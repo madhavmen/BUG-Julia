@@ -332,15 +332,32 @@ function _robust_thin_svd(S_mat::AbstractMatrix)
     end
 end
 
+# Number of singular values to keep from `svals` (sorted descending) under a
+# rank cap `maxdim` and a relative weight `cutoff`. The cutoff is measured
+# against the largest singular value (`thresh = cutoff·|svals[1]|`), keeping every
+# value strictly above it — identical to the Python two_site_bug trunc_thresh
+# rule. `cutoff = 0.0` disables the threshold (pure maxdim cap, the default).
+function _svd_keep_count(svals::AbstractVector, maxdim::Int, cutoff::Real)
+    n = length(svals)
+    n == 0 && return 0
+    keep = n
+    if cutoff > 0
+        thresh = cutoff * abs(svals[1])
+        keep = max(count(>(thresh), abs.(svals)), 1)
+    end
+    return min(keep, maxdim, n)
+end
+
 function _truncate_quantum_s_step(
     S_new     :: ITensor,
     left_ind  :: Index,
     right_ind :: Index;
     maxdim    :: Int,
+    cutoff    :: Float64 = 0.0,
 )
     S_mat  = Array(S_new, left_ind, right_ind)
     F      = _robust_thin_svd(S_mat)
-    keep   = min(length(F.S), maxdim)
+    keep   = _svd_keep_count(F.S, maxdim, cutoff)
     p_ind  = Index(keep, tags(left_ind))
     P_tens = itensor(Matrix(@view F.U[:, 1:keep]), left_ind, p_ind)
     SV_mat = Matrix(@view F.Vt[1:keep, :])
@@ -355,10 +372,11 @@ function _truncate_quantum_s_step_reverse(
     left_ind  :: Index,
     right_ind :: Index;
     maxdim    :: Int,
+    cutoff    :: Float64 = 0.0,
 )
     S_mat = Array(S_new, left_ind, right_ind)
     F     = _robust_thin_svd(S_mat)
-    keep  = min(length(F.S), maxdim)
+    keep  = _svd_keep_count(F.S, maxdim, cutoff)
     bond_ind = Index(keep, tags(right_ind))
     US_mat   = Matrix(@view F.U[:, 1:keep])
     @inbounds for col in 1:keep

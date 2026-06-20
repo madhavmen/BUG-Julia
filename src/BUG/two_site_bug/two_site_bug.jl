@@ -194,6 +194,7 @@ function _two_site_parity_sweep!(
     info             :: BUGInfo;
     parity           :: Symbol,
     maxdim           :: Int,
+    trunc_thresh     :: Float64 = 0.0,
     augment          :: Bool,
     aug_krylov_depth :: Int,
     lanczos_tol      :: Float64,
@@ -229,7 +230,7 @@ function _two_site_parity_sweep!(
         )
         s_inds = inds(candidate.S_new)
         U_s, SV_tens, keep, svals = _truncate_quantum_s_step(
-            candidate.S_new, s_inds[1], s_inds[2]; maxdim = maxdim,
+            candidate.S_new, s_inds[1], s_inds[2]; maxdim = maxdim, cutoff = trunc_thresh,
         )
 
         _record_kl_augmentation!(info, bond_data, candidate)
@@ -257,6 +258,7 @@ function _two_site_strang_step!(
     info             :: BUGInfo;
     order            :: Symbol,
     maxdim           :: Int,
+    trunc_thresh     :: Float64 = 0.0,
     augment          :: Bool,
     aug_krylov_depth :: Int,
     lanczos_tol      :: Float64,
@@ -265,7 +267,7 @@ function _two_site_strang_step!(
     matrixfree_sstep :: Bool,
 )
     sweep(τ, par) = _two_site_parity_sweep!(psi, gates, τ, info;
-        parity = par, maxdim = maxdim,
+        parity = par, maxdim = maxdim, trunc_thresh = trunc_thresh,
         augment = augment, aug_krylov_depth = aug_krylov_depth,
         lanczos_tol = lanczos_tol, lanczos_maxiter = lanczos_maxiter,
         substep_method = substep_method, matrixfree_sstep = matrixfree_sstep,
@@ -303,6 +305,12 @@ Keyword arguments
                        or `:lie` (1st order: odd(dt) even(dt)).
 - `maxdim`           : hard bond-dimension cap (rank-adaptive S-step truncation).
                        `typemax(Int)` keeps full rank (Trotter error only).
+- `trunc_thresh`     : relative singular-value cutoff of the post-S-step SVD,
+                       measured against the largest singular value. Each bond
+                       keeps only the directions whose weight exceeds it, so the
+                       rank grows only as far as the entanglement requires
+                       (the discarded-weight control). `0.0` (default) disables
+                       the threshold, leaving the pure `maxdim` cap.
 - `augment`          : enable KLS basis augmentation (default `true`).
 - `aug_krylov_depth` : augmentation Krylov-chain depth (default 1).
 - `substep_method`   : `:expv`, `:euler`, or `:rk4` for the K/L/S substeps.
@@ -319,6 +327,7 @@ function bug_two_site!(
     dt    :: Number,
     order            :: Symbol  = :strang,
     maxdim           :: Int     = 200,
+    trunc_thresh     :: Float64 = 0.0,
     augment          :: Bool    = true,
     aug_krylov_depth :: Int     = 1,
     lanczos_tol      :: Float64 = 1e-15,
@@ -347,8 +356,8 @@ function bug_two_site!(
         _with_bug_expv_backend(effective_backend) do
             _with_bug_time_prefactor(time_prefactor) do
                 _two_site_strang_step!(psi, gates, dt, info;
-                    order = order, maxdim = maxdim, augment = augment,
-                    aug_krylov_depth = aug_krylov_depth,
+                    order = order, maxdim = maxdim, trunc_thresh = trunc_thresh,
+                    augment = augment, aug_krylov_depth = aug_krylov_depth,
                     lanczos_tol = lanczos_tol, lanczos_maxiter = lanczos_maxiter,
                     substep_method = substep_method, matrixfree_sstep = matrixfree_sstep,
                 )

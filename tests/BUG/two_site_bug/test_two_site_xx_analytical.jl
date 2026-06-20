@@ -44,4 +44,25 @@ include(joinpath(@__DIR__, "..", "..", "common", "xx_free_fermion.jl"))
 
         @test all(info.bond_dims_after .≤ 4)
     end
+
+    @testset "bug_two_site! trunc_thresh (SVD cutoff) trims rank vs maxdim alone" begin
+        gates = BUG.two_site_xx_bond_gates(sites; J = J)
+
+        # Default trunc_thresh = 0.0 must reproduce the pure-maxdim behaviour.
+        psi_a = random_tt(sites; maxdim = 2, seed = 7)
+        psi_b = random_tt(sites; maxdim = 2, seed = 7)
+        info_default = bug_two_site!(psi_a, gates; dt = 0.05, order = :strang, maxdim = 16)
+        info_zero    = bug_two_site!(psi_b, gates; dt = 0.05, order = :strang, maxdim = 16, trunc_thresh = 0.0)
+        @test info_default.bond_dims_after == info_zero.bond_dims_after
+
+        # A loose cutoff keeps the full rank; a coarse cutoff discards weak
+        # directions, so its kept bonds never exceed the tight-cutoff run.
+        psi_tight = random_tt(sites; maxdim = 2, seed = 7)
+        psi_loose = random_tt(sites; maxdim = 2, seed = 7)
+        info_tight = bug_two_site!(psi_tight, gates; dt = 0.05, order = :strang, maxdim = 16, trunc_thresh = 1e-14)
+        info_loose = bug_two_site!(psi_loose, gates; dt = 0.05, order = :strang, maxdim = 16, trunc_thresh = 1e-1)
+        @test all(info_loose.bond_dims_after .≤ info_tight.bond_dims_after)
+        @test maximum(info_loose.bond_dims_after) ≤ maximum(info_tight.bond_dims_after)
+        @test norm(psi_loose) > 0.0
+    end
 end

@@ -170,6 +170,40 @@ end
     @test norm(U_s_mat' * U_s_mat - I) < 1e-10
 end
 
+@testset "S-step truncation: trunc_thresh (relative SVD cutoff)" begin
+    # _svd_keep_count mirrors the Python two_site_bug rule:
+    #   thresh = cutoff * |s[1]|;  keep = max(count(|s| > thresh), 1);  min(keep, maxdim, n)
+    svals = [1.0, 0.5, 1e-3, 1e-8, 1e-14]
+    @test BUG._svd_keep_count(svals, 100, 0.0)  == 5      # cutoff off -> all
+    @test BUG._svd_keep_count(svals, 100, 1e-2) == 2      # drop 1e-3,1e-8,1e-14
+    @test BUG._svd_keep_count(svals, 100, 1e-6) == 3      # keep down to 1e-3
+    @test BUG._svd_keep_count(svals, 2,   0.0)  == 2      # maxdim cap dominates
+    @test BUG._svd_keep_count(svals, 100, 10.0) == 1      # everything below thresh -> at least 1
+    @test BUG._svd_keep_count(Float64[], 4, 1e-6) == 0    # empty spectrum
+
+    # End-to-end on the truncation function: a coarse cutoff keeps fewer
+    # singular values than the pure-maxdim call on the same S tensor.
+    N     = 5
+    sites = siteinds("S=1/2", N)
+    psi   = random_tt(sites; maxdim = 4, seed = 49)
+    W     = _make_xx_mpo(sites)
+    orthogonalize!(psi, 1)
+    bond  = 2
+    L_cur, R_cur = _owned_two_site_mpo_envs(psi, W, bond)
+    snap  = BUG._canonical_quantum_bond_snapshot(psi, W, bond, L_cur, R_cur)
+    HW    = snap.L_mpo_cur * snap.W_left * snap.W_right * snap.R_mpo_cur
+    sstep = BUG._advance_s_tensor_in_bases(
+        snap.U0_tens, snap.V0_tens, snap.S0_tens, HW, -0.01im;
+        lanczos_tol = 1e-12, lanczos_maxiter = 30, substep_method = :expv,
+        matrixfree_sstep = false,
+    )
+    s_inds = inds(sstep.S_new)
+    _, _, keep_full, svals_t = BUG._truncate_quantum_s_step(sstep.S_new, s_inds[1], s_inds[2]; maxdim = 10, cutoff = 0.0)
+    _, _, keep_cut,  _       = BUG._truncate_quantum_s_step(sstep.S_new, s_inds[1], s_inds[2]; maxdim = 10, cutoff = 1e-1)
+    @test keep_cut ≤ keep_full
+    @test keep_cut == BUG._svd_keep_count(svals_t, 10, 1e-1)
+end
+
 @testset "Faithful KLS candidate: output fields" begin
     N     = 5
     sites = siteinds("S=1/2", N)
