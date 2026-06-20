@@ -73,20 +73,12 @@ For cases where direct bond-by-bond update control is needed (rare).
   for the nearest-neighbour XX Hamiltonian
 - `two_site_xx_bond_gates(sites; J)` → per-bond two-site term generators for the same
 
-## Classical PDE Context
-
-For quantics-discretized PDEs (heat, Navier-Stokes, Gross-Pitaevskii), see
-[BUGSweepPDE/README.md](../../Classical_PDEs/integrators/BUGSweepPDE/README.md)
-for the PDE-specific layer abstraction (`GateLayer`, `KLSLayer`, schedule
-builders).
-
 ## Tuning
 
 ### Rank Adaptation
 
 - **Increase `maxdim`** for finer accuracy at higher cost
-- **Decrease `lanczos_tol`** for tighter Krylov convergence (slower per step, better quality)
-- **Increase `aug_krylov_depth`** for richer augmentation (typically 1–2 sufficient)
+
 
 ### Composition Error
 
