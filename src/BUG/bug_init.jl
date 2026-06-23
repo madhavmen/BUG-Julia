@@ -76,6 +76,13 @@ end
 const BUG_DEBUG_REVERSE_SNAPSHOT_ASSERTS       =
     strip(get(ENV, "PS_BUG_DEBUG_REVERSE_SNAPSHOT_ASSERTS", "1")) != "0"
 
+# Discarded-projector BUG (discarded_bug.jl) augmentation tolerance: a Krylov
+# direction is admitted into the K/L direct-sum frame only if its residual
+# outside the old span exceeds BUG_DEFAULT_AUG_TOL. The faithful KLS path uses
+# no such heuristic (see note below); this constant is consumed only by the
+# discarded-projector column/row filters in bug_kls.jl.
+const BUG_DEFAULT_AUG_TOL = 1e-12
+
 # (BUG_DEFAULT_AUG_TOL removed — augmentation no longer uses a heuristic discard tolerance; new
 #  Krylov directions are admitted down to the augmenting QR's machine-precision rank tolerance.)
 # Default DENSE S-step. The matrix-free Krylov S-step (matrixfree_sstep=true) is the cure for
