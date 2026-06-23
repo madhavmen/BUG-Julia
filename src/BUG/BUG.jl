@@ -27,6 +27,7 @@ using ..TTutils
 
 include("bug_init.jl")
 include("bug_kls.jl")
+include("discarded_bug.jl")
 let two_site_file = joinpath(@__DIR__, "two_site_bug", "two_site_bug.jl")
     if isfile(two_site_file)
         include("two_site_bug/two_site_bug.jl")
@@ -45,6 +46,7 @@ end
 
 export BUGInfo
 export bug_two_site!
+export discarded_bug_step!, discarded_bug_local_update
 export two_site_xx_parity_mpos, two_site_xx_bond_gates
 export _left_site_bond_index, _site_bond_index
 

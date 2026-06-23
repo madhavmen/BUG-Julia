@@ -39,6 +39,7 @@ end
     # include("BUG/two_site_bug/test_two_site_long_range_xx.jl")
     include("BUG/two_site_bug/test_two_site_trotter_convergence.jl")
     include("BUG/two_site_bug/test_two_site_xx_analytical.jl")
+    include("BUG/two_site_bug/test_discarded_bug.jl")
 end
 
 # --- TDVP ---
