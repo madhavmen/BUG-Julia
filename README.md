@@ -67,22 +67,23 @@ info = bug_two_site!(psi, gates; dt, maxdim, order=:strang, kwargs...)
 ### Discarded-Projector Variant
 
 ```julia
-info = discarded_bug_step!(psi, W; dt, order=:symmetric, maxdim=typemax(Int),
+info = discarded_bug_step!(psi, W; dt, maxdim=typemax(Int), cutoff=0.0,
                            time_prefactor=ComplexF64(-im), kwargs...)
 ```
 - `psi::TensorTrain` — the state (modified in-place)
 - `W::TensorTrainOperator` — the Hamiltonian **MPO** (not per-bond gates)
 - `dt::Number` — timestep
-- `order::Symbol` — `:symmetric` (Strang forward+reverse, 2nd order, default) or
-  `:forward` (single forward sweep, 1st order; diagnostics)
 - `maxdim::Int` — bond-dimension cap (`typemax(Int)` = grow freely)
+- `cutoff::Float64` — relative singular-value threshold of the SVD truncations
 - `time_prefactor::ComplexF64` — `-im` for real time (default); pass `ComplexF64(1)`
   for imaginary time / parabolic PDEs
 - Returns `BUGInfo` with the before/after bond dimensions and convergence metrics
 
-The kernel `discarded_bug_local_update(bond_data, HW_env; dt, maxdim, ...)` mirrors
-the call surface of `_faithful_kls_local_bond_candidate`, so the sweep can swap
-kernels without any other change.
+One step is a single **global sweep**: form `phi = H·psi`, build augmented left/right
+isometries that keep `psi` exact and admit only the discarded part `(I − U0 U0†) phi`
+(never an `M`/`N` overlap matrix), then integrate ONE Galerkin centre tensor under the
+two-site effective Hamiltonian. The step is exact at full bond dimension and O(dt²),
+convergent under truncation; there is no backward substep (BUG is inverse-free).
 
 ### KLS Kernel (Direct Access)
 
