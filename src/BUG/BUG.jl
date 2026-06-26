@@ -46,7 +46,7 @@ end
 
 export BUGInfo
 export bug_two_site!
-export discarded_bug_step!, discarded_bug_local_update
+export discarded_bug_step!
 export two_site_xx_parity_mpos, two_site_xx_bond_gates
 export _left_site_bond_index, _site_bond_index
 

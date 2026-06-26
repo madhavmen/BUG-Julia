@@ -19,33 +19,6 @@
 # well-defined orthonormal isometry. Final rank control happens only at the post-S-step SVD truncation
 # to maxdim (Ceruti–Kusch–Lubich step 3).
 
-# Discarded-projector column/row filters (used by discarded_bug.jl). These admit
-# only the genuinely-new directions of a QR basis (residual outside span(U0)/
-# span(V0) above `aug_tol`), so the direct-sum augmentation in the discarded-BUG
-# isometries stays orthonormal without forming an overlap matrix. The faithful
-# KLS path below does not use them.
-function _filter_left_aug_columns(U0_mat, Qk; aug_tol::Float64 = BUG_DEFAULT_AUG_TOL)
-    size(Qk, 2) == 0 && return Matrix{eltype(Qk)}(undef, size(Qk, 1), 0)
-    keep = Int[]
-    for col in 1:size(Qk, 2)
-        proj_sq = sum(abs2, U0_mat' * @view(Qk[:, col]))
-        residual_sq = max(0.0, 1.0 - proj_sq)
-        residual_sq > aug_tol^2 && push!(keep, col)
-    end
-    return isempty(keep) ? Matrix{eltype(Qk)}(undef, size(Qk, 1), 0) : Matrix(Qk[:, keep])
-end
-
-function _filter_right_aug_rows(V0_mat, Ql; aug_tol::Float64 = BUG_DEFAULT_AUG_TOL)
-    size(Ql, 1) == 0 && return Matrix{eltype(Ql)}(undef, 0, size(Ql, 2))
-    keep = Int[]
-    for row in 1:size(Ql, 1)
-        proj_sq = sum(abs2, V0_mat * @view(Ql[row, :]))
-        residual_sq = max(0.0, 1.0 - proj_sq)
-        residual_sq > aug_tol^2 && push!(keep, row)
-    end
-    return isempty(keep) ? Matrix{eltype(Ql)}(undef, 0, size(Ql, 2)) : Matrix(Ql[keep, :])
-end
-
 function _pick_left_update(U0_mat, K1_mat;
         augment::Bool = true,
         max_rank::Union{Nothing,Int} = nothing,
