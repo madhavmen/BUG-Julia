@@ -12,11 +12,13 @@ using LinearAlgebra, Random, Printf
 using LurCGT, Telum
 
 include("symmetric_mps.jl")
+include("frame.jl")
 
 export SymMPS, canonical!, move_left!, move_right!, bond_dims, leg_dim,
        product_state, domain_wall_state, neel_state,
        total_sz, sz_expectation, site_expval,
        left_gram, right_gram, local_space,
-       SECTOR_UP, SECTOR_DOWN
+       SECTOR_UP, SECTOR_DOWN,
+       BondFrame, bond_frame, frame_theta, two_site_block
 
 end # module
