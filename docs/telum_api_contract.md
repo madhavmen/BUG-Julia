@@ -105,6 +105,24 @@ end
 
 `TLIndex` equality ignores `lock`: two indices are `==` iff `(itags, dir, plev, dual)` match.
 
+**`Itag` is a normalised tag *set*, not a string.** Comma-separated tags are
+sorted, so `setitag(t, 2, "S,1")` stores a tag that **prints as `'1,S'`**.
+Comparison against the unsorted spelling still succeeds (`ind.itags == "S,1"`
+is `true`), but error messages and `show` output use the sorted form — do not
+be alarmed by `itag='1,S'` in an assertion message.
+
+### Lazy views
+
+`getIdentity`, `adjoint`/`conj`, scalar multiplication and `permutedims` all
+return a **`TLArrayView`**, which exposes only `inds` and `spaces` — it has no
+`.qlabels` or `.RMTs`, and **`getsub` has no view method**. Materialise with the
+exported `to_concrete(q) -> TLArray` before any of those:
+
+```julia
+F = to_concrete(getIdentity((link, 2), (q.I, 1); itag="L,2"))
+A = getsub(F, 2, pred)      # MethodError without the to_concrete
+```
+
 Useful derived quantities:
 
 ```julia
@@ -157,6 +175,15 @@ end
   bond `[(((2,),), 1)]` — the operator charge — not a padded full-dimension bond.
 
 `U` is an isometry: `norm(U)^2 == sum(d for (_,d) in U.spaces[end])`.
+
+**Arrow convention.** `svd` always emits `'-'` on the new legs of `U` and `Vd`,
+and `'+'` on **both** legs of `S`. So whichever side absorbs `S` receives a
+`'+'` bond leg. A rightward MPS sweep therefore produces
+`(link_r '-', link_l '+')` across the new bond and a leftward sweep produces
+the mirror image. There is no keyword to override this — `svd`'s `dir=` kwarg
+*selects* left legs, it does not set output arrows. `SymMPS` handles this by
+maintaining only the weaker invariant "the two legs sharing a bond carry
+opposite arrows"; see `src/BondUpdateBUG/symmetric_mps.jl`.
 
 ---
 
@@ -233,7 +260,7 @@ UdU.inds                                   # 2 legs; norm(UdU)^2 == bond dim
 **Every environment/overlap contraction in Tasks 6, 7, 10 and 11 must prime or
 explicitly index its open legs.** Relying on `*` alone silently traces them out.
 
-### 7b. `contract` does NOT auto-conjugate
+### 7b. `contract` asserts three things, and does NOT auto-conjugate
 
 ```julia
 contract(q1, legs1::NTuple{CN,Int}, q2, legs2::NTuple{CN,Int};
@@ -241,7 +268,21 @@ contract(q1, legs1::NTuple{CN,Int}, q2, legs2::NTuple{CN,Int};
 contract(q1, l1::Int, q2, l2::Int)          # convenience
 ```
 
-It **asserts opposite arrow directions** on each contracted pair:
+Each contracted pair must have **opposite arrows**, **equal spaces**, and
+**equal itags**. All three are `@assert`s with distinct messages:
+
+```
+Contracted legs must have opposite arrow directions: q1 leg 1 has dir='+', ...
+Contracted legs must have matching space info: q1 leg 2 spaces != q2 leg 1 spaces
+Contracted legs must have matching itags: q1 leg 1 has itag='s', q2 leg 2 has itag='1,S'
+```
+
+The itag rule means a **local operator must be retagged onto the site it acts
+on** before contraction — `setitag(O, "S,$j")` sets every leg of `O` to that
+tag, which is safe because `TLIndex` equality includes the arrow, so the two
+legs stay distinct.
+
+The arrow rule:
 
 ```
 contract(Sz,(1,2),Sz,(1,2))     -> AssertionError: Contracted legs must have
@@ -304,6 +345,45 @@ empty_tlarray(q; T=ComplexF64)  # same leg structure, no stored sectors
 `addSingleton(q.I; nlegs=1)` gives spaces
 `([±1 sectors], [±1 sectors], [(((0,),),1)])`.
 
+### `getIdentity` is the MPS link-building primitive
+
+```julia
+getIdentity((a, leg_a), (b, leg_b); itag="L,i+1", plev=0, lock=0) -> TLArrayView
+```
+
+Two-leg fusion. Given the incoming link and a physical leg it returns a rank-3
+tensor with **exactly the `(link_l, site, link_r)` layout** this plan needs, and
+the outgoing link's space is the correctly fused set of charges. Input legs
+appear in the output with **flipped arrows**; the fused leg is `'-'`.
+
+```julia
+V = getvac(q.I, ("L,0", "L,1"))                      # legs (L,0 '+', L,1 '-')
+F = to_concrete(getIdentity((V, 2), (q.I, 1); itag="L,2"))
+F.inds     # (L,1 '+', s '-', L,2 '-')
+F.qlabels  # [(0, +1, -1), (0, -1, +1)]
+```
+
+Note the sign: with `(in '+', out '-', out '-')` the conservation law is
+`in − out − out = 0`, so **the link charge is minus the accumulated spin**.
+This is self-consistent under chaining and needs no correction; just do not
+assume the link label equals `2·Sz` summed.
+
+To turn this into a product-state site tensor, restrict the physical leg with
+`preserve_space=true` (keeps local operators contractible) and trim the
+outgoing link with `preserve_space=false` (makes a product state report bond
+dimension 1):
+
+```julia
+A = getsub(F, 2, s -> s == SECTOR_UP ? Colon() : nothing; preserve_space=true)
+A = to_concrete(A)
+present = Set(ql[3] for ql in A.qlabels)
+A = to_concrete(getsub(A, 3, s -> s in present ? Colon() : nothing))
+```
+
+Skipping the link trim leaves an unpopulated sector in the bond space, and the
+tensor is then **not** an isometry onto that space — `norm(left_gram(A) - 1)`
+comes out `1.0` instead of `0`.
+
 ---
 
 ## 10. Gotcha summary
@@ -320,6 +400,11 @@ empty_tlarray(q; T=ComplexF64)  # same leg structure, no stored sectors
 | 8 | `norm(t)` for an expectation value | `t[]` on the rank-0 result |
 | 9 | `adjoint` permutes legs | it only conjugates + flips directions |
 | 10 | `q1 + q2` on mismatched legs | align leg structure first, or it throws |
+| 11 | `contract` only checks arrows | it also asserts equal **spaces** and equal **itags** |
+| 12 | applying a bare local operator | `setitag(O, "S,$j")` first, or the itag assert fires |
+| 13 | `getsub(getIdentity(...), ...)` | `getIdentity` returns a view; `to_concrete` it first |
+| 14 | `"S,1"` stays `"S,1"` | `Itag` sorts tag sets; it prints as `'1,S'` (comparison still works) |
+| 15 | a restricted site tensor is an isometry | only after trimming the link space to populated sectors |
 
 An eleventh trap is in the *harness*, not Telum: a bare top-level `try/catch`
 that sets a flag inside `catch` will not update a global in a script (soft
