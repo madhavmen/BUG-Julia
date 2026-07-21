@@ -2,7 +2,7 @@
 
 julia_version = "1.12.5"
 manifest_format = "2.0"
-project_hash = "89608faec959b0630c7374239a8c17b981f0790d"
+project_hash = "1286d7a1f6bb7fbaf50d7f24ff46e6d8b6196cc7"
 
 [[deps.AbstractAlgebra]]
 deps = ["LinearAlgebra", "MacroTools", "PrecompileTools", "Preferences", "Random", "RandomExtensions", "SparseArrays"]
@@ -27,7 +27,7 @@ uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
 version = "1.11.0"
 
 [[deps.BUGJulia]]
-deps = ["LinearAlgebra", "LurCGT", "Printf", "Random"]
+deps = ["LinearAlgebra", "LurCGT", "Printf", "Random", "Telum"]
 path = "."
 uuid = "8f2a1c34-5d6e-4b7a-9c8d-1e2f3a4b5c6d"
 version = "0.1.0"
@@ -166,6 +166,18 @@ deps = ["Artifacts", "Preferences"]
 git-tree-sha1 = "7204148362dafe5fe6a273f855b8ccbe4df8173e"
 uuid = "692b3bcd-3c85-4b1f-b108-f13ce0eb3210"
 version = "1.8.0"
+
+[[deps.JSON]]
+deps = ["Dates", "Logging", "Parsers", "PrecompileTools", "StructUtils", "UUIDs", "Unicode"]
+git-tree-sha1 = "c89d196f5ffb64bfbf80985b699ea913b0d2c211"
+uuid = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+version = "1.6.1"
+
+    [deps.JSON.extensions]
+    JSONArrowExt = ["ArrowTypes"]
+
+    [deps.JSON.weakdeps]
+    ArrowTypes = "31f734f8-188a-4ce0-8406-c8a06bd891cd"
 
 [[deps.JuliaSyntaxHighlighting]]
 deps = ["StyledStrings"]
@@ -475,6 +487,22 @@ version = "0.5.2"
     JLArrays = "27aeb0d3-9eb9-45fb-866b-73c2ecf80fcb"
     Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
     PtrArrays = "43287f4e-b6f4-7ad1-bb20-aadabca52c3d"
+
+[[deps.StructUtils]]
+deps = ["Dates", "UUIDs"]
+git-tree-sha1 = "82bee338d650aa515f31866c460cb7e3bcef90b8"
+uuid = "ec057cc2-7a8d-4b58-b3b3-92acb9f63b42"
+version = "2.8.2"
+
+    [deps.StructUtils.extensions]
+    StructUtilsMeasurementsExt = ["Measurements"]
+    StructUtilsStaticArraysCoreExt = ["StaticArraysCore"]
+    StructUtilsTablesExt = ["Tables"]
+
+    [deps.StructUtils.weakdeps]
+    Measurements = "eff96d63-e80a-5855-80a2-b1b0885c5ab7"
+    StaticArraysCore = "1e83bf80-4336-4d27-bf5d-d5a4f845583c"
+    Tables = "bd369af6-aec1-5ad0-b16a-f7cc5008161c"
 
 [[deps.StyledStrings]]
 uuid = "f489334b-da3d-4c2e-b8f0-e476e12c162b"
