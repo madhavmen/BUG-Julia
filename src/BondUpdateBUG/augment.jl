@@ -147,36 +147,57 @@ function augmented_left_isometry(U0, K1;
     n_new = 0
 
     if augment
-        # (1) Sulz / discarded augmentation: the part of K1 outside span(U0),
-        # orthonormal AND exactly orthogonal to U0 -- see `_complement_basis`.
-        Q = _complement_basis(U0, K1; leg = 3)
-        if Q !== nothing
-            Q = _cap_new_columns(Q, U0, max_rank)
-            if Q !== nothing && leg_dim(Q, 3) > 0
-                push!(blocks, to_concrete(setitag(Q, 3, bond_tag)))
-                n_new += leg_dim(Q, 3)
-            end
-        end
+        r = leg_dim(U0, 3)
 
-        # (2) Minimal fill for sectors that are reachable but spanned by neither.
+        # ORDER MATTERS, AND THE FILL GOES FIRST.
+        #
+        # The whole frame must satisfy Sulz: r + new <= 2r, so `r` new directions
+        # are available and the two mechanisms compete for them. The fill wins
+        # ties because it is the only one that CAN open an empty charge sector:
+        # under U(1) with the opposite frame frozen, K1 stays inside U0's sectors,
+        # so the complement contributes exactly nothing there.
+        #
+        # Taking the complement first instead starves the fill and the state
+        # FREEZES. Measured on the L=6 domain wall: at bond 4 the complement used
+        # the whole budget (n_perp = r = 1) every step, the one missing sector was
+        # never opened, and the bond dims stalled at [1,1,2,1,1] instead of
+        # [2,4,6,4,2] -- a dt-independent 4.4e-4 error against the split reference.
+        n_fill = 0
         if missing_fill > 0
             rep = sector_report(U0, K1)
-            missed = [r for r in rep if r.missing]
+            missed = [x for x in rep if x.missing]
             if !isempty(missed)
                 F = fusion_basis(U0, 1, 2; tag = bond_tag)
-                for r in missed
-                    seed_charges === nothing || r.charge in seed_charges || continue
-                    seed = random_sector_seed(F, r.charge,
-                                              min(r.reachable_dim, missing_fill); rng = rng)
+                for x in missed
+                    n_fill < r || break
+                    seed_charges === nothing || x.charge in seed_charges || continue
+                    seed = random_sector_seed(F, x.charge,
+                               min(x.reachable_dim, missing_fill, r - n_fill); rng = rng)
                     seed === nothing && continue
                     push!(blocks, to_concrete(setitag(seed, 3, bond_tag)))
-                    n_new += leg_dim(seed, 3)
+                    n_fill += leg_dim(seed, 3)
+                end
+            end
+        end
+        n_new += n_fill
+
+        # The discarded/Sulz complement takes whatever the budget still allows.
+        if n_new < r
+            Q = _complement_basis(U0, K1; leg = 3)
+            if Q !== nothing
+                Q = _cap_new_columns(Q, U0, max_rank)
+                Q = Q === nothing ? nothing : _trim_total(Q, 3, r - n_new)
+                if Q !== nothing && leg_dim(Q, 3) > 0
+                    push!(blocks, to_concrete(setitag(Q, 3, bond_tag)))
+                    n_new += leg_dim(Q, 3)
                 end
             end
         end
     end
 
     U_aug = length(blocks) == 1 ? U0 : to_concrete(oplus(blocks, (3,)))
+    leg_dim(U_aug, 3) <= 2 * leg_dim(U0, 3) || error(
+        "Sulz bound violated: augmented rank $(leg_dim(U_aug, 3)) > 2r = $(2 * leg_dim(U0, 3))")
     return U_aug, n_new
 end
 
@@ -202,35 +223,69 @@ function augmented_right_isometry(V0, L1;
     n_new = 0
 
     if augment
-        Q = _complement_basis(V0, L1; leg = 1)
-        if Q !== nothing
-            Q = _cap_new_columns(Q, V0, max_rank; leg = 1)
-            if Q !== nothing && leg_dim(Q, 1) > 0
-                push!(blocks, to_concrete(setitag(Q, 1, bond_tag)))
-                n_new += leg_dim(Q, 1)
-            end
-        end
+        r = leg_dim(V0, 1)
 
+        n_fill = 0                              # fill first; see the left mirror
         if missing_fill > 0
             rep = sector_report_right(V0, L1)
-            missed = [r for r in rep if r.missing]
+            missed = [x for x in rep if x.missing]
             if !isempty(missed)
                 F = fusion_basis(V0, 2, 3; tag = bond_tag)
-                for r in missed
-                    seed_charges === nothing || r.charge in seed_charges || continue
-                    seed = random_sector_seed(F, r.charge,
-                                              min(r.reachable_dim, missing_fill); rng = rng)
+                for x in missed
+                    n_fill < r || break
+                    seed_charges === nothing || x.charge in seed_charges || continue
+                    seed = random_sector_seed(F, x.charge,
+                               min(x.reachable_dim, missing_fill, r - n_fill); rng = rng)
                     seed === nothing && continue
                     seed = to_concrete(permutedims(seed, (3, 1, 2)))
                     push!(blocks, to_concrete(setitag(seed, 1, bond_tag)))
-                    n_new += leg_dim(seed, 1)
+                    n_fill += leg_dim(seed, 1)
+                end
+            end
+        end
+        n_new += n_fill
+
+        if n_new < r
+            Q = _complement_basis(V0, L1; leg = 1)
+            if Q !== nothing
+                Q = _cap_new_columns(Q, V0, max_rank; leg = 1)
+                Q = Q === nothing ? nothing : _trim_total(Q, 1, r - n_new)
+                if Q !== nothing && leg_dim(Q, 1) > 0
+                    push!(blocks, to_concrete(setitag(Q, 1, bond_tag)))
+                    n_new += leg_dim(Q, 1)
                 end
             end
         end
     end
 
     V_aug = length(blocks) == 1 ? V0 : to_concrete(oplus(blocks, (1,)))
+    leg_dim(V_aug, 1) <= 2 * leg_dim(V0, 1) || error(
+        "Sulz bound violated: augmented rank $(leg_dim(V_aug, 1)) > 2r = $(2 * leg_dim(V0, 1))")
     return V_aug, n_new
+end
+
+"""
+    _trim_total(Q, leg, n) -> TLArray or nothing
+
+Keep at most `n` columns of `Q` in total, walking sectors in Telum's order and
+taking each sector's leading (largest-singular-value) columns first.
+
+The cross-sector tie-break is arbitrary -- `svd` orders columns by weight WITHIN
+a sector, not across them -- but this only ever binds when the fill and the
+complement together want more than the `r` new directions Sulz permits, which is
+rare and only at low rank.
+"""
+function _trim_total(Q, leg::Int, n::Int)
+    n <= 0 && return nothing
+    leg_dim(Q, leg) <= n && return Q
+    left = n
+    keep = Dict{Any, Int}()
+    for (q, d) in Q.spaces[leg]
+        keep[q] = min(d, left)
+        left -= keep[q]
+    end
+    any(v > 0 for v in values(keep)) || return nothing
+    return to_concrete(getsub(Q, leg, s -> (k = get(keep, s, 0); k == 0 ? nothing : 1:k)))
 end
 
 """

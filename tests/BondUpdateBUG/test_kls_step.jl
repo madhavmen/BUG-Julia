@@ -398,15 +398,29 @@ RNG() = MersenneTwister(0x5EED)
     @testset "the K/L augmentation obeys the Sulz 2r bound with no tolerance" begin
         # No cutoff is applied to the K/L step: every direction it finds is kept,
         # and the only constraint is rank([U0|K1]) <= 2r.
-        for (L, i) in ((6, 4), (8, 4)), dt in (0.05, 1e-6)
+        #
+        # The bound covers the WHOLE frame, seeds included -- the fill draws from
+        # what the complement leaves of the r available slots, so `missing_fill`
+        # cannot push the frame past 2r. Worst case is low rank, where r = 1
+        # permits exactly one new direction in total.
+        for (L, i) in ((6, 4), (8, 4)), dt in (0.05, 1e-6), fill in (0, 1, 4)
             psi = entangled_state(L, i); f = frame_at(psi, i)
             r = kls_bond_update(f, gate_at(f), ComplexF64(-im * dt);
                                 maxdim = 1000, trunc_thresh = 1e-14,
-                                missing_fill = 0, rng = RNG())
+                                missing_fill = fill, rng = RNG())
             @test r.aug_k <= 2 * f.old_rank
             @test r.aug_l <= 2 * f.old_rank
             @test leg_dim(r.U_aug, 3) == r.aug_k
             @test leg_dim(r.V_aug, 1) == r.aug_l
+        end
+        # rank-1 bonds are where the seeds would otherwise overflow the bound
+        for fill in (1, 4)
+            psi = fixture(6, 3); f = frame_at(psi, 3)
+            @test f.old_rank == 1
+            r = kls_bond_update(f, gate_at(f), -0.05im; maxdim = 1000,
+                                trunc_thresh = 1e-14, missing_fill = fill, rng = RNG())
+            @test r.aug_k <= 2
+            @test r.aug_l <= 2
         end
     end
 

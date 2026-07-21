@@ -128,6 +128,21 @@ using BUGJulia.BondUpdateBUG
         @test drift(:strang, 0.02, 20) / d_str < drift(:lie, 0.02, 20) / d_lie
     end
 
+    @testset "the Sulz bound holds at every bond of every step" begin
+        # aug_k/aug_l are the per-step MAXIMA over the group's bonds, and the
+        # kept rank is what the previous step left, so aug <= 2 * previous keep
+        # is the run-level form of rank([U0|K1]) <= 2r.
+        psi = domain_wall_state(6)
+        g = bond_gates(psi)
+        info = bond_update_bug!(psi, g;
+            opts = BondUpdateOptions(dt = 0.05, n_steps = 8, maxdim = 8,
+                                     missing_fill = 4))
+        for k in 2:8
+            @test info.aug_k_dims[k] <= 2 * info.max_bond_dims[k - 1]
+            @test info.aug_l_dims[k] <= 2 * info.max_bond_dims[k - 1]
+        end
+    end
+
     @testset "n_steps=0 is a no-op that still returns empty records" begin
         psi = domain_wall_state(6)
         g = bond_gates(psi)
