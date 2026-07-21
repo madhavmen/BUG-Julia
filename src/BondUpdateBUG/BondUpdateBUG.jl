@@ -14,6 +14,7 @@ using LurCGT, Telum
 include("symmetric_mps.jl")
 include("frame.jl")
 include("expv.jl")
+include("sectors.jl")
 
 export SymMPS, canonical!, move_left!, move_right!, bond_dims, leg_dim,
        product_state, domain_wall_state, neel_state,
@@ -23,6 +24,8 @@ export SymMPS, canonical!, move_left!, move_right!, bond_dims, leg_dim,
        BondFrame, bond_frame, frame_theta, two_site_block,
        expv, lanczos_expv, arnoldi_expv, tensor_inner,
        hermitian_tridiagonal_exp_coeffs,
-       enable_krylov_log, disable_krylov_log, get_krylov_log, KRYLOV_LOG
+       enable_krylov_log, disable_krylov_log, get_krylov_log, KRYLOV_LOG,
+       reachable_sectors, fuse_spaces, add_charge, dual_charge, sector_dim,
+       SectorReport, sector_report, missing_charges, perp_component, align_charge
 
 end # module
