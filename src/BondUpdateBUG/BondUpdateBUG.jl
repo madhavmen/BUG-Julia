@@ -16,6 +16,8 @@ include("frame.jl")
 include("expv.jl")
 include("sectors.jl")
 include("augment.jl")
+include("gates.jl")
+include("kls_step.jl")
 
 export SymMPS, canonical!, move_left!, move_right!, bond_dims, leg_dim,
        product_state, domain_wall_state, neel_state,
@@ -30,6 +32,8 @@ export SymMPS, canonical!, move_left!, move_right!, bond_dims, leg_dim,
        reachable_sectors, fusion_basis, fuse_spaces, add_charge, dual_charge, sector_dim,
        SectorReport, sector_report, missing_charges, perp_component, align_charge,
        sector_report_right, perp_component_right,
-       augmented_left_isometry, augmented_right_isometry, random_sector_seed
+       augmented_left_isometry, augmented_right_isometry, random_sector_seed,
+       heisenberg_bond_gate, xx_bond_gate, magnetisation_gate, apply_gate,
+       kls_bond_update
 
 end # module
