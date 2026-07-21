@@ -103,6 +103,27 @@ end
         end
     end
 
+    @testset "every charge the frame CARRIES is reachable" begin
+        # U0's own bond sectors must appear in the reachable table with a
+        # positive dimension. Violating this means the two are labelled in
+        # different (dual) conventions -- which is exactly what raw
+        # getIdentity does, and what a vacuum-link fixture cannot detect.
+        for psi in (domain_wall_state(6), neel_state(6))
+            for i in 1:(length(psi) - 1)
+                canonical!(psi, i)
+                f = bond_frame(psi, i)
+                reach = Dict(reachable_sectors(f.U0, 1, 2))
+                for (q, d) in f.U0.spaces[3]
+                    @test haskey(reach, q)
+                    @test reach[q] >= d
+                end
+                for r in sector_report(f.U0, to_concrete(f.U0 * f.S0))
+                    @test !(r.u0_cols > 0 && r.reachable_dim == 0)
+                end
+            end
+        end
+    end
+
     @testset "every reachable charge is reported" begin
         psi = domain_wall_state(6)
         for i in 1:5

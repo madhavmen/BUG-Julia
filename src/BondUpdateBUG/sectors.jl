@@ -42,16 +42,17 @@ end
 Charges reachable on the fused leg `a (x) b`, with their dimensions, computed
 by explicit charge arithmetic.
 
-Telum's convention (measured, job 93413): each **input** leg that is incoming
-(`'+'`) is dualised so the fusion rule sees every leg as outgoing, and the
-fused label is then simply the SUM -- there is no further dual. Note
-`getIdentity` flips the input arrows in its output, so the dirs to pass here
-are the ones on the tensor being fused, not the ones on the result.
+Convention (measured, jobs 93413/93458/93480): each input leg that is incoming
+(`'+'`) is dualised so the fusion rule sees every leg as outgoing; the labels
+are summed; and the result is dualised once more to land in the **frame**
+convention -- the one [`fusion_basis`](@ref) and every `svd`-produced bond leg
+in this package use. (Raw `getIdentity` reports the dual of this, because it
+flips its input arrows.)
 
 Getting this wrong is easy to miss: with a vacuum link the reachable set is
-`{+q, -q}`, which is its own dual, so an extra dual still "passes". It only
-shows up once the link carries a non-zero charge. Abelian only; cross-checked
-against [`reachable_sectors`](@ref) on charged links in the tests.
+`{+q, -q}`, which is its own dual, so a wrong number of duals still "passes".
+It only shows up once the link carries a non-zero charge. Abelian only;
+cross-checked against [`reachable_sectors`](@ref) on charged links in the tests.
 """
 function fuse_spaces(syms, space_a, dir_a::Char, space_b, dir_b::Char)
     acc = Dict{Any, Int}()
@@ -59,7 +60,7 @@ function fuse_spaces(syms, space_a, dir_a::Char, space_b, dir_b::Char)
     for (qa, da) in space_a, (qb, db) in space_b
         ca = dir_a == '+' ? dual_charge(syms, qa) : qa
         cb = dir_b == '+' ? dual_charge(syms, qb) : qb
-        q = add_charge(syms, ca, cb)
+        q = dual_charge(syms, add_charge(syms, ca, cb))
         haskey(acc, q) || push!(order, q)
         acc[q] = get(acc, q, 0) + da * db
     end
@@ -67,18 +68,42 @@ function fuse_spaces(syms, space_a, dir_a::Char, space_b, dir_b::Char)
 end
 
 """
+    fusion_basis(t, leg_a=1, leg_b=2; tag="fused") -> TLArray
+
+Orthonormal basis of the fused `leg_a (x) leg_b` space, **in `t`'s own leg
+convention**: legs `(leg_a, leg_b, bond)` with the same arrows `t` has and a
+bond leg labelled the way `svd(t, (leg_a, leg_b)).U` labels its bond.
+
+`getIdentity` alone is NOT usable for this. It flips the input arrows in its
+output, so its fused leg carries the **dual** of the labels a frame built from
+`t` carries, and its `(link, site)` legs point the wrong way to be `oplus`ed
+with such a frame. Taking the adjoint restores the input arrows, and the
+subsequent SVD relabels the bond exactly as every other frame in this package
+is labelled.
+
+Getting this wrong is a silent corruption: with a vacuum link the reachable set
+is `{+q,-q}`, its own dual, so the mislabelled version still agrees. It only
+surfaces once the link carries a non-zero charge -- the same false-pass trap as
+the fusion-sign bug (jobs 93413, 93458).
+"""
+function fusion_basis(t, leg_a::Int = 1, leg_b::Int = 2; tag::AbstractString = "fused")
+    F = to_concrete(getIdentity((t, leg_a), (t, leg_b); itag = tag)')
+    # getIdentity's output is always (input_a, input_b, fused), whatever
+    # leg numbers the inputs had, so the split is on (1,2) -- NOT (leg_a, leg_b).
+    return to_concrete(svd(F, (1, 2); cutoff = 0.0).U)
+end
+
+"""
     reachable_sectors(t, leg_a=1, leg_b=2) -> Vector{Tuple{QLabel,Int}}
 
 Every charge reachable on the fused `leg_a (x) leg_b` of `t`, with its
-dimension. Delegates to Telum's `getIdentity`, so it is correct for
-non-Abelian symmetries too.
+dimension, labelled in `t`'s own bond convention (see [`fusion_basis`](@ref)).
 
 The total dimension always equals `leg_dim(t, leg_a) * leg_dim(t, leg_b)` --
 fusing regroups the product space by charge, it never loses or adds directions.
 """
 function reachable_sectors(t, leg_a::Int = 1, leg_b::Int = 2)
-    fused = to_concrete(getIdentity((t, leg_a), (t, leg_b); itag = "fused"))
-    return [(q, d) for (q, d) in fused.spaces[end]]
+    return [(q, d) for (q, d) in fusion_basis(t, leg_a, leg_b).spaces[end]]
 end
 
 # ── the missing-quantum-number table ────────────────────────────────────────
@@ -203,3 +228,67 @@ end
 
 "Charges that are reachable on `(link (x) site)` but spanned by neither frame."
 missing_charges(rep::Vector{SectorReport}) = [r.charge for r in rep if r.missing]
+
+# ── right-frame mirrors ─────────────────────────────────────────────────────
+# V0 and L1 carry (bond, site, link): the frame leg is 1 and the fused pair is
+# (2, 3). Written out rather than obtained by transposing, matching how Alice
+# keeps _symmetric_augmented_right_isometry_from_l explicit -- the arrow and tag
+# bookkeeping does not survive a naive transpose.
+
+"""
+    perp_component_right(V0, L1) -> TLArray
+
+`P_perp L1 = L1 - (L1 V0') V0`, contracting over the `(site, link)` legs.
+Row mirror of [`perp_component`](@ref).
+"""
+function perp_component_right(V0, L1)
+    ov = contract(L1, (2, 3), V0', (2, 3))     # (L1 bond, V0 bond)
+    proj = contract(ov, (2,), V0, (1,))        # (L1 bond, site, link)
+    return to_concrete(L1 - proj)
+end
+
+"""
+    sector_report_right(V0, L1; aug_tol=1e-12) -> Vector{SectorReport}
+
+Missing-quantum-number table for a right frame. Row mirror of
+[`sector_report`](@ref): charges are enumerated on the fused `(site (x) link)`
+leg and counted on frame leg 1.
+"""
+function sector_report_right(V0, L1; aug_tol::Float64 = 1e-12)
+    syms = symm(V0)
+    ref_dir = V0.inds[1].dir
+    l_dir = L1.inds[1].dir
+    reach = [(q, d) for (q, d) in fusion_basis(V0, 2, 3).spaces[end]]
+    perp = perp_component_right(V0, L1)
+    new_space = norm(perp) <= aug_tol ? Tuple[] :
+                to_concrete(svd(perp, (2, 3); cutoff = aug_tol).U).spaces[end]
+
+    charges = Any[]
+    for (q, _) in reach
+        q in charges || push!(charges, q)
+    end
+    for (q, _) in V0.spaces[1]
+        q in charges || push!(charges, q)
+    end
+    for (q, _) in L1.spaces[1]
+        qa = align_charge(syms, q, l_dir, ref_dir)
+        qa in charges || push!(charges, qa)
+    end
+
+    out = SectorReport[]
+    for q in charges
+        rdim = 0
+        for (s, d) in reach
+            s == q && (rdim = d)
+        end
+        v = sector_dim(V0, 1, q)
+        l = sector_dim(L1, 1, align_charge(syms, q, ref_dir, l_dir))
+        nnew = 0
+        for (s, d) in new_space
+            s == q && (nnew = d)
+        end
+        rng = v + nnew
+        push!(out, SectorReport(q, rdim, v, l, rng, rng == 0 && rdim > 0))
+    end
+    return out
+end

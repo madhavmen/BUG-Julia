@@ -257,3 +257,33 @@ left_gram(A) = contract(prime(A, 3)', (1, 2), A, (1, 2))
 `AA†` traced over `(site, link_r)`, leaving the two `link_l` legs open.
 """
 right_gram(A) = contract(prime(A, 1)', (2, 3), A, (2, 3))
+
+"""
+    left_isometry_defect(A) -> Float64
+
+`||A (I - A'A)||_F` over the `(link_l, site)` legs: zero exactly when `A` is a
+left isometry, and computed WITHOUT catastrophic cancellation.
+
+Two tempting alternatives are both worse:
+
+  - `norm(left_gram(A) - 1)` builds its identity from the tensor's own legs via
+    `Base.:-(q, ::Number)` and fails to align them for frames that came out of
+    `oplus` ("No leg in TLArray matches leg 2 ...").
+  - the Frobenius expansion `||G-I||^2 = ||G||^2 - 2||A||^2 + d` needs no
+    identity, but subtracts two quantities of size `d`, so its absolute error is
+    `~d*eps` and after the square root the floor is `~1e-8`. A genuinely exact
+    isometry measured that way reports 3.7e-8, which is indistinguishable from
+    a real defect.
+
+`A - A(A'A)` is a difference of two O(1) tensors whose true value is small, so
+its norm is accurate to full precision.
+"""
+left_isometry_defect(A) = norm(perp_component(A, A))
+
+"""
+    right_isometry_defect(A) -> Float64
+
+`||(I - AA') A||_F` over the `(site, link_r)` legs. Mirror of
+[`left_isometry_defect`](@ref); the bond is leg 1.
+"""
+right_isometry_defect(A) = norm(perp_component_right(A, A))
