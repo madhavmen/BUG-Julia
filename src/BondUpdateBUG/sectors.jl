@@ -174,7 +174,7 @@ function perp_component(U0, K1)
 end
 
 """
-    sector_report(U0, K1; aug_tol=1e-12) -> Vector{SectorReport}
+    sector_report(U0, K1) -> Vector{SectorReport}
 
 The missing-quantum-number table for the bond whose left frame is `U0`.
 
@@ -184,17 +184,23 @@ sector reachable but empty is reported rather than silently dropped -- that
 omission is exactly the bug this table exists to catch.
 
 `range_cols = u0_cols + rank(P_perp K1)` in that sector, with the rank taken
-from a symmetry-native SVD at `aug_tol`. Nothing is densified: densifying a
+from the same complement basis the augmentation uses. Nothing is densified: densifying a
 block-sparse state reintroduces the forbidden amplitudes the symmetry forbids.
 """
-function sector_report(U0, K1; aug_tol::Float64 = 1e-12)
+function sector_report(U0, K1)
     syms = symm(U0)
     ref_dir = U0.inds[3].dir                 # every charge below is in THIS convention
     k_dir = K1.inds[3].dir
     reach = reachable_sectors(U0, 1, 2)
     perp = perp_component(U0, K1)
-    new_space = norm(perp) <= aug_tol ? Tuple[] :
-                to_concrete(svd(perp, (1, 2); cutoff = aug_tol).U).spaces[3]
+    # MUST be the very basis the augmentation will use. Computing the range
+    # here with any other rule risks calling a sector empty while the complement
+    # actually fills it -- the fill would then seed a direction the complement
+    # already supplies, `oplus` would concatenate both, and the frame would stop
+    # being an isometry. Same failure mode as the roundoff duplicates in
+    # `_complement_basis`.
+    Q = _complement_basis(U0, K1; leg = 3)
+    new_space = Q === nothing ? Tuple[] : Q.spaces[3]
 
     charges = Any[]
     for (q, _) in reach
@@ -248,20 +254,20 @@ function perp_component_right(V0, L1)
 end
 
 """
-    sector_report_right(V0, L1; aug_tol=1e-12) -> Vector{SectorReport}
+    sector_report_right(V0, L1) -> Vector{SectorReport}
 
 Missing-quantum-number table for a right frame. Row mirror of
 [`sector_report`](@ref): charges are enumerated on the fused `(site (x) link)`
 leg and counted on frame leg 1.
 """
-function sector_report_right(V0, L1; aug_tol::Float64 = 1e-12)
+function sector_report_right(V0, L1)
     syms = symm(V0)
     ref_dir = V0.inds[1].dir
     l_dir = L1.inds[1].dir
     reach = [(q, d) for (q, d) in fusion_basis(V0, 2, 3).spaces[end]]
     perp = perp_component_right(V0, L1)
-    new_space = norm(perp) <= aug_tol ? Tuple[] :
-                to_concrete(svd(perp, (2, 3); cutoff = aug_tol).U).spaces[end]
+    Q = _complement_basis(V0, L1; leg = 1)          # see sector_report
+    new_space = Q === nothing ? Tuple[] : Q.spaces[1]
 
     charges = Any[]
     for (q, _) in reach

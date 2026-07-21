@@ -49,9 +49,70 @@ function random_sector_seed(F, q, n_seed::Int; rng::AbstractRNG)
     return to_concrete(getsub(Q, 3, s -> 1:n))
 end
 
+# Numerical-rank guard. NOT a truncation knob and NOT user-facing: it only
+# separates genuine directions from the roundoff residue of a floating-point
+# subtraction, at the scale of the input. Every direction the K/L step actually
+# produces is kept, however small its weight -- the only bound on the K/L
+# augmentation is Sulz's 2r.
+const _RANK_EPS = 100 * eps(Float64)
+
+"""
+    _complement_basis(U0, K1; leg) -> TLArray or nothing
+
+An orthonormal basis of the part of `K1` outside `span(U0)`, exactly orthogonal
+to `U0`. `leg` is 3 for a left frame, 1 for a right frame.
+
+NO TOLERANCE. The K/L augmentation admits every direction it finds; the hard
+constraint is the Sulz bound, `rank([U0 | K1]) <= 2r`, which is automatic here
+because `rank(perp) <= rank(K1) = r` -- asserted below rather than assumed.
+
+TWO SUBTLETIES, BOTH OF WHICH PRODUCED A NORM BLOW-UP. `oplus` concatenates
+blocks; it does NOT orthogonalise them, so `[U0 | Q]` is an isometry only if this
+function guarantees it, and it originally did not:
+
+ 1. A CUTOFF RELATIVE TO `perp` IS MEANINGLESS. `perp` is the O(tau) new
+    direction, so its own largest singular value is tiny -- measured 1.5e-6 at
+    tau = 0.02. Telum's `cutoff` is relative to that, so the old `cutoff = 1e-12`
+    thresholded at 1.5e-18 and kept the roundoff residue of the subtraction at
+    ~1e-16. That residue is what was subtracted, so it points ALONG U0: measured
+    `||U0' Q|| = 1.0`, one column of Q duplicated a U0 column, and the frame had
+    isometry defect exactly sqrt(2). The S-step then read `U_aug' Theta V_aug'`
+    off a singular frame and the norm GREW -- 1 -> 2.83 -> 11.3 -> 45.3 -> 128.3
+    over five real-time steps. The rank guard is therefore absolute, scaled by
+    the input, which is what a numerical rank determination has to be.
+
+ 2. RE-PROJECTION IS STILL NEEDED. A direction surviving at the rank guard can
+    still carry a U0 component of order eps/guard. Subtracting the U0 component
+    again and re-orthonormalising drives the overlap back to machine precision.
+"""
+function _complement_basis(U0, K1; leg::Int = 3)
+    perp_of = leg == 3 ? perp_component : perp_component_right
+    split   = leg == 3 ? (1, 2) : (2, 3)
+    scale = norm(K1)
+    scale == 0 && return nothing
+    tol = _RANK_EPS * scale
+
+    function orth(t)
+        n = norm(t)
+        n <= tol && return nothing
+        Q = to_concrete(svd(t, split; cutoff = min(tol / n, 1.0)).U)
+        return leg == 3 ? Q : to_concrete(permutedims(Q, (3, 1, 2)))
+    end
+
+    Q = orth(perp_of(U0, K1))
+    Q === nothing && return nothing
+    Q = orth(perp_of(U0, Q))            # exactness pass; see (2) above
+    Q === nothing && return nothing
+
+    r = leg_dim(U0, leg)
+    leg_dim(Q, leg) <= r || error(
+        "Sulz bound violated: $(leg_dim(Q, leg)) new directions against rank $r")
+    return Q
+end
+
 """
     augmented_left_isometry(U0, K1; max_rank=typemax(Int), missing_fill=1,
-                            aug_tol=1e-12, augment=true, rng) -> (U_aug, n_new)
+                            augment=true, seed_charges=nothing, rng) -> (U_aug, n_new)
 
 The augmented left frame `[U0 | orth(P_perp K1) | seeds]`, rank <= 2r plus one
 minimal seed per empty-but-reachable sector.
@@ -78,7 +139,6 @@ Python parity surface.
 function augmented_left_isometry(U0, K1;
                                  max_rank::Int = typemax(Int),
                                  missing_fill::Int = 1,
-                                 aug_tol::Float64 = 1e-12,
                                  augment::Bool = true,
                                  seed_charges = nothing,
                                  rng::AbstractRNG = MersenneTwister(0x5EED))
@@ -87,10 +147,10 @@ function augmented_left_isometry(U0, K1;
     n_new = 0
 
     if augment
-        # (1) Sulz / discarded augmentation: the part of K1 outside span(U0).
-        perp = perp_component(U0, K1)
-        if norm(perp) > aug_tol
-            Q = to_concrete(svd(perp, (1, 2); cutoff = aug_tol).U)
+        # (1) Sulz / discarded augmentation: the part of K1 outside span(U0),
+        # orthonormal AND exactly orthogonal to U0 -- see `_complement_basis`.
+        Q = _complement_basis(U0, K1; leg = 3)
+        if Q !== nothing
             Q = _cap_new_columns(Q, U0, max_rank)
             if Q !== nothing && leg_dim(Q, 3) > 0
                 push!(blocks, to_concrete(setitag(Q, 3, bond_tag)))
@@ -100,7 +160,7 @@ function augmented_left_isometry(U0, K1;
 
         # (2) Minimal fill for sectors that are reachable but spanned by neither.
         if missing_fill > 0
-            rep = sector_report(U0, K1; aug_tol = aug_tol)
+            rep = sector_report(U0, K1)
             missed = [r for r in rep if r.missing]
             if !isempty(missed)
                 F = fusion_basis(U0, 1, 2; tag = bond_tag)
@@ -134,8 +194,7 @@ bookkeeping is not symmetric under a naive transpose.
 function augmented_right_isometry(V0, L1;
                                   max_rank::Int = typemax(Int),
                                   missing_fill::Int = 1,
-                                  aug_tol::Float64 = 1e-12,
-                                  augment::Bool = true,
+                                   augment::Bool = true,
                                   seed_charges = nothing,
                                   rng::AbstractRNG = MersenneTwister(0x5EED))
     bond_tag = V0.inds[1].itags
@@ -143,11 +202,8 @@ function augmented_right_isometry(V0, L1;
     n_new = 0
 
     if augment
-        perp = perp_component_right(V0, L1)
-        if norm(perp) > aug_tol
-            Q = to_concrete(svd(perp, (2, 3); cutoff = aug_tol).U)
-            # svd puts the new leg LAST; the right frame wants it first.
-            Q = to_concrete(permutedims(Q, (3, 1, 2)))
+        Q = _complement_basis(V0, L1; leg = 1)
+        if Q !== nothing
             Q = _cap_new_columns(Q, V0, max_rank; leg = 1)
             if Q !== nothing && leg_dim(Q, 1) > 0
                 push!(blocks, to_concrete(setitag(Q, 1, bond_tag)))
@@ -156,7 +212,7 @@ function augmented_right_isometry(V0, L1;
         end
 
         if missing_fill > 0
-            rep = sector_report_right(V0, L1; aug_tol = aug_tol)
+            rep = sector_report_right(V0, L1)
             missed = [r for r in rep if r.missing]
             if !isempty(missed)
                 F = fusion_basis(V0, 2, 3; tag = bond_tag)

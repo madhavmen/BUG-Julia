@@ -375,6 +375,41 @@ RNG() = MersenneTwister(0x5EED)
         @test r.keep > f.old_rank            # the bond actually grew
     end
 
+    # THE REGRESSION THAT MATTERS MOST IN THIS FILE.
+    #
+    # `oplus` concatenates blocks without orthogonalising them, so a non-isometric
+    # U_aug is not caught anywhere downstream -- it just makes the S-step read
+    # `U_aug' Theta V_aug'` off a singular frame and the norm GROWS. Real-time
+    # evolution silently went 1 -> 2.83 -> 11.3 -> 45.3 -> 128.3 over five steps.
+    # It only shows up once `perp` is O(tau) small, i.e. during actual evolution,
+    # which is why hand-built frames never caught it.
+    @testset "the augmented frames stay isometries when perp is O(tau) tiny" begin
+        for dt in (1e-1, 1e-3, 1e-6, 1e-9)
+            psi = entangled_state(6, 4); f = frame_at(psi, 4)
+            r = kls_bond_update(f, gate_at(f), ComplexF64(-im * dt);
+                                maxdim = 1000, trunc_thresh = 1e-14, rng = RNG())
+            @test isapprox(left_isometry_defect(r.U_aug), 0.0; atol = 1e-11)
+            @test isapprox(right_isometry_defect(r.V_aug), 0.0; atol = 1e-11)
+            # and therefore the norm is preserved, which is the observable symptom
+            @test isapprox(norm(theta_of(r)), norm(frame_theta(f)); atol = 1e-11)
+        end
+    end
+
+    @testset "the K/L augmentation obeys the Sulz 2r bound with no tolerance" begin
+        # No cutoff is applied to the K/L step: every direction it finds is kept,
+        # and the only constraint is rank([U0|K1]) <= 2r.
+        for (L, i) in ((6, 4), (8, 4)), dt in (0.05, 1e-6)
+            psi = entangled_state(L, i); f = frame_at(psi, i)
+            r = kls_bond_update(f, gate_at(f), ComplexF64(-im * dt);
+                                maxdim = 1000, trunc_thresh = 1e-14,
+                                missing_fill = 0, rng = RNG())
+            @test r.aug_k <= 2 * f.old_rank
+            @test r.aug_l <= 2 * f.old_rank
+            @test leg_dim(r.U_aug, 3) == r.aug_k
+            @test leg_dim(r.V_aug, 1) == r.aug_l
+        end
+    end
+
     @testset "the augmented rank stays at 2r, never d*r" begin
         # The regression the whole rank rule exists to prevent: padding every
         # partially populated sector to its full local dimension.

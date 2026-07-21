@@ -116,6 +116,19 @@ KW = (maxdim = 64, trunc_thresh = 1e-14)
         @test 1.6 < d2 / d3 < 2.6
     end
 
+    @testset "many sweeps preserve the norm, not just one" begin
+        # The single-sweep version of this test passed throughout while real-time
+        # evolution was blowing the norm up by 128x over five steps: the defect
+        # needs a bond of rank > 1 AND an O(tau) perp to appear at all.
+        psi = domain_wall_state(6); canonical!(psi, 1)
+        g = bond_gates(psi)
+        for _ in 1:12, p in (:even, :odd)
+            parity_sweep!(psi, g, p, ComplexF64(-0.02im); KW..., rng = RNG())
+            @test isapprox(norm(psi), 1.0; atol = 1e-10)
+        end
+        @test maximum(bond_dims(psi)) > 1        # and it was not trivially frozen
+    end
+
     @testset "the sweep reports its augmentation and truncation" begin
         psi = domain_wall_state(6); canonical!(psi, 1)
         g = bond_gates(psi)

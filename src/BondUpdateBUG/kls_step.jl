@@ -76,7 +76,8 @@ Keywords:
   - `s_tau` -- separate S-step time, for Trotter schemes that halve it.
     Defaults to `tau`.
   - `augment` -- `false` freezes the bases, giving a fixed-rank projector step.
-  - `aug_tol` -- rank tolerance for the augmentation SVD.
+    There is deliberately no K/L tolerance: the augmentation keeps every
+    direction it finds, bounded only by Sulz's `2r`.
   - `missing_fill` -- random seeds per empty-but-reachable charge sector.
   - `maxiter` / `tol` -- Krylov budget for all three substeps.
 """
@@ -85,7 +86,6 @@ function kls_bond_update(f::BondFrame, gate, tau::ComplexF64;
                          trunc_thresh::Float64 = 1e-14,
                          s_tau::Union{Nothing, ComplexF64} = nothing,
                          augment::Bool = true,
-                         aug_tol::Float64 = 1e-12,
                          missing_fill::Int = 1,
                          maxiter::Int = 30,
                          tol::Float64 = 1e-15,
@@ -111,7 +111,7 @@ function kls_bond_update(f::BondFrame, gate, tau::ComplexF64;
 
     K1 = expv(apply_gk, tau, K0; hermitian = false, maxiter = maxiter, tol = tol)
     U_aug, n_new_k = augmented_left_isometry(f.U0, K1;
-                                             augment = augment, aug_tol = aug_tol,
+                                             augment = augment,
                                              missing_fill = missing_fill,
                                              seed_charges = seed_l, rng = rng)
 
@@ -127,7 +127,7 @@ function kls_bond_update(f::BondFrame, gate, tau::ComplexF64;
 
     L1 = expv(apply_gl, tau, L0; hermitian = false, maxiter = maxiter, tol = tol)
     V_aug, n_new_l = augmented_right_isometry(f.V0, L1;
-                                              augment = augment, aug_tol = aug_tol,
+                                              augment = augment,
                                               missing_fill = missing_fill,
                                               seed_charges = seed_r, rng = rng)
 

@@ -39,7 +39,7 @@ Advance every bond of one commuting group by `tau`, in place. Returns
 the diagnostics Python's `parity_sweep` returns.
 
 `kwargs` forward to [`kls_bond_update`](@ref): `maxdim`, `trunc_thresh`,
-`augment`, `aug_tol`, `missing_fill`, `maxiter`, `tol`, `rng`.
+`augment`, `missing_fill`, `maxiter`, `tol`, `rng`.
 
 No re-canonicalisation after a bond: `kls_bond_update` returns `left_core`
 already a left isometry with the centre in `right_core`, so setting
