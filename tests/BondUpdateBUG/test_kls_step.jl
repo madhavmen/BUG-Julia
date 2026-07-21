@@ -279,6 +279,36 @@ RNG() = MersenneTwister(0x5EED)
         end
     end
 
+    # EVERY PAIRABLE SECTOR MUST BE CONSIDERED, even if it is then pruned.
+    #
+    # The kept bond legitimately carries fewer sectors than are pairable -- at
+    # bond 3 of the L=6 domain wall the (+3,) sector (all-up left block, three
+    # flips from the initial state) enters the augmented frame and is then
+    # discarded with weight 7e-19, which is correct. What must NOT happen is the
+    # sector never being offered to the S-step at all: that is a systematic
+    # omission rather than a truncation, and it is invisible in the kept state.
+    @testset "the augmented frame offers every pairable sector to the S-step" begin
+        for (L, i) in ((6, 3), (6, 4), (8, 4))
+            psi = fixture(L, i); f = frame_at(psi, i)
+            pl, pr = pairable_charges(f)
+            r = kls_bond_update(f, gate_at(f), -0.05im;
+                                maxdim = 1000, trunc_thresh = 1e-14, rng = RNG())
+            uaug = Set(q for (q, _) in r.U_aug.spaces[3])
+            vaug = Set(q for (q, _) in r.V_aug.spaces[1])
+            # the Sulz budget can legitimately exhaust before every sector is
+            # seeded, so require coverage only when there was room for it
+            if r.aug_k < 2 * f.old_rank
+                @test issubset(pl, uaug)
+            end
+            if r.aug_l < 2 * f.old_rank
+                @test issubset(pr, vaug)
+            end
+            # and nothing UNpairable ever gets in
+            @test issubset(uaug, pl)
+            @test issubset(vaug, pr)
+        end
+    end
+
     @testset "maxdim caps the kept rank" begin
         psi = entangled_state(8, 4); f = frame_at(psi, 4)
         r = kls_bond_update(f, gate_at(f), -0.05im;
