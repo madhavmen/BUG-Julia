@@ -34,8 +34,11 @@
 # truncation, with NO backward (−tau) substep and no overlap-matrix inverse. At full
 # bond dimension the step is EXACT; the truncation error converges monotonically as
 # the bond dimension is raised. Measured (XX, exact-diagonalisation reference): the
-# single-step infidelity is O(dt^4) (ratio 16 per dt-halving) ⇒ the step is 2nd order
-# in the state and CONVERGENT (no forward-only floor); Richardson lifts the order.
+# single-step infidelity is CURRENTLY O(dt^2) (ratio ~4 per dt-halving) ⇒ the step is
+# 1ST ORDER in the state for now and CONVERGENT (no forward-only floor). The
+# Ceruti-Kusch-Lubich rank-adaptive-BUG theory argues the augmented Galerkin core
+# should give 2nd order; the implementation does not yet reproduce that (tracked as
+# a follow-up, not re-derived here) — treat this as a first-order method for now.
 
 # ── per-site helpers (index extraction; trivial boundary links) ────────────────
 _dbug_siteind(t::ITensor)         = only(filter(ix -> hastags(ix, "Site"), inds(t)))
@@ -61,7 +64,12 @@ function _dbug_k_sweep(psi, phi, cl::Int, maxdim::Int, cutoff::Float64)
         proj     = dag(u0) * phit                                    # U0^dagger phi
         phi_perp = phit - u0 * proj                                  # (I − U0 U0^dagger) phi
         W_i = u0
-        budget = maxdim - dim(mid_psi)
+        # Augment to 2r (budget = rpsi, Sulz Alg. 5): admit r extra discarded phi
+        # directions so the propose bases can span new (incl. high-|charge|) sectors.
+        # Capping off-central frames at maxdim-rpsi instead starves the augmentation
+        # and stalls cooling. The redundant 2r scaffolding is collapsed back to the
+        # true minimal Schmidt rank by the lossless re-gauge in _dbug_global_step!.
+        budget = dim(mid_psi)
         if budget > 0
             Uc, Sc, _Vc = svd(phi_perp, (prevb, s_i); maxdim = budget, cutoff = cutoff)
             qb = commonind(Uc, Sc)
@@ -99,7 +107,8 @@ function _dbug_l_sweep(psi, phi, cr::Int, maxdim::Int, cutoff::Float64)
         proj     = dag(v0) * phit
         phi_perp = phit - v0 * proj
         V_i = v0;  n_new[i] = 0
-        budget = maxdim - dim(mid_psi)
+        # Mirror of _dbug_k_sweep: augment to 2r (budget = rpsi). See note there.
+        budget = dim(mid_psi)
         if budget > 0
             Uc, Sc, _Vc = svd(phi_perp, (s_i, nextb); maxdim = budget, cutoff = cutoff)
             qb = commonind(Uc, Sc)
@@ -173,6 +182,20 @@ function _dbug_global_step!(
     push!(cores, left_core);  push!(cores, right_core)
     for k in (cr + 1):N;  push!(cores, Z[k]);  end
     psi2 = TensorTrain(cores)
+    # The K/L sweeps augment every bond to 2r; those redundant directions must be
+    # collapsed back to the true minimal Schmidt rank each step, otherwise the 2r
+    # scaffolding accumulates and the off-central bonds double every step. A lossless
+    # SVD sweep (tiny cutoff, no maxdim cap) does this without discarding weight; the
+    # user-facing maxdim truncation stays confined to the central S-step above. This
+    # mirrors the Alice TWO-WAY canonical(L-1,trunc=None); canonical(0,trunc=None)
+    # re-gauge: BOTH passes must be SVD-based (not QR-only), or the direction NOT
+    # covered by the SVD sweep is left at its full augmented (2r) rank — the Python
+    # investigation (2026-07-08) measured this asymmetry blow up the untruncated half
+    # to full Hilbert rank at L>=20. `orthogonalize!` is QR-only and cannot reduce
+    # rank, so the second pass uses `svd_compress_reverse!` (mirror of
+    # `svd_compress!`), giving a genuine two-way SVD re-gauge.
+    TTutils.svd_compress!(psi2; maxdim = typemax(Int), cutoff = 1e-14)
+    TTutils.svd_compress_reverse!(psi2; maxdim = typemax(Int), cutoff = 1e-14)
     orthogonalize!(psi2, 1)
     for k in 1:N;  psi[k] = psi2[k];  end                           # mutate psi in place
 
@@ -204,6 +227,10 @@ is the relative singular-value threshold of the SVD truncations. `time_prefactor
 -im` (real time) by default; pass `ComplexF64(1)` for imaginary time. The
 `order`/`matrixfree_sstep`/`aug_tol` keywords are retained for call-site
 compatibility but no longer select a scheme (the global sweep is the only scheme).
+
+Currently a FIRST-order method in practice (measured single-step infidelity ~O(dt^2),
+i.e. state error ~O(dt); see `discarded_bug.jl` header) — treat it as first order for
+now, not the second order the rank-adaptive-BUG theory argues for.
 """
 function discarded_bug_step!(
     psi :: TensorTrain,

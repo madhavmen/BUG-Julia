@@ -2,6 +2,7 @@
 
 export svd_compress, svd_compress!, compress, compress!, multiply!, square!
 export svd_compress_rsvd, svd_compress_rsvd!
+export svd_compress_reverse!
 
 
 """
@@ -34,6 +35,34 @@ function svd_compress!(f::TensorTrain; maxdim::Integer, cutoff::AbstractFloat = 
             new_link = settags(old_link, "Link,l=$j")
             replaceind!(f[j], old_link, new_link)
             replaceind!(f[j + 1], old_link, new_link)
+        end
+    end
+end
+
+
+"""
+    svd_compress_reverse!(f::TensorTrain; maxdim, cutoff=0.0)
+
+Compress `f` in-place with a single right-to-left truncated-SVD sweep — the
+mirror image of `svd_compress!`. Running `svd_compress!` then
+`svd_compress_reverse!` (or vice versa) gives a lossless TWO-WAY re-gauge: each
+pass is SVD-based (not QR-only), so each direction can independently collapse
+any rank-deficiency it finds, leaving every bond at its true minimal Schmidt
+rank rather than only the bonds visited by a single direction.
+"""
+function svd_compress_reverse!(f::TensorTrain; maxdim::Integer, cutoff::AbstractFloat = 0.0)
+    N = length(f)
+    orthogonalize!(f, N)
+    for j in lastindex(f):-1:(firstindex(f) + 1)
+        Vinds = uniqueinds(f[j], f[j - 1])
+        U, S, V = svd(f[j], Vinds; maxdim, cutoff)
+        f[j] = U
+        f[j - 1] = f[j - 1] * (S * V)
+        old_link = commonind(f[j], f[j - 1])
+        if !isnothing(old_link)
+            new_link = settags(old_link, "Link,l=$(j - 1)")
+            replaceind!(f[j], old_link, new_link)
+            replaceind!(f[j - 1], old_link, new_link)
         end
     end
 end

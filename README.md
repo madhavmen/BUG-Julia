@@ -13,16 +13,22 @@ grows the basis.
   the group is an exact factor of the Trotter step.
 - Recommended for systems where rank growth is a concern.
 
-**`discarded_bug_step!`** — discarded-projector BUG variant
-- Derived from the faithful CKL scheme; differs *only* in the local bond update.
-  The discarded (orthogonal-complement) projector is applied to the K/L generator
-  *before* the exponential (`project-before`), and the basis is grown by a plain
-  direct sum `[U0 | Qk]` / `[V0 ; Ql]` — **no augmented overlap matrices** `M̂`/`N̂`.
-- Advances against a Hamiltonian **MPO** by a symmetric forward+reverse sweep
-  (Strang), so with the rank free to grow it reproduces `exp(-i dt H)` to high order.
-- The project-before generator is non-Hermitian, so the K/L substep uses a
-  non-Hermitian Krylov exponential (`KrylovKit.exponentiate`, `issymmetric=false`);
-  the Hermitian S-step reuses the faithful Lanczos path.
+**`discarded_bug_step!`** — discarded-projector BUG variant (rank-adaptive
+tree-tensor-network BUG of Ceruti–Lubich–Walach / Sulz, specialised to the MPS
+tree; the Julia mirror of the validated Python `sweep.py`)
+- One step is a single **global sweep** (`_dbug_global_step!`): form `phi = H·psi`
+  once, build augmented left/right isometries per basis matrix that keep `psi`
+  exact and admit only the discarded (orthogonal-complement) part of `phi` —
+  **no augmented overlap matrices** `M̂`/`N̂` are ever formed — then integrate a
+  single Galerkin centre tensor under the two-site effective Hamiltonian. There is
+  no backward (`-tau`) substep; BUG is inverse-free by design.
+- The augmented bases span `range(psi) ⊕ range(H psi)`, not a local two-site
+  approximation, so the step is exact at full bond dimension and the truncation
+  error converges monotonically as the bond dimension is raised.
+- Currently a FIRST-order method in practice (measured single-step infidelity
+  ~O(dt^2), i.e. state error ~O(dt)); the rank-adaptive-BUG theory argues for
+  second order via the augmented Galerkin core, but the implementation does not
+  yet reproduce that — treat it as first order for now.
 
 ## Core Concepts
 
@@ -82,8 +88,11 @@ info = discarded_bug_step!(psi, W; dt, maxdim=typemax(Int), cutoff=0.0,
 One step is a single **global sweep**: form `phi = H·psi`, build augmented left/right
 isometries that keep `psi` exact and admit only the discarded part `(I − U0 U0†) phi`
 (never an `M`/`N` overlap matrix), then integrate ONE Galerkin centre tensor under the
-two-site effective Hamiltonian. The step is exact at full bond dimension and O(dt²),
+two-site effective Hamiltonian. The step is exact at full bond dimension and
 convergent under truncation; there is no backward substep (BUG is inverse-free).
+Currently FIRST order in practice (measured single-step infidelity ~O(dt²), i.e.
+state error ~O(dt)) — treat it as first order for now, not the second order the
+rank-adaptive-BUG theory argues for.
 
 ### KLS Kernel (Direct Access)
 

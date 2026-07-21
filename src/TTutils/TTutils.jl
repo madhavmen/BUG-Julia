@@ -86,6 +86,7 @@ export _partition_ranges
 export svd_compress, svd_compress!, compress, compress!
 export add, add!, multiply!, square!
 export svd_compress_rsvd, svd_compress_rsvd!
+export svd_compress_reverse!
 export zipup
 export LinearSolveInfo, solve_linear, solve_linear!
 

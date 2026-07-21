@@ -404,6 +404,24 @@ function _run_independent_kl_pair(
     return fetch(k_task), l_result
 end
 
+# ── Discarded-projector helpers (two-site BUG variant = discarded) ────────────
+# Apply the discarded (orthogonal-complement) projector to a K/L matvec RESULT:
+#   left  P⊥_U0 = I − U0 U0†  on the (link_l, site_l) row space,
+#   right P⊥_V0 = I − V0† V0  on the (site_r, link_r) column space.
+# The vectors are in the flattened layout the K/L substeps use — `k` on
+# (link_l, site_l, mid_k), `l` on (mid_l, site_r, link_r) — so `U0_mat` is
+# (link_l·site_l)×old_rank and `V0_mat` is old_rank×(site_r·link_r) (the same
+# reshapes `_augmented_*_isometry_from_{k,l}` use). This "project-before" of the
+# K/L generator is the ONLY change from the faithful KLS update.
+@inline function _discarded_perp_left(hk_vec, U0_mat, nrow::Int, ncol::Int)
+    W = reshape(hk_vec, nrow, ncol)
+    return vec(W .- U0_mat * (U0_mat' * W))
+end
+@inline function _discarded_perp_right(hl_vec, V0_mat, nrow::Int, ncol::Int)
+    Lm = reshape(hl_vec, nrow, ncol)
+    return vec(Lm .- (Lm * V0_mat') * V0_mat)
+end
+
 # ── Faithful forward KLS candidate ───────────────────────────────────────────
 
 """
@@ -411,6 +429,10 @@ end
 
 Paper-faithful simultaneous K+L augmentation followed by S-step.
 Returns `(U_aug_tens, V_aug_tens, n_new_k, n_new_l, numops_s, S_new)`.
+
+`project_before = true` selects the discarded-projector variant: the K and L
+generators are projected with `P⊥` before the exponential (a non-Hermitian
+substep), while the augmentation, S-start, S-step and truncation are unchanged.
 """
 function _faithful_kls_local_bond_candidate(
     bond_data;
@@ -428,6 +450,7 @@ function _faithful_kls_local_bond_candidate(
     checkerboard_threads::Integer = Threads.nthreads(),
     HW_env_override  :: Union{Nothing,ITensor} = nothing,
     local_gate       :: Union{Nothing,ITensor} = nothing,
+    project_before   :: Bool = false,
 )
     aug_krylov_depth >= 1 ||
         error("aug_krylov_depth must be >= 1; got $aug_krylov_depth")
@@ -453,6 +476,17 @@ function _faithful_kls_local_bond_candidate(
         (isnothing(HW_env_override) ?
             (bond_data.L_mpo_cur * bond_data.W_left * bond_data.W_right * bond_data.R_mpo_cur) :
             HW_env_override)
+
+    # Discarded variant: flattened U0/V0 isometries for the P⊥ projector applied to
+    # the K/L generators. `nothing` (and never touched) in the faithful path.
+    U0_mat = project_before ?
+        reshape(_complex_tensor_array(bond_data.U0_tens,
+                    bond_data.link_l, bond_data.site_l, bond_data.canon_u0),
+                dl * ds_l, old_rank) : nothing
+    V0_mat = project_before ?
+        reshape(_complex_tensor_array(bond_data.V0_tens,
+                    bond_data.canon_v0, bond_data.site_r, bond_data.link_r),
+                old_rank, ds_r * dr) : nothing
 
     K0_tens = bond_data.U0_tens * bond_data.S0_tens
     mid_k   = _left_site_bond_index(K0_tens, bond_data.link_l, bond_data.site_l)
@@ -490,10 +524,18 @@ function _faithful_kls_local_bond_candidate(
                     (w -> _apply_projected_local_operator(H1_k, w,
                             bond_data.link_l, bond_data.site_l, mid_k))
                 end
-            k1_vec, _ = _linear_substep(apply_k, _active_time_prefactor() * dt, k0_vec;
-                method = kl_substep_method, lanczos_tol = lanczos_tol,
-                lanczos_maxiter = lanczos_maxiter, restart = lanczos_restart,
-            )
+            # Discarded variant: project the K generator, G_K = P⊥_U0 · H_K (non-Hermitian).
+            apply_k_eff = project_before ?
+                (w -> _discarded_perp_left(apply_k(w), U0_mat, dl * ds_l, d_mid_k)) : apply_k
+            k1_vec, _ = project_before ?
+                _general_linear_substep(apply_k_eff, _active_time_prefactor() * dt, k0_vec;
+                    method = kl_substep_method, lanczos_tol = lanczos_tol,
+                    lanczos_maxiter = lanczos_maxiter, restart = lanczos_restart,
+                    issymmetric = false) :
+                _linear_substep(apply_k, _active_time_prefactor() * dt, k0_vec;
+                    method = kl_substep_method, lanczos_tol = lanczos_tol,
+                    lanczos_maxiter = lanczos_maxiter, restart = lanczos_restart,
+                )
             if aug_krylov_depth == 1
                 K1_tens = itensor(reshape(k1_vec, dl, ds_l, d_mid_k),
                     bond_data.link_l, bond_data.site_l, mid_k)
@@ -510,7 +552,7 @@ function _faithful_kls_local_bond_candidate(
             cols[1] = k1_vec
             v = k1_vec
             for j in 2:aug_krylov_depth
-                v = apply_k(v)
+                v = apply_k_eff(v)
                 cols[j] = v
             end
             K1_block_mat = reduce(hcat,
@@ -538,10 +580,18 @@ function _faithful_kls_local_bond_candidate(
                     (w -> _apply_projected_local_operator(H1_l, w,
                             mid_l, bond_data.site_r, bond_data.link_r))
                 end
-            l1_vec, _ = _linear_substep(apply_l, _active_time_prefactor() * dt, l0_vec;
-                method = kl_substep_method, lanczos_tol = lanczos_tol,
-                lanczos_maxiter = lanczos_maxiter, restart = lanczos_restart,
-            )
+            # Discarded variant: project the L generator, G_L = H_L · P⊥_V0 (non-Hermitian).
+            apply_l_eff = project_before ?
+                (w -> _discarded_perp_right(apply_l(w), V0_mat, d_mid_l, ds_r * dr)) : apply_l
+            l1_vec, _ = project_before ?
+                _general_linear_substep(apply_l_eff, _active_time_prefactor() * dt, l0_vec;
+                    method = kl_substep_method, lanczos_tol = lanczos_tol,
+                    lanczos_maxiter = lanczos_maxiter, restart = lanczos_restart,
+                    issymmetric = false) :
+                _linear_substep(apply_l, _active_time_prefactor() * dt, l0_vec;
+                    method = kl_substep_method, lanczos_tol = lanczos_tol,
+                    lanczos_maxiter = lanczos_maxiter, restart = lanczos_restart,
+                )
             if aug_krylov_depth == 1
                 L1_tens = itensor(reshape(l1_vec, d_mid_l, ds_r, dr),
                     mid_l, bond_data.site_r, bond_data.link_r)
@@ -557,7 +607,7 @@ function _faithful_kls_local_bond_candidate(
             rows[1] = l1_vec
             v = l1_vec
             for j in 2:aug_krylov_depth
-                v = apply_l(v)
+                v = apply_l_eff(v)
                 rows[j] = v
             end
             L1_block_mat = reduce(vcat,
@@ -588,6 +638,21 @@ function _faithful_kls_local_bond_candidate(
         numops_s = sstep.numops_s, S_new = sstep.S_new,
     )
 end
+
+# ── Discarded-projector forward KLS candidate (two-site BUG variant='discarded') ─
+
+"""
+    _discarded_kls_local_bond_candidate(bond_data; ...) -> NamedTuple
+
+Discarded-projector K/L variant of `_faithful_kls_local_bond_candidate`: the K and
+L generators are projected with `P⊥ = I − U0 U0†` / `I − V0† V0` BEFORE the
+exponential (the "project-before" discarded rule), so those substeps run on the
+non-Hermitian Krylov path. Augmentation, S-start (`Û†Θ0V̂† ≡ M̂ S0 N̂`), S-step and
+truncation are identical to the faithful candidate. This is the per-bond, two-site
+analogue of the global `discarded_bug.jl` sweep (and of Alice's `discarded_candidate.py`).
+"""
+_discarded_kls_local_bond_candidate(bond_data; kwargs...) =
+    _faithful_kls_local_bond_candidate(bond_data; project_before = true, kwargs...)
 
 # ── Faithful reverse KLS candidate ───────────────────────────────────────────
 
