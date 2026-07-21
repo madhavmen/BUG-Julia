@@ -1,134 +1,109 @@
-# BUG (Bond-Update-and-Galerkin) Quantum Integrator
+# BUG-Julia — `bond_update_bug`
 
-## Overview
+A symmetry-native, rank-adaptive Basis-Update-and-Galerkin time integrator for
+1D tensor networks, built on [Telum](https://github.com/) / LurCGT so that U(1)
+and non-Abelian symmetric tensors stay block-sparse throughout.
 
-The BUG module provides canonically validated, rank-adaptive time-integration
-methods for quantum spin-chain systems. Two integrators are available, both
-two-site and both rank-adaptive; they differ only in how the local bond update
-grows the basis.
+**There is exactly one supported integrator: `bond_update_bug!`.** Everything
+else that used to live here is under `exploratory/` or at the tag
+`archive/pre-bond-update-legacy`.
 
-**`bug_two_site!`** — 2-Site-BUG method (faithful KLS)
-- Applies 2-site-local layers via faithful-KLS with adaptive bond dimension.
-- Each parity (odd/even) group is a commuting set of nearest-neighbour terms, so
-  the group is an exact factor of the Trotter step.
-- Recommended for systems where rank growth is a concern.
-
-**`discarded_bug_step!`** — discarded-projector BUG variant
-- Derived from the faithful CKL scheme; differs *only* in the local bond update.
-  The discarded (orthogonal-complement) projector is applied to the K/L generator
-  *before* the exponential (`project-before`), and the basis is grown by a plain
-  direct sum `[U0 | Qk]` / `[V0 ; Ql]` — **no augmented overlap matrices** `M̂`/`N̂`.
-- Advances against a Hamiltonian **MPO** by a symmetric forward+reverse sweep
-  (Strang), so with the rank free to grow it reproduces `exp(-i dt H)` to high order.
-- The project-before generator is non-Hermitian, so the K/L substep uses a
-  non-Hermitian Krylov exponential (`KrylovKit.exponentiate`, `issymmetric=false`);
-  the Hermitian S-step reuses the faithful Lanczos path.
-
-## Core Concepts
-
-### Faithful Simultaneous K+L+S Update
-
-The KLS (Krylov-Lanczos-SVD) local bond update is the foundation of rank-adaptive
-integration:
-- **K-step:** Right-orthogonal basis extension (Krylov)
-- **L-step:** Left-orthogonal basis extension (co-Krylov)
-- **S-step:** Schmidt value truncation with error control
-- **Augmentation:** Optional enrichment of trial spaces with residual directions
-
-Implemented via `_faithful_kls_local_bond_candidate(...)` with tunable tolerances
-and iteration limits. The substeps exponentiate the *projected* effective
-Hamiltonian internally (Krylov / Lanczos) — no pre-formed gate is applied — so the
-local step is the faithful KLS update, exact at full rank.
-
-### Strang Splitting
-
-The step uses the symmetric (Strang) odd/even composition
-
-```
-U_odd(dt/2) ∘ U_even(dt) ∘ U_odd(dt/2)
-```
-
-applied as a sweep of bond-local KLS updates over each parity group.
-
-## Public API
-
-### Quantum 2-Site Method
+## Quick start
 
 ```julia
-info = bug_two_site!(psi, gates; dt, maxdim, order=:strang, kwargs...)
+using BUGJulia.BondUpdateBUG
+
+psi  = domain_wall_state(6)                       # |up up up down down down>
+gates = bond_gates(psi; J = 1.0, delta = 1.0)     # delta = 0 gives XX
+info = bond_update_bug!(psi, gates; opts = BondUpdateOptions(
+    dt = 0.01, n_steps = 5, order = :strang, maxdim = 8))
+
+[sz_expectation(psi, j) for j in 1:6]             # the evolved profile
+info.max_bond_dims                                 # rank growth, per step
 ```
-- `psi::MPS` — the state (modified in-place)
-- `gates::Vector{ITensor}` — per-bond two-site Hamiltonian terms `h_{b,b+1}`
-- `dt::Float64` — timestep
-- `maxdim::Int` — bond-dimension cap for truncation
-- `order::Symbol` — `:lie` (1st) or `:strang` (2nd, default)
-- Returns `BUGInfo` with convergence metrics
 
-### Discarded-Projector Variant
+Real time only: `dt` is real and the driver forms `tau = -im*dt` itself.
 
-```julia
-info = discarded_bug_step!(psi, W; dt, maxdim=typemax(Int), cutoff=0.0,
-                           time_prefactor=ComplexF64(-im), kwargs...)
+## The algorithm
+
+One local bond update, mirroring the verified Python kernel
+(`Alice/.../kls/discarded_candidate.py`), in six steps:
+
+1. **K-step.** `H_K x = V0'·gate(x ⊗ V0)`, then project *before* the exponential:
+   `G_K x = H_K x − U0(U0'·H_K x)`. That makes `G_K` **non-Hermitian**, so the K
+   and L substeps take an Arnoldi exponential, not Lanczos.
+2. **L-step.** The mirror, with `P⊥_V0` applied on the right.
+3. **Augmentation.** `Q = orth([U0 | K1])` per charge sector. **No tolerance is
+   applied here** — every direction the step finds is kept, and the only
+   constraint is the Sulz bound `rank([U0|K1]) ≤ 2r`.
+4. **Missing-quantum-number fill.** Under U(1) with the opposite frame frozen,
+   `K1` stays inside `U0`'s sectors and can never *open* a new one, so a reachable
+   sector that neither populates is seeded with a minimal random orthonormal
+   block. Only sectors whose dual is reachable on the other side are seeded — an
+   unpaired one is structurally zero and would be dead weight. The fill draws
+   from the same `2r` budget as the complement, and goes **first**: starve it and
+   the state freezes.
+5. **S-step.** `Ŝ0 = Û'·Θ0·V̂'` directly — **no overlap matrices** `M̂`/`N̂`. The
+   Galerkin generator on the augmented bases is Hermitian, so this one is Lanczos.
+6. **Truncate.** A symmetry-blocked SVD of `S1` sets the new bond dimension and
+   prunes any seeded sector the dynamics left empty.
+
+## `BondUpdateOptions`
+
+| field | default | |
+|---|---|---|
+| `dt`, `n_steps` | 0.05, 10 | real time step and count |
+| `order` | `:strang` | `:strang` (even ½, odd, even ½) or `:lie` |
+| `maxdim` | 200 | hard bond-dimension cap |
+| `trunc_thresh` | 1e-12 | singular-value cutoff for the S-step split |
+| `normalize` | true | rescale after each step; the norm is recorded *before* |
+| `augment`, `missing_fill` | true, 1 | rank adaptation; there is deliberately **no** K/L tolerance |
+| `lanczos_tol`, `lanczos_maxiter` | 1e-15, 30 | Krylov budget for all three substeps |
+| `seed` | `0x5EED` | one RNG for the whole run, so a run is reproducible |
+
+`bond_update_bug!` returns a `BondUpdateInfo` with `times`, `norms`,
+`bond_dims`, `max_bond_dims`, `aug_k_dims`, `aug_l_dims` and `discarded`.
+
+## Accuracy
+
+L=6 Heisenberg, `Dmax=8`, `dt=0.01`, against a dense propagator using the *same*
+odd/even split:
+
+| | |
+|---|---|
+| projection error | 6.25e-5, converging second order in `dt` |
+| vs the Alice reference kernel (`⟨Sz_j⟩`) | 6.33e-8 |
+| vs Alice with the Sulz bound relaxed | **4.27e-11** |
+| XX vs the free-fermion analytic solution | < 1e-6 |
+
+BUG is **not** exact at `Dmax=8`: `exp(-iτh)Θ` has right support up to twice the
+link support, so the `h²` term wants more room than `2r` permits, and the
+resulting O(τ²) local error is intrinsic to the bound rather than a defect. The
+6.33e-8 gap from Alice is *entirely* the strict `2r` enforcement — the port
+itself agrees to 4.27e-11, and the fill's RNG contributes exactly nothing (four
+seeds, zero spread). Accuracy is to come from raising the order of the sweep,
+never from widening the basis past `2r`.
+
+## Tests
+
+```bash
+sbatch --job-name=t_all --mem=32G scripts/run_julia.sbatch tests/runtests.jl
 ```
-- `psi::TensorTrain` — the state (modified in-place)
-- `W::TensorTrainOperator` — the Hamiltonian **MPO** (not per-bond gates)
-- `dt::Number` — timestep
-- `maxdim::Int` — bond-dimension cap (`typemax(Int)` = grow freely)
-- `cutoff::Float64` — relative singular-value threshold of the SVD truncations
-- `time_prefactor::ComplexF64` — `-im` for real time (default); pass `ComplexF64(1)`
-  for imaginary time / parabolic PDEs
-- Returns `BUGInfo` with the before/after bond dimensions and convergence metrics
 
-One step is a single **global sweep**: form `phi = H·psi`, build augmented left/right
-isometries that keep `psi` exact and admit only the discarded part `(I − U0 U0†) phi`
-(never an `M`/`N` overlap matrix), then integrate ONE Galerkin centre tensor under the
-two-site effective Hamiltonian. The step is exact at full bond dimension and O(dt²),
-convergent under truncation; there is no backward substep (BUG is inverse-free).
+720 tests. The Python parity test consumes
+`tests/crosscheck/reference_l6_heisenberg.json`, regenerated with:
 
-### KLS Kernel (Direct Access)
-
-```julia
-candidate = _faithful_kls_local_bond_candidate(
-    bond_data;
-    dt, s_dt, augment=true,
-    aug_krylov_depth=1,
-    lanczos_tol=1e-15,
-    lanczos_maxiter=60,
-    substep_method=:expv,
-    HW_env_override=nothing,
-)
+```bash
+sbatch scripts/run_python.sbatch tests/crosscheck/export_python_reference.py
 ```
-For cases where direct bond-by-bond update control is needed (rare).
 
-### Helpers
+Two independent references are used, and each is validated before it is relied
+on: `tests/common/dense_reference.jl` (shares the integrator's conventions) and
+`tests/common/free_fermion.jl` (derived from the Hamiltonian on paper, no 2^L
+object anywhere). They agree to 1e-11.
 
-- `two_site_xx_parity_mpos(sites; J)` → reference `(W_odd, W_even, W_full)` MPOs
-  for the nearest-neighbour XX Hamiltonian
-- `two_site_xx_bond_gates(sites; J)` → per-bond two-site term generators for the same
+## Retired paths
 
-## Tuning
-
-### Rank Adaptation
-
-- **Increase `maxdim`** for finer accuracy at higher cost
-
-
-### Composition Error
-
-- Lie is 1st order; Strang is 2nd order
-- For quantum short-time dynamics (small dt), 2nd order often suffices
-
-## References
-
-- Ceruti, Kusch & Lubich (2022), *BIT* — rank-adaptive Basis-Update & Galerkin (arXiv:2304.05660)
-- Lubich (1994) — From Quantum to Classical
-- Hochbruck & Lubich (1997) — Exponential integrators for large systems
-- This codebase uses 2-site local terms (not full-chain) with faithful KLS for efficiency
-
-## Files
-
-- `bug_init.jl` — MPS/MPO initialization utilities and `BUGInfo` bookkeeping
-- `bug_kls.jl` — Faithful simultaneous K+L+S implementation
-- `discarded_bug.jl` — Discarded-projector BUG variant (`discarded_bug_step!`):
-  project-before K/L generators, direct-sum basis growth, MPO-driven Strang sweep
-- `two_site_bug/two_site_bug.jl` — Two-site odd/even Strang sweep and XX helpers
+`exploratory/` holds the global-sweep discarded BUG and the pre-refactor
+ITensors tree (TDVP, TTutils, the faithful-KLS kernel). None of it loads against
+this package's dependencies; it is a record, not a working state.

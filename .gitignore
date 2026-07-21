@@ -1,0 +1,8 @@
+# SLURM job artefacts (written next to the script by run_julia.sbatch's %x_%j)
+*.out
+*.err
+.*_jid
+
+# Julia
+/deps/build.log
+*.cov
