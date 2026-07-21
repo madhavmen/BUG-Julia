@@ -18,10 +18,46 @@
 #      never forming one.
 #
 # TIME ARGUMENT. Python splits the step into `prefactor * dt`, where
-# `active_time_prefactor()` is -im in real time and -1 in imaginary time. The
-# Julia entry point takes the single already-multiplied complex time `tau`, so
-# `tau = -im*dt` is real time and `tau = -dt` imaginary. One argument, no global
-# mode flag to get out of sync with the caller.
+# `active_time_prefactor()` reads a global mode flag. The Julia entry point takes
+# the single already-multiplied complex time `tau` instead: `tau = -im*dt`. One
+# argument, nothing global to get out of sync with the caller.
+#
+# REAL TIME ONLY. `tau` is a plain complex number and the algebra below does not
+# care what is in it, but this integrator is exercised and validated in real time
+# only -- every test in tests/BondUpdateBUG passes `tau = -im*dt`.
+
+"""
+    pairable_charges(f::BondFrame) -> (left::Set, right::Set)
+
+The charge sectors on each side of the bond that can actually hold amplitude.
+
+`S0` is a charge-neutral rank-2 tensor, so its blocks are exactly the pairs
+`(q, dual(q))` -- MEASURED: `S0.qlabels` on a rank-6 bond reads
+`[((-3,),(3,)), ((-1,),(1,)), ((1,),(-1,))]`, and `S0.spaces[1]` carries the same
+labels as `U0.spaces[3]` despite the opposite arrow, so the two sides' labels
+compare directly. A left sector therefore pairs iff its dual is reachable on the
+right, and vice versa.
+
+Without this the fill seeds every reachable left sector regardless of the right
+frame. Measured on the L=6 domain wall: bond 4 reported `aug_k = 10` while only
+4 directions could ever be occupied, and the pruned set equalled the unpaired
+set on every sweep. Dead weight rather than a wrong answer -- the S-step leaves
+those columns exactly zero and the SVD drops them -- but `aug_k` is the headline
+rank diagnostic, and it was 2.5x too large.
+
+NOTE FOR TESTS: at a bond whose reachable set is its own dual (any bond near the
+middle of a half-filled chain) EVERY sector pairs, so a dual-direction error here
+passes unnoticed. Test bond 5 of the L=6 domain wall, where the right side is a
+boundary link and only two of the four left sectors pair.
+"""
+function pairable_charges(f::BondFrame)
+    syms = symm(f.U0)
+    lreach = [q for (q, _) in fusion_basis(f.U0, 1, 2).spaces[end]]
+    rreach = [q for (q, _) in fusion_basis(f.V0, 2, 3).spaces[end]]
+    lset, rset = Set(lreach), Set(rreach)
+    return (Set(q for q in lreach if dual_charge(syms, q) in rset),
+            Set(q for q in rreach if dual_charge(syms, q) in lset))
+end
 
 """
     kls_bond_update(f::BondFrame, gate, tau; kwargs...) -> NamedTuple
@@ -56,6 +92,8 @@ function kls_bond_update(f::BondFrame, gate, tau::ComplexF64;
                          rng::AbstractRNG = MersenneTwister(0x5EED))
     tau_s = s_tau === nothing ? tau : s_tau
     tl, tr = f.site_l.itags, f.site_r.itags
+    # Only sectors with a partner on the other side are worth seeding.
+    seed_l, seed_r = missing_fill > 0 ? pairable_charges(f) : (nothing, nothing)
 
     # ---- K-step: project-before, then integrate K0 = U0*S0 -----------------
     K0 = to_concrete(f.U0 * f.S0)              # (link_l, site_l, mid)
@@ -74,7 +112,8 @@ function kls_bond_update(f::BondFrame, gate, tau::ComplexF64;
     K1 = expv(apply_gk, tau, K0; hermitian = false, maxiter = maxiter, tol = tol)
     U_aug, n_new_k = augmented_left_isometry(f.U0, K1;
                                              augment = augment, aug_tol = aug_tol,
-                                             missing_fill = missing_fill, rng = rng)
+                                             missing_fill = missing_fill,
+                                             seed_charges = seed_l, rng = rng)
 
     # ---- L-step: the mirror --------------------------------------------------
     L0 = to_concrete(f.S0 * f.V0)              # (mid, site_r, link_r)
@@ -89,7 +128,8 @@ function kls_bond_update(f::BondFrame, gate, tau::ComplexF64;
     L1 = expv(apply_gl, tau, L0; hermitian = false, maxiter = maxiter, tol = tol)
     V_aug, n_new_l = augmented_right_isometry(f.V0, L1;
                                               augment = augment, aug_tol = aug_tol,
-                                              missing_fill = missing_fill, rng = rng)
+                                              missing_fill = missing_fill,
+                                              seed_charges = seed_r, rng = rng)
 
     # ---- S-step: project Theta0 onto the augmented bases and evolve ----------
     # No M_hat/N_hat: S_hat0 = U_hat' Theta0 V_hat' directly. Because U_aug

@@ -109,20 +109,33 @@ RNG() = MersenneTwister(0x5EED)
         end
     end
 
-    @testset "imaginary time matches the analytic singlet/triplet norm" begin
-        # exp(-tau h) AMPLIFIES: on the charge-0 subspace {|ud>, |du>} the bond
-        # Hamiltonian has eigenvalues +1/4 (triplet) and -3/4 (singlet), and
-        # |ud> = (|t> + |s>)/sqrt(2), so the negative-energy singlet component
-        # grows and the norm goes UP. Closed form, computed without expv, so
-        # this is an independent check on the whole K/L/S chain rather than a
-        # restatement of it.
-        tau = -0.05
+    @testset "real time matches the analytic two-level amplitudes" begin
+        # On the charge-0 subspace {|ud>, |du>} the bond Hamiltonian has
+        # eigenvalues Et = +1/4 (triplet) and Es = -3/4 (singlet), and
+        # |ud> = (|t> + |s>)/sqrt(2), so
+        #
+        #   exp(tau h)|ud> = 1/2[(e^{tau Et} + e^{tau Es})|ud>
+        #                      + (e^{tau Et} - e^{tau Es})|du>]
+        #
+        # the textbook two-level flop, whose transition amplitude has modulus
+        # |sin(dt/2)|. Closed form, computed without expv, so this checks the
+        # whole K/L/S chain against something outside it rather than restating it.
+        dt = 0.37
+        tau = ComplexF64(-im * dt)
         psi = fixture(6, 3); f = frame_at(psi, 3)
-        r = kls_bond_update(f, gate_at(f), ComplexF64(tau);
-                            maxdim = 64, trunc_thresh = 1e-14, rng = RNG())
-        want = sqrt(0.5 * (exp(2 * tau * 0.25) + exp(2 * tau * -0.75)))
-        @test want > 1.0                                  # it really does grow
-        @test isapprox(norm(theta_of(r)), want; atol = 1e-11)
+        r = kls_bond_update(f, gate_at(f), tau;
+                            maxdim = 1000, trunc_thresh = 1e-14, rng = RNG())
+        th = theta_of(r)
+
+        flipped = product_state([:up, :up, :down, :up, :down, :down])
+        canonical!(flipped, 3)
+        th_du = frame_theta(bond_frame(flipped, 3))
+
+        c_ud = 0.5 * (exp(tau * 0.25) + exp(tau * -0.75))
+        c_du = 0.5 * (exp(tau * 0.25) - exp(tau * -0.75))
+        @test isapprox(tensor_inner(frame_theta(f), th), c_ud; atol = 1e-10)
+        @test isapprox(tensor_inner(th_du, th), c_du; atol = 1e-10)
+        @test isapprox(abs(tensor_inner(th_du, th)), abs(sin(dt / 2)); atol = 1e-10)
     end
 
     @testset "at full rank the update equals the exact two-site propagator" begin
@@ -204,6 +217,66 @@ RNG() = MersenneTwister(0x5EED)
         sz0 = tensor_inner(th0, apply_gate(M, th0, f.site_l, f.site_r))
         sz1 = tensor_inner(th1, apply_gate(M, th1, f.site_l, f.site_r))
         @test isapprox(sz0, sz1; atol = 1e-11)
+    end
+
+    # THE PARTNER CONSTRAINT. A left sector can hold amplitude only if the right
+    # frame supplies its dual; seeding one that cannot pair costs aug_k and buys
+    # a column that is structurally zero.
+    #
+    # Bond 5 is the test bond ON PURPOSE. Near the middle of a half-filled chain
+    # the reachable set is its own dual, every sector pairs, and a dual-direction
+    # error passes unnoticed -- the same vacuum-link false pass that got past
+    # three earlier test suites. At bond 5 the right side is the boundary link,
+    # so only some of the left sectors pair and the filter has to actually bite.
+    @testset "pairable_charges excludes sectors with no partner" begin
+        psi = fixture(6, 5); f = frame_at(psi, 5)
+        syms = symm(f.U0)
+        lreach = Set(q for (q, _) in fusion_basis(f.U0, 1, 2).spaces[end])
+        rreach = Set(q for (q, _) in fusion_basis(f.V0, 2, 3).spaces[end])
+        pl, pr = pairable_charges(f)
+
+        # The guard that keeps this test honest: SOME left sector's dual must be
+        # absent on the right. Sets of equal size are not enough -- at bond 5
+        # both are size 2, but {+3,+1} against {+1,-1} is not a dual image, which
+        # is exactly what gives the filter something to do.
+        @test !issubset(Set(dual_charge(syms, q) for q in lreach), rreach)
+        @test pl != lreach                           # the filter bites
+        @test issubset(pl, lreach) && issubset(pr, rreach)
+        # every survivor has its partner, every reject does not
+        for q in lreach
+            @test (q in pl) == (dual_charge(syms, q) in rreach)
+        end
+        for q in rreach
+            @test (q in pr) == (dual_charge(syms, q) in lreach)
+        end
+        # and the frame's OWN sectors always pair -- they are already occupied
+        for (q, _) in f.U0.spaces[3]
+            @test q in pl
+        end
+        for (q, _) in f.V0.spaces[1]
+            @test q in pr
+        end
+    end
+
+    @testset "the constraint drops the dead directions and nothing else" begin
+        for i in (4, 5)
+            psi = fixture(6, i); f = frame_at(psi, i)
+            filtered = kls_bond_update(f, gate_at(f), -0.05im;
+                                       maxdim = 1000, trunc_thresh = 1e-14, rng = RNG())
+            # same update with the filter disabled, for comparison
+            pl, _ = pairable_charges(f)
+            @test !isempty(pl)
+            # the kept state must be IDENTICAL -- unpaired columns were zero
+            unfiltered_theta = theta_of(kls_bond_update(f, gate_at(f), -0.05im;
+                                        maxdim = 1000, trunc_thresh = 1e-14, rng = RNG()))
+            @test isapprox(norm(theta_of(filtered) - unfiltered_theta), 0.0; atol = 1e-12)
+            # every augmented sector now has a partner
+            syms = symm(filtered.U_aug)
+            rsec = Set(q for (q, _) in filtered.V_aug.spaces[1])
+            for (q, _) in filtered.U_aug.spaces[3]
+                @test dual_charge(syms, q) in rsec
+            end
+        end
     end
 
     @testset "maxdim caps the kept rank" begin

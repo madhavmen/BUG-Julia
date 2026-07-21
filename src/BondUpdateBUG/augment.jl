@@ -62,6 +62,13 @@ it is the first block of the result -- so the old frame is always spanned.
 `max_rank` caps the NEW directions admitted per charge sector, matching
 `_kl_truncated_left`'s `keep = min(keep, max_rank - r)`.
 
+`seed_charges`, when given, restricts the fill to those charges. The caller
+supplies it because the constraint is not visible from one frame: a left sector
+can only ever hold amplitude if the RIGHT frame supplies a partner, and seeding
+one that cannot pair produces a column that is structurally zero through the
+whole S-step and is then discarded by the truncating SVD -- after inflating
+`aug_k`. See `kls_step.jl::pairable_charges`.
+
 `missing_fill = 0` disables the fill entirely. Note Alice cannot do this: its
 `n_seed = min(len(rows), max(1, aug_missing_fill))` floors at 1, so
 `aug_missing_fill=0` still seeds one column there. The `0` setting is a
@@ -73,6 +80,7 @@ function augmented_left_isometry(U0, K1;
                                  missing_fill::Int = 1,
                                  aug_tol::Float64 = 1e-12,
                                  augment::Bool = true,
+                                 seed_charges = nothing,
                                  rng::AbstractRNG = MersenneTwister(0x5EED))
     bond_tag = U0.inds[3].itags
     blocks = Any[U0]
@@ -97,6 +105,7 @@ function augmented_left_isometry(U0, K1;
             if !isempty(missed)
                 F = fusion_basis(U0, 1, 2; tag = bond_tag)
                 for r in missed
+                    seed_charges === nothing || r.charge in seed_charges || continue
                     seed = random_sector_seed(F, r.charge,
                                               min(r.reachable_dim, missing_fill); rng = rng)
                     seed === nothing && continue
@@ -127,6 +136,7 @@ function augmented_right_isometry(V0, L1;
                                   missing_fill::Int = 1,
                                   aug_tol::Float64 = 1e-12,
                                   augment::Bool = true,
+                                  seed_charges = nothing,
                                   rng::AbstractRNG = MersenneTwister(0x5EED))
     bond_tag = V0.inds[1].itags
     blocks = Any[V0]
@@ -151,6 +161,7 @@ function augmented_right_isometry(V0, L1;
             if !isempty(missed)
                 F = fusion_basis(V0, 2, 3; tag = bond_tag)
                 for r in missed
+                    seed_charges === nothing || r.charge in seed_charges || continue
                     seed = random_sector_seed(F, r.charge,
                                               min(r.reachable_dim, missing_fill); rng = rng)
                     seed === nothing && continue
