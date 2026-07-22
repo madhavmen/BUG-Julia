@@ -3,11 +3,10 @@
 # Top-level test runner for BUGJulia.
 # Run with: sbatch scripts/run_julia.sbatch tests/runtests.jl
 #
-# There is exactly ONE supported integrator, `bond_update_bug!`, and this file
-# covers all of it. The retired ITensors-based tree (the faithful-KLS kernel, the
-# global-sweep discarded BUG, TDVP, TTutils) lives under `exploratory/` and is
-# deliberately NOT run here -- it does not load against this package's
-# dependencies. See `exploratory/README.md` and the tag
+# There is exactly ONE integrator, `bond_update_bug!` (the discarded-projector
+# 2r-Galerkin BUG), and this file covers all of it. Every other BUG scheme --
+# the faithful-KLS kernel, the global-sweep discarded BUG, the ITensors tree --
+# has been deleted; the pre-consolidation code remains only in the git tag
 # `archive/pre-bond-update-legacy`.
 
 using Test
@@ -26,7 +25,6 @@ Random.seed!(42)          # the integrator seeds its own RNG from BondUpdateOpti
     include("BondUpdateBUG/test_kls_step.jl")
     include("BondUpdateBUG/test_sweep.jl")
     include("BondUpdateBUG/test_driver.jl")
-    include("BondUpdateBUG/test_composition.jl")
 end
 
 @testset "references" begin
