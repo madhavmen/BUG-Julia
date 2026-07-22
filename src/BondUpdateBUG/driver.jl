@@ -35,6 +35,16 @@ Controls for one `bond_update_bug!` run.
     exactly the direction the dynamics needs, capped at Sulz `2r`. Grows rank
     by the minimal physical amount (no wasted random columns), so it is the
     efficient no-symmetry rank-growth path. Prefer over `pad`.
+    AUTO-DEFAULT (NO-SYMMETRY ONLY): when `symmetry_mode() === :none`, the
+    initial state is a product state (every bond is dimension 1), and the caller
+    has chosen neither `pad` nor `criterion2`, `criterion2` is switched on for
+    the whole run. A product state is exactly the case the rank-1 freeze strands
+    when there is a single dense sector, and criterion 2 is the minimal,
+    physically correct way out -- so it is the safe default rather than
+    something the caller must know to request. Under U(1) this does NOT fire:
+    the missing-sector fill already grows a product state, and the symmetric
+    path is left exactly as validated. Set `pad = true` to override with
+    padding, or pass a non-product state to skip the auto-enable.
   - `lanczos_tol`, `lanczos_maxiter` -- Krylov budget for all three substeps.
   - `seed` -- one RNG is seeded with it for the WHOLE run, so a run is
     reproducible while consecutive steps still draw different fill directions.
@@ -80,6 +90,10 @@ struct BondUpdateInfo
 end
 
 Base.length(info::BondUpdateInfo) = length(info.times)
+
+"A product state -- every interior bond is dimension 1. This is the state the
+rank-1 K/L freeze strands, so it is what triggers the `criterion2` auto-default."
+_is_product_state(psi::SymMPS) = maximum(bond_dims(psi); init = 1) <= 1
 
 "The orders `bond_update_bug!` accepts. Under the strict Sulz <=2r bound the
 rank-2r Galerkin bond update caps the achievable global order at 2, so the
@@ -127,11 +141,21 @@ function bond_update_bug!(psi::SymMPS, gates;
     rng = MersenneTwister(opts.seed)
     canonical!(psi, 1)
 
+    # crit2 defaults ON from a product state, NO-SYMMETRY ONLY: the rank-1 freeze
+    # (see kls_step.jl) strands a product initial state when there is a single
+    # dense sector. Under U(1) the missing-sector fill already pads a product
+    # state into growth, so the symmetric path needs nothing here. Only
+    # auto-enable when the caller has not already chosen a rank-growth path (pad,
+    # or explicit crit2), and only for THIS invocation's initial state (a chunked
+    # driver wanting crit2 across an evolved, non-product restart must ask).
+    criterion2 = opts.criterion2 ||
+        (!opts.pad && symmetry_mode() === :none && _is_product_state(psi))
+
     kw = (maxdim = opts.maxdim, trunc_thresh = opts.trunc_thresh,
           augment = opts.augment,
           missing_fill = opts.missing_fill,
           pad = opts.pad,
-          criterion2 = opts.criterion2,
+          criterion2 = criterion2,
           maxiter = opts.lanczos_maxiter, tol = opts.lanczos_tol, rng = rng)
 
     times = Float64[]; norms = Float64[]
