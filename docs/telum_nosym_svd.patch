@@ -1,0 +1,31 @@
+--- svd.jl.orig_nosym_backup	2026-07-22 17:40:28.391158253 +0200
++++ svd.jl	2026-07-22 17:40:46.798138268 +0200
+@@ -1291,6 +1291,7 @@
+     return Expr(:tuple, [:( _svd_core(core_payload, PS, Val($n)) ) for n in 1:N]...)
+ end
+ 
++_svd_core_kron_matrix(::Tuple{}) = ones(Float64, 1, 1)   # N=0 (no symmetry): trivial 1x1 core
+ function _svd_core_kron_matrix(cores::NTuple{N, Array{Float64, 3}}) where {N}
+     core = cores[1]
+     mat = reshape(core, size(core, 1) * size(core, 2), size(core, 3))
+@@ -1384,7 +1385,7 @@
+     rmt = sector_rmt(q, sector_index)
+     rmt_size = size(rmt)
+     phys_dim = prod(rmt_size[i] for i in 1:QD)
+-    om_dim = prod(rmt_size[QD + n] for n in 1:N)
++    om_dim = prod(rmt_size[QD + n] for n in 1:N; init = 1)   # init=1: N=0 (no symmetry)
+     cores = _svd_core_tuple(core_payload, PS, Val(N))
+     core_mat = _svd_core_kron_matrix(cores)
+     @assert size(core_mat, 2) == om_dim
+@@ -1398,9 +1399,9 @@
+     expanded_dims = _svd_expanded_core_dims(rmt_size, cores, Val(QD), Val(N))
+     perm = _svd_expanded_class_perm(left_legs, right_legs, Val(QD), Val(N))
+     left_dim = prod(rmt_size[leg] for leg in left_legs) *
+-               prod(size(_svd_left_iso(left_payload, PS, Val(n)), 2) for n in 1:N)
++               prod(size(_svd_left_iso(left_payload, PS, Val(n)), 2) for n in 1:N; init = 1)
+     right_dim = prod(rmt_size[leg] for leg in right_legs) *
+-                prod(size(_svd_right_iso(right_payload, PS, Val(n)), 2) for n in 1:N)
++                prod(size(_svd_right_iso(right_payload, PS, Val(n)), 2) for n in 1:N; init = 1)
+     @assert size(dest) == (left_dim, right_dim)
+     permed = _svd_permutedims_to_buffer!(permute_buffer, product_buffer, expanded_dims, perm)
+     dest .+= reshape(permed, left_dim, right_dim)

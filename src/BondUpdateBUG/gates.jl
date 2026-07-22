@@ -58,7 +58,20 @@ function heisenberg_bond_gate(site_l, site_r; J::Float64 = 1.0, delta::Float64 =
     outer(A, B) = to_concrete(permutedims(
         contract(_retag_site(A, tl), (), _retag_site(B, tr), ()), (1, 3, 2, 4)))
 
-    xy = pair(q.Sp, q.Sp) + pair(q.Sm, q.Sm)
+    # Under :U1 the raising/lowering operators are rank-3 (an op-leg carries the
+    # ±2 charge) and the XY term is the op-leg contraction `pair`, which already
+    # folds in the 1/2 (`pair(Sp,Sp) == ½ S⁻⊗S⁺`; see the header note). Under
+    # :none they are plain rank-2 matrices with no op-leg, so the identical
+    # operator is written as an explicit outer product. Telum normalises the
+    # spin operators to `Sp = -(1/√2)·S⁺_std`, `Sm = (1/√2)·S⁻_std`, so
+    # `outer(Sp,Sm) = -½ (S⁺⊗S⁻)_std`; the coefficient that reproduces the
+    # physical XY term `½(S⁺S⁻ + S⁻S⁺)_std` is therefore -1 (MEASURED: matches
+    # the :U1 gate element-for-element, pinned in the gate test).
+    xy = if length(q.Sp.inds) == 3
+        pair(q.Sp, q.Sp) + pair(q.Sm, q.Sm)
+    else
+        to_concrete(-1.0 * (outer(q.Sp, q.Sm) + outer(q.Sm, q.Sp)))
+    end
     G = delta == 0.0 ? xy : xy + delta * outer(q.Sz, q.Sz)
     return to_concrete(J * G * (1.0 + 0.0im))
 end

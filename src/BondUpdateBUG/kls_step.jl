@@ -59,6 +59,51 @@ function pairable_charges(f::BondFrame)
             Set(q for q in rreach if dual_charge(syms, q) in lset))
 end
 
+# ── criterion-2 residual enrichment ──────────────────────────────────────────
+# Left/right directions of the full 2-site update `Hth = HΘ` that the current
+# augmented frame misses, orthonormal and capped to `budget` (the remaining Sulz
+# 2r headroom). `Hth` is rank-4 `(link_l, s_l, s_r, link_r)`. Two projection
+# passes drive the overlap with the frame to machine zero so `oplus([frame|Q])`
+# stays an isometry (same exactness pass as `_complement_basis`).
+const _C2_EPS = 100 * eps(Float64)
+
+function _criterion2_left(U_aug, Hth, budget::Int)
+    budget <= 0 && return nothing
+    function resid(T)
+        ov   = contract(U_aug', (1, 2), T, (1, 2))     # (bondU, s_r, link_r)
+        proj = contract(U_aug, (3,), ov, (1,))          # (link_l, s_l, s_r, link_r)
+        return to_concrete(T - proj)
+    end
+    sc = norm(Hth); sc == 0 && return nothing
+    R = resid(Hth); norm(R) <= _C2_EPS * sc && return nothing
+    Q = to_concrete(svd(R, (1, 2); cutoff = 1e-12).U)   # (link_l, s_l, newbond)
+    R2 = resid(Q); norm(R2) <= _C2_EPS * norm(Q) && return nothing
+    Q = to_concrete(svd(R2, (1, 2); cutoff = 1e-12).U)
+    leg_dim(Q, 3) <= budget ? Q : _trim_total(Q, 3, budget)
+end
+
+function _criterion2_right(V_aug, Hth, budget::Int)
+    budget <= 0 && return nothing
+    # residual of the rank-4 Hth against V_aug over (s_r, link_r)
+    function resid4(T)
+        ov   = contract(T, (3, 4), V_aug', (2, 3))      # (link_l, s_l, bondV)
+        proj = contract(ov, (3,), V_aug, (1,))           # (link_l, s_l, s_r, link_r)
+        return to_concrete(T - proj)
+    end
+    # residual of a rank-3 candidate frame Q=(bond, s_r, link_r) against V_aug
+    function resid3(Q)
+        ov   = contract(Q, (2, 3), V_aug', (2, 3))       # (Qbond, Vbond)
+        proj = contract(ov, (2,), V_aug, (1,))            # (Qbond, s_r, link_r)
+        return to_concrete(Q - proj)
+    end
+    sc = norm(Hth); sc == 0 && return nothing
+    R = resid4(Hth); norm(R) <= _C2_EPS * sc && return nothing
+    Q = to_concrete(permutedims(svd(R, (3, 4); cutoff = 1e-12).U, (3, 1, 2)))  # (newbond, s_r, link_r)
+    R2 = resid3(Q); norm(R2) <= _C2_EPS * norm(Q) && return nothing
+    Q = to_concrete(permutedims(svd(R2, (2, 3); cutoff = 1e-12).U, (3, 1, 2)))
+    leg_dim(Q, 1) <= budget ? Q : _trim_total(Q, 1, budget)
+end
+
 """
     kls_bond_update(f::BondFrame, gate, tau; kwargs...) -> NamedTuple
 
@@ -87,6 +132,8 @@ function kls_bond_update(f::BondFrame, gate, tau::ComplexF64;
                          s_tau::Union{Nothing, ComplexF64} = nothing,
                          augment::Bool = true,
                          missing_fill::Int = 1,
+                         pad::Bool = false,
+                         criterion2::Bool = false,
                          maxiter::Int = 30,
                          tol::Float64 = 1e-15,
                          rng::AbstractRNG = MersenneTwister(0x5EED))
@@ -113,6 +160,7 @@ function kls_bond_update(f::BondFrame, gate, tau::ComplexF64;
     U_aug, n_new_k = augmented_left_isometry(f.U0, K1;
                                              augment = augment,
                                              missing_fill = missing_fill,
+                                             pad = pad,
                                              seed_charges = seed_l, rng = rng)
 
     # ---- L-step: the mirror --------------------------------------------------
@@ -129,14 +177,33 @@ function kls_bond_update(f::BondFrame, gate, tau::ComplexF64;
     V_aug, n_new_l = augmented_right_isometry(f.V0, L1;
                                               augment = augment,
                                               missing_fill = missing_fill,
+                                              pad = pad,
                                               seed_charges = seed_r, rng = rng)
+
+    theta0 = frame_theta(f)
+
+    # ---- criterion-2 residual enrichment (targeted rank growth, no padding) --
+    # The K/L half-steps hold the opposite frame fixed, so on a product state the
+    # off-diagonal generator projects to zero and rank cannot grow (the state
+    # freezes -- fatal without U(1) sectors, where the missing-fill can't help).
+    # The residual of the FULL 2-site update HΘ captures exactly that missed
+    # direction; enriching the frames with it -- orthogonal to what K/L already
+    # found, capped at the Sulz 2r -- grows rank by the minimal physical amount.
+    if criterion2
+        Hth = apply_gate(gate, theta0, tl, tr)
+        QL = _criterion2_left(U_aug, Hth, 2 * f.old_rank - leg_dim(U_aug, 3))
+        QL === nothing || (U_aug = to_concrete(oplus(
+            [U_aug, to_concrete(setitag(QL, 3, U_aug.inds[3].itags))], (3,))))
+        QR = _criterion2_right(V_aug, Hth, 2 * leg_dim(f.V0, 1) - leg_dim(V_aug, 1))
+        QR === nothing || (V_aug = to_concrete(oplus(
+            [V_aug, to_concrete(setitag(QR, 1, V_aug.inds[1].itags))], (1,))))
+    end
 
     # ---- S-step: project Theta0 onto the augmented bases and evolve ----------
     # No M_hat/N_hat: S_hat0 = U_hat' Theta0 V_hat' directly. Because U_aug
     # CONTAINS U0 as its first block and V_aug contains V0, this projection is
     # lossless -- U_aug U_aug' Theta0 V_aug' V_aug == Theta0 exactly -- which is
     # what makes tau = 0 the identity on the state.
-    theta0 = frame_theta(f)
     S_start = to_concrete(contract(contract(U_aug', (1, 2), theta0, (1, 2)),
                                    (2, 3), V_aug', (2, 3)))
 

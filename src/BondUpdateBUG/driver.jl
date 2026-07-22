@@ -22,6 +22,19 @@ Controls for one `bond_update_bug!` run.
     BEFORE rescaling, so `info.norms` still shows what the step did.
   - `augment`, `missing_fill` -- rank-adaptation controls, forwarded. There is
     no K/L tolerance: that augmentation is bounded only by Sulz's `2r`.
+  - `pad` -- complete each active bond's frame to the Sulz `2r` budget with
+    orthogonal random directions. Off by default (U(1) grows rank via the
+    minimal missing-sector fill). Needed WITHOUT symmetry: with a single dense
+    sector the missing-fill never fires, so from a product state the rank-`r`
+    Galerkin core cannot see the off-diagonal generator and the state freezes;
+    padding lets rank double per step (the truncating SVD prunes bonds still
+    ahead of the entanglement front). This is the no-symmetry analogue of the
+    fill, and the rank growth 2-site TDVP gets from its 2-site SVD.
+  - `criterion2` -- targeted alternative to `pad`: enrich each frame with
+    the residual of the FULL 2-site update `HΘ` (Ceruti-Kusch-Lubich), i.e.
+    exactly the direction the dynamics needs, capped at Sulz `2r`. Grows rank
+    by the minimal physical amount (no wasted random columns), so it is the
+    efficient no-symmetry rank-growth path. Prefer over `pad`.
   - `lanczos_tol`, `lanczos_maxiter` -- Krylov budget for all three substeps.
   - `seed` -- one RNG is seeded with it for the WHOLE run, so a run is
     reproducible while consecutive steps still draw different fill directions.
@@ -35,6 +48,8 @@ Base.@kwdef struct BondUpdateOptions
     normalize::Bool = true
     augment::Bool = true
     missing_fill::Int = 1
+    pad::Bool = false
+    criterion2::Bool = false
     lanczos_tol::Float64 = 1e-15
     lanczos_maxiter::Int = 30
     seed::UInt = 0x5EED
@@ -115,6 +130,8 @@ function bond_update_bug!(psi::SymMPS, gates;
     kw = (maxdim = opts.maxdim, trunc_thresh = opts.trunc_thresh,
           augment = opts.augment,
           missing_fill = opts.missing_fill,
+          pad = opts.pad,
+          criterion2 = opts.criterion2,
           maxiter = opts.lanczos_maxiter, tol = opts.lanczos_tol, rng = rng)
 
     times = Float64[]; norms = Float64[]

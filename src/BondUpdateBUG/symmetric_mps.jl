@@ -20,20 +20,51 @@
 
 # ── local space ─────────────────────────────────────────────────────────────
 
-const _LOCAL_SPACE = Ref{Any}(nothing)
+# ── symmetry mode ────────────────────────────────────────────────────────────
+#
+# The integrator runs either symmetry-native (:U1 charge sectors) or without any
+# symmetry (:none, one dense block). The mode is a module-level setting because
+# the STATE and the GATES must agree on it, and both are built through
+# `local_space()`; set it once, before building either. Every tensor is
+# self-describing afterwards (`symm(t)`), so the kernel (frame/augment/kls/sweep)
+# needs no mode flag -- it already dispatches on the tensors' own symmetry.
+
+const _SYMMETRY = Ref{Symbol}(:U1)
+const _LOCAL_SPACES = Dict{Symbol, Any}()
+
+"The current symmetry mode, `:U1` or `:none`."
+symmetry_mode() = _SYMMETRY[]
 
 """
-    local_space()
+    set_symmetry!(sym) -> Symbol
 
-The U(1) spin-½ local space, built once and cached. Note `SpinOptions` takes
-2·S as an `Int`, so spin-½ is `SpinOptions(:U1, 1)`; the `:U1` branch returns
-`(:I, :Sp, :Sz, :Sm)` and has no `.S` field. See `docs/telum_api_contract.md`.
+Select the symmetry the local space is built with: `:U1` (charge-conserving
+spin sectors) or `:none` (a single dense block). Set this before building the
+state and its gates; they must share a mode.
 """
-function local_space()
-    if _LOCAL_SPACE[] === nothing
-        _LOCAL_SPACE[] = getLocalSpace(SpinOptions(:U1, 1), ("s", "s", "op"))
-    end
-    return _LOCAL_SPACE[]
+function set_symmetry!(sym::Symbol)
+    sym in (:U1, :none) || throw(ArgumentError("symmetry must be :U1 or :none, got $sym"))
+    _SYMMETRY[] = sym
+    return sym
+end
+
+"""
+    local_space(sym = symmetry_mode())
+
+The spin-½ local space for mode `sym`, built once per mode and cached.
+`SpinOptions` takes 2·S as an `Int`, so spin-½ is `SpinOptions(:U1, 1)` /
+`SpinOptions(nothing, 1)`. Both branches expose `(:I, :Sp, :Sz, :Sm)`; under
+`:U1` the raising/lowering operators are rank-3 (their op-leg carries the ±2
+charge), under `:none` they are rank-2 plain matrices. See
+`docs/telum_api_contract.md`.
+"""
+function local_space(sym::Symbol = symmetry_mode())
+    haskey(_LOCAL_SPACES, sym) && return _LOCAL_SPACES[sym]
+    opts = sym === :U1   ? SpinOptions(:U1, 1)     :
+           sym === :none ? SpinOptions(nothing, 1) :
+           throw(ArgumentError("symmetry must be :U1 or :none, got $sym"))
+    _LOCAL_SPACES[sym] = getLocalSpace(opts, ("s", "s", "op"))
+    return _LOCAL_SPACES[sym]
 end
 
 "U(1) sector label for a single up spin (charge 2·Sz = +1)."
@@ -95,7 +126,13 @@ makes a product state report bond dimension 1.
 function product_state(spins::Vector{Symbol})
     L = length(spins)
     L >= 1 || throw(ArgumentError("product_state needs at least one site"))
-    q = local_space()
+    return symmetry_mode() === :none ? _product_state_none(spins) :
+                                       _product_state_u1(spins)
+end
+
+function _product_state_u1(spins::Vector{Symbol})
+    L = length(spins)
+    q = local_space(:U1)
 
     tensors = Any[]
     # Left boundary: a one-dimensional vacuum link.
@@ -124,6 +161,56 @@ function product_state(spins::Vector{Symbol})
         A = to_concrete(getsub(A, 3, s -> s in present ? Colon() : nothing))
 
         # BUG evolves complex amplitudes; promote once, here.
+        A = to_concrete(A * (1.0 + 0.0im))
+
+        push!(tensors, A)
+        prev = (A, 3)
+    end
+
+    return SymMPS(tensors, L)
+end
+
+"""
+    _dense_up_index(q) -> Int
+
+Which index (1 or 2) of the `:none` dense physical sector is the up spin,
+read off the sign of `Sz`'s diagonal. Avoids hard-coding the basis order that
+`get_SU2_symmops` happens to produce.
+"""
+function _dense_up_index(q)
+    Sz = Matrix(q.Sz.RMTs[1])
+    return real(Sz[1, 1]) > real(Sz[2, 2]) ? 1 : 2
+end
+
+"""
+    _product_state_none(spins) -> SymMPS
+
+No-symmetry product state. The physical leg is a single dense sector of
+dimension 2, so a spin is selected by INDEX on the outgoing link (`getsub`
+returns an `Int`), not by charge sector. The physical leg keeps its full
+2-dimensional space so local operators stay contractible.
+"""
+function _product_state_none(spins::Vector{Symbol})
+    L = length(spins)
+    q = local_space(:none)
+    up = _dense_up_index(q)
+
+    tensors = Any[]
+    prev = (getvac(q.I, ("L,0", "L,1")), 2)
+    for i in 1:L
+        idx = if spins[i] === :up
+            up
+        elseif spins[i] === :down
+            3 - up
+        else
+            throw(ArgumentError("spin $i must be :up or :down, got $(spins[i])"))
+        end
+
+        F = to_concrete(getIdentity(prev, (q.I, 1); itag = "L,$(i + 1)"))
+        F = to_concrete(setitag(F, 2, "S,$i"))
+        # One trivial sector on the outgoing link; keep the chosen spin index,
+        # which trims that link to dimension 1 (product state ⇒ bond dim 1).
+        A = to_concrete(getsub(F, 3, s -> idx))
         A = to_concrete(A * (1.0 + 0.0im))
 
         push!(tensors, A)

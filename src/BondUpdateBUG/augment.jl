@@ -111,6 +111,44 @@ function _complement_basis(U0, K1; leg::Int = 3)
 end
 
 """
+    _pad_directions(C, F, budget, leg; rng) -> TLArray or nothing
+
+`budget` random directions orthogonal to the current frame `C`, drawn from the
+full reachable fusion basis `F`. This is the no-symmetry analogue of the
+missing-sector fill: without U(1) charges there is never an *empty* sector to
+open, so a rank-1 product state can never grow (the rank-r Galerkin core cannot
+see the off-diagonal generator). Completing the frame to rank ≤ 2r each step
+with orthogonal random directions lets rank double per step until it saturates
+`maxdim` -- exactly the rank growth 2-site TDVP gets from its 2-site SVD.
+
+`leg` is 3 for a left frame, 1 for a right frame. `C` and `F` share the frame's
+own leg layout. The random block is projected off `C` and re-orthonormalised
+(twice, as in `_complement_basis`) so `[C | pad]` stays an isometry.
+"""
+function _pad_directions(C, F, budget::Int, leg::Int; rng::AbstractRNG)
+    budget <= 0 && return nothing
+    perp_of = leg == 3 ? perp_component : perp_component_right
+    split   = leg == 3 ? (1, 2) : (2, 3)
+    fixlayout(Q) = leg == 3 ? Q : to_concrete(permutedims(Q, (3, 1, 2)))
+
+    T = eltype(F)
+    R = TLArray(symm(F), copy(F.qlabels), copy(F.wmatdata), copy(F.wmatinfo),
+                [randn(rng, T, size(r)) for r in F.RMTs], F.inds, F.spaces)
+    R = fixlayout(to_concrete(R))                 # F is (a,b,bond); C's layout for perp
+
+    scale = norm(R)
+    scale == 0 && return nothing
+    function orth(t)
+        n = norm(t); n <= 100 * eps(Float64) * scale && return nothing
+        return fixlayout(to_concrete(svd(t, split; cutoff = 1e-12).U))
+    end
+    Q = orth(perp_of(C, R));  Q === nothing && return nothing
+    Q = orth(perp_of(C, Q));  Q === nothing && return nothing
+    leg_dim(Q, leg) <= budget && return Q
+    return _trim_total(Q, leg, budget)
+end
+
+"""
     augmented_left_isometry(U0, K1; max_rank=typemax(Int), missing_fill=1,
                             augment=true, seed_charges=nothing, rng) -> (U_aug, n_new)
 
@@ -140,6 +178,7 @@ function augmented_left_isometry(U0, K1;
                                  max_rank::Int = typemax(Int),
                                  missing_fill::Int = 1,
                                  augment::Bool = true,
+                                 pad::Bool = false,
                                  seed_charges = nothing,
                                  rng::AbstractRNG = MersenneTwister(0x5EED))
     bond_tag = U0.inds[3].itags
@@ -193,6 +232,18 @@ function augmented_left_isometry(U0, K1;
                 end
             end
         end
+
+        # Frame padding (no-symmetry rank growth). Fills the remaining Sulz budget
+        # with orthogonal random directions so rank can double from a product state.
+        if pad && n_new < r
+            C = length(blocks) == 1 ? U0 : to_concrete(oplus(blocks, (3,)))
+            F = fusion_basis(U0, 1, 2; tag = bond_tag)
+            P = _pad_directions(C, F, r - n_new, 3; rng = rng)
+            if P !== nothing && leg_dim(P, 3) > 0
+                push!(blocks, to_concrete(setitag(P, 3, bond_tag)))
+                n_new += leg_dim(P, 3)
+            end
+        end
     end
 
     U_aug = length(blocks) == 1 ? U0 : to_concrete(oplus(blocks, (3,)))
@@ -216,6 +267,7 @@ function augmented_right_isometry(V0, L1;
                                   max_rank::Int = typemax(Int),
                                   missing_fill::Int = 1,
                                    augment::Bool = true,
+                                  pad::Bool = false,
                                   seed_charges = nothing,
                                   rng::AbstractRNG = MersenneTwister(0x5EED))
     bond_tag = V0.inds[1].itags
@@ -254,6 +306,17 @@ function augmented_right_isometry(V0, L1;
                     push!(blocks, to_concrete(setitag(Q, 1, bond_tag)))
                     n_new += leg_dim(Q, 1)
                 end
+            end
+        end
+
+        # Frame padding (no-symmetry rank growth); mirror of the left frame.
+        if pad && n_new < r
+            C = length(blocks) == 1 ? V0 : to_concrete(oplus(blocks, (1,)))
+            F = fusion_basis(V0, 2, 3; tag = bond_tag)
+            P = _pad_directions(C, F, r - n_new, 1; rng = rng)
+            if P !== nothing && leg_dim(P, 1) > 0
+                push!(blocks, to_concrete(setitag(P, 1, bond_tag)))
+                n_new += leg_dim(P, 1)
             end
         end
     end
