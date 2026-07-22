@@ -19,6 +19,7 @@ include("augment.jl")
 include("gates.jl")
 include("kls_step.jl")
 include("sweep.jl")
+include("composition.jl")
 include("driver.jl")
 
 export SymMPS, canonical!, move_left!, move_right!, bond_dims, leg_dim,
@@ -37,7 +38,9 @@ export SymMPS, canonical!, move_left!, move_right!, bond_dims, leg_dim,
        augmented_left_isometry, augmented_right_isometry, random_sector_seed,
        heisenberg_bond_gate, xx_bond_gate, magnetisation_gate, apply_gate,
        kls_bond_update, pairable_charges,
-       parity_bonds, bond_gates, parity_sweep!, energy,
-       BondUpdateOptions, BondUpdateInfo, bond_update_bug!
+       parity_bonds, bond_gates, parity_sweep!, directional_sweep!, energy,
+       BondUpdateOptions, BondUpdateInfo, bond_update_bug!,
+       substep_times, extrapolation_weights, linear_combination, compress!,
+       SUPPORTED_ORDERS
 
 end # module

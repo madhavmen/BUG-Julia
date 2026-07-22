@@ -12,7 +12,10 @@
 Controls for one `bond_update_bug!` run.
 
   - `dt`, `n_steps` -- real time step and how many to take.
-  - `order` -- `:strang` (even dt/2, odd dt, even dt/2) or `:lie` (even dt, odd dt).
+  - `order` -- `:strang` (even dt/2, odd dt, even dt/2), `:lie` (even dt, odd dt),
+    or the extrapolated `:extrap3` / `:richardson4`. `:yoshida4` exists only for
+    TDVP order-matching: it is a composition and steps backward, which BUG cannot
+    do safely for parabolic generators. See `composition.jl`.
   - `maxdim` -- hard bond-dimension cap. Python's default is 200; same here.
   - `trunc_thresh` -- singular-value cutoff for the S-step split.
   - `normalize` -- rescale to unit norm after each step. The norm is recorded
@@ -63,11 +66,63 @@ end
 
 Base.length(info::BondUpdateInfo) = length(info.times)
 
-"The (parity, fraction-of-dt) schedule of one Trotter step."
+"The (parity, fraction-of-dt) schedule of one BASE Trotter step."
 function _trotter_schedule(order::Symbol)
     order === :strang && return ((:even, 0.5), (:odd, 1.0), (:even, 0.5))
     order === :lie    && return ((:even, 1.0), (:odd, 1.0))
-    throw(ArgumentError("order must be :strang or :lie, got $order"))
+    throw(ArgumentError("base order must be :strang or :lie, got $order"))
+end
+
+"""
+Advance `psi` by `dt` under a BASE order, accumulating the sweep diagnostics.
+
+`:yoshida4` recurses into three Strang steps with Yoshida's weights, one of which
+is NEGATIVE -- it is a composition, not an extrapolation, and is available only
+for TDVP order-matching.
+"""
+function _advance_base!(psi, gates, order::Symbol, dt::Float64, kw, acc)
+    if order === :yoshida4
+        for w in _yoshida_weights()
+            _advance_base!(psi, gates, :strang, w * dt, kw, acc)
+        end
+        return psi
+    end
+    for (parity, frac) in _trotter_schedule(order)
+        s = parity_sweep!(psi, gates, parity, ComplexF64(-im * dt * frac); kw...)
+        acc[1] = max(acc[1], s.aug_k); acc[2] = max(acc[2], s.aug_l)
+        acc[3] = max(acc[3], s.discarded)
+    end
+    return psi
+end
+
+"""
+One full step of `order`, in place.
+
+For an extrapolated order the base method is run from the SAME starting state at
+each refinement level and the results combined; `psi` is only overwritten at the
+end, so the levels cannot contaminate one another.
+"""
+function _advance!(psi::SymMPS, gates, order::Symbol, dt::Float64, opts, kw, acc)
+    if !haskey(_EXTRAPOLATION, order)
+        return _advance_base!(psi, gates, order, dt, kw, acc)
+    end
+    spec = _EXTRAPOLATION[order]
+    levels = SymMPS[]
+    for n in spec.levels
+        p = copy(psi)                       # copies the tensor vector; entries are replaced, never mutated
+        for _ in 1:n
+            _advance_base!(p, gates, spec.base, dt / n, kw, acc)
+        end
+        push!(levels, p)
+    end
+    combined = linear_combination(levels, spec.weights;
+                                  maxdim = opts.maxdim,
+                                  cutoff = max(opts.trunc_thresh, 1e-14))
+    for i in eachindex(psi)
+        psi[i] = combined[i]
+    end
+    psi.center = combined.center
+    return psi
 end
 
 """
@@ -81,7 +136,8 @@ selects.
 """
 function bond_update_bug!(psi::SymMPS, gates;
                           opts::BondUpdateOptions = BondUpdateOptions())
-    schedule = _trotter_schedule(opts.order)     # validate before touching psi
+    opts.order in SUPPORTED_ORDERS || throw(ArgumentError(
+        "order must be one of $(SUPPORTED_ORDERS), got $(opts.order)"))
     rng = MersenneTwister(opts.seed)
     canonical!(psi, 1)
 
@@ -95,12 +151,9 @@ function bond_update_bug!(psi::SymMPS, gates;
     augk = Int[]; augl = Int[]; disc = Float64[]
 
     for step in 1:opts.n_steps
-        ak = 0; al = 0; dd = 0.0
-        for (parity, frac) in schedule
-            s = parity_sweep!(psi, gates, parity,
-                              ComplexF64(-im * opts.dt * frac); kw...)
-            ak = max(ak, s.aug_k); al = max(al, s.aug_l); dd = max(dd, s.discarded)
-        end
+        acc = Any[0, 0, 0.0]
+        _advance!(psi, gates, opts.order, opts.dt, opts, kw, acc)
+        ak, al, dd = acc[1], acc[2], acc[3]
 
         n = norm(psi)                            # recorded BEFORE renormalising
         if opts.normalize && n > 0

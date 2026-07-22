@@ -26,6 +26,7 @@ Random.seed!(42)          # the integrator seeds its own RNG from BondUpdateOpti
     include("BondUpdateBUG/test_kls_step.jl")
     include("BondUpdateBUG/test_sweep.jl")
     include("BondUpdateBUG/test_driver.jl")
+    include("BondUpdateBUG/test_composition.jl")
 end
 
 @testset "references" begin

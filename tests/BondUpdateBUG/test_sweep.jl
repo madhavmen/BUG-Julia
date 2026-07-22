@@ -180,3 +180,42 @@ KW = (maxdim = 64, trunc_thresh = 1e-14)
         end
     end
 end
+
+@testset "directional sweep (adjoint L/R primitive)" begin
+    include("../common/dense_reference.jl")
+
+    @testset "applies every bond once, conserves charge, grows the bond" begin
+        psi = domain_wall_state(6); canonical!(psi, 1)
+        sz0 = total_sz(psi)
+        info = directional_sweep!(psi, bond_gates(psi), :left_to_right,
+                                  ComplexF64(-im * 0.05); KW..., rng = RNG())
+        @test isapprox(total_sz(psi), sz0; atol = 1e-10)   # U(1) charge held
+        @test maximum(bond_dims(psi)) > 1                  # entanglement grew
+        @test info.aug_k >= 1
+        @test_throws ArgumentError directional_sweep!(psi, bond_gates(psi),
+                                                      :sideways, ComplexF64(-im * 0.05); KW...)
+    end
+
+    # The local adjoint property: one 2-site bond update inverts EXACTLY --
+    # kls(+tau) undoes kls(-tau) to machine precision -- WHERE the augmented frame
+    # is complete (2r >= ambient). Bond 3 of the L=6 domain wall is such a bond.
+    # This is what makes L and R adjoint sweeps (L_{-tau} o R_{tau} = 1) and hence
+    # a symmetric composition of them a valid higher-order building block. On a
+    # full truncating sweep the relation holds only up to the 2r-Galerkin O(dt^2)
+    # floor (see test_composition.jl) -- the ceiling that keeps this integrator at
+    # second order under the strict Sulz bound.
+    @testset "a complete-frame bond update is exactly invertible" begin
+        for tau in (0.05, 0.1)
+            psi = domain_wall_state(6); canonical!(psi, 3)
+            f = bond_frame(psi, 3); th0 = frame_theta(f)
+            gate = heisenberg_bond_gate(f.site_l, f.site_r)
+            r1 = kls_bond_update(f, gate, ComplexF64(-im * tau); KW..., rng = RNG())
+            psi[3] = r1.left_core; psi[4] = r1.right_core; psi.center = 4
+            canonical!(psi, 3)
+            f2 = bond_frame(psi, 3)
+            r2 = kls_bond_update(f2, gate, ComplexF64(+im * tau); KW..., rng = RNG())
+            th2 = to_concrete(r2.left_core * r2.right_core)
+            @test isapprox(norm(th2 - th0), 0.0; atol = 1e-10)
+        end
+    end
+end
