@@ -48,6 +48,18 @@ Controls for one `bond_update_bug!` run.
   - `lanczos_tol`, `lanczos_maxiter` -- Krylov budget for all three substeps.
   - `seed` -- one RNG is seeded with it for the WHOLE run, so a run is
     reproducible while consecutive steps still draw different fill directions.
+
+  Diagnostics (all opt-in, all recorded from a `copy` of the state so they can
+  never perturb the run):
+
+  - `record_magnetisation` -- store the full `⟨Sz⟩` site profile after every
+    step in `info.magnetisations` (for light-cone heat-maps / error metrics).
+  - `spectrum_steps` -- step indices at which to store the FULL entanglement
+    spectrum (all bonds) in `info.spectra`. Use a handful of timestamps, not
+    every step -- it is far heavier than the scalar diagnostics.
+  - `observe` -- an arbitrary `f(psi, step, time)` run after each step on a copy
+    of the state; its return is pushed to `info.observations`. The escape hatch
+    for anything the built-in recorders do not cover.
 """
 Base.@kwdef struct BondUpdateOptions
     dt::Float64 = 0.05
@@ -63,6 +75,9 @@ Base.@kwdef struct BondUpdateOptions
     lanczos_tol::Float64 = 1e-15
     lanczos_maxiter::Int = 30
     seed::UInt = 0x5EED
+    record_magnetisation::Bool = false
+    spectrum_steps::Vector{Int} = Int[]
+    observe::Union{Nothing,Function} = nothing
 end
 
 """
@@ -78,6 +93,16 @@ Per-step record of a run. Every field has length `n_steps`.
     i.e. old rank plus new directions, before the truncating split. Now counts
     only sectors that can actually pair (`kls_step.jl::pairable_charges`).
   - `discarded` -- largest relative weight thrown away by a bond's S-step split.
+  - `center_bond_dims` -- bond dimension of the central cut after each step
+    (`bond_dims[center_bond]`), always recorded.
+
+Opt-in per-step diagnostics (empty unless the matching option was set):
+
+  - `magnetisations` -- the `⟨Sz⟩` site profile after each step, one
+    `Vector{Float64}` of length `length(psi)` per step (`record_magnetisation`).
+  - `spectra` -- `step => entanglement_spectrum` at the requested `spectrum_steps`;
+    the value is the all-bonds Schmidt spectrum (`Vector{Vector{Float64}}`).
+  - `observations` -- the return of `observe(psi, step, time)` for each step.
 """
 struct BondUpdateInfo
     times::Vector{Float64}
@@ -87,6 +112,10 @@ struct BondUpdateInfo
     aug_k_dims::Vector{Int}
     aug_l_dims::Vector{Int}
     discarded::Vector{Float64}
+    center_bond_dims::Vector{Int}
+    magnetisations::Vector{Vector{Float64}}
+    spectra::Dict{Int,Vector{Vector{Float64}}}
+    observations::Vector{Any}
 end
 
 Base.length(info::BondUpdateInfo) = length(info.times)
@@ -161,6 +190,11 @@ function bond_update_bug!(psi::SymMPS, gates;
     times = Float64[]; norms = Float64[]
     bdims = Vector{Int}[]; maxb = Int[]
     augk = Int[]; augl = Int[]; disc = Float64[]
+    cbd = Int[]
+    mags = Vector{Float64}[]
+    spectra = Dict{Int,Vector{Vector{Float64}}}()
+    obs = Any[]
+    cb = center_bond(psi)                        # fixed: the central interior bond
 
     for step in 1:opts.n_steps
         acc = Any[0, 0, 0.0]
@@ -176,7 +210,22 @@ function bond_update_bug!(psi::SymMPS, gates;
         push!(times, step * opts.dt); push!(norms, n)
         push!(bdims, bd); push!(maxb, maximum(bd; init = 0))
         push!(augk, ak); push!(augl, al); push!(disc, dd)
+        push!(cbd, bd[cb])
+
+        # Opt-in diagnostics. Each reads a `copy` so `canonical!` moving the
+        # centre can never disturb the live state the next step evolves --
+        # identical behaviour under U(1) and with no symmetry.
+        if opts.record_magnetisation
+            push!(mags, magnetisation(copy(psi)))
+        end
+        if step in opts.spectrum_steps
+            spectra[step] = entanglement_spectrum(copy(psi))
+        end
+        if opts.observe !== nothing
+            push!(obs, opts.observe(copy(psi), step, step * opts.dt))
+        end
     end
 
-    return BondUpdateInfo(times, norms, bdims, maxb, augk, augl, disc)
+    return BondUpdateInfo(times, norms, bdims, maxb, augk, augl, disc,
+                          cbd, mags, spectra, obs)
 end
