@@ -19,11 +19,14 @@ include("augment.jl")
 include("gates.jl")
 include("kls_step.jl")
 include("sweep.jl")
+include("observables.jl")
 include("driver.jl")
 
 export SymMPS, canonical!, move_left!, move_right!, bond_dims, leg_dim,
        product_state, domain_wall_state, neel_state,
        total_sz, sz_expectation, site_expval,
+       magnetisation, center_bond, center_bond_dimension,
+       bond_spectrum, entanglement_spectrum,
        left_gram, right_gram, left_isometry_defect, right_isometry_defect,
        local_space, set_symmetry!, symmetry_mode,
        SECTOR_UP, SECTOR_DOWN,
