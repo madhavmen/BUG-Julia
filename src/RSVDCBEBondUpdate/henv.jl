@@ -1,0 +1,567 @@
+# Channel environments for a nearest-neighbour XXZ chain.
+#
+# WHY THIS EXISTS. `BondUpdateBUG` is gate-based: `bond_gates` builds one two-site
+# gate per bond and `parity_sweep!` Trotterises them. Both halves of CBE-BUG need `H`
+# GLOBALLY instead -- the CBE sketch applies `H` through the environments
+# (`RSVDpreBE0SiQS.m:336`), and the single centre-bond Galerkin step needs the
+# effective Hamiltonian of the whole chain, not of one bond. Telum is a tensor
+# library only (no MPS/MPO layer), so this is built here.
+#
+# NOT A SYMMETRIC MPO. For H = Σ_i Σ_t c_t O^t_i P^t_{i+1} the sum of local terms
+# closes under a finite-state recursion with three channel kinds:
+#
+#   id[i+1]     = A†( id[i] )A                        the transported identity
+#   open[i+1,t] = A†( id[i] ⊗ O^t_i )A                half a term, awaiting its partner
+#   done[i+1]   = A†( done[i] )A + Σ_t c_t A†( open[i,t] ⊗ P^t_i )A
+#
+# That is an MPO contraction with the virtual leg NAMED rather than fused, and naming
+# it is the point: the charge each channel carries arrives on the op-leg of Telum's
+# own `Sp`/`Sm` (`docs/telum_api_contract.md` §1), so there is no charge-graded virtual
+# space to assemble by hand and no AutoMPO to write. O(L) build, `2 + |terms|` tensors
+# per link.
+#
+# LEG AND PRIME CONVENTION. Every environment carries `(bra, ket [, op])` with the
+# BRA leg primed and the ket leg unprimed, so:
+#
+#   * the ket leg pairs with the next site tensor's link leg (both unprimed), and
+#   * the bra leg pairs with the bra tensor's link leg (both primed).
+#
+# `contract` asserts equal itags and opposite arrows (§7b), and the two link legs of a
+# bond share an itag, so priming is the only thing keeping the bra and ket namespaces
+# apart. Consequently the bra tensor differs by position in the chain:
+#
+#   interior       `prime(prime(A,1),3)'`   both links primed
+#   left boundary  `prime(A,3)'`            link_l unprimed -- it pairs bra-to-ket
+#   right closure  `prime(A,1)'`            link_r unprimed -- ditto, giving a scalar
+#
+# Getting this wrong does not throw; it silently traces the wrong pair (§7a). The
+# guard is `env_energy == energy(psi, gates)`, the gate path being pinned to the
+# analytic Heisenberg block element by element in `test_gates.jl`.
+
+# ── the Hamiltonian as a term list ───────────────────────────────────────────
+
+"""
+    XXZTerm(left, right, coeff)
+
+One nearest-neighbour term `coeff · left_i ⊗ right_{i+1}`, repeated on every bond.
+
+`left` and `right` are bare local operators; they are retagged onto their site at
+contraction time. Either may be rank-3, carrying an `op` leg whose charge is what
+makes the pair U(1)-allowed; when both are, that leg is contracted between them (this
+is the XY hop, and it is why the two operators must be a `Sp`/`Sp'` adjoint pair
+rather than `Sp`/`Sm` -- see `gates.jl`'s header on the 1/√2 normalisation).
+"""
+struct XXZTerm
+    left::Any
+    right::Any
+    coeff::Float64
+end
+
+"""
+    XXZChain(L, terms, J, delta)
+
+`H = J Σ_i (Sx Sx + Sy Sy + delta Sz Sz)` on `L` sites, as a term list.
+Built by [`xxz_chain`](@ref); `delta = 0` is XX.
+"""
+struct XXZChain
+    L::Int
+    terms::Vector{XXZTerm}
+    J::Float64
+    delta::Float64
+end
+
+Base.length(h::XXZChain) = h.L
+
+"""
+    xxz_chain(L; J=1.0, delta=1.0) -> XXZChain
+
+The same Hamiltonian `bond_gates` builds, as a term list instead of a gate per bond.
+
+The two symmetry modes need different factorisations of the XY term, exactly as
+`heisenberg_bond_gate` does:
+
+  - `:U1` — `Sp`/`Sm` are rank-3 with a ±2 charge on the op-leg, and the physical term
+    is the op-leg contraction of an operator with its own adjoint: `pair(Sp,Sp) +
+    pair(Sm,Sm)`, which already carries the 1/2 of `½(S⁺S⁻ + S⁻S⁺)`.
+  - `:none` — they are plain matrices with no op-leg, Telum normalises them to
+    `Sp = -(1/√2)S⁺_std`, and the coefficient reproducing the physical XY term is `-1`.
+
+Both are MEASURED facts about Telum's normalisation, pinned by `test_gates.jl`; this
+function only mirrors them, so `env_energy` and `energy(psi, bond_gates(psi))` must
+agree to machine precision.
+"""
+function xxz_chain(L::Int; J::Float64 = 1.0, delta::Float64 = 1.0)
+    L >= 2 || throw(ArgumentError("xxz_chain needs at least two sites, got $L"))
+    q = local_space()
+    terms = XXZTerm[]
+    if length(q.Sp.inds) == 3
+        push!(terms, XXZTerm(q.Sp, to_concrete(q.Sp'), J))
+        push!(terms, XXZTerm(q.Sm, to_concrete(q.Sm'), J))
+    else
+        push!(terms, XXZTerm(q.Sp, q.Sm, -J))
+        push!(terms, XXZTerm(q.Sm, q.Sp, -J))
+    end
+    delta == 0.0 || push!(terms, XXZTerm(q.Sz, q.Sz, J * delta))
+    return XXZChain(L, terms, J, delta)
+end
+
+"The term list of `h`. `hamiltonian_terms(h)[t]` pairs with `open[i][t]`."
+hamiltonian_terms(h::XXZChain) = h.terms
+
+# ── zero sentinel ────────────────────────────────────────────────────────────
+#
+# A channel that has no contribution yet is NOT the same as the boundary identity, and
+# conflating them is a silent factor-of-one bug: `done` starts at ZERO (no completed
+# terms) while `id` starts at the boundary identity (represented by `nothing`, which
+# `_left_step` reads as "contract the bra and ket links together").
+
+struct ZeroEnv end
+const ZERO = ZeroEnv()
+
+_accum(a::ZeroEnv, b) = b
+_accum(a, b) = to_concrete(a + b)
+
+# ── local pieces ─────────────────────────────────────────────────────────────
+
+"Retag an operator's two site legs onto site `i`, leaving any op-leg alone."
+_retag_sites(O, i::Int) = to_concrete(setitag(setitag(O, 1, "S,$i"), 2, "S,$i"))
+
+"""
+    _apply_site_op(A, O, i) -> TLArray
+
+`O_i A`, returned in `A`'s own layout with any op-leg appended:
+`(link_l, site, link_r)` or `(link_l, site, link_r, op)`.
+
+The ket-facing leg of `O` is found by ARROW, not position: a plain operator has it at
+leg 1, an adjoint (`Sp'`) at leg 2, and `contract` asserts opposite arrows, so
+hard-coding leg 1 breaks on exactly the adjoint half of every XY term.
+"""
+function _apply_site_op(A, O, i::Int)
+    O === nothing && return A
+    Oi = _retag_sites(O, i)
+    ket_leg = Oi.inds[1].dir == '+' ? 1 : 2
+    T = contract(Oi, (ket_leg,), A, (2,))
+    # T = (O's remaining legs..., A's link_l, A's link_r). The surviving site leg of a
+    # rank-3 O is always at index < 3, so its remainder is (site_out, op) in order.
+    return length(Oi.inds) == 2 ? to_concrete(permutedims(T, (2, 1, 3))) :
+                                  to_concrete(permutedims(T, (3, 1, 4, 2)))
+end
+
+"Bra tensor for an interior step: both link legs primed, so each pairs with the
+environment's bra leg rather than with the ket."
+_bra_interior(A) = to_concrete(prime(prime(A, 1), 3)')
+
+"Bra tensor at the left boundary: `link_l` unprimed, because there the bra and ket
+links are the same dim-1 vacuum leg and must contract with each other."
+_bra_left_boundary(A) = to_concrete(prime(A, 3)')
+
+"Bra tensor closing the right boundary: `link_r` unprimed, for the same reason."
+_bra_right_boundary(A) = to_concrete(prime(A, 1)')
+
+# ── one left step ────────────────────────────────────────────────────────────
+
+"""
+    _left_step(E, A, O, i) -> TLArray
+
+Push the left environment `E` at link `i` through site `i`, inserting `O` on the ket.
+`E === nothing` means the left boundary identity. Returns `(bra, ket [, op])`.
+
+Three cases, distinguished by rank alone:
+
+  - `E` rank 2, `O` without an op-leg → rank-2 out (transport, or a `:none` term);
+  - `E` rank 2, `O` rank 3 → rank-3 out, the op-leg left dangling (OPEN a channel);
+  - `E` rank 3, `O` rank 3 → rank-2 out, the two op-legs contracted (CLOSE it).
+
+The fourth combination (`E` rank 3, `O` without an op-leg) would carry a half-open
+term past a site without closing it. For nearest-neighbour terms that never happens,
+so it is rejected rather than silently producing a longer-range Hamiltonian.
+"""
+function _left_step(E, A, O, i::Int)
+    AO = _apply_site_op(A, O, i)
+    nAO = length(AO.inds)
+
+    if E === nothing
+        # Boundary: contract link_l bra-to-ket along with the site leg.
+        out = contract(AO, (1, 2), _bra_left_boundary(A), (1, 2))
+    else
+        nE = length(E.inds)
+        if nE == 3 && nAO == 4
+            tmp = contract(AO, (1, 4), E, (2, 3))       # close: pair the op-legs too
+        elseif nE == 2
+            tmp = contract(AO, (1,), E, (2,))
+        else
+            error("_left_step: rank-$nE environment with a rank-$nAO operator would " *
+                  "carry an open channel past site $i")
+        end
+        # tmp = (site, link_r, [op], bra) -- the bra leg is always last.
+        out = contract(tmp, (1, length(tmp.inds)), _bra_interior(A), (2, 1))
+    end
+
+    # out = (ket, [op], bra); put the bra first.
+    n = length(out.inds)
+    return to_concrete(permutedims(out, n == 2 ? (2, 1) : (3, 1, 2)))
+end
+
+"""
+    _left_close(E, A, O, i) -> ComplexF64
+
+As `_left_step`, but at the last site: `link_r` is the dim-1 vacuum boundary, so it is
+contracted bra-to-ket and the result is a scalar. A channel still open here would mean
+a term running off the end of the chain, so that is an error.
+"""
+function _left_close(E, A, O, i::Int)
+    AO = _apply_site_op(A, O, i)
+    nAO, nE = length(AO.inds), length(E.inds)
+    tmp = (nE == 3 && nAO == 4) ? contract(AO, (1, 4), E, (2, 3)) :
+          nE == 2               ? contract(AO, (1,), E, (2,))     :
+          error("_left_close: rank-$nE environment with a rank-$nAO operator at site $i")
+    length(tmp.inds) == 3 || error(
+        "_left_close: an operator channel is still open at the right boundary")
+    s = to_concrete(contract(tmp, (1, 2, 3), _bra_right_boundary(A), (2, 3, 1)))
+    return ComplexF64(s[])
+end
+
+# ── the left stack ───────────────────────────────────────────────────────────
+
+"""
+    LeftEnvStack
+
+Left environments at links `1 … n`, one entry per link (`id[i]`, `done[i]`,
+`open[i][t]`). `id[1] === nothing` is the boundary identity; `done`/`open` entries are
+`ZERO` where the channel has no contribution yet.
+
+`id` is stored even though it is the identity for a left-canonical chain: computing it
+explicitly keeps the recursion valid with the orthogonality centre anywhere, and
+`test_henv.jl` asserts it IS the identity in the canonical case rather than assuming it.
+"""
+struct LeftEnvStack
+    id::Vector{Any}
+    done::Vector{Any}
+    open::Vector{Vector{Any}}
+end
+
+"""
+    left_env_stack(psi, h; upto=length(psi)-1) -> LeftEnvStack
+
+Build the left channel environments at links `1 … upto+1` by sweeping sites `1 … upto`.
+
+`upto = L-1` (the default) fills every link a bond update can need on its left, i.e.
+up to link `L`. `upto = 0` is legal and gives just the boundary at link 1 -- what bond 1
+needs, where there is nothing to its left.
+"""
+function left_env_stack(psi::SymMPS, h::XXZChain; upto::Int = length(psi) - 1)
+    L = length(psi)
+    length(h) == L || throw(DimensionMismatch(
+        "chain has $(length(h)) sites, state has $L"))
+    0 <= upto <= L || throw(ArgumentError("upto must be in 0:$L, got $upto"))
+    terms = h.terms
+    nt = length(terms)
+
+    id   = Any[nothing]
+    done = Any[ZERO]
+    open = Vector{Any}[Any[ZERO for _ in 1:nt]]
+
+    for i in 1:upto
+        A = psi[i]
+
+        acc = done[i] === ZERO ? ZERO : _left_step(done[i], A, nothing, i)
+        for t in 1:nt
+            open[i][t] === ZERO && continue
+            c = _left_step(open[i][t], A, terms[t].right, i)
+            acc = _accum(acc, to_concrete(terms[t].coeff * c))
+        end
+        push!(done, acc)
+
+        # A channel opened at site i is closed at site i+1, so there is nothing to open
+        # on the last site of the chain.
+        push!(open, Any[i < L ? _left_step(id[i], A, terms[t].left, i) : ZERO
+                        for t in 1:nt])
+        push!(id, _left_step(id[i], A, nothing, i))
+    end
+
+    return LeftEnvStack(id, done, open)
+end
+
+"""
+    env_energy(psi, h) -> ComplexF64
+
+`⟨ψ|H|ψ⟩` from the channel recursion, closing the right boundary at site `L`.
+
+Requires `psi` left-canonical up to `L` in the sense that the recursion is exact for
+any gauge -- it contracts bra against ket explicitly and never assumes an isometry.
+Valid for an unnormalised state: this is the unnormalised expectation value, so
+compare against `energy(psi, gates) * norm(psi)^2` unless the state is normalised.
+"""
+function env_energy(psi::SymMPS, h::XXZChain)
+    L = length(psi)
+    st = left_env_stack(psi, h; upto = L - 1)
+    A = psi[L]
+    E = st.done[L] === ZERO ? ComplexF64(0) : _left_close(st.done[L], A, nothing, L)
+    for (t, term) in enumerate(h.terms)
+        st.open[L][t] === ZERO && continue
+        E += term.coeff * _left_close(st.open[L][t], A, term.right, L)
+    end
+    return E
+end
+
+# ── one right step ───────────────────────────────────────────────────────────
+#
+# The mirror, with one asymmetry that is easy to get backwards: a right channel OPENS
+# with `term.right` (the right half of a term, sitting at site i and waiting for its
+# partner on its LEFT) and CLOSES with `term.left`. Under U(1) that also puts the op-leg
+# arrows the other way round -- `Sp'` dangles a '+' leg here and `Sp` closes it -- which
+# is exactly why the term list stores both halves instead of deriving one by transpose.
+
+"""
+    _right_step(E, A, O, i) -> TLArray
+
+Push the right environment `E` at link `i+1` through site `i`, inserting `O` on the ket.
+`E === nothing` means the right boundary identity. Returns `(bra, ket [, op])` on link
+`i`, the same convention as [`_left_step`](@ref).
+"""
+function _right_step(E, A, O, i::Int)
+    AO = _apply_site_op(A, O, i)
+    nAO = length(AO.inds)
+
+    if E === nothing
+        out = contract(AO, (2, 3), _bra_right_boundary(A), (2, 3))
+    else
+        nE = length(E.inds)
+        if nE == 3 && nAO == 4
+            tmp = contract(AO, (3, 4), E, (2, 3))
+        elseif nE == 2
+            tmp = contract(AO, (3,), E, (2,))
+        else
+            error("_right_step: rank-$nE environment with a rank-$nAO operator would " *
+                  "carry an open channel past site $i")
+        end
+        # tmp = (link_l, site, [op], bra) -- the bra leg is always last.
+        out = contract(tmp, (2, length(tmp.inds)), _bra_interior(A), (2, 3))
+    end
+
+    n = length(out.inds)
+    return to_concrete(permutedims(out, n == 2 ? (2, 1) : (3, 1, 2)))
+end
+
+"""
+    _right_close(E, A, O, i) -> ComplexF64
+
+As `_right_step` at site 1, where `link_l` is the dim-1 vacuum boundary and is
+contracted bra-to-ket, giving a scalar.
+"""
+function _right_close(E, A, O, i::Int)
+    AO = _apply_site_op(A, O, i)
+    nAO, nE = length(AO.inds), length(E.inds)
+    tmp = (nE == 3 && nAO == 4) ? contract(AO, (3, 4), E, (2, 3)) :
+          nE == 2               ? contract(AO, (3,), E, (2,))     :
+          error("_right_close: rank-$nE environment with a rank-$nAO operator at site $i")
+    length(tmp.inds) == 3 || error(
+        "_right_close: an operator channel is still open at the left boundary")
+    s = to_concrete(contract(tmp, (1, 2, 3), _bra_left_boundary(A), (1, 2, 3)))
+    return ComplexF64(s[])
+end
+
+# ── the right stack ──────────────────────────────────────────────────────────
+
+"""
+    RightEnvStack
+
+Right environments, indexed by LINK like [`LeftEnvStack`](@ref) but filled from the
+right: entry `i` is the environment on link `i`, i.e. everything at sites `i … L`.
+`id[L+1] === nothing` is the boundary identity. Links below the sweep's reach hold
+`missing`, so using one by mistake throws instead of being read as a boundary.
+"""
+struct RightEnvStack
+    id::Vector{Any}
+    done::Vector{Any}
+    open::Vector{Vector{Any}}
+end
+
+"""
+    right_env_stack(psi, h; downto=2) -> RightEnvStack
+
+Build the right channel environments on links `downto … L+1` by sweeping sites
+`L … downto`. `downto = 2` (the default) fills every link a bond update can need on its
+right, i.e. down to link 2. `downto = L+1` is legal and gives just the boundary -- what
+bond `L-1` needs, where there is nothing to its right.
+"""
+function right_env_stack(psi::SymMPS, h::XXZChain; downto::Int = 2)
+    L = length(psi)
+    length(h) == L || throw(DimensionMismatch(
+        "chain has $(length(h)) sites, state has $L"))
+    1 <= downto <= L + 1 || throw(ArgumentError(
+        "downto must be in 1:$(L + 1), got $downto"))
+    terms = h.terms
+    nt = length(terms)
+
+    id   = Any[missing for _ in 1:(L + 1)]
+    done = Any[missing for _ in 1:(L + 1)]
+    open = Vector{Any}[Any[missing for _ in 1:nt] for _ in 1:(L + 1)]
+
+    id[L + 1]   = nothing
+    done[L + 1] = ZERO
+    open[L + 1] = Any[ZERO for _ in 1:nt]
+
+    for i in L:-1:downto
+        A = psi[i]
+
+        acc = done[i + 1] === ZERO ? ZERO : _right_step(done[i + 1], A, nothing, i)
+        for t in 1:nt
+            open[i + 1][t] === ZERO && continue
+            c = _right_step(open[i + 1][t], A, terms[t].left, i)
+            acc = _accum(acc, to_concrete(terms[t].coeff * c))
+        end
+        done[i] = acc
+
+        # A channel opened at site i is closed at site i-1, so nothing opens at site 1.
+        open[i] = Any[i > 1 ? _right_step(id[i + 1], A, terms[t].right, i) : ZERO
+                      for t in 1:nt]
+        id[i] = _right_step(id[i + 1], A, nothing, i)
+    end
+
+    return RightEnvStack(id, done, open)
+end
+
+"""
+    env_energy_right(psi, h) -> ComplexF64
+
+`⟨ψ|H|ψ⟩` swept from the right instead of the left. Same number as
+[`env_energy`](@ref); its purpose is to pin the right recursion independently, since
+the two sweeps share no contraction.
+"""
+function env_energy_right(psi::SymMPS, h::XXZChain)
+    L = length(psi)
+    st = right_env_stack(psi, h; downto = 2)
+    A = psi[1]
+    E = st.done[2] === ZERO ? ComplexF64(0) : _right_close(st.done[2], A, nothing, 1)
+    for (t, term) in enumerate(h.terms)
+        st.open[2][t] === ZERO && continue
+        E += term.coeff * _right_close(st.open[2][t], A, term.left, 1)
+    end
+    return E
+end
+
+# ── the two-site effective action ────────────────────────────────────────────
+#
+# `H` restricted to bond `(i, i+1)`, the object both halves of CBE-BUG consume: the
+# sketch applies it to a random block (`RSVDpreBE0SiQS.m:336`) and the Galerkin step
+# applies it to the centre core. Five contributions, and the two-channel structure is
+# what makes them exhaustive for a nearest-neighbour H:
+#
+#   (a) done_L ⊗ 1          terms entirely left of the block
+#   (b) 1 ⊗ done_R          terms entirely right of it
+#   (c) open_L[t] closed by term.right at site i      straddling link i
+#   (d) open_R[t] closed by term.left  at site i+1    straddling link i+2
+#   (e) the bond term itself
+#
+# (e) is delegated to `apply_gate` with the same gate the Trotter path uses, rather than
+# rebuilt from the term list: that code is pinned to the analytic Heisenberg block
+# element by element (`test_gates.jl`), and stage 1a establishes that the term list and
+# the gate are the same operator.
+#
+# CANONICALITY IS REQUIRED, NOT OPTIONAL. (a) and (b) each carry an implicit identity on
+# the far side, which is only what `id_L`/`id_R` are when sites `1…i-1` are left
+# isometries and `i+2…L` are right isometries -- i.e. when the centre is at `i` or `i+1`,
+# exactly what `bond_frame` already demands. `test_henv.jl` asserts the `id` channels are
+# identities in that gauge rather than trusting it.
+
+"""
+    _apply_theta_op(Theta, O, leg, i) -> TLArray
+
+`O_i` acting on `leg` (2 for the left site, 3 for the right) of the two-site block,
+returned in `Theta`'s layout `(link_l, site_l, site_r, link_r)` with any op-leg appended.
+
+As in [`_apply_site_op`](@ref), the ket-facing leg of `O` is found by arrow, so an
+adjoint half-term works unchanged.
+"""
+function _apply_theta_op(Theta, O, leg::Int, i::Int)
+    O === nothing && return Theta
+    Oi = _retag_sites(O, i)
+    ket_leg = Oi.inds[1].dir == '+' ? 1 : 2
+    T = contract(Oi, (ket_leg,), Theta, (leg,))
+    rank3 = length(Oi.inds) == 3
+    # T = (site_out, [op], Theta's legs except `leg`, in order).
+    perm = if leg == 2
+        rank3 ? (3, 1, 4, 5, 2) : (2, 1, 3, 4)
+    elseif leg == 3
+        rank3 ? (3, 4, 1, 5, 2) : (2, 3, 1, 4)
+    else
+        throw(ArgumentError("_apply_theta_op: leg must be 2 or 3, got $leg"))
+    end
+    return to_concrete(permutedims(T, perm))
+end
+
+"""
+    _apply_theta_env(T, E, link_leg) -> TLArray
+
+Contract environment `E` onto `link_leg` (1 or 4) of `T`, where `T` carries
+`(link_l, site_l, site_r, link_r [, op])`. If both `T` and `E` have an op-leg they are
+contracted (the channel closes); the environment's bra leg replaces `link_leg` and is
+unprimed so the result has exactly `Theta`'s legs again.
+"""
+function _apply_theta_env(T, E, link_leg::Int)
+    link_leg in (1, 4) || throw(ArgumentError("link_leg must be 1 or 4, got $link_leg"))
+    nT, nE = length(T.inds), length(E.inds)
+    out = if nT == 5 && nE == 3
+        contract(T, (link_leg, 5), E, (2, 3))
+    elseif nE == 2 && nT == 4
+        contract(T, (link_leg,), E, (2,))
+    else
+        error("_apply_theta_env: rank-$nT block against a rank-$nE environment leaves " *
+              "an operator channel dangling")
+    end
+    # `out` = T's remaining legs in order, then E's bra leg.
+    #   link_leg == 1: (site_l, site_r, link_r, bra) -> bra first
+    #   link_leg == 4: (link_l, site_l, site_r, bra) -> already in place
+    out = link_leg == 1 ? to_concrete(permutedims(out, (4, 1, 2, 3))) : to_concrete(out)
+    return to_concrete(prime(out, link_leg; inc = -1))
+end
+
+"""
+    apply_h_two_site(Theta, h, i, lenv, renv) -> TLArray
+
+`H Theta` for the two-site block at bond `(i, i+1)`, legs
+`(link_l, site_l, site_r, link_r)` in and out.
+
+`lenv` must be filled at link `i` and `renv` at link `i+2`; the state they were built
+from must be canonical at the bond (see the note above). This is the whole chain's `H`,
+not the bond's gate -- which is the point of the module.
+"""
+function apply_h_two_site(Theta, h::XXZChain, i::Int,
+                          lenv::LeftEnvStack, renv::RightEnvStack)
+    tl, tr = Theta.inds[2].itags, Theta.inds[3].itags
+    acc = nothing
+    add!(x) = (acc = acc === nothing ? x : to_concrete(acc + x))
+
+    # (a), (b): the completed channels, with an implicit identity on the far side.
+    lenv.done[i] === ZERO || add!(_apply_theta_env(Theta, lenv.done[i], 1))
+    renv.done[i + 2] === ZERO || add!(_apply_theta_env(Theta, renv.done[i + 2], 4))
+
+    # (c), (d): the half-open channels, closed inside the block.
+    for (t, term) in enumerate(h.terms)
+        o = lenv.open[i][t]
+        if o !== ZERO
+            T = _apply_theta_op(Theta, term.right, 2, i)
+            add!(to_concrete(term.coeff * _apply_theta_env(T, o, 1)))
+        end
+        o = renv.open[i + 2][t]
+        if o !== ZERO
+            T = _apply_theta_op(Theta, term.left, 3, i + 1)
+            add!(to_concrete(term.coeff * _apply_theta_env(T, o, 4)))
+        end
+    end
+
+    # (e) the bond's own term, via the gate the Trotter path is pinned against.
+    add!(apply_gate(bond_gate(h, tl, tr), Theta, tl, tr))
+
+    return acc
+end
+
+"""
+    bond_gate(h, site_l, site_r) -> TLArray
+
+The two-site gate of `h` on one bond -- `heisenberg_bond_gate` with `h`'s couplings, so
+the term list and the gate can never disagree about `J` or `delta`.
+"""
+bond_gate(h::XXZChain, site_l, site_r) =
+    heisenberg_bond_gate(site_l, site_r; J = h.J, delta = h.delta)
