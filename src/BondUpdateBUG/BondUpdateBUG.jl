@@ -23,6 +23,7 @@ include("observables.jl")
 include("driver.jl")
 
 export SymMPS, canonical!, move_left!, move_right!, bond_dims, leg_dim,
+       overlap,
        product_state, domain_wall_state, neel_state,
        total_sz, sz_expectation, site_expval,
        magnetisation, center_bond, center_bond_dimension,

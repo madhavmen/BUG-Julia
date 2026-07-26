@@ -110,6 +110,75 @@ isometry and the state norm is the Frobenius norm of the centre tensor.
 """
 LinearAlgebra.norm(psi::SymMPS) = norm(psi[psi.center])
 
+"""
+    overlap(bra::SymMPS, ket::SymMPS) -> ComplexF64
+
+The full MPS inner product `<bra|ket>` (`bra` conjugated), contracted bond by
+bond from the left. The two states must have the same length and physical
+spaces; their bond dimensions may differ. `overlap(psi, psi)` equals
+`norm(psi)^2`, and `overlap` is conjugate-symmetric: `overlap(a,b) ==
+conj(overlap(b,a))`.
+
+Each site pairs `bra[i]'` (adjoint) against `ket[i]`, the same arrow-consistent
+contraction `tensor_inner` uses, so it is correct with OR without symmetry. A
+structurally-zero overlap (no matching charge blocks, e.g. orthogonal U(1)
+sectors) is exactly `0`, not an error.
+
+NOTE: BUG-Julia does not define or export `inner`. ITensorMPS owns that name, so
+in a session with `using ITensorMPS` a call like `inner(::SymMPS, ::SymMPS)`
+resolves to ITensorMPS and throws a `MethodError`. Use `overlap` (exported) or
+`LinearAlgebra.dot` (extended below) instead.
+"""
+function overlap(bra::SymMPS, ket::SymMPS)
+    length(bra) == length(ket) || throw(DimensionMismatch(
+        "overlap needs equal-length states, got $(length(bra)) and $(length(ket))"))
+    L = length(bra)
+    # One site: every leg pairs (both links are dim-1 boundaries), so this is
+    # exactly the single-tensor inner product.
+    L == 1 && return tensor_inner(bra[1], ket[1])
+    # The transfer tensor carries (bra_link_r, ket_link_r), which inherit the SAME
+    # link itag "L,i+1" -- Telum rejects a tensor with two identical indices, and
+    # `contract` also requires paired legs to share an itag, so the two link
+    # namespaces cannot just be renamed away. Retag only the bra's INTERNAL link
+    # legs into a private "BL,i" namespace: adjacent bra tensors still match each
+    # other (so the chain contracts), the bra/ket transfer legs become distinct
+    # (so no duplicate index), and the two BOUNDARY links -- contracted directly
+    # bra-with-ket at sites 1 and L -- keep their original tag so those pair. Site
+    # legs keep "S,i" and still pair with ket.
+    braR = Vector{Any}(undef, L)
+    for i in 1:L
+        t = bra[i]
+        i > 1 && (t = setitag(t, 1, "BL,$i"))
+        i < L && (t = setitag(t, 3, "BL,$(i + 1)"))
+        braR[i] = to_concrete(t)
+    end
+    # Left boundary link (leg 1) pairs here; carry (bra_link_r, ket_link_r) right.
+    E = contract(braR[1]', (1, 2), ket[1], (1, 2))
+    for i in 2:(L - 1)
+        tmp = contract(E, (1,), braR[i]', (1,))      # (ket_link, bra_site, bra_link_r)
+        E   = contract(tmp, (1, 2), ket[i], (1, 2))  # (bra_link_r, ket_link_r)
+    end
+    # Last site closes ALL remaining legs -- including the dim-1 RIGHT boundary
+    # link (leg 3) -- so the result is a rank-0 scalar, not a dangling rank-2.
+    tmp = contract(E, (1,), braR[L]', (1,))          # (ket_link, bra_site, bra_link_r)
+    # The right boundary carries each state's TOTAL charge. If bra and ket share
+    # no sector there they live in different charge sectors and the overlap is
+    # structurally zero -- return it rather than let `contract` assert on the
+    # mismatched space (the same zero `tensor_inner` gives for no matching blocks).
+    braq = Set(first(sp) for sp in braR[L].spaces[3])
+    ketq = Set(first(sp) for sp in ket[L].spaces[3])
+    isdisjoint(braq, ketq) && return 0.0 + 0.0im
+    s = contract(tmp, (1, 2, 3), ket[L], (1, 2, 3))
+    r = to_concrete(s)
+    length(r) == 0 && return 0.0 + 0.0im             # `length` of a TLArray is its sector count
+    return ComplexF64(r[])
+end
+
+"`dot(bra, ket)` is `overlap(bra, ket)` -- extends `LinearAlgebra.dot` so it
+composes in a mixed session without the `inner` name clash (distinct types, same
+generic). See `overlap`."
+LinearAlgebra.dot(bra::SymMPS, ket::SymMPS) = overlap(bra, ket)
+
 # ── construction ────────────────────────────────────────────────────────────
 
 """
