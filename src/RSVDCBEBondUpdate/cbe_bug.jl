@@ -144,9 +144,15 @@ function apply_zero_site(H0::ZeroSiteH, S)
     for t in eachindex(H0.open_l)
         ol, or = H0.open_l[t], H0.open_r[t]
         (ol === ZERO || or === ZERO) && continue
-        # (bra_l, bond_r, op) then close the op-leg against the right channel.
-        left = contract(ol, (2,), S, (1,))             # (bra_l, op, bond_r)
-        out  = contract(left, (2, 3), or, (3, 2))      # (bra_l, bra_r)
+        # A term's two halves either BOTH carry an op-leg (the U(1) XY hop, where the leg
+        # carries the +/-2 charge that makes the pair allowed) or NEITHER does (SzSz, and
+        # every term without symmetry). One rank test covers both channels.
+        left = contract(ol, (2,), S, (1,))             # (bra_l, [op,] bond_r)
+        out = if length(ol.inds) == 3
+            contract(left, (2, 3), or, (3, 2))         # close the op-leg too
+        else
+            contract(left, (2,), or, (2,))
+        end                                             # (bra_l, bra_r)
         add!(to_concrete(H0.coeffs[t] * _unprime(_unprime(to_concrete(out), 1), 2)))
     end
     acc === nothing && throw(ArgumentError(
@@ -319,3 +325,119 @@ end
 
 cbe_bug_bond_update(psi::SymMPS, h::XXZChain, tau::Number; kwargs...) =
     cbe_bug_bond_update(psi, h, ComplexF64(tau); kwargs...)
+
+# ── driver ───────────────────────────────────────────────────────────────────
+
+"""
+    CBEBugOptions
+
+Controls for one `cbe_bug!` run. Mirrors `BondUpdateOptions` where the meaning is the
+same, so the two integrators can be driven from the same campaign code.
+
+  - `dt`, `n_steps` -- real time step and how many to take.
+  - `dex`, `dover`, `comp_ratio`, `sulz_cap`, `preselect_only` -- the expansion, forwarded
+    to [`cbe_expand`](@ref). `dex = 0` is the full Sulz budget `r`.
+  - `maxdim`, `trunc_thresh` -- truncation, applied at the centre and in the final sweep.
+  - `normalize` -- rescale after each step; the norm is recorded BEFORE rescaling.
+  - `maxiter`, `tol` -- Krylov budget for the single 0-site exponential.
+  - `seed` -- one RNG for the whole run, so a run is reproducible while consecutive steps
+    still draw different sketches.
+
+NO `order` FIELD. `bond_update_bug!` offers `:lie` / `:strang` because it Trotterises the
+even and odd bond groups and has a splitting error to compose away. CBE-BUG takes one
+projected exponential per step over a globally expanded subspace -- there is no operator
+splitting to symmetrise, so a composition parameter here would be meaningless.
+
+REAL TIME ONLY, as for `bond_update_bug!`: the driver forms `tau = -im*dt` itself.
+"""
+Base.@kwdef struct CBEBugOptions
+    dt::Float64 = 0.05
+    n_steps::Int = 10
+    dex::Int = 0
+    dover::Union{Nothing, Int} = nothing
+    comp_ratio::Float64 = 0.5
+    sulz_cap::Bool = true
+    preselect_only::Bool = false
+    maxdim::Int = 200
+    trunc_thresh::Float64 = 1e-12
+    normalize::Bool = true
+    maxiter::Int = 30
+    tol::Float64 = 1e-15
+    seed::UInt = 0x5EED
+    record_magnetisation::Bool = false
+    observe::Union{Nothing, Function} = nothing
+end
+
+"""
+    CBEBugRunInfo
+
+Per-step record of a `cbe_bug!` run; every field has length `n_steps`.
+
+`max_expanded` is the headline rank diagnostic and the one to compare against
+`BondUpdateInfo.aug_k_dims`: it is the largest bond the basis sweep proposed BEFORE the
+truncation, i.e. `r + Dex`, against the K/L augmentation's `2r`.
+"""
+struct CBEBugRunInfo
+    times::Vector{Float64}
+    norms::Vector{Float64}
+    bond_dims::Vector{Vector{Int}}
+    max_bond_dims::Vector{Int}
+    expanded::Vector{Vector{Int}}
+    max_expanded::Vector{Int}
+    centre_ranks::Vector{Int}
+    err_pre::Vector{Float64}
+    err_fnl::Vector{Float64}
+    discarded::Vector{Float64}
+    magnetisations::Vector{Vector{Float64}}
+    observations::Vector{Any}
+end
+
+Base.length(info::CBEBugRunInfo) = length(info.times)
+
+"""
+    cbe_bug!(psi, h; opts=CBEBugOptions()) -> CBEBugRunInfo
+
+Evolve `psi` in place for `opts.n_steps` real-time steps of `opts.dt` with CBE-BUG.
+
+One RNG is threaded through the whole run rather than re-seeded per step, so the sketches
+are reproducible without every step drawing the same directions.
+"""
+function cbe_bug!(psi::SymMPS, h::XXZChain; opts::CBEBugOptions = CBEBugOptions())
+    rng = MersenneTwister(opts.seed)
+    times = Float64[]; norms = Float64[]
+    bdims = Vector{Int}[]; maxb = Int[]
+    expanded = Vector{Int}[]; maxex = Int[]
+    cranks = Int[]; epre = Float64[]; efnl = Float64[]; disc = Float64[]
+    mags = Vector{Float64}[]; obs = Any[]
+
+    for step in 1:opts.n_steps
+        info = cbe_bug_bond_update(psi, h, ComplexF64(-im * opts.dt);
+                                   dex = opts.dex, dover = opts.dover,
+                                   comp_ratio = opts.comp_ratio,
+                                   sulz_cap = opts.sulz_cap,
+                                   preselect_only = opts.preselect_only,
+                                   maxdim = opts.maxdim,
+                                   trunc_thresh = opts.trunc_thresh,
+                                   maxiter = opts.maxiter, tol = opts.tol, rng = rng)
+
+        n = norm(psi)                                # recorded BEFORE renormalising
+        if opts.normalize && n > 0
+            psi[psi.center] = to_concrete((1.0 / n) * psi[psi.center])
+        end
+
+        bd = bond_dims(psi)
+        push!(times, step * opts.dt); push!(norms, n)
+        push!(bdims, bd); push!(maxb, maximum(bd; init = 0))
+        push!(expanded, info.expanded); push!(maxex, maximum(info.expanded; init = 0))
+        push!(cranks, info.centre_rank)
+        push!(epre, info.err_pre); push!(efnl, info.err_fnl)
+        push!(disc, info.discarded)
+
+        # Diagnostics read a copy, so moving the centre can never disturb the live state.
+        opts.record_magnetisation && push!(mags, magnetisation(copy(psi)))
+        opts.observe === nothing || push!(obs, opts.observe(copy(psi), step, step * opts.dt))
+    end
+
+    return CBEBugRunInfo(times, norms, bdims, maxb, expanded, maxex, cranks,
+                         epre, efnl, disc, mags, obs)
+end

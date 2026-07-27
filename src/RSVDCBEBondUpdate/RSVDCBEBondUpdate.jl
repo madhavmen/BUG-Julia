@@ -32,10 +32,13 @@ using ..BondUpdateBUG: SymMPS, canonical!, bond_dims, leg_dim, local_space,
                        expv, tensor_inner, perp_component, perp_component_right,
                        fusion_basis, reachable_sectors, sector_dim, dual_charge,
                        align_charge, left_isometry_defect, right_isometry_defect,
-                       energy, bond_gates, apply_gate, heisenberg_bond_gate
+                       energy, bond_gates, apply_gate, heisenberg_bond_gate,
+                       magnetisation, center_bond
 
 include("henv.jl")
 include("cbe.jl")
+include("cbe_bug.jl")
+include("tdvp2_baseline.jl")
 
 export XXZTerm, XXZChain, xxz_chain, hamiltonian_terms, bond_gate,
        LeftEnvStack, RightEnvStack,
@@ -43,6 +46,10 @@ export XXZTerm, XXZChain, xxz_chain, hamiltonian_terms, bond_gate,
        apply_h_two_site,
        sketch_h_left, sketch_h_right,
        sector_graded_sketch,
-       CBEExpansion, cbe_expand
+       CBEExpansion, cbe_expand,
+       CBEBugInfo, cbe_bug_bond_update, truncate_sweep!,
+       CBEBugOptions, CBEBugRunInfo, cbe_bug!,
+       ZeroSiteH, zero_site_h, apply_zero_site,
+       OneSiteH, one_site_h, apply_one_site, TDVP2Info, tdvp2_step!, tensor_elements
 
 end # module

@@ -1,6 +1,36 @@
 # CBE-BUG: controlled bond expansion as the BUG basis update
 
-Design spec for the exploratory integrator. Status: **spec + stage 1**.
+Design spec for the exploratory integrator. Status: **implemented and verified**
+(stages 1-3 + driver). The accuracy/rank/cost comparison is deliberately NOT done here —
+see "What is verified" below.
+
+## What is verified, and what is not
+
+Verified (805+ assertions, `tests/RSVDCBEBondUpdate/`, jobs 94952-94976). Every claim is
+pinned against something that shares no code with the thing under test — usually
+`dense_heisenberg`/`dense_state`, since in symmetric-tensor code a leg/arrow/prime slip
+does not throw, it silently traces the wrong index pair and returns a plausible number:
+
+| claim | how it is pinned |
+|---|---|
+| the term list is the same operator as the gates | `env_energy` == dense matrix element, both symmetry modes |
+| the two-site effective action is right | **off-diagonal** vs dense (a diagonal-only check passes with an environment on the wrong leg) |
+| the sketch never needs `HΘ` | `sketch_h_left(…,Ω)` == `contract(apply_h_two_site(Θ),Ω')` for arbitrary `Ω` |
+| CBE reaches sectors K/L cannot | A/B: the K/L complement provably stays inside `U0`'s sectors; CBE opens the missing one, no fill in the call |
+| the expansion is a frame, and lossless | `left_isometry_defect` ~ 0; `U_ex†Θ₀V_ex†` rebuilds `Θ₀`; `‖S‖ == ‖S₀‖` (no padding needed) |
+| **the step is right** | **exact at full rank: one step == `exp(-iH dt)` at L=4; 2.3e-15 over 8 steps at L=6** |
+| the cheap path computes the right operator | `apply_zero_site` == `U_ex†·apply_h_two_site(U_ex S V_ex)·V_ex†` |
+| no rank-4 tensor in the Krylov loop | structural: every tensor in `ZeroSiteH` is rank ≤ 3, `apply_zero_site` returns rank 2 |
+| `dex` is a usable knob | more expansion never increases the error |
+| the driver only does bookkeeping | equals a hand-rolled loop threading the same RNG |
+
+**Not** verified here, and deliberately so: accuracy vs rank, order in `dt`, and wall-clock
+cost. Both CBE-BUG and 2-site TDVP are *exact* once the manifold is the whole space
+(measured ~1e-13 at L=6/`maxdim`=32), so at these sizes the rank cap has to be pushed so
+low to manufacture an error that the truncation floor dominates whatever is being measured.
+Those comparisons belong to a large-system run where the cap binds for physical reasons.
+`benchmarks/cbe_bug_vs_baselines.jl` is the harness for it, parked unrun; the `O(L²)`
+per-step environment rebuild noted in stage 3 must go first.
 
 Reference implementation this follows (von Delft group, QSMPSLib, `Lib_MPS_MPO/`):
 

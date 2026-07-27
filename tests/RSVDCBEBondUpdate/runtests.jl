@@ -17,4 +17,7 @@ Random.seed!(42)
     include("test_sketch.jl")
     include("test_graded_sketch.jl")
     include("test_expand.jl")
+    include("test_cbe_bug.jl")
+    include("test_tdvp2_baseline.jl")
+    include("test_driver.jl")
 end

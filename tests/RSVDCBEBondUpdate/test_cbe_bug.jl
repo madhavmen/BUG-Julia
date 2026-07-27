@@ -109,26 +109,50 @@ end
         @test abs(norm(psi) - n0) < 1e-8                   # 0-site generator is Hermitian
     end
 
-    @testset "matches dense evolution over several steps" begin
-        # Away from full rank the step is an approximation, so this is a convergence
-        # statement, not a precision one: halving dt must reduce the error.
+    @testset "exact over many steps once the rank is full" begin
+        # The L=4 exactness test above, extended: at L=6 with maxdim=32 the state also
+        # reaches full rank ([2,4,8,4,2]), so the centre projector stays the identity for
+        # the whole run and the error is machine noise -- MEASURED 2.3e-15 over 8 steps
+        # (job 94969). Nothing about dt convergence can be read off this regime, which is
+        # why the order measurement is a stage-4 benchmark and not a unit test.
         set_symmetry!(:U1)
         L = 6
         h = xxz_chain(L)
         H = dense_heisenberg(L)
+        psi = evolved(L; n_steps = 4, dt = 0.05, maxdim = 32)
+        # Not `== saturated(L)`: MEASURED [2,4,7,4,2] (job 94971), because the eighth
+        # centre direction carries no weight in this state. The subspace is complete for
+        # everything the dynamics touches, which is what the error below actually tests --
+        # asserting the nominal dimension instead tests the state's Schmidt spectrum.
+        @test maximum(bond_dims(psi)) >= min(2^(L ÷ 2), 2^(L - L ÷ 2)) - 1
+        v0 = dense_state(psi)
+        dt = 0.02
+        for _ in 1:8
+            cbe_bug_bond_update(psi, h, -im * dt; maxdim = 32, trunc_thresh = 1e-14)
+        end
+        @test norm(dense_state(psi) - dense_exact_propagate(H, v0, dt * 8)) < 1e-12
+    end
 
-        function err_after(dt, nsteps)
-            psi = evolved(L; n_steps = 4, dt = 0.05, maxdim = 32)
+    @testset "more expansion never hurts" begin
+        # The property `dex` has to have if it is to be a usable knob: enlarging the
+        # subspace cannot increase the error. Run below full rank, so the expansion is
+        # what limits accuracy rather than the maxdim cap.
+        set_symmetry!(:U1)
+        L = 6
+        h = xxz_chain(L)
+        H = dense_heisenberg(L)
+        dt = 0.05
+
+        function err_with(dex)
+            psi = evolved(L; n_steps = 1, dt = 0.05, maxdim = 6)
             v0 = dense_state(psi)
-            for _ in 1:nsteps
-                cbe_bug_bond_update(psi, h, -im * dt; maxdim = 32, trunc_thresh = 1e-14)
-            end
-            return norm(dense_state(psi) - dense_exact_propagate(H, v0, dt * nsteps))
+            cbe_bug_bond_update(psi, h, -im * dt; dex = dex, maxdim = 6,
+                                trunc_thresh = 1e-14)
+            return norm(dense_state(psi) - dense_exact_propagate(H, v0, dt))
         end
 
-        e1 = err_after(0.04, 4)
-        e2 = err_after(0.02, 8)
-        @test e2 < e1
+        e_small, e_full = err_with(1), err_with(0)     # dex = 0 is the full Sulz budget
+        @test e_full <= e_small + 1e-12
     end
 
     @testset "rank does not ratchet up" begin
