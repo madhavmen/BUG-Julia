@@ -6,7 +6,7 @@ see "What is verified" below.
 
 ## What is verified, and what is not
 
-Verified (805+ assertions, `tests/RSVDCBEBondUpdate/`, jobs 94952-94976). Every claim is
+Verified (886 assertions, `tests/RSVDCBEBondUpdate/`, jobs 94952-94982). Every claim is
 pinned against something that shares no code with the thing under test — usually
 `dense_heisenberg`/`dense_state`, since in symmetric-tensor code a leg/arrow/prime slip
 does not throw, it silently traces the wrong index pair and returns a plausible number:
@@ -23,14 +23,14 @@ does not throw, it silently traces the wrong index pair and returns a plausible 
 | no rank-4 tensor in the Krylov loop | structural: every tensor in `ZeroSiteH` is rank ≤ 3, `apply_zero_site` returns rank 2 |
 | `dex` is a usable knob | more expansion never increases the error |
 | the driver only does bookkeeping | equals a hand-rolled loop threading the same RNG |
+| the carried environments are the rebuilt ones | link-by-link, both sides; and mid-sweep against a stack rebuilt from the updated state |
 
 **Not** verified here, and deliberately so: accuracy vs rank, order in `dt`, and wall-clock
 cost. Both CBE-BUG and 2-site TDVP are *exact* once the manifold is the whole space
 (measured ~1e-13 at L=6/`maxdim`=32), so at these sizes the rank cap has to be pushed so
 low to manufacture an error that the truncation floor dominates whatever is being measured.
 Those comparisons belong to a large-system run where the cap binds for physical reasons.
-`benchmarks/cbe_bug_vs_baselines.jl` is the harness for it, parked unrun; the `O(L²)`
-per-step environment rebuild noted in stage 3 must go first.
+`benchmarks/cbe_bug_vs_baselines.jl` is the harness for it, parked unrun.
 
 Reference implementation this follows (von Delft group, QSMPSLib, `Lib_MPS_MPO/`):
 
@@ -336,10 +336,25 @@ over-dimensioned relative to the weight they carry, and the unpopulated directio
 exactly zero singular values, so the truncating sweep removes them and the rank does not
 ratchet up step after step.
 
-Known cost issue, deliberately deferred: the environment stacks are rebuilt at every bond
-of the sweeps, which is `O(L²)` environment work per time step. Correct but wasteful;
-incremental stacks are a stage-4 optimisation, and the comparison in stage 4 must not
-report this version's wall time as the method's cost.
+Environment work is **`O(L)` per step**. Each sweep CARRIES its own side's channels — one
+`push_*_channels` per bond — and reads the other side from a single prebuilt stack, so
+nothing is rebuilt per bond. The centre step needs no rebuild either: the carried left
+channels already sit on link `c` and the prebuilt right stack already holds link `c+2`.
+This is the structure of the chain BUG in qtci's `exploratory_bug/src/BUG/discarded_bug.jl`,
+whose K-sweep carries `aps`/`aph` site to site and computes its environments exactly once.
+
+Note the gauge transport needs no `M̂`/`N̂` matrices at all, for the same reason that
+formulation drops them: `U_ex ⊇ U0` makes the overlap exactly `[I;0]`, so the write-back
+*is* the transport.
+
+ORDERING IS LOAD-BEARING, and a per-bond rebuild hides it. `canonical!` rewrites tensors,
+so each sweep canonicalises to its far end BEFORE building the stack it will read, and the
+sweep direction is chosen so the write-back only ever touches sites that stack does not
+depend on (`_absorb_right!` at bond `j` touches sites `j, j+1`, while the left stack is
+read at links `<= j`; mirror for the other sweep). Getting this backwards reads a stale
+environment, which does not throw — it silently evolves with the wrong Hamiltonian, so
+`test_carry.jl` checks mid-sweep that the carry equals a stack rebuilt from the UPDATED
+state while the opposite stack still equals the untouched side.
 
 ### Stage 4 — measurement
 

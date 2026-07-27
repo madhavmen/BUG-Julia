@@ -121,6 +121,79 @@ const ZERO = ZeroEnv()
 _accum(a::ZeroEnv, b) = b
 _accum(a, b) = to_concrete(a + b)
 
+# ── one link's channels, and how a sweep carries them ────────────────────────
+#
+# A sweep does NOT need to rebuild an environment stack at every bond. The channels on
+# link `i+1` are the channels on link `i` pushed through site `i` -- O(1) per bond, against
+# O(L) for a rebuild. Carrying them is what makes a step O(L) instead of O(L^2), and it is
+# how the chain BUG in qtci's `exploratory_bug/src/BUG/discarded_bug.jl` works: its K-sweep
+# carries `aps`/`aph` site to site and precomputes its environments exactly once.
+#
+# ORDERING CONSTRAINT, which a rebuild hides. `canonical!` rewrites tensors, so a stack
+# precomputed before it is stale. A carried sweep must therefore canonicalise FIRST, then
+# build the one stack it needs for the opposite side, then sweep -- see
+# `cbe_bug_bond_update`, where each sweep only ever touches sites the other side's stack
+# does not depend on.
+
+"""
+    ChannelSet
+
+The channel environment on ONE link: `id` (the transported identity), `done` (completed
+terms) and `open[t]` (term `t`'s dangling half). `id === nothing` is a boundary; `done` or
+`open[t]` may be `ZERO`.
+"""
+struct ChannelSet
+    id::Any
+    done::Any
+    open::Vector{Any}
+end
+
+"The channels on a chain boundary: identity transported from nothing, no terms yet."
+boundary_channels(h::XXZChain) = ChannelSet(nothing, ZERO, Any[ZERO for _ in h.terms])
+
+"""
+    push_left_channels(cs, h, A, i; open_next=true) -> ChannelSet
+
+Carry the left channels on link `i` through site tensor `A` onto link `i+1`.
+
+`open_next=false` suppresses opening new half-terms, for the last site of a chain where a
+term opened would never be closed.
+"""
+function push_left_channels(cs::ChannelSet, h::XXZChain, A, i::Int;
+                            open_next::Bool = true)
+    terms = h.terms
+    acc = cs.done === ZERO ? ZERO : _left_step(cs.done, A, nothing, i)
+    for (t, term) in enumerate(terms)
+        cs.open[t] === ZERO && continue
+        acc = _accum(acc, to_concrete(term.coeff *
+                     _left_step(cs.open[t], A, term.right, i)))
+    end
+    nxt = Any[open_next ? _left_step(cs.id, A, terms[t].left, i) : ZERO
+              for t in eachindex(terms)]
+    return ChannelSet(_left_step(cs.id, A, nothing, i), acc, nxt)
+end
+
+"""
+    push_right_channels(cs, h, A, i; open_next=true) -> ChannelSet
+
+Mirror: carry the right channels on link `i+1` through site `i` onto link `i`. A right
+channel OPENS with `term.right` and CLOSES with `term.left` -- the asymmetry `_right_step`
+documents.
+"""
+function push_right_channels(cs::ChannelSet, h::XXZChain, A, i::Int;
+                             open_next::Bool = true)
+    terms = h.terms
+    acc = cs.done === ZERO ? ZERO : _right_step(cs.done, A, nothing, i)
+    for (t, term) in enumerate(terms)
+        cs.open[t] === ZERO && continue
+        acc = _accum(acc, to_concrete(term.coeff *
+                     _right_step(cs.open[t], A, term.left, i)))
+    end
+    nxt = Any[open_next ? _right_step(cs.id, A, terms[t].right, i) : ZERO
+              for t in eachindex(terms)]
+    return ChannelSet(_right_step(cs.id, A, nothing, i), acc, nxt)
+end
+
 # ── local pieces ─────────────────────────────────────────────────────────────
 
 "Retag an operator's two site legs onto site `i`, leaving any op-leg alone."
@@ -254,29 +327,18 @@ function left_env_stack(psi::SymMPS, h::XXZChain; upto::Int = length(psi) - 1)
     length(h) == L || throw(DimensionMismatch(
         "chain has $(length(h)) sites, state has $L"))
     0 <= upto <= L || throw(ArgumentError("upto must be in 0:$L, got $upto"))
-    terms = h.terms
-    nt = length(terms)
 
-    id   = Any[nothing]
-    done = Any[ZERO]
-    open = Vector{Any}[Any[ZERO for _ in 1:nt]]
-
+    # The stack IS the carry, recorded link by link -- one implementation of the
+    # recursion, so a sweep that carries and a sweep that prebuilds can never drift.
+    cs = boundary_channels(h)
+    id   = Any[cs.id]
+    done = Any[cs.done]
+    open = Vector{Any}[cs.open]
     for i in 1:upto
-        A = psi[i]
-
-        acc = done[i] === ZERO ? ZERO : _left_step(done[i], A, nothing, i)
-        for t in 1:nt
-            open[i][t] === ZERO && continue
-            c = _left_step(open[i][t], A, terms[t].right, i)
-            acc = _accum(acc, to_concrete(terms[t].coeff * c))
-        end
-        push!(done, acc)
-
-        # A channel opened at site i is closed at site i+1, so there is nothing to open
-        # on the last site of the chain.
-        push!(open, Any[i < L ? _left_step(id[i], A, terms[t].left, i) : ZERO
-                        for t in 1:nt])
-        push!(id, _left_step(id[i], A, nothing, i))
+        # A channel opened at site i is closed at site i+1, so nothing opens on the last
+        # site of the chain.
+        cs = push_left_channels(cs, h, psi[i], i; open_next = i < L)
+        push!(id, cs.id); push!(done, cs.done); push!(open, cs.open)
     end
 
     return LeftEnvStack(id, done, open)
@@ -391,32 +453,18 @@ function right_env_stack(psi::SymMPS, h::XXZChain; downto::Int = 2)
         "chain has $(length(h)) sites, state has $L"))
     1 <= downto <= L + 1 || throw(ArgumentError(
         "downto must be in 1:$(L + 1), got $downto"))
-    terms = h.terms
-    nt = length(terms)
+    nt = length(h.terms)
 
     id   = Any[missing for _ in 1:(L + 1)]
     done = Any[missing for _ in 1:(L + 1)]
     open = Vector{Any}[Any[missing for _ in 1:nt] for _ in 1:(L + 1)]
 
-    id[L + 1]   = nothing
-    done[L + 1] = ZERO
-    open[L + 1] = Any[ZERO for _ in 1:nt]
-
+    cs = boundary_channels(h)
+    id[L + 1] = cs.id; done[L + 1] = cs.done; open[L + 1] = cs.open
     for i in L:-1:downto
-        A = psi[i]
-
-        acc = done[i + 1] === ZERO ? ZERO : _right_step(done[i + 1], A, nothing, i)
-        for t in 1:nt
-            open[i + 1][t] === ZERO && continue
-            c = _right_step(open[i + 1][t], A, terms[t].left, i)
-            acc = _accum(acc, to_concrete(terms[t].coeff * c))
-        end
-        done[i] = acc
-
         # A channel opened at site i is closed at site i-1, so nothing opens at site 1.
-        open[i] = Any[i > 1 ? _right_step(id[i + 1], A, terms[t].right, i) : ZERO
-                      for t in 1:nt]
-        id[i] = _right_step(id[i + 1], A, nothing, i)
+        cs = push_right_channels(cs, h, psi[i], i; open_next = i > 1)
+        id[i] = cs.id; done[i] = cs.done; open[i] = cs.open
     end
 
     return RightEnvStack(id, done, open)
@@ -565,3 +613,17 @@ the term list and the gate can never disagree about `J` or `delta`.
 """
 bond_gate(h::XXZChain, site_l, site_r) =
     heisenberg_bond_gate(site_l, site_r; J = h.J, delta = h.delta)
+
+# ── reading a link out of a prebuilt stack ───────────────────────────────────
+#
+# Defined here rather than beside `ChannelSet`, because a method signature's types are
+# resolved when the method is defined and `LeftEnvStack` / `RightEnvStack` are declared
+# further up this file.
+
+"Link `i` of a prebuilt left stack, as a `ChannelSet`."
+left_channels(lenv::LeftEnvStack, i::Int) =
+    ChannelSet(lenv.id[i], lenv.done[i], lenv.open[i])
+
+"Link `i` of a prebuilt right stack, as a `ChannelSet`."
+right_channels(renv::RightEnvStack, i::Int) =
+    ChannelSet(renv.id[i], renv.done[i], renv.open[i])

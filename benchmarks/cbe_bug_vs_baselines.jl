@@ -23,10 +23,10 @@
 #       pinned); both baselines materialise a rank-4 two-site block, and 2-site TDVP
 #       evolves one inside its Krylov loop.
 #
-# WALL TIME IS NOT THE METHOD'S COST. `cbe_bug_bond_update` and `tdvp2_step!` both rebuild
-# their environment stacks at every bond, O(L^2) per step -- a deliberate placeholder
-# (docs/cbe_bug.md section 4 stage 3). Timings compare the two implementations to each
-# other, nothing more, and that placeholder must go before any campaign run.
+# WALL TIME. `cbe_bug_bond_update` carries its channel environments along each sweep, so it
+# is O(L) per step. `tdvp2_step!` still rebuilds per bond, O(L^2) -- it is a baseline, and
+# that has to be fixed before any timing comparison between the two is meaningful. Rank and
+# memory figures are unaffected.
 
 using LinearAlgebra, Printf
 using BUGJulia.BondUpdateBUG

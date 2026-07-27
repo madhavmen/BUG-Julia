@@ -94,32 +94,35 @@ centre bond. `U_ex` carries `(link_l, site_l, bond)` and `V_ex` carries
 `(bond, site_r, link_r)` -- an MPS tensor's layout in each case -- so the same one-site
 recursions the environment stacks are built from apply unchanged.
 """
-function zero_site_h(h::XXZChain, i::Int, lenv::LeftEnvStack, renv::RightEnvStack,
+function zero_site_h(h::XXZChain, i::Int, lch::ChannelSet, rch::ChannelSet,
                      U_ex, V_ex)
     terms = h.terms
     nt = length(terms)
 
     # Left: everything completed to the left of the centre bond, plus each half-term that
     # is still open there. A channel open at link i is closed by `term.right` at site i.
-    dl = lenv.done[i] === ZERO ? ZERO : _left_step(lenv.done[i], U_ex, nothing, i)
+    dl = lch.done === ZERO ? ZERO : _left_step(lch.done, U_ex, nothing, i)
     for t in 1:nt
-        lenv.open[i][t] === ZERO && continue
-        c = _left_step(lenv.open[i][t], U_ex, terms[t].right, i)
+        lch.open[t] === ZERO && continue
+        c = _left_step(lch.open[t], U_ex, terms[t].right, i)
         dl = _accum(dl, to_concrete(terms[t].coeff * c))
     end
-    ol = Any[_left_step(lenv.id[i], U_ex, terms[t].left, i) for t in 1:nt]
+    ol = Any[_left_step(lch.id, U_ex, terms[t].left, i) for t in 1:nt]
 
-    dr = renv.done[i + 2] === ZERO ? ZERO :
-         _right_step(renv.done[i + 2], V_ex, nothing, i + 1)
+    dr = rch.done === ZERO ? ZERO :
+         _right_step(rch.done, V_ex, nothing, i + 1)
     for t in 1:nt
-        renv.open[i + 2][t] === ZERO && continue
-        c = _right_step(renv.open[i + 2][t], V_ex, terms[t].left, i + 1)
+        rch.open[t] === ZERO && continue
+        c = _right_step(rch.open[t], V_ex, terms[t].left, i + 1)
         dr = _accum(dr, to_concrete(terms[t].coeff * c))
     end
-    or = Any[_right_step(renv.id[i + 2], V_ex, terms[t].right, i + 1) for t in 1:nt]
+    or = Any[_right_step(rch.id, V_ex, terms[t].right, i + 1) for t in 1:nt]
 
     return ZeroSiteH(dl, dr, ol, or, [t.coeff for t in terms])
 end
+
+zero_site_h(h::XXZChain, i::Int, lenv::LeftEnvStack, renv::RightEnvStack, U_ex, V_ex) =
+    zero_site_h(h, i, left_channels(lenv, i), right_channels(renv, i + 2), U_ex, V_ex)
 
 """
     apply_zero_site(H0, S) -> TLArray
@@ -231,10 +234,21 @@ Keywords: `dex`, `dover`, `comp_ratio`, `sulz_cap`, `preselect_only` forward to
 [`cbe_expand`](@ref); `maxdim` and `trunc_thresh` control the truncations; `maxiter` and
 `tol` the Krylov budget of the single 0-site exponential.
 
-The environment stacks are rebuilt at each bond of the sweeps, which is `O(L²)`
-environment work per step -- correct but wasteful, and deliberately left that way until
-the scheme is shown to be worth optimising. Do not read this version's wall time as the
-method's cost.
+`O(L)` environment work per step. Each sweep CARRIES its own side's channels (one
+`push_*_channels` per bond) and reads the other side from a single prebuilt stack, so
+nothing is rebuilt per bond -- the same structure the chain BUG in qtci's
+`exploratory_bug/src/BUG/discarded_bug.jl` uses, where the K-sweep carries `aps`/`aph` and
+the environments are computed exactly once.
+
+The centre step needs no rebuild either: the carried left channels already sit on link `c`
+and the prebuilt right stack already holds link `c+2`.
+
+ORDERING IS LOAD-BEARING. `canonical!` rewrites tensors, so each sweep canonicalises to
+its far end BEFORE building the stack it will read, and the sweep direction is then chosen
+so the write-back only ever touches sites that stack does not depend on
+(`_absorb_right!` at bond `j` touches sites `j, j+1`, and the left stack is read at links
+`<= j`; mirror for the other sweep). Getting this backwards reads a stale environment,
+which does not throw -- it silently evolves with the wrong Hamiltonian.
 """
 function cbe_bug_bond_update(psi::SymMPS, h::XXZChain, tau::ComplexF64;
                              dex::Int = 0,
@@ -261,41 +275,53 @@ function cbe_bug_bond_update(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     exkw = (dex = dex, dover = dover, comp_ratio = comp_ratio, sulz_cap = sulz_cap,
             preselect_only = preselect_only, rng = rng)
 
-    "Expand at bond `i` from the current state; returns the expansion."
-    function expand_at(i::Int)
-        canonical!(psi, i)
-        f = bond_frame(psi, i)
-        ex = cbe_expand(f, h, i,
-                        left_env_stack(psi, h; upto = i - 1),
-                        right_env_stack(psi, h; downto = i + 2); exkw...)
+    function record!(ex)
         err_pre = max(err_pre, ex.err_pre)
         err_fnl = max(err_fnl, ex.err_fnl)
         return ex
     end
 
-    # 1. right-to-centre, then 2. left-to-centre. The right sweep runs first so the left
-    #    one ends with the centre at `c`, which is what `bond_frame(psi, c)` requires.
+    # 1. RIGHT-TO-CENTRE. Canonicalise to the far right FIRST, then build the one left
+    #    stack this sweep needs: it is read at link j for j = L-1 … c+1, and `_absorb_right!`
+    #    only ever touches sites j and j+1, so links <= j stay valid for the whole sweep.
+    #    The RIGHT channels are carried instead -- link j+2 pushed through the freshly
+    #    expanded psi[j+1] gives link j+1, which is exactly what bond j-1 reads.
+    canonical!(psi, L - 1)
+    lstack = left_env_stack(psi, h; upto = L - 2)
+    rch = boundary_channels(h)                        # link L+1, what bond L-1 reads
     for j in (L - 1):-1:(c + 1)
-        ex = expand_at(j)
+        canonical!(psi, j)
+        f = bond_frame(psi, j)
+        ex = record!(cbe_expand(f, h, j, left_channels(lstack, j), rch; exkw...))
         _absorb_right!(psi, j, ex.V_ex)
         expanded[j] = leg_dim(psi[j], 3)
         n_new[j] = ex.n_new_r
+        rch = push_right_channels(rch, h, psi[j + 1], j + 1)
     end
+
+    # 2. LEFT-TO-CENTRE, the mirror. Canonicalise left FIRST so the right stack built now
+    #    reflects the sweep-1 expansions; `_absorb_left!` touches sites i and i+1 only, so
+    #    the stack's links >= i+2 stay valid. The LEFT channels are carried.
+    canonical!(psi, 1)
+    rstack = right_env_stack(psi, h; downto = 3)
+    lch = boundary_channels(h)                        # link 1, what bond 1 reads
     for i in 1:(c - 1)
-        ex = expand_at(i)
+        canonical!(psi, i)
+        f = bond_frame(psi, i)
+        ex = record!(cbe_expand(f, h, i, lch, right_channels(rstack, i + 2); exkw...))
         _absorb_left!(psi, i, ex.U_ex)
         expanded[i] = leg_dim(psi[i], 3)
         n_new[i] = ex.n_new_l
+        lch = push_left_channels(lch, h, psi[i], i)
     end
 
-    # 3. the centre bond: expand both frames, then ONE Galerkin step on the core.
+    # 3. THE CENTRE BOND, with no rebuild: the carried `lch` already sits on link c and the
+    #    prebuilt `rstack` already holds link c+2. Expand both frames, then ONE Galerkin
+    #    step on the core.
     canonical!(psi, c)
     f = bond_frame(psi, c)
-    lenv = left_env_stack(psi, h; upto = c - 1)
-    renv = right_env_stack(psi, h; downto = c + 2)
-    ex = cbe_expand(f, h, c, lenv, renv; exkw...)
-    err_pre = max(err_pre, ex.err_pre)
-    err_fnl = max(err_fnl, ex.err_fnl)
+    lenv, renv = lch, right_channels(rstack, c + 2)
+    ex = record!(cbe_expand(f, h, c, lenv, renv; exkw...))
     expanded[c] = leg_dim(ex.U_ex, 3)
     n_new[c] = ex.n_new_l
 

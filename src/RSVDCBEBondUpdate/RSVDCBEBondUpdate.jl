@@ -43,6 +43,8 @@ include("tdvp2_baseline.jl")
 export XXZTerm, XXZChain, xxz_chain, hamiltonian_terms, bond_gate,
        LeftEnvStack, RightEnvStack,
        left_env_stack, right_env_stack, env_energy, env_energy_right,
+       ChannelSet, boundary_channels, left_channels, right_channels,
+       push_left_channels, push_right_channels,
        apply_h_two_site,
        sketch_h_left, sketch_h_right,
        sector_graded_sketch,

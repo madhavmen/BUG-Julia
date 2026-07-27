@@ -14,6 +14,7 @@ Random.seed!(42)
 @testset "RSVDCBEBondUpdate" begin
     include("test_henv.jl")
     include("test_heff.jl")
+    include("test_carry.jl")
     include("test_sketch.jl")
     include("test_graded_sketch.jl")
     include("test_expand.jl")

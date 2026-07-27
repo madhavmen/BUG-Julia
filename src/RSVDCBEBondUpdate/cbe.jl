@@ -90,7 +90,7 @@ This is the candidate space the left frame is expanded into.
 `H Theta` projected on the current right frame.
 """
 function sketch_h_left(f::BondFrame, h::XXZChain, i::Int,
-                       lenv::LeftEnvStack, renv::RightEnvStack, Om)
+                       lch::ChannelSet, rch::ChannelSet, Om)
     K0 = to_concrete(f.U0 * f.S0)          # (link_l, site_l, bond)
     V0 = f.V0                              # (bond, site_r, link_r)
     plainV = _vpart_plain(V0, Om)          # (bond, g)
@@ -101,25 +101,25 @@ function sketch_h_left(f::BondFrame, h::XXZChain, i::Int,
     join3(K, V) = contract(K, (3, 4), V, (1, 3))      # ditto, op-leg shared
 
     # (a) terms entirely to the left of the block.
-    lenv.done[i] === ZERO ||
-        add!(join2(_env_on_link(K0, lenv.done[i], 1), plainV))
+    lch.done === ZERO ||
+        add!(join2(_env_on_link(K0, lch.done, 1), plainV))
 
     # (b) terms entirely to the right: the operator sits on link_r, which the sketch
     #     already covers, so it is pushed onto V0 before Om is contracted in.
-    if renv.done[i + 2] !== ZERO
-        Vd = _env_on_link(V0, renv.done[i + 2], 3)
+    if rch.done !== ZERO
+        Vd = _env_on_link(V0, rch.done, 3)
         add!(join2(K0, to_concrete(contract(Vd, (2, 3), Om', (2, 3)))))
     end
 
     for (t, term) in enumerate(h.terms)
         # (c) a term straddling link i: closed by term.right at site_l, on the left half.
-        o = lenv.open[i][t]
+        o = lch.open[t]
         if o !== ZERO
             K = _env_on_link(_apply_site_op(K0, term.right, i), o, 1)
             add!(to_concrete(term.coeff * join2(K, plainV)))
         end
         # (d) a term straddling link i+2: both of its legs are on the right half.
-        o = renv.open[i + 2][t]
+        o = rch.open[t]
         if o !== ZERO
             Vd = _env_on_link(_apply_site_op(V0, term.left, i + 1), o, 3)
             add!(to_concrete(term.coeff *
@@ -152,7 +152,7 @@ the result is `(g, site_r, link_r)`, the right matricization of `H Theta` sketch
 the left. `Om = f.U0` recovers the exact right factor.
 """
 function sketch_h_right(f::BondFrame, h::XXZChain, i::Int,
-                        lenv::LeftEnvStack, renv::RightEnvStack, Om)
+                        lch::ChannelSet, rch::ChannelSet, Om)
     K0 = to_concrete(f.U0 * f.S0)
     V0 = f.V0
     plainK = _kpart_sketched(K0, Om)                  # (g, bond)
@@ -162,20 +162,20 @@ function sketch_h_right(f::BondFrame, h::XXZChain, i::Int,
     join2(K, V) = contract(K, (2,), V, (1,))          # (g, site_r, link_r)
     join3(K, V) = contract(K, (2, 3), V, (1, 4))      # ditto, op-leg shared
 
-    if lenv.done[i] !== ZERO
-        K = _env_on_link(K0, lenv.done[i], 1)
+    if lch.done !== ZERO
+        K = _env_on_link(K0, lch.done, 1)
         add!(join2(_kpart_sketched(K, Om), V0))
     end
-    renv.done[i + 2] === ZERO ||
-        add!(join2(plainK, _env_on_link(V0, renv.done[i + 2], 3)))
+    rch.done === ZERO ||
+        add!(join2(plainK, _env_on_link(V0, rch.done, 3)))
 
     for (t, term) in enumerate(h.terms)
-        o = lenv.open[i][t]
+        o = lch.open[t]
         if o !== ZERO
             K = _env_on_link(_apply_site_op(K0, term.right, i), o, 1)
             add!(to_concrete(term.coeff * join2(_kpart_sketched(K, Om), V0)))
         end
-        o = renv.open[i + 2][t]
+        o = rch.open[t]
         if o !== ZERO
             Vd = _env_on_link(_apply_site_op(V0, term.left, i + 1), o, 3)
             add!(to_concrete(term.coeff * join2(plainK, Vd)))
@@ -453,7 +453,7 @@ Keywords:
     weight-ranking is worth.
 """
 function cbe_expand(f::BondFrame, h::XXZChain, i::Int,
-                    lenv::LeftEnvStack, renv::RightEnvStack;
+                    lch::ChannelSet, rch::ChannelSet;
                     dex::Int = 0,
                     dover::Union{Nothing, Int} = nothing,
                     comp_ratio::Float64 = 0.5,
@@ -481,7 +481,7 @@ function cbe_expand(f::BondFrame, h::XXZChain, i::Int,
     QL, err_l = if dex_l > 0
         OmR = sector_graded_sketch(V0, :right, npre; comp_ratio = comp_ratio, rng = rng)
         OmR === nothing ? (nothing, 0.0) :
-            _preselect_left(U0, sketch_h_left(f, h, i, lenv, renv, OmR), stol_pre)
+            _preselect_left(U0, sketch_h_left(f, h, i, lch, rch, OmR), stol_pre)
     else
         (nothing, 0.0)
     end
@@ -489,7 +489,7 @@ function cbe_expand(f::BondFrame, h::XXZChain, i::Int,
     QR, err_r = if dex_r > 0
         OmL = sector_graded_sketch(U0, :left, npre; comp_ratio = comp_ratio, rng = rng)
         OmL === nothing ? (nothing, 0.0) :
-            _preselect_right(V0, sketch_h_right(f, h, i, lenv, renv, OmL), stol_pre)
+            _preselect_right(V0, sketch_h_right(f, h, i, lch, rch, OmL), stol_pre)
     else
         (nothing, 0.0)
     end
@@ -505,7 +505,7 @@ function cbe_expand(f::BondFrame, h::XXZChain, i::Int,
          0.0)
     else
         UMU = to_concrete(permutedims(
-            contract(sketch_h_left(f, h, i, lenv, renv, QR), (1, 2), QL', (1, 2)), (2, 1)))
+            contract(sketch_h_left(f, h, i, lch, rch, QR), (1, 2), QL', (1, 2)), (2, 1)))
         # EMPTY: the left and right candidate spaces share no charge sector, so no pair of
         # them can carry amplitude (the reference's `Empty` branch, :461; the same
         # constraint `pairable_charges` enforces for the random fill).
@@ -559,3 +559,21 @@ function _trim_total(Q, leg::Int, n::Int)
     any(v > 0 for v in values(keep)) || return nothing
     return to_concrete(getsub(Q, leg, s -> (k = get(keep, s, 0); k == 0 ? nothing : 1:k)))
 end
+
+# ── prebuilt-stack convenience wrappers ──────────────────────────────────────
+#
+# The kernels above take the channels on the two links they actually use, so a sweep can
+# CARRY them (O(1) per bond) instead of rebuilding a stack (O(L) per bond). These wrappers
+# keep the stack-indexed call sites -- the tests, and anything not sweeping -- unchanged.
+
+sketch_h_left(f::BondFrame, h::XXZChain, i::Int,
+              lenv::LeftEnvStack, renv::RightEnvStack, Om) =
+    sketch_h_left(f, h, i, left_channels(lenv, i), right_channels(renv, i + 2), Om)
+
+sketch_h_right(f::BondFrame, h::XXZChain, i::Int,
+               lenv::LeftEnvStack, renv::RightEnvStack, Om) =
+    sketch_h_right(f, h, i, left_channels(lenv, i), right_channels(renv, i + 2), Om)
+
+cbe_expand(f::BondFrame, h::XXZChain, i::Int,
+           lenv::LeftEnvStack, renv::RightEnvStack; kwargs...) =
+    cbe_expand(f, h, i, left_channels(lenv, i), right_channels(renv, i + 2); kwargs...)
