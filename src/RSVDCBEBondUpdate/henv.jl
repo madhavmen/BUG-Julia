@@ -576,23 +576,23 @@ from must be canonical at the bond (see the note above). This is the whole chain
 not the bond's gate -- which is the point of the module.
 """
 function apply_h_two_site(Theta, h::XXZChain, i::Int,
-                          lenv::LeftEnvStack, renv::RightEnvStack)
+                          lch::ChannelSet, rch::ChannelSet)
     tl, tr = Theta.inds[2].itags, Theta.inds[3].itags
     acc = nothing
     add!(x) = (acc = acc === nothing ? x : to_concrete(acc + x))
 
     # (a), (b): the completed channels, with an implicit identity on the far side.
-    lenv.done[i] === ZERO || add!(_apply_theta_env(Theta, lenv.done[i], 1))
-    renv.done[i + 2] === ZERO || add!(_apply_theta_env(Theta, renv.done[i + 2], 4))
+    lch.done === ZERO || add!(_apply_theta_env(Theta, lch.done, 1))
+    rch.done === ZERO || add!(_apply_theta_env(Theta, rch.done, 4))
 
     # (c), (d): the half-open channels, closed inside the block.
     for (t, term) in enumerate(h.terms)
-        o = lenv.open[i][t]
+        o = lch.open[t]
         if o !== ZERO
             T = _apply_theta_op(Theta, term.right, 2, i)
             add!(to_concrete(term.coeff * _apply_theta_env(T, o, 1)))
         end
-        o = renv.open[i + 2][t]
+        o = rch.open[t]
         if o !== ZERO
             T = _apply_theta_op(Theta, term.left, 3, i + 1)
             add!(to_concrete(term.coeff * _apply_theta_env(T, o, 4)))
@@ -604,6 +604,10 @@ function apply_h_two_site(Theta, h::XXZChain, i::Int,
 
     return acc
 end
+
+apply_h_two_site(Theta, h::XXZChain, i::Int,
+                 lenv::LeftEnvStack, renv::RightEnvStack) =
+    apply_h_two_site(Theta, h, i, left_channels(lenv, i), right_channels(renv, i + 2))
 
 """
     bond_gate(h, site_l, site_r) -> TLArray

@@ -181,6 +181,31 @@ end
         @test maximum(info_full.expanded) >= maximum(info_small.expanded)
     end
 
+    @testset "the centre expansion is load-bearing" begin
+        # INVESTIGATION (asked 2026-07-27): given the sweeps already expanded every other
+        # bond, are the augmented frames at the centre needed? Measured here rather than
+        # argued. The sweeps expand bonds 1..c-1 and c+1..L-1; bond c is expanded ONLY by
+        # the centre step, so with it off the centre rank can never grow -- and the centre
+        # cut is exactly where a domain wall's entanglement builds.
+        set_symmetry!(:U1)
+        L = 8
+        h = xxz_chain(L; delta = 0.0)
+        c = L ÷ 2
+        function run(centre_expand)
+            psi = domain_wall_state(L)
+            r = Int[]
+            for _ in 1:6
+                cbe_bug_bond_update(psi, h, -im * 0.05; maxdim = 32,
+                                    trunc_thresh = 1e-12, centre_expand = centre_expand)
+                push!(r, bond_dims(psi)[c])
+            end
+            return r
+        end
+        with, without = run(true), run(false)
+        @test all(==(1), without)          # frozen at the product state's rank
+        @test maximum(with) > 1            # the expansion is what unfreezes it
+    end
+
     @testset "no symmetry" begin
         set_symmetry!(:none)
         try

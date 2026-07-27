@@ -40,8 +40,11 @@ end
 The single-site effective Hamiltonian at site `j`; `lenv` must be filled at link `j` and
 `renv` at link `j+1`.
 """
+one_site_h(h::XXZChain, j::Int, lch::ChannelSet, rch::ChannelSet) =
+    OneSiteH(j, lch.done, rch.done, lch.open, rch.open, h.terms)
+
 one_site_h(h::XXZChain, j::Int, lenv::LeftEnvStack, renv::RightEnvStack) =
-    OneSiteH(j, lenv.done[j], renv.done[j + 1], lenv.open[j], renv.open[j + 1], h.terms)
+    one_site_h(h, j, left_channels(lenv, j), right_channels(renv, j + 1))
 
 """
     apply_one_site(H1, M) -> TLArray
@@ -87,15 +90,19 @@ end
 "Total stored elements of a TLArray -- the honest size of the object, block-sparse."
 tensor_elements(t) = sum(length(r) for r in t.RMTs; init = 0)
 
-"One forward/backward pair at bond `i`, sweeping in `dir`. Returns the largest Theta seen."
-function _tdvp2_bond!(psi::SymMPS, h::XXZChain, i::Int, tau::ComplexF64, dir::Symbol;
-                      maxdim, trunc_thresh, maxiter, tol, acc)
-    lenv = left_env_stack(psi, h; upto = i - 1)
-    renv = right_env_stack(psi, h; downto = i + 2)
+"""
+One forward/backward pair at bond `i`, sweeping in `dir`. Takes the channels on the two
+links it uses so the caller can CARRY them; `acc` collects the diagnostics.
 
+Returns the channels the NEXT bond of the sweep needs on this sweep's own side: pushed
+through the freshly written tensor, which is the O(1) alternative to rebuilding a stack.
+"""
+function _tdvp2_bond!(psi::SymMPS, h::XXZChain, i::Int, tau::ComplexF64, dir::Symbol,
+                      lch::ChannelSet, rch::ChannelSet;
+                      maxdim, trunc_thresh, maxiter, tol, acc)
     Theta = to_concrete(psi[i] * psi[i + 1])        # rank 4 -- the object being compared
     acc[2] = max(acc[2], tensor_elements(Theta))
-    Theta = expv(x -> apply_h_two_site(x, h, i, lenv, renv), tau, Theta;
+    Theta = expv(x -> apply_h_two_site(x, h, i, lch, rch), tau, Theta;
                  hermitian = true, maxiter = maxiter, tol = tol)
 
     res = svd(Theta, (1, 2); cutoff = max(trunc_thresh, 1e-14), Nkeep = maxdim,
@@ -105,26 +112,29 @@ function _tdvp2_bond!(psi::SymMPS, h::XXZChain, i::Int, tau::ComplexF64, dir::Sy
 
     if dir === :right
         psi[i] = to_concrete(setitag(res.U, 3, tag))
+        # The backward half-step sits at site i+1, so its left channels are this bond's
+        # pushed through the isometry just written -- no rebuild.
+        lnext = push_left_channels(lch, h, psi[i], i)
         M = to_concrete(setitag(to_concrete(res.S * res.Vd), 1, tag))
-        if i < length(psi) - 1                      # no back-step off the end of the sweep
-            H1 = one_site_h(h, i + 1, left_env_stack(psi, h; upto = i), renv)
-            M = expv(x -> apply_one_site(H1, x), -tau, M;
+        if i < length(psi) - 1
+            M = expv(x -> apply_one_site(one_site_h(h, i + 1, lnext, rch), x), -tau, M;
                      hermitian = true, maxiter = maxiter, tol = tol)
         end
         psi[i + 1] = M
         psi.center = i + 1
+        return lnext
     else
         psi[i + 1] = to_concrete(setitag(res.Vd, 1, tag))
+        rnext = push_right_channels(rch, h, psi[i + 1], i + 1)
         M = to_concrete(setitag(to_concrete(res.U * res.S), 3, tag))
         if i > 1
-            H1 = one_site_h(h, i, lenv, right_env_stack(psi, h; downto = i + 1))
-            M = expv(x -> apply_one_site(H1, x), -tau, M;
+            M = expv(x -> apply_one_site(one_site_h(h, i, lch, rnext), x), -tau, M;
                      hermitian = true, maxiter = maxiter, tol = tol)
         end
         psi[i] = M
         psi.center = i
+        return rnext
     end
-    return psi
 end
 
 """
@@ -133,9 +143,9 @@ end
 One symmetric two-site TDVP step of `tau = -im*dt`, in place. Second order.
 
 Present as the memory/accuracy baseline for CBE-BUG; it is not part of the CBE scheme and
-nothing in `cbe_bug.jl` calls it. Like `cbe_bug_bond_update`, it rebuilds its environment
-stacks per bond, so the two are handicapped identically and their wall times are
-comparable to each other (though neither is the method's true cost).
+nothing in `cbe_bug.jl` calls it. Like `cbe_bug_bond_update`, it carries its channel
+environments along each half-sweep, so environment work is `O(L)` per step and a wall-time
+comparison between the two is not distorted by one of them rebuilding.
 """
 function tdvp2_step!(psi::SymMPS, h::XXZChain, tau::ComplexF64;
                      maxdim::Int = 200,
@@ -149,15 +159,26 @@ function tdvp2_step!(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     acc = Any[0, 0, 0.0]
     half = tau / 2
 
+    # O(L) environments, as in `cbe_bug_bond_update`: each half-sweep carries its own side
+    # and reads the other from one prebuilt stack. The forward sweep only writes sites
+    # <= i+1, so the right stack stays valid; the backward sweep only writes sites >= i,
+    # so the left stack (rebuilt once, after the forward sweep) stays valid.
     canonical!(psi, 1)
+    rstack = right_env_stack(psi, h; downto = 3)
+    lch = boundary_channels(h)
     for i in 1:(L - 1)
-        _tdvp2_bond!(psi, h, i, half, :right;
-                     maxdim, trunc_thresh, maxiter, tol, acc)
+        lch = _tdvp2_bond!(psi, h, i, half, :right,
+                           lch, right_channels(rstack, i + 2);
+                           maxdim, trunc_thresh, maxiter, tol, acc)
     end
+
+    lstack = left_env_stack(psi, h; upto = L - 2)
+    rch = boundary_channels(h)
     for i in (L - 1):-1:1
         canonical!(psi, i)
-        _tdvp2_bond!(psi, h, i, half, :left;
-                     maxdim, trunc_thresh, maxiter, tol, acc)
+        rch = _tdvp2_bond!(psi, h, i, half, :left,
+                           left_channels(lstack, i), rch;
+                           maxdim, trunc_thresh, maxiter, tol, acc)
     end
 
     return TDVP2Info(maximum(bond_dims(psi); init = 0), acc[2], acc[3])

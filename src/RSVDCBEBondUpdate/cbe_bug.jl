@@ -256,6 +256,7 @@ function cbe_bug_bond_update(psi::SymMPS, h::XXZChain, tau::ComplexF64;
                              comp_ratio::Float64 = 0.5,
                              sulz_cap::Bool = true,
                              preselect_only::Bool = false,
+                             centre_expand::Bool = true,
                              maxdim::Int = 200,
                              trunc_thresh::Float64 = 1e-12,
                              maxiter::Int = 30,
@@ -321,7 +322,12 @@ function cbe_bug_bond_update(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     canonical!(psi, c)
     f = bond_frame(psi, c)
     lenv, renv = lch, right_channels(rstack, c + 2)
-    ex = record!(cbe_expand(f, h, c, lenv, renv; exkw...))
+    # `centre_expand = false` is the A/B for "are the augmented frames at the centre
+    # needed at all, given the sweeps already expanded every other bond?" With it off the
+    # S-step runs in the UNexpanded frames, so link c can never grow and the entanglement
+    # at the centre cut is frozen. Diagnostic only -- see docs/cbe_bug.md.
+    ex = centre_expand ? record!(cbe_expand(f, h, c, lenv, renv; exkw...)) :
+                         CBEExpansion(f.U0, f.V0, 0, 0, 0.0, 0.0)
     expanded[c] = leg_dim(ex.U_ex, 3)
     n_new[c] = ex.n_new_l
 
@@ -384,6 +390,7 @@ Base.@kwdef struct CBEBugOptions
     comp_ratio::Float64 = 0.5
     sulz_cap::Bool = true
     preselect_only::Bool = false
+    centre_expand::Bool = true
     maxdim::Int = 200
     trunc_thresh::Float64 = 1e-12
     normalize::Bool = true
@@ -442,6 +449,7 @@ function cbe_bug!(psi::SymMPS, h::XXZChain; opts::CBEBugOptions = CBEBugOptions(
                                    comp_ratio = opts.comp_ratio,
                                    sulz_cap = opts.sulz_cap,
                                    preselect_only = opts.preselect_only,
+                                   centre_expand = opts.centre_expand,
                                    maxdim = opts.maxdim,
                                    trunc_thresh = opts.trunc_thresh,
                                    maxiter = opts.maxiter, tol = opts.tol, rng = rng)
