@@ -93,6 +93,46 @@ Guards worth copying verbatim, each of which has a counterpart already in this r
 | `Empty` check when left/right complement charges do not intersect (`:461`) | `pairable_charges` (`kls_step.jl:53`) |
 | `ComplementQ` — fill charge sectors missing from the selection (`:654`) | `random_sector_seed` (`augment.jl:35`) — **this is what CBE should make redundant** |
 
+## 2b. The second goal: cheaper bonds, and never a two-site tensor
+
+Alongside correctness, this scheme has to be **more memory-efficient in how it expands a
+bond** than the alternatives — cheaper than adding random vectors, cheaper than completing
+the basis, and cheaper than 2-site TDVP. That is a design constraint on the
+implementation, not just something to measure afterwards, and it has a sharp form:
+
+**CBE-BUG must never allocate a rank-4 two-site tensor.** Both alternatives do:
+
+| scheme | expanded bond | largest object per bond update |
+|---|---|---|
+| 2-site TDVP | `d·χ` (full local space, then truncate) | `Θ`, rank 4, `O(χ²d²)` — it *evolves* it |
+| BUG with 2r K/L augmentation | `2r` | `frame_theta(f)`, rank 4, plus `apply_gate` on it |
+| basis completion / random pad | up to `d·χ` | rank 4 |
+| **CBE-BUG** | **`r + Dex`, `Dex` a knob** | **rank 3: `O(χ·d·Dpre)` and `O(χ²)`** |
+
+Every step of the scheme can be written rank-4-free, and each place it would otherwise
+appear has a factorisation that avoids it:
+
+* **the sketch** — `Kpart · Vpart` (§4 stage 2), nothing bigger than `U0S0` or `V0`;
+* **writing an expansion back** — `U_ex†(A_i A_{i+1}) = (U_ex†A_i)A_{i+1}`, so the
+  two-site block is never materialised;
+* **forming the augmented core** — `S₀ = (U_ex†A_c)(A_{c+1}V_ex†)`, likewise;
+* **the Galerkin step** — this is the one that matters most, and it is also the one the
+  reference makes obvious in hindsight: `RSVDpreBE0SiQS` *returns* `VLex, VRex`, the
+  environments already pushed through the expanded tensors, precisely so that
+  `LanczosUpdate0SiQS` can update the bond **without touching the site tensors at all**.
+  Pushing the channel environments through `U_ex`/`V_ex` once per step turns each Krylov
+  matvec into
+
+      S_out = done_L·S + S·done_R^T + Σ_t c_t Σ_op open_L[t]·S·open_R[t]
+
+  which is a handful of `bond × bond` products — `O(χ²)` per matvec instead of `O(χ²d²)`,
+  with no two-site object anywhere in the Krylov loop.
+
+The `Dex` knob is what makes the bond itself cheaper: the K/L augmentation has no knob
+(it admits every direction it finds, up to `2r`), and basis completion has no knob by
+definition. Here the expansion is `r + Dex` with the directions *ranked by weight in
+`HΘ`*, so `Dex` can be small and still targeted.
+
 ## 3. Target scheme: CBE-BUG
 
 Combining the above with the BUG structure, dropping the discarded projector, and
@@ -175,6 +215,49 @@ the two-site effective action matches a direct gate sum on an interior bond.
 Port `RSVDpreBE0SiQS`: sector-graded `GaussRandMat`, preselect, final selection,
 `RepairOrtho`, `Empty` check, direct-sum expand, zero-pad the core.
 
+Four things became clear while writing this and are worth recording, because they are
+not obvious from the MATLAB:
+
+**(i) The sketch must be folded in DURING the contraction, not applied to a formed
+`HΘ`.** With the rank-4 `HΘ` in hand you would take its exact left SVD and beat any
+sketch of it, in both accuracy and cost — the randomization would be a strawman. This is
+why `contractHPsi_R2L` (`RSVDpreBE0SiQS.m:826`) orders its network to put `Ω` next to the
+right environment first, and why `sketch_h_left`/`sketch_h_right` here never build a
+two-site object.
+
+**(ii) One decomposition makes all five contributions uniform.** Every term of `H` at a
+bond factorises into something acting on the left legs and something on the right,
+sharing at most one op-leg:
+
+    Y[link_l, site_l, g] = Σ_{bond, op} Kpart[link_l, site_l, bond, op] · Vpart[bond, g, op]
+
+with `Kpart` the left operator applied to `K0 = U0 S0` and `Vpart` the right operator
+applied to `V0` and then contracted with `Ω`. Nothing bigger than `K0` or `V0` is ever
+formed, and the sketch dimension replaces `site_r ⊗ link_r` at the first opportunity.
+`K0` and `V0` both carry their site leg at position 2 — an MPS tensor's layout — so the
+site-operator helper applies to them unchanged.
+
+**(iii) The final-selection matrix is one more sketch call.** Unwinding the `Scheme`
+branches of `RSVDpreBE0SiQS.m:435-457` (which do include the core `OC`), the small
+matrix is exactly
+
+    UMU = U0L† (HΘ) V0R†
+
+so it is `sketch_h_left(…, V0R)` contracted with `U0L†` — no new machinery, and it makes
+plain what the selection ranks candidates by: their weight in the two-site action of `H`.
+
+**(iv) Zero-padding the core is automatic, not a step.** `ExpandOrthoCenter`
+(`RSVDpreBE0SiQS.m:864`) pads `OC` with explicit zero blocks. In BUG's no-overlap form
+the core is obtained as `Ŝ₀ = Û†Θ₀V̂†`, and since the new columns are orthogonal to the
+old frame by construction, that projection *is* `[[S₀,0],[0,0]]`. Nothing to pad.
+
+And the mechanism that makes the whole exercise worthwhile, in one line: `GaussRandMat`
+allocates complement columns per sector in proportion to `DC(q) = Dfull(q) − DT(q)`
+(`RSVDpreBE0SiQS.m:590-620`). A charge sector the frame does not touch at all has
+`DT(q) = 0`, hence the **largest** complement share — so an empty-but-reachable sector is
+sampled by construction. That is the replacement for `random_sector_seed`: not a fill
+bolted on beside the augmentation, but a property of the sketch itself.
+
 Acceptance:
 1. expanded frames are isometries (`left_isometry_defect` at machine zero);
 2. the expansion contains the old frame, so `Û†Θ0V̂†` is lossless and `tau = 0` is the
@@ -187,9 +270,46 @@ Acceptance:
 
 ### Stage 3 — the step (`cbe_bug.jl`)
 
-Basis sweep + single centre Galerkin S-step + truncation. New entry point
-`cbe_bug!`; `bond_update_bug!` and `kls_bond_update` are left untouched (they are the
-validated reference and the unitarity-critical path).
+Entry point `cbe_bug_bond_update`; `bond_update_bug!` and `kls_bond_update` are left
+untouched (validated reference, and the unitarity-critical path).
+
+```
+c = centre bond
+
+1.  right-to-centre basis sweep   j = L-1 … c+1 : expand V, write back, centre moves left
+2.  left-to-centre basis sweep    i = 1 … c-1   : expand U, write back, centre moves right
+3.  centre bond: expand both frames, then ONE Galerkin step
+        S₀    = U_ex† Θ V_ex†                    (lossless; see stage 2c)
+        S_new = expv(x -> U_ex† H (U_ex x V_ex) V_ex†, tau, S₀)
+    then the truncating SVD sets the new centre rank
+4.  truncation sweep (Sulz algorithm 1) over the remaining bonds
+```
+
+Writing an expansion back is exact and needs no correction term: with `U_ex ⊇ U0`,
+
+    psi[i] <- U_ex ,   psi[i+1] <- U_ex† (psi[i] psi[i+1])
+
+leaves the state unchanged, because `U_ex†U0 = [I;0]`.
+
+**A subtlety worth recording, because the scheme looks wrong at first glance.** With the
+basis update now purely algebraic (CBE expands; it does not evolve), and only one core
+evolved, it can seem that the expansions at bonds far from the centre can never acquire
+amplitude — the centre core lives on bond `c` alone. They do, and the reason is that
+expanding bond `c-1` enlarges `dim(link_c)`, hence the *ambient space* `link_c ⊗ site_c`
+that the centre frame is chosen from. The outer expansions raise the ceiling on the
+centre's variational subspace rather than carrying weight themselves. What the step then
+computes is one projected exponential in a globally CBE-enlarged subspace, whose error is
+`(1-P)H|ψ⟩` — precisely the quantity `dex` controls.
+
+Step 4 is not optional housekeeping: after step 3 the non-centre bonds are
+over-dimensioned relative to the weight they carry, and the unpopulated directions have
+exactly zero singular values, so the truncating sweep removes them and the rank does not
+ratchet up step after step.
+
+Known cost issue, deliberately deferred: the environment stacks are rebuilt at every bond
+of the sweeps, which is `O(L²)` environment work per time step. Correct but wasteful;
+incremental stacks are a stage-4 optimisation, and the comparison in stage 4 must not
+report this version's wall time as the method's cost.
 
 ### Stage 4 — measurement
 
