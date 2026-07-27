@@ -1,25 +1,36 @@
-# CBE-BUG: CBE expansion plus Algorithm 7, at every bond of one sweep.
+# CBE-BUG: a K/L basis sweep in CBE frames, then ONE Galerkin step at the centre bond.
 #
-# Structure:
+# The structure of the proven chain BUG (`exploratory_bug/src/BUG/discarded_bug.jl:16-31`,
+# the MPS realisation of Sulz algorithms 5-7):
 #
-#   for each bond i = 1 … L-1
-#       expand the bond (`cbe_expand`: RSVD sketch of HΘ, sector-graded, no expv)
-#       Algorithm 7 on that bond: project into the expanded space, Galerkin step, split
-#   truncation sweep (Sulz algorithm 1)
+#   1. K-sweep   left to right,  augmented LEFT frames  W_1 … W_c
+#   2. L-sweep   right to left,  augmented RIGHT frames Z_c … Z_{L-1}
+#   3. Galerkin  seed S = <W, Z | psi> from the sweep carries, then integrate the single
+#                centre connecting tensor -- THE ONLY TIME EVOLUTION, so no over-counting
+#                and no backward substep
+#   4. Truncate  (Sulz algorithm 1)
 #
 # THE K/L ODEs ARE NEVER SOLVED. `cbe_expand` supplies the directions those solves would
-# have found -- one application of H, sketched -- and the per-bond Galerkin `expv` builds
-# the Krylov basis on the expanded bond and takes the step in it. So there is no frozen
-# projector and no discarded projector, and no one-site `expv` per bond either.
+# have found -- one sketched application of H -- and the centre `expv` builds the Krylov
+# basis on the expanded bond and takes the step in it. No frozen projector, no discarded
+# projector, no one-site `expv`.
 #
-# A GALERKIN STEP AT EVERY BOND IS NOT OPTIONAL. An earlier version did the basis sweeps
-# and then a single Galerkin step at the centre. That cannot grow a chain's ranks: an
-# expansion is LOSSLESS, so it cannot change the state's Schmidt rank, and only the bond
-# that gets a Galerkin step gains any. The centre was then capped at
-# `room_l = d·χ_{c-1} − r` because χ_{c-1} never moved -- L=18 sat at maxbond 2 with an
-# error independent of dt. The reference recursion (`exploratory_bug/src/TTN/ttn_bug.jl`,
-# algorithms 5-7) updates the connecting tensor at EVERY node too; the root's update is
-# merely the last one, not the only one.
+# THE BASIS SWEEPS MUST NOT TOUCH THE STATE. Two earlier versions failed here, and both
+# failures are worth naming because neither throws:
+#
+#   * Writing each frame back as it is found (`_absorb_left!`) leaves the zero-padded
+#     remainder in `psi[i+1]`; the next `bond_frame` then re-derives from that padded tensor
+#     with `svd(cutoff = 0.0)`, collapsing the padding and propagating the collapse back into
+#     the bond just expanded. L=18 sat at maxbond 2 with an error INDEPENDENT of dt.
+#   * Compensating with a Galerkin step at every bond grows the rank but applies the global
+#     H L-1 times per sweep: full-rank exactness broke to 2.24e-2.
+#
+# Rank grows because the evolved core is DENSE and the frames are RETAINED: S(t1) propagates
+# out through W_{i+1}…W_c, so every bond ends up carrying r + Dex. The rank at bond i is NOT
+# `U_ex†psi[i]` -- that is its value before the step, still zero-padded.
+#
+# Frames are therefore accumulated in `W`/`Z`, each built from a CARRY of the original state,
+# and `psi` is assembled only after the Galerkin step.
 #
 # NO RANK-4 TENSOR IS EVER ALLOCATED. That is the module's second design goal
 # (docs/cbe_bug.md §2b) and it is a property of how each step is factorised, not an
@@ -68,6 +79,36 @@ function _absorb_right!(psi::SymMPS, i::Int, V_ex)
     psi[i + 1] = to_concrete(setitag(V_ex, 1, tag))
     psi.center = i
     return psi
+end
+
+"""
+    _frame_from(left, right) -> BondFrame
+
+`bond_frame`'s factorisation, but on tensors handed in rather than read out of `psi`.
+
+The basis sweeps must not touch the state (see `cbe_bug_bond_update`), so the tensor whose
+left frame is wanted is a CARRY -- `C_{i-1}·psi[i]`, the left block already expressed in the
+expanded basis -- and not `psi[i]` itself. `bond_frame` cannot express that: it insists the
+orthogonality centre sit on site `i`, and reads the state directly.
+
+Correctness rests on exactly one of `left`/`right` carrying the amplitude while the other is
+an isometry, which is what makes `left*right` the true two-site block:
+
+  * K-sweep, `psi` canonical at 1: `left = C_{i-1}·psi[i]` carries it, `psi[i+1]` is a right
+    isometry, so `res_r.S == 1`.
+  * L-sweep, `psi` canonical at L: `psi[j]` is a left isometry (`res_l.S == 1`) and
+    `right = psi[j+1]·D_{j+1}` carries it.
+"""
+function _frame_from(left, right)
+    res_l = svd(left,  (1, 2), "bU,L", "bU,R"; cutoff = 0.0)
+    res_r = svd(right, (1,),   "bV,L", "bV,R"; cutoff = 0.0)
+    U0 = to_concrete(res_l.U)
+    V0 = to_concrete(res_r.Vd)
+    S0 = to_concrete(to_concrete(res_l.S * res_l.Vd) * to_concrete(res_r.U * res_r.S))
+    return BondFrame(U0, S0, V0,
+                     left.inds[1], left.inds[2], left.inds[3],
+                     right.inds[2], right.inds[3],
+                     leg_dim(U0, 3), copy(left.spaces[3]))
 end
 
 # ── the 0-site effective Hamiltonian ─────────────────────────────────────────
@@ -297,38 +338,6 @@ function cbe_bug_bond_update(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     exkw = (dex = dex, dover = dover, comp_ratio = comp_ratio,
             sulz_cap = sulz_cap, preselect_only = preselect_only, rng = rng)
 
-    """
-    ALGORITHM 7 at one bond, in the CBE-expanded frames: project the block into the
-    expanded space, take the Galerkin step there, split back.
-
-    This is what makes the rank grow, and nothing else does. An expansion is LOSSLESS, so
-    widening a bond cannot change the state's Schmidt rank -- `Ŝ₀` is zero-padded on the
-    new directions and the state is still exactly what it was. It is this `expv` that puts
-    weight on them; a bond that never gets one collapses at the next gauge move, which is
-    correct reporting and not a lost expansion. Measured before this was per-bond: L=18 sat
-    at maxbond 2 with an error INDEPENDENT of dt, because only the centre bond had a
-    Galerkin step and `room_l = d·χ_{c-1} − r` then pinned even that at 2.
-
-    The K/L ODEs are NOT solved. `expv` builds the Krylov basis on the expanded bond and
-    steps in it, with `apply_zero_site` costing `O(χ²)` per matvec and never touching a
-    site tensor -- so the K/L directions come from CBE, the step from this Krylov space.
-    """
-    function alg7_bond!(i::Int, lenv::ChannelSet, renv::ChannelSet, ex::CBEExpansion)
-        ML = contract(ex.U_ex', (1, 2), psi[i], (1, 2))          # (bond_ex_l, bond_old)
-        MR = contract(psi[i + 1], (2, 3), ex.V_ex', (2, 3))      # (bond_old, bond_ex_r)
-        S0 = to_concrete(contract(ML, (2,), MR, (1,)))           # zero-padded on the new dirs
-        peak!(ex.U_ex, ex.V_ex, S0)
-        H0 = zero_site_h(h, i, lenv, renv, ex.U_ex, ex.V_ex)
-        S1 = expv(x -> apply_zero_site(H0, x), tau, S0;
-                  hermitian = true, maxiter = maxiter, tol = tol)
-        res = svd(S1, (1,); cutoff = max(trunc_thresh, 1e-14), Nkeep = maxdim,
-                  get_lists = true)
-        tag = psi[i].inds[3].itags
-        psi[i]     = to_concrete(setitag(ex.U_ex * res.U, 3, tag))
-        psi[i + 1] = to_concrete(setitag((res.S * res.Vd) * ex.V_ex, 1, tag))
-        psi.center = i + 1
-        return _trunc_weight(res)
-    end
 
     function record!(ex)
         err_pre = max(err_pre, ex.err_pre)
@@ -340,39 +349,120 @@ function cbe_bug_bond_update(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     peak!(transients...) = (peak = max(peak, _state_stored(psi) +
                                        sum(tensor_elements(t) for t in transients; init = 0)))
 
-    # ONE SWEEP, EVERY BOND: CBE-expand, then Algorithm 7 on that bond.
+    # K-SWEEP, L-SWEEP, then ONE Galerkin step at the centre. The structure of the proven
+    # chain BUG (`exploratory_bug/src/BUG/discarded_bug.jl:16-31`, the MPS realisation of
+    # Sulz algorithms 5-7): the single centre evolution is THE ONLY TIME EVOLUTION, so
+    # there is no over-counting and no backward substep.
     #
-    # This replaces the earlier "K/L basis sweeps + a single Galerkin step at the centre".
-    # That structure cannot grow a chain's ranks: the expansion is lossless, so only the
-    # bond that gets a Galerkin step gains rank, and the centre is then capped at
-    # `room_l = d·χ_{c-1} − r` because χ_{c-1} never moves. The reference recursion
-    # (`exploratory_bug/src/TTN/ttn_bug.jl`, algorithms 5-7) likewise updates the connecting
-    # tensor at EVERY node and not only at the root -- the root's update is merely the last.
+    # THE BASIS SWEEPS MUST NOT TOUCH THE STATE. This is the bug an earlier version had:
+    # it wrote each expanded frame straight back with `_absorb_left!`, which leaves the
+    # zero-padded remainder in `psi[i+1]`, and then the next iteration's `bond_frame` used
+    # `svd(cutoff = 0.0)` on that padded tensor -- collapsing the padding and propagating
+    # the collapse back into the bond just expanded. Frames are therefore accumulated in
+    # `W`/`Z`, every one derived from the ORIGINAL `psi`, and the state is assembled only
+    # after the Galerkin step.
     #
-    # ORDERING IS LOAD-BEARING. The left channels are carried (one `push_left_channels` per
-    # bond) and the right ones are read from a single prebuilt stack. `alg7_bond!` writes
-    # only sites `i` and `i+1`, so `rstack`'s links `>= i+2` stay valid for the whole sweep,
-    # and it leaves the centre at `i+1`, which is exactly where bond `i+1` needs it -- no
-    # `canonical!` inside the loop at all. Getting this backwards reads a stale environment,
-    # which does not throw; it silently evolves with the wrong Hamiltonian.
+    # Rank grows because the evolved core is DENSE and the frames are RETAINED: `S(t1)`
+    # propagates out through `W_{i+1}…W_c`, so every bond ends up carrying `r + Dex`. It is
+    # not necessary -- and it is actively wrong -- to put a Galerkin step on each bond.
+    W = Vector{Any}(undef, c)              # augmented LEFT frames,  sites 1 … c
+    Z = Vector{Any}(undef, L - 1)          # augmented RIGHT frames, Z[j] absorbs site j+1
+
+    # ---- K-sweep: augmented LEFT frames, left to right -------------------------
+    # `psi` canonical at 1, so sites 2…L are right isometries and the amplitude of the left
+    # block rides in the carry `C = <W_1…W_i | psi_1…psi_i>`. The frame at bond `i` is built
+    # from `C·psi[i]`, i.e. the left block already in the EXPANDED basis -- which is what
+    # makes the frames chain. Building each from `psi[i]` instead gives frames whose left leg
+    # is the old bond, and they cannot be composed.
     canonical!(psi, 1)
     rstack = right_env_stack(psi, h; downto = 3)
-    lch = boundary_channels(h)                        # link 1, what bond 1 reads
-    discarded = 0.0
-    for i in 1:(L - 1)
-        renv = right_channels(rstack, i + 2)
-        f = bond_frame(psi, i)
-        # `centre_expand = false` keeps the centre bond in its UNexpanded frames; with
-        # every bond now getting a Galerkin step this is a pure diagnostic A/B on how much
-        # the expansion at that one cut is worth.
+    lch = boundary_channels(h)
+    lenv_c = lch                           # left channels at the expanded link c
+    C = nothing
+    for i in 1:c
+        K = C === nothing ? psi[i] : to_concrete(contract(C, (2,), psi[i], (1,)))
+        f = _frame_from(K, psi[i + 1])
+        i == c && (lenv_c = lch)
         ex = (centre_expand || i != c) ?
-             record!(cbe_expand(f, h, i, lch, renv; exkw...)) :
+             record!(cbe_expand(f, h, i, lch, right_channels(rstack, i + 2); exkw...)) :
              CBEExpansion(f.U0, f.V0, 0, 0, 0.0, 0.0)
+        W[i] = ex.U_ex
         expanded[i] = leg_dim(ex.U_ex, 3)
         n_new[i] = ex.n_new_l
-        discarded = max(discarded, alg7_bond!(i, lch, renv, ex))
-        lch = push_left_channels(lch, h, psi[i], i)
+        peak!(ex.U_ex)
+        C = to_concrete(contract(ex.U_ex', (1, 2), K, (1, 2)))    # (b_{i+1}, link_{i+1})
+        lch = push_left_channels(lch, h, ex.U_ex, i)
     end
+
+    # ---- L-sweep: augmented RIGHT frames, right to left ------------------------
+    # The mirror, and it needs the opposite gauge: canonical at L makes sites 1…L-1 left
+    # isometries, so the amplitude of the right block rides in `D` instead. Re-gauging does
+    # not change the state, and `W` stays valid -- the seed below is a full contraction and
+    # so is gauge independent.
+    canonical!(psi, L)
+    lstack = left_env_stack(psi, h; upto = L - 2)
+    rch = boundary_channels(h)
+    renv_c = rch                           # right channels at the expanded link c+2
+    D = nothing
+    for j in (L - 1):-1:c
+        B = D === nothing ? psi[j + 1] : to_concrete(contract(psi[j + 1], (3,), D, (1,)))
+        f = _frame_from(psi[j], B)
+        j == c && (renv_c = rch)
+        ex = (centre_expand || j != c) ?
+             record!(cbe_expand(f, h, j, left_channels(lstack, j), rch; exkw...)) :
+             CBEExpansion(f.U0, f.V0, 0, 0, 0.0, 0.0)
+        Z[j] = ex.V_ex
+        if j != c
+            expanded[j] = leg_dim(ex.V_ex, 1)
+            n_new[j] = ex.n_new_r
+        end
+        peak!(ex.V_ex)
+        D = to_concrete(contract(B, (2, 3), ex.V_ex', (2, 3)))    # (link_{j+1}, b)
+        rch = push_right_channels(rch, h, ex.V_ex, j + 1)
+    end
+
+    # ---- seed and the single Galerkin step -------------------------------------
+    # S_start = <W, Z | psi>, by full contraction from each end. No M/N overlap matrices,
+    # and no gauge requirement on `psi` -- this is a complete contraction of the state
+    # against the frames.
+    AL = nothing
+    for i in 1:c
+        T = AL === nothing ? psi[i] : to_concrete(contract(AL, (2,), psi[i], (1,)))
+        AL = to_concrete(contract(W[i]', (1, 2), T, (1, 2)))       # (b_L, link_{i+1})
+    end
+    AR = nothing
+    for j in (L - 1):-1:c
+        T = AR === nothing ? psi[j + 1] : to_concrete(contract(psi[j + 1], (3,), AR, (1,)))
+        AR = to_concrete(contract(T, (2, 3), Z[j]', (2, 3)))       # (link_{j+1}, b_R)
+    end
+    S0 = to_concrete(contract(AL, (2,), AR, (1,)))                 # (b_L, b_R)
+    peak!(W[c], Z[c], S0)
+
+    H0 = zero_site_h(h, c, lenv_c, renv_c, W[c], Z[c])
+    S1 = expv(x -> apply_zero_site(H0, x), tau, S0;
+              hermitian = true, maxiter = maxiter, tol = tol)
+    res = svd(S1, (1,); cutoff = max(trunc_thresh, 1e-14), Nkeep = maxdim, get_lists = true)
+    discarded = _trunc_weight(res)
+
+    # ---- assemble psi = W_1 … W_{c-1} (W_c U) (S Vd Z_c) Z_{c+1} … Z_{L-1} ------
+    # BOTH bond legs of every frame have to be retagged, not just one. The frames carry the
+    # `_frame_from` / `cbe_expand` bond tags ("bU,L" and friends), and adjacent tensors in a
+    # `SymMPS` must agree on the shared link tag -- retagging one side only leaves
+    # `psi[i].inds[3] != psi[i+1].inds[1]`, which `contract` rejects on the next sweep.
+    "Put a frame's two bond legs back on the state's own link tags."
+    relink(T, t1, t3) = to_concrete(setitag(setitag(T, 1, t1), 3, t3))
+
+    for i in 1:(c - 1)
+        psi[i] = relink(W[i], psi[i].inds[1].itags, psi[i].inds[3].itags)
+    end
+    t1c, t3c = psi[c].inds[1].itags, psi[c].inds[3].itags
+    t3r = psi[c + 1].inds[3].itags
+    psi[c]     = relink(to_concrete(W[c] * res.U), t1c, t3c)
+    psi[c + 1] = relink(to_concrete((res.S * res.Vd) * Z[c]), t3c, t3r)
+    for j in (c + 1):(L - 1)
+        psi[j + 1] = relink(Z[j], psi[j + 1].inds[1].itags, psi[j + 1].inds[3].itags)
+    end
+    psi.center = c + 1
     centre_rank = leg_dim(psi[c], 3)
 
     # Compress once at the end. Every bond has now had its Galerkin step, so a direction

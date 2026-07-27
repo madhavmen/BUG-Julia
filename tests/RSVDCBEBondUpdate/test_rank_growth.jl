@@ -61,13 +61,19 @@ secset(t, l) = Set((q, d) for (q, d) in t.spaces[l])
         @test length(secset(psi[L ÷ 2], 3)) > 1       # U(1) growth means new charge sectors
     end
 
-    @testset "the error responds to dt" begin
-        # The sharpest statement of the old bug: it was dt-INDEPENDENT. Refining dt must
-        # now change the answer, whatever the accuracy happens to be.
+    @testset "the answer responds to dt" begin
+        # The sharpest statement of the old bug: it was dt-INDEPENDENT. Refining dt must now
+        # change the answer, whatever the accuracy happens to be.
+        #
+        # MUST BE A NON-CONSERVED OBSERVABLE. An earlier version of this test used
+        # `sum(magnetisation(...))`, i.e. total Sz -- which U(1) conserves exactly, so it is
+        # dt-independent for a CORRECT integrator too and the test proved nothing (it read
+        # 1.3e-15 and "failed" a working sweep). The site-resolved profile is what actually
+        # carries the dynamics.
         set_symmetry!(:U1)
         L = 8
         h = xxz_chain(L; delta = 0.0)
-        final = Float64[]
+        profiles = Vector{Vector{Float64}}()
         for dt in (0.1, 0.05)
             psi = domain_wall_state(L)
             for _ in 1:round(Int, 1.0 / dt)
@@ -75,9 +81,13 @@ secset(t, l) = Set((q, d) for (q, d) in t.spaces[l])
                                     trunc_thresh = 1e-12)
             end
             p = copy(psi)
-            push!(final, sum(magnetisation(p)) / norm(p)^2)
+            push!(profiles, magnetisation(p) ./ norm(p)^2)
         end
-        @test abs(final[1] - final[2]) > 1e-10
+        @test maximum(abs.(profiles[1] .- profiles[2])) > 1e-10
+        # and total Sz is conserved at BOTH steps, which is the thing the old test measured
+        for pr in profiles
+            @test abs(sum(pr) - 0.0) < 1e-10
+        end
     end
 
     @testset "U(1) charge is conserved through the expansion" begin
