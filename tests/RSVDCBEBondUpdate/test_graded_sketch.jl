@@ -96,8 +96,21 @@ sketch_charges(Om, side::Symbol) =
         canonical!(psi, 3)
         f = bond_frame(psi, 3)
 
-        function halves(ratio)
-            Om = sector_graded_sketch(f.V0, :right, 8; comp_ratio = ratio,
+        # `comp_ratio` CAN ONLY BITE WHILE BOTH HALVES HAVE ROOM. `npre` columns of an
+        # `n`-dimensional fused space with `npre >= n` force the sketch to take EVERYTHING,
+        # ratio or no ratio -- and since `sector_graded_sketch` now redistributes a half's
+        # shortfall to the other half instead of dropping it (so the probe stays `npre` wide,
+        # `cbe.jl`), that is precisely what it does. An earlier version of this test asked for
+        # 8 columns of an 8-dimensional space and then required the ratio to change the mix,
+        # which is impossible. Measure at a width the space can actually apportion, and assert
+        # the precondition so the test cannot go vacuous if the state changes.
+        full = Dict(reachable_sectors(f.V0, 2, 3))
+        ndc = sum(max(d - sector_dim(f.V0, 1, q), 0) for (q, d) in full; init = 0)
+        ndt = sum(min(d, sector_dim(f.V0, 1, q)) for (q, d) in full; init = 0)
+        @test ndc >= 2 && ndt >= 2
+
+        function halves(ratio, npre)
+            Om = sector_graded_sketch(f.V0, :right, npre; comp_ratio = ratio,
                                       rng = Random.MersenneTwister(0xBEEF))
             Om === nothing && return (0.0, 0.0)
             perp = norm(to_concrete(perp_component_right(f.V0, Om)))
@@ -105,14 +118,22 @@ sketch_charges(Om, side::Symbol) =
             return (perp, inside)
         end
 
-        p_lo, i_lo = halves(0.25)
-        p_hi, i_hi = halves(0.75)
-        # Neither half may be missing: a pure-complement sketch is exactly what the
-        # reference warns against ("1-site components are also important").
-        @test p_lo > 1e-10 && i_lo > 1e-10
-        @test p_hi > 1e-10 && i_hi > 1e-10
-        # And the ratio has to actually do something.
-        @test p_hi / i_hi > p_lo / i_lo
+        # BOTH HALVES PRESENT, at a width where both shares are servable: `n_c = n_t = 2`, which
+        # needs 2 dimensions on each side (asserted above). A pure-complement sketch is exactly
+        # what the reference warns against ("1-site components are also important",
+        # `RSVDpreBE0SiQS.m:339`), so the balanced ratio must deliver both.
+        p_mid, i_mid = halves(0.5, 4)
+        @test p_mid > 1e-10 && i_mid > 1e-10
+
+        # THE RATIO DOES SOMETHING, stated at the endpoints rather than at 0.25 vs 0.75. Narrow
+        # widths make the interior ratios arithmetically degenerate -- `round(Int, 2*0.25)` is 0
+        # under banker's rounding, so 0.25 at `npre = 2` legitimately yields no complement column
+        # at all. `min(ndc, ndt)` is the widest probe both endpoints can serve purely.
+        w = min(ndc, ndt)
+        p_hi, i_hi = halves(1.0, w)
+        p_lo, i_lo = halves(0.0, w)
+        @test p_hi > 1e-10 && i_hi < 1e-10       # complement only
+        @test p_lo < 1e-10 && i_lo > 1e-10       # isometry only
     end
 
     @testset "layout, caps and determinism" begin
@@ -153,14 +174,33 @@ sketch_charges(Om, side::Symbol) =
             @test Om !== nothing
             @test leg_dim(Om, 3) >= 1
         end
-        # A pure-complement sketch must be orthogonal to the frame; a pure-isometry one
-        # must lie inside it. This is what distinguishes the two halves.
-        Omc = sector_graded_sketch(f.U0, :left, 6; comp_ratio = 1.0,
+        # A pure-complement sketch must be orthogonal to the frame; a pure-isometry one must
+        # lie inside it. This is what distinguishes the two halves -- but it is only asked AT A
+        # WIDTH THE HALF CAN SERVE. `sector_graded_sketch` redistributes a shortfall rather than
+        # returning a narrow probe (`cbe.jl`: a narrow probe caps the expansion however large
+        # `dex` is, and near an edge collapsed it to 0-1 columns), so requesting 6
+        # complement-only columns of a 4-dimensional complement correctly comes back with
+        # isometry columns making up the width. Asking for purity there would be asking the fix
+        # to be absent.
+        lfull = Dict(reachable_sectors(f.U0, 1, 2))
+        ldc = sum(max(d - sector_dim(f.U0, 3, q), 0) for (q, d) in lfull; init = 0)
+        ldt = sum(min(d, sector_dim(f.U0, 3, q)) for (q, d) in lfull; init = 0)
+        @test ldc >= 1 && ldt >= 1
+
+        Omc = sector_graded_sketch(f.U0, :left, ldc; comp_ratio = 1.0,
                                    rng = Random.MersenneTwister(3))
         @test norm(to_concrete(Omc - to_concrete(perp_component(f.U0, Omc)))) < 1e-10
-        Omt = sector_graded_sketch(f.U0, :left, 6; comp_ratio = 0.0,
+        Omt = sector_graded_sketch(f.U0, :left, ldt; comp_ratio = 0.0,
                                    rng = Random.MersenneTwister(3))
         @test norm(to_concrete(perp_component(f.U0, Omt))) < 1e-10
+
+        # THE SHORTFALL REDISTRIBUTION ITSELF. Past the complement's dimension the probe must
+        # stay the requested width by borrowing from the other half -- not silently narrow.
+        wide = sector_graded_sketch(f.U0, :left, ldc + ldt; comp_ratio = 1.0,
+                                    rng = Random.MersenneTwister(4))
+        @test wide !== nothing
+        @test leg_dim(wide, 3) == ldc + ldt
+        @test norm(to_concrete(wide - to_concrete(perp_component(f.U0, wide)))) > 1e-10
 
         @test_throws ArgumentError sector_graded_sketch(f.U0, :left, 6; comp_ratio = -0.1)
         @test_throws ArgumentError sector_graded_sketch(f.U0, :left, 6; comp_ratio = 1.5)

@@ -21,6 +21,9 @@ Contents, in dependency order:
   - `cbe.jl`   — the RSVD bond expansion itself (sector-graded sketch, preselection,
     final selection).
   - `cbe_bug.jl` — `cbe_bug_bond_update`: basis sweep + one centre-bond Galerkin step.
+  - `cbe_gate.jl` — the same CBE selection inside the VALIDATED odd/even gate Trotter sweep.
+    No environments, no basis sweep, one Galerkin per bond: it isolates the selection from
+    everything `cbe_bug.jl` could also be getting wrong, and is the path to confirm first.
 """
 module RSVDCBEBondUpdate
 
@@ -33,11 +36,12 @@ using ..BondUpdateBUG: SymMPS, canonical!, bond_dims, leg_dim, local_space,
                        fusion_basis, reachable_sectors, sector_dim, dual_charge,
                        align_charge, left_isometry_defect, right_isometry_defect,
                        energy, bond_gates, apply_gate, heisenberg_bond_gate,
-                       magnetisation, center_bond
+                       magnetisation, center_bond, parity_bonds
 
 include("henv.jl")
 include("cbe.jl")
 include("cbe_bug.jl")
+include("cbe_gate.jl")
 include("tdvp2_baseline.jl")
 
 export XXZTerm, XXZChain, xxz_chain, hamiltonian_terms, bond_gate,
@@ -51,6 +55,8 @@ export XXZTerm, XXZChain, xxz_chain, hamiltonian_terms, bond_gate,
        CBEExpansion, cbe_expand,
        CBEBugInfo, cbe_bug_bond_update, truncate_sweep!,
        CBEBugOptions, CBEBugRunInfo, cbe_bug!,
+       sketch_gate_left, sketch_gate_right, cbe_expand_gate,
+       cbe_gate_bond_update, cbe_gate_sweep!, cbe_gate_bug!,
        ZeroSiteH, zero_site_h, apply_zero_site,
        OneSiteH, one_site_h, apply_one_site, TDVP2Info, tdvp2_step!, tensor_elements
 

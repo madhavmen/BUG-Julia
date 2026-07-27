@@ -298,16 +298,42 @@ function sector_graded_sketch(frame, side::Symbol, npre::Int;
     dT    = Dict(q => sector_dim(frame, fl, q) for q in keys(dfull))
     dC    = Dict(q => max(dfull[q] - dT[q], 0) for q in keys(dfull))
 
-    # `n_c + n_t == npre` exactly, and either may be zero -- that is what makes the pure
-    # cases reachable. `npre >= 1` guarantees the total is non-empty.
+    # `n_c + n_t == npre` is only the TARGET split, and either may be zero -- that is what
+    # makes the pure cases reachable.
     n_c = clamp(round(Int, npre * comp_ratio), 0, npre)
     n_t = npre - n_c
+
+    # THE SHORTFALL IS REDISTRIBUTED, NOT DROPPED -- MEASURED. `_alloc_columns` caps every
+    # sector at its own dimension, so a half whose subspace is small delivers fewer columns
+    # than asked. `npre` is the probe's WIDTH, and the expansion can admit at most that many
+    # directions however large `dex` is -- they ARE the sketch's columns. Near a chain edge the
+    # opposite frame's complement is 0- or 1-dimensional, so a complement-weighted split
+    # collapsed the probe to 0-1 columns and the expansion silently declined WITH ROOM TO
+    # SPARE: at `comp_ratio = 1.0`, `dex = 64`, an L=8 warm state gave bond 1 `rank 2 -> (2,2)`
+    # and bond 3 `6 -> (6,6)`, leaving right residuals of 3.1e-4 and 0.19 untouched. One
+    # blocked narrow bond then caps every bond inward -- the staircase profile the MPO sweep
+    # froze into. Handing the shortfall to the other half keeps the probe `npre` wide whenever
+    # the fused space has the dimensions for it, which is what the RSVD oversampling guarantee
+    # assumes in the first place.
+    cc = _alloc_columns(dC, n_c)
+    n_t += n_c - sum(values(cc); init = 0)        # complement short -> widen the isometry half
+    ct = _alloc_columns(dT, n_t)
+    short = n_t - sum(values(ct); init = 0)
+    short > 0 && (cc = _alloc_columns(dC, n_c + short))  # and back, if that half is short too
+
+    # NEVER RETURN AN EMPTY PROBE while the space has dimensions. The sketch probes the frame
+    # on the OPPOSITE side of the bond, so a saturated frame is still a perfectly good probe --
+    # `Om = frame` is the EXACT probe. Declining here refuses to expand one side of a bond
+    # because the other was full, the edge blockage above in its purest form.
+    # (`comp_ratio = 1.0` on a saturated frame hits it: `dC` is all zeros and `n_t` is 0.)
+    if sum(values(cc); init = 0) + sum(values(ct); init = 0) == 0
+        ct = _alloc_columns(dfull, npre)
+    end
 
     blocks = Any[]
 
     # Complement half: random, then the frame projected OUT.
-    RC = n_c > 0 ? _trim_per_sector(_randomize_like(F, rng), 3, _alloc_columns(dC, n_c)) :
-                   nothing
+    RC = _trim_per_sector(_randomize_like(F, rng), 3, cc)
     if RC !== nothing
         C = to_concrete(perp_of(frame, tolayout(RC)))
         norm(C) > 0 && push!(blocks, C)
@@ -316,8 +342,7 @@ function sector_graded_sketch(frame, side::Symbol, npre::Int;
     # Isometry half: random, then the frame projected IN. `R - perp(R)` is the projection
     # onto the frame's span, built from the same primitive so the two halves can never
     # disagree about what "the frame's span" is.
-    RT = n_t > 0 ? _trim_per_sector(_randomize_like(F, rng), 3, _alloc_columns(dT, n_t)) :
-                   nothing
+    RT = _trim_per_sector(_randomize_like(F, rng), 3, ct)
     if RT !== nothing
         R = tolayout(RT)
         T = to_concrete(R - to_concrete(perp_of(frame, R)))
@@ -468,8 +493,30 @@ have found -- one application of `H`, sketched -- and the per-bond Galerkin upda
 the step in it. So there is no `expv` per bond on a one-site object, only the `O(χ²)`
 matrix-free 0-site Krylov, and no rank-4 tensor anywhere.
 """
-function cbe_expand(f::BondFrame, h::XXZChain, i::Int,
-                    lch::ChannelSet, rch::ChannelSet;
+cbe_expand(f::BondFrame, h::XXZChain, i::Int,
+           lch::ChannelSet, rch::ChannelSet; kwargs...) =
+    cbe_expand(f,
+               Om -> sketch_h_left(f, h, i, lch, rch, Om),
+               Om -> sketch_h_right(f, h, i, lch, rch, Om); kwargs...)
+
+"""
+    cbe_expand(f, skl, skr; kwargs...) -> CBEExpansion
+
+The SELECTION half of controlled bond expansion, with the H-action supplied as two
+closures instead of read off a global Hamiltonian:
+
+  - `skl(Om)` -- `(H Theta) Om†` in `U0`'s layout `(link_l, site_l, g)`, for an `Om` in
+    `V0`'s layout. The candidate space the LEFT frame expands into.
+  - `skr(Om)` -- the mirror, `(g, site_r, link_r)` from an `Om` in `U0`'s layout.
+
+Everything downstream of those two calls -- the growth budget, the sector-graded sketch,
+the two preselections with `RepairOrtho`, the weight ranking of the final selection, the
+`Empty` branch, the direct sums -- is shared. That is the point of the split: the
+gate-based path (`cbe_gate.jl`) and the global-MPO path exercise the SAME selection code,
+so confirming CBE works against a validated Trotter sweep also validates the selection the
+Lubich sweep depends on. Nothing here knows which caller it has.
+"""
+function cbe_expand(f::BondFrame, skl, skr;
                     dex::Int = 0,
                     dover::Union{Nothing, Int} = nothing,
                     comp_ratio::Float64 = 0.5,
@@ -522,16 +569,14 @@ function cbe_expand(f::BondFrame, h::XXZChain, i::Int,
     # ---- preselection: sketch H from each side, project off the frame ----------
     QL, err_l = if dex_l > 0
         OmR = sector_graded_sketch(V0, :right, npre; comp_ratio = comp_ratio, rng = rng)
-        OmR === nothing ? (nothing, 0.0) :
-            _preselect_left(U0, sketch_h_left(f, h, i, lch, rch, OmR), stol_pre)
+        OmR === nothing ? (nothing, 0.0) : _preselect_left(U0, skl(OmR), stol_pre)
     else
         (nothing, 0.0)
     end
 
     QR, err_r = if dex_r > 0
         OmL = sector_graded_sketch(U0, :left, npre; comp_ratio = comp_ratio, rng = rng)
-        OmL === nothing ? (nothing, 0.0) :
-            _preselect_right(V0, sketch_h_right(f, h, i, lch, rch, OmL), stol_pre)
+        OmL === nothing ? (nothing, 0.0) : _preselect_right(V0, skr(OmL), stol_pre)
     else
         (nothing, 0.0)
     end
@@ -540,26 +585,59 @@ function cbe_expand(f::BondFrame, h::XXZChain, i::Int,
     (QL === nothing && QR === nothing) && return none()
 
     # ---- final selection: rank the candidates by their weight in H Theta ------
-    TLC, TRC, err_fnl = if preselect_only || QL === nothing || QR === nothing
-        # With one side empty there is no UMU to form; take what the preselection found.
-        (QL === nothing ? nothing : _trim_total(QL, 3, dex_l),
-         QR === nothing ? nothing : _trim_total(QR, 1, dex_r),
-         0.0)
-    else
-        UMU = to_concrete(permutedims(
-            contract(sketch_h_left(f, h, i, lch, rch, QR), (1, 2), QL', (1, 2)), (2, 1)))
-        # EMPTY: the left and right candidate spaces share no charge sector, so no pair of
-        # them can carry amplitude (the reference's `Empty` branch, :461; the same
-        # constraint `pairable_charges` enforces for the random fill).
-        if length(UMU.qlabels) == 0 || norm(UMU) < 1e-11
-            (nothing, nothing, 0.0)
-        else
-            res = svd(UMU, (1,); Nkeep = min(dex_l, dex_r), cutoff = stol_fnl,
-                      get_lists = true)
-            (to_concrete(contract(QL, (3,), res.U, (1,))),
-             to_concrete(contract(res.Vd, (2,), QR, (1,))),
-             _trunc_weight(res))
+    #
+    # PER SIDE, NOT JOINTLY -- and the two-sided expansion is why. The reference's CBE is
+    # DIRECTIONAL: `CBE1SiQS(..., direction)` expands one side per call ('>>' or '<<'), so
+    # the joint matrix `UMU = QL†(HΘ)QR` only ever ranks the one side being expanded. Reusing
+    # it to rank BOTH sides at once imports a coupling that is not in the reference, and it
+    # lets a saturated side veto its partner. Two ways, both MEASURED on an L=8 warm state at
+    # `dex = 64`:
+    #
+    #   * `Nkeep = min(dex_l, dex_r)` throttles each side to the OTHER side's headroom. Bond 6
+    #     has `room_r = d*chi_r - r = 2*2 - 3 = 1`, so the left was capped at one direction and
+    #     its residual stayed at 9.97e-3 while the right reached 7.5e-20. Bond 4 the same.
+    #   * the `Empty` verdict was GLOBAL. At bond 3 the left frame already spanned the whole
+    #     left image (residual 8.4e-12), so `QL` was numerical noise and `norm(UMU) < 1e-11` --
+    #     which returned NOTHING ON EITHER SIDE, abandoning a right residual of 0.19. A
+    #     negligible `UMU` means no candidate PAIR carries weight with both sides simultaneously
+    #     outside their frames; it says nothing about the one-sided components, which are
+    #     exactly the "1-site" contributions the reference insists matter (`:339`).
+    #
+    # So the joint SVD is used only where it can serve a side's whole budget; otherwise that
+    # side falls back to its own preselected candidates, which are ALREADY weight-ordered (the
+    # preselection SVD's singular values are the weights in the sketched action). Each side
+    # decides independently, and either may come back empty without silencing the other.
+    njl = QL === nothing ? 0 : leg_dim(QL, 3)
+    njr = QR === nothing ? 0 : leg_dim(QR, 1)
+
+    joint, resj, err_fnl = 0, nothing, 0.0
+    if !preselect_only && njl > 0 && njr > 0
+        UMU = to_concrete(permutedims(contract(skl(QR), (1, 2), QL', (1, 2)), (2, 1)))
+        # EMPTY: the left and right candidate spaces share no charge sector, so no pair of them
+        # can carry amplitude (the reference's `Empty` branch, :461; the same constraint
+        # `pairable_charges` enforces for the random fill). Now only disables the JOINT ranking.
+        if length(UMU.qlabels) > 0 && norm(UMU) >= 1e-11
+            joint = min(dex_l, dex_r, njl, njr)
+            if joint > 0
+                resj = svd(UMU, (1,); Nkeep = joint, cutoff = stol_fnl, get_lists = true)
+                err_fnl = _trunc_weight(resj)
+            end
         end
+    end
+
+    TLC = if njl == 0
+        nothing
+    elseif resj !== nothing && dex_l <= joint
+        to_concrete(contract(QL, (3,), resj.U, (1,)))
+    else
+        _trim_total(QL, 3, dex_l)
+    end
+    TRC = if njr == 0
+        nothing
+    elseif resj !== nothing && dex_r <= joint
+        to_concrete(contract(resj.Vd, (2,), QR, (1,)))
+    else
+        _trim_total(QR, 1, dex_r)
     end
 
     (TLC === nothing && TRC === nothing) && return CBEExpansion(U0, V0, 0, 0, err_pre, 0.0)
