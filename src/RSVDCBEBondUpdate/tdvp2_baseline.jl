@@ -80,11 +80,17 @@ end
 Per-step record: `max_bond` after the step, `theta_elements` the largest two-site block
 built (the memory figure CBE-BUG is measured against), and `discarded` the largest
 relative weight a bond truncation threw away.
+
+`peak_elements` is the WORKING SET, defined identically to `CBEBugInfo.peak_elements`:
+`state + transients alive at that moment`. Here the transient is `Theta`, and it is alive
+*alongside* `psi[i]` and `psi[i+1]` -- the two-site block duplicates them rather than
+replacing them, which is the cost CBE-BUG avoids by never forming one.
 """
 struct TDVP2Info
     max_bond::Int
     theta_elements::Int
     discarded::Float64
+    peak_elements::Int
 end
 
 "Total stored elements of a TLArray -- the honest size of the object, block-sparse."
@@ -102,6 +108,7 @@ function _tdvp2_bond!(psi::SymMPS, h::XXZChain, i::Int, tau::ComplexF64, dir::Sy
                       maxdim, trunc_thresh, maxiter, tol, acc)
     Theta = to_concrete(psi[i] * psi[i + 1])        # rank 4 -- the object being compared
     acc[2] = max(acc[2], tensor_elements(Theta))
+    acc[4] = max(acc[4], _state_stored(psi) + tensor_elements(Theta))
     Theta = expv(x -> apply_h_two_site(x, h, i, lch, rch), tau, Theta;
                  hermitian = true, maxiter = maxiter, tol = tol)
 
@@ -156,7 +163,7 @@ function tdvp2_step!(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     L >= 2 || throw(ArgumentError("tdvp2_step! needs at least two sites"))
     length(h) == L || throw(DimensionMismatch(
         "chain has $(length(h)) sites, state has $L"))
-    acc = Any[0, 0, 0.0]
+    acc = Any[0, 0, 0.0, 0]
     half = tau / 2
 
     # O(L) environments, as in `cbe_bug_bond_update`: each half-sweep carries its own side
@@ -181,7 +188,7 @@ function tdvp2_step!(psi::SymMPS, h::XXZChain, tau::ComplexF64;
                            maxdim, trunc_thresh, maxiter, tol, acc)
     end
 
-    return TDVP2Info(maximum(bond_dims(psi); init = 0), acc[2], acc[3])
+    return TDVP2Info(maximum(bond_dims(psi); init = 0), acc[2], acc[3], acc[4])
 end
 
 tdvp2_step!(psi::SymMPS, h::XXZChain, tau::Number; kwargs...) =

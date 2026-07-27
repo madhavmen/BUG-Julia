@@ -408,9 +408,11 @@ end
 
 What [`cbe_expand`](@ref) produced at one bond.
 
-  - `U_ex`, `V_ex`  the expanded frames, `[U0 | new]` and `[V0 ; new]`. Both CONTAIN the
-    old frame as their first block, which is what makes `Ŝ₀ = U_ex† Θ₀ V_ex†` lossless
-    and `tau = 0` the identity on the state.
+  - `U_ex`, `V_ex`  the expanded frames. They SPAN `[U0 | new]` but are ROTATED within that
+    span, so neither contains the old frame as a block. Spanning it is what keeps
+    `Ŝ₀ = U_ex† Θ₀ V_ex†` lossless; *not* containing it is what keeps `Ŝ₀` free of an
+    identically-zero block, which Telum's strict `sv > cutoff*sv_max` selector would delete
+    at the next gauge move. See the rotation block in [`cbe_expand`](@ref).
   - `n_new_l`, `n_new_r`  new directions admitted on each side.
   - `err_pre`  weight the preselection SVDs discarded (both sides combined in quadrature).
   - `err_fnl`  weight the final selection discarded -- the honest measure of what the
@@ -451,6 +453,12 @@ Keywords:
   - `preselect_only` -- skip the final selection and take the preselected candidates
     directly, the reference's `'-p'` mode. Diagnostic: it isolates how much the
     weight-ranking is worth.
+
+THE K/L ODEs ARE NEVER SOLVED. This routine supplies the DIRECTIONS those solves would
+have found -- one application of `H`, sketched -- and the per-bond Galerkin update in
+[`cbe_bug_bond_update`](@ref) then builds the Krylov basis on the expanded bond and takes
+the step in it. So there is no `expv` per bond on a one-site object, only the `O(χ²)`
+matrix-free 0-site Krylov, and no rank-4 tensor anywhere.
 """
 function cbe_expand(f::BondFrame, h::XXZChain, i::Int,
                     lch::ChannelSet, rch::ChannelSet;
@@ -536,6 +544,13 @@ function cbe_expand(f::BondFrame, h::XXZChain, i::Int,
          leg_dim(TRC, 1))
     end
 
+    # NO ROTATION HERE, deliberately. An earlier version rotated the expanded frame into the
+    # singular basis of `Ŝ₀ + tau·H₀Ŝ₀`, on the theory that the gauge move was deleting the
+    # expansion. It was not: an expansion is LOSSLESS, so it cannot change the state's
+    # Schmidt rank, and `canonical!` collapsing a widened bond back is correct reporting
+    # rather than deletion. Rank grows only where the state is EVOLVED in the widened space,
+    # which is what the per-bond Algorithm 7 update in `cbe_bug_bond_update` is for. The
+    # rotation was lossless but bought nothing, so it is gone.
     if sulz_cap
         leg_dim(U_ex, 3) <= 2r || error(
             "CBE expansion broke the Sulz bound on the left: $(leg_dim(U_ex, 3)) > 2r = $(2r)")

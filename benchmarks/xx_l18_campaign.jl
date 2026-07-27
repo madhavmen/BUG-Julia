@@ -30,8 +30,21 @@ const OUTDIR = joinpath(@__DIR__, "..", "results")
 "Exact <Sz_j(t)> for the L=18 domain wall (free fermions)."
 exact_profile(t) = xx_free_fermion_sz(L, t; J = 1.0, occupied = 1:(L ÷ 2))
 
-"L-infinity error of an MPS magnetisation profile against the exact one."
-profile_err(psi, t) = maximum(abs.(magnetisation(copy(psi)) .- exact_profile(t)))
+"""
+L-infinity error of an MPS magnetisation profile against the exact one.
+
+DIVIDES BY THE NORM, and that is not cosmetic. `site_expval` returns the unnormalised
+`<psi|Sz_j|psi>`, and BOTH integrators shed norm as their truncations discard weight -- by
+t=15 at maxdim=32 that is a percent-level effect. Without the division the plot would
+report norm loss as magnetisation error, and would do so unequally between the two methods
+(they discard different weight), which is exactly the comparison being made. The raw norm
+is recorded separately in the CSV so the loss stays visible rather than hidden by this.
+"""
+function profile_err(psi, t)
+    p = copy(psi)
+    n2 = norm(p)^2                     # before measuring: canonical! preserves it anyway
+    return maximum(abs.(magnetisation(p) ./ n2 .- exact_profile(t)))
+end
 
 "Largest stored elements of any two-site block the step would need. CBE-BUG never builds
 one, so this is 0 for it by construction -- see docs/cbe_bug.md section 2b."
