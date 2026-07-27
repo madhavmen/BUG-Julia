@@ -278,8 +278,12 @@ function sector_graded_sketch(frame, side::Symbol, npre::Int;
                               rng::AbstractRNG = MersenneTwister(0x5EED),
                               tag::AbstractString = "cbeG")
     side in (:left, :right) || throw(ArgumentError("side must be :left or :right"))
-    0.0 < comp_ratio < 1.0 || throw(ArgumentError(
-        "comp_ratio must be strictly between 0 and 1, got $comp_ratio"))
+    # The ENDPOINTS ARE ALLOWED, and they are the interesting A/B: `1.0` is
+    # complement-only (the pure discarded space), `0.0` isometry-only. An earlier version
+    # demanded strict inequality and also floored both halves at one column, so
+    # "complement only" silently still drew one kept-space column and could not be measured.
+    0.0 <= comp_ratio <= 1.0 || throw(ArgumentError(
+        "comp_ratio must be in [0, 1], got $comp_ratio"))
     npre >= 1 || throw(ArgumentError("npre must be at least 1, got $npre"))
 
     fl = side === :left ? 3 : 1                       # the frame's bond leg
@@ -294,13 +298,16 @@ function sector_graded_sketch(frame, side::Symbol, npre::Int;
     dT    = Dict(q => sector_dim(frame, fl, q) for q in keys(dfull))
     dC    = Dict(q => max(dfull[q] - dT[q], 0) for q in keys(dfull))
 
-    n_c = max(round(Int, npre * comp_ratio), 1)
-    n_t = max(npre - n_c, 1)
+    # `n_c + n_t == npre` exactly, and either may be zero -- that is what makes the pure
+    # cases reachable. `npre >= 1` guarantees the total is non-empty.
+    n_c = clamp(round(Int, npre * comp_ratio), 0, npre)
+    n_t = npre - n_c
 
     blocks = Any[]
 
     # Complement half: random, then the frame projected OUT.
-    RC = _trim_per_sector(_randomize_like(F, rng), 3, _alloc_columns(dC, n_c))
+    RC = n_c > 0 ? _trim_per_sector(_randomize_like(F, rng), 3, _alloc_columns(dC, n_c)) :
+                   nothing
     if RC !== nothing
         C = to_concrete(perp_of(frame, tolayout(RC)))
         norm(C) > 0 && push!(blocks, C)
@@ -309,7 +316,8 @@ function sector_graded_sketch(frame, side::Symbol, npre::Int;
     # Isometry half: random, then the frame projected IN. `R - perp(R)` is the projection
     # onto the frame's span, built from the same primitive so the two halves can never
     # disagree about what "the frame's span" is.
-    RT = _trim_per_sector(_randomize_like(F, rng), 3, _alloc_columns(dT, n_t))
+    RT = n_t > 0 ? _trim_per_sector(_randomize_like(F, rng), 3, _alloc_columns(dT, n_t)) :
+                   nothing
     if RT !== nothing
         R = tolayout(RT)
         T = to_concrete(R - to_concrete(perp_of(frame, R)))
@@ -465,7 +473,8 @@ function cbe_expand(f::BondFrame, h::XXZChain, i::Int,
                     dex::Int = 0,
                     dover::Union{Nothing, Int} = nothing,
                     comp_ratio::Float64 = 0.5,
-                    sulz_cap::Bool = true,
+                    sulz_cap::Bool = false,
+                    rmax::Int = 0,
                     preselect_only::Bool = false,
                     stol_pre::Float64 = 1e-10,
                     stol_fnl::Float64 = 1e-13,
@@ -477,8 +486,33 @@ function cbe_expand(f::BondFrame, h::XXZChain, i::Int,
     # Room to expand, per side: the local space minus what the frame already spans.
     room_l = leg_dim(U0, 1) * leg_dim(U0, 2) - r
     room_r = leg_dim(V0, 2) * leg_dim(V0, 3) - r
-    budget = dex <= 0 ? r : dex
-    sulz_cap && (budget = min(budget, r))
+    # GROWTH IS NEIGHBOURHOOD-COUPLED, as in the reference (`RSVDpreBE0SiQS.m:66-77`):
+    #
+    #   Dmax = max([MDB0(1), MDB1(1), MDB2(1)])   % LEFT, centre and RIGHT bond dims
+    #   Dex  = ceil(1.1*Dmax) - MDB1(1)           % target 1.1x the neighbourhood max
+    #   Dex  = min(Dex, ceil(2*MDB1(1)))          % cap the EXPANSION at 2r => total 3r
+    #
+    # The coupling is the point: it lets a WIDE bond pull its narrow neighbours up. A purely
+    # local `budget = r` lets a bond sitting at r=1 propose only one direction, so growth
+    # crawls one direction per bond per step and stalls -- measured at L=8, `bond_dims`
+    # froze at [1,1,2,4,2,1,1] while 2-site TDVP had [2,4,6,8,6,4,2] at the same time, and
+    # the centre then hit `room_l = d·χ_{i-1} − r = 0` and could not expand at all.
+    dmax = max(leg_dim(U0, 1), r, leg_dim(V0, 3))
+    budget = dex <= 0 ? max(ceil(Int, 1.1 * dmax) - r, 1) : dex
+    # NO SULZ BOUND BY DEFAULT. The `2r` bound belongs to the RANK-ADAPTIVE BUG, and this
+    # method is not that -- the rank here is set by CBE's selection, so the bound has nothing
+    # to enforce and only throttles. Growth is limited by `room` (the local space, a hard
+    # limit) and by `maxdim` at the truncation, which is where a rank ceiling belongs.
+    #
+    # Two earlier readings of it, both wrong and both measured:
+    #   * per-bond `min(budget, r)` -- caps each bond at twice its OWN rank. A bond at r=1
+    #     could never exceed 2, the narrow bonds never opened, and `room_l = d·χ_{i-1} − r`
+    #     then pinned the centre: L=8 froze at [1,1,2,4,2,1,1] against TDVP2's [2,4,6,8,6,4,2].
+    #   * even read globally (`2*rmax`), it is still a rank-adaptive-BUG constraint that does
+    #     not apply here.
+    # `sulz_cap = true` keeps the global form available purely as an A/B.
+    rm = rmax > 0 ? rmax : r
+    sulz_cap && (budget = min(budget, max(2 * rm - r, 0)))
     dex_l, dex_r = min(budget, room_l), min(budget, room_r)
     (dex_l <= 0 && dex_r <= 0) && return none()      # both frames already complete
 
@@ -552,10 +586,15 @@ function cbe_expand(f::BondFrame, h::XXZChain, i::Int,
     # which is what the per-bond Algorithm 7 update in `cbe_bug_bond_update` is for. The
     # rotation was lossless but bought nothing, so it is gone.
     if sulz_cap
-        leg_dim(U_ex, 3) <= 2r || error(
-            "CBE expansion broke the Sulz bound on the left: $(leg_dim(U_ex, 3)) > 2r = $(2r)")
-        leg_dim(V_ex, 1) <= 2r || error(
-            "CBE expansion broke the Sulz bound on the right: $(leg_dim(V_ex, 1)) > 2r = $(2r)")
+        # Only checked when the bound is deliberately switched on, and in its GLOBAL form
+        # (`2*rmax`) -- the per-bond reading was wrong, see the budget block above.
+        lim = 2 * rm
+        leg_dim(U_ex, 3) <= lim || error(
+            "CBE expansion broke the global Sulz bound on the left: " *
+            "$(leg_dim(U_ex, 3)) > 2*rmax = $lim")
+        leg_dim(V_ex, 1) <= lim || error(
+            "CBE expansion broke the global Sulz bound on the right: " *
+            "$(leg_dim(V_ex, 1)) > 2*rmax = $lim")
     end
 
     return CBEExpansion(U_ex, V_ex, n_l, n_r, err_pre, err_fnl)

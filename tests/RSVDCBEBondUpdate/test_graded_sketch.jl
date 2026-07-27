@@ -143,8 +143,27 @@ sketch_charges(Om, side::Symbol) =
         again = sector_graded_sketch(f.U0, :left, 6; rng = Random.MersenneTwister(1))
         @test norm(to_concrete(OmL - again)) == 0.0
 
-        @test_throws ArgumentError sector_graded_sketch(f.U0, :left, 6; comp_ratio = 0.0)
-        @test_throws ArgumentError sector_graded_sketch(f.U0, :left, 6; comp_ratio = 1.0)
+        # The ENDPOINTS ARE VALID and are the A/B worth running: 1.0 draws only the
+        # complement (discarded) space, 0.0 only the isometry (kept) space. An earlier
+        # version rejected both AND floored each half at one column, so "complement only"
+        # silently still drew a kept-space column and could not be measured at all.
+        for cr in (0.0, 1.0)
+            Om = sector_graded_sketch(f.U0, :left, 6; comp_ratio = cr,
+                                      rng = Random.MersenneTwister(2))
+            @test Om !== nothing
+            @test leg_dim(Om, 3) >= 1
+        end
+        # A pure-complement sketch must be orthogonal to the frame; a pure-isometry one
+        # must lie inside it. This is what distinguishes the two halves.
+        Omc = sector_graded_sketch(f.U0, :left, 6; comp_ratio = 1.0,
+                                   rng = Random.MersenneTwister(3))
+        @test norm(to_concrete(Omc - to_concrete(perp_component(f.U0, Omc)))) < 1e-10
+        Omt = sector_graded_sketch(f.U0, :left, 6; comp_ratio = 0.0,
+                                   rng = Random.MersenneTwister(3))
+        @test norm(to_concrete(perp_component(f.U0, Omt))) < 1e-10
+
+        @test_throws ArgumentError sector_graded_sketch(f.U0, :left, 6; comp_ratio = -0.1)
+        @test_throws ArgumentError sector_graded_sketch(f.U0, :left, 6; comp_ratio = 1.5)
         @test_throws ArgumentError sector_graded_sketch(f.U0, :left, 0)
         @test_throws ArgumentError sector_graded_sketch(f.U0, :sideways, 6)
     end

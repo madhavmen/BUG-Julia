@@ -315,7 +315,7 @@ function cbe_bug_bond_update(psi::SymMPS, h::XXZChain, tau::ComplexF64;
                              dex::Int = 0,
                              dover::Union{Nothing, Int} = nothing,
                              comp_ratio::Float64 = 0.5,
-                             sulz_cap::Bool = true,
+                             sulz_cap::Bool = false,
                              preselect_only::Bool = false,
                              centre_expand::Bool = true,
                              maxdim::Int = 200,
@@ -335,8 +335,11 @@ function cbe_bug_bond_update(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     err_fnl  = 0.0
     peak     = 0
 
-    exkw = (dex = dex, dover = dover, comp_ratio = comp_ratio,
-            sulz_cap = sulz_cap, preselect_only = preselect_only, rng = rng)
+    # `rmax` is the state's widest bond, so the (optional) Sulz bound is read GLOBALLY
+    # rather than per bond. Captured once, before the sweeps widen anything.
+    exkw = (dex = dex, dover = dover, comp_ratio = comp_ratio, sulz_cap = sulz_cap,
+            rmax = maximum(bond_dims(psi); init = 0),
+            preselect_only = preselect_only, rng = rng)
 
 
     function record!(ex)
@@ -505,7 +508,7 @@ Base.@kwdef struct CBEBugOptions
     dex::Int = 0
     dover::Union{Nothing, Int} = nothing
     comp_ratio::Float64 = 0.5
-    sulz_cap::Bool = true
+    sulz_cap::Bool = false
     preselect_only::Bool = false
     centre_expand::Bool = true
     maxdim::Int = 200
