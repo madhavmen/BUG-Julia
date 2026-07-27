@@ -61,9 +61,9 @@ for cr in (1.0, 0.75, 0.5, 0.25, 0.0)
     flush(stdout)
 end
 
-# 2. is the SULZ CAP the real throttle rather than the ratio? With it on, the budget is
-#    min(dex, r) = r, so a bond can at best double -- and `room_l = chi_{i-1}*d - r` can make
-#    even that zero. Lift it and give a fixed generous budget to separate the two effects.
+# 2. Separate the RATIO from the BUDGET. Part 1 uses the reference's neighbourhood-coupled
+#    default (`ceil(1.1*Dmax) - r`); here a fixed generous `dex` isolates whether any
+#    remaining gap is candidate QUALITY (the ratio) or candidate COUNT (the budget).
 println()
 for (cr, dex, sc) in ((1.0, 8, false), (0.5, 8, false), (1.0, 16, false), (0.5, 16, false))
     e, bd, w = run(comp_ratio = cr, dex = dex, sulz_cap = sc)
