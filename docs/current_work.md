@@ -1,8 +1,37 @@
-# RSVD-CBE for BUG — session handoff (2026-07-27)
+# RSVD-CBE for BUG — current work
 
-Branch `feature/cbe-bug`, pushed to `origin`. Read this before touching
-`src/RSVDCBEBondUpdate/`; it records what was fixed, what was **ruled out** (so it is not
-re-investigated), and what is left.
+Branch `feature/cbe-bug`. Read this before touching `src/RSVDCBEBondUpdate/`; it records what
+was fixed, what was **ruled out** (so it is not re-investigated), and what is left.
+
+---
+
+## 0. The two paths, and what to call them
+
+| | `cbe_bond_update` (`cbe_bond_update.jl`) | `cbe_lubich_sweep` (`cbe_lubich.jl`) |
+|---|---|---|
+| `H` at a bond | the **bare two-site gate** | an **effective operator dressed with channel environments**, carrying every term of `H` |
+| composition | odd/even Trotter, Strang | none — one step, no splitting |
+| Galerkin steps per step | one per bond (`L−1`) | **one**, at the centre |
+| basis update | `canonical!` before each bond | K-sweep + L-sweep with carries |
+| built from | `xx_bond_gate`, `heisenberg_bond_gate` | `xxz_chain` + `henv.jl` |
+| rank-4 tensor | yes, one per matvec inside `apply_s` | **never** |
+| drivers | `cbe_bond_update_sweep!`, `cbe_bond_update_bug!` | `cbe_lubich_bug!` |
+| status | the **validated** path; the diagnostic vehicle | the **production target** |
+
+**Neither path ever applies a global `H` to the state**, and earlier wording in these docs that
+said so was wrong. Every application is an EFFECTIVE LOCAL operator: a two-site effective `H`
+for the basis sketch (`sketch_h_left/right`, built from the left channels at link `i`, the right
+channels at link `i+2`, and the local terms) and a zero-site effective `H` for the Galerkin step
+(`zero_site_h` contracted with the augmented frames). The only defensible sense of "global" is
+*which terms the effective operator contains* — all of `H` for `cbe_lubich_sweep`, versus only
+the local bond term for `cbe_bond_update`, where the rest of the chain reaches the bond solely
+through the canonical gauge. `henv.jl:10` says it outright: **NOT A SYMMETRIC MPO** — it is an
+MPO contraction with the virtual leg *named* rather than fused.
+
+Older names, for reading past commits: `cbe_gate_bond_update` → `cbe_bond_update`,
+`cbe_gate_sweep!` → `cbe_bond_update_sweep!`, `cbe_gate_bug!` → `cbe_bond_update_bug!`,
+`cbe_expand_gate` → `cbe_expand_bond`, `sketch_gate_*` → `sketch_bond_*`,
+`cbe_bug_bond_update` → `cbe_lubich_sweep`, `cbe_bug!` → `cbe_lubich_bug!`.
 
 ---
 
@@ -14,15 +43,15 @@ was **two defects in the CBE selection**, not in the sweep. Once fixed, the gate
 Lubich/MPO sweeps both reach the same profile and both beat the validated `bond_update_bug!`.
 
 ```
-XX domain wall, L=8, dt=0.02, t=0.5, maxdim=32, dex=8   (benchmarks/lubich_vs_gate_rank.jl)
+XX domain wall, L=8, dt=0.02, t=0.5, maxdim=32, dex=8   (benchmarks/lubich_vs_bond_update_rank.jl)
 
 bond_update_bug!      err 2.09e-04   profile [2,4,7,12,8,4,2]   172.7s
-cbe_gate_bug! (gate)  err 1.37e-06   profile [2,4,8,12,8,4,2]    31.1s
-cbe_bug!   (Lubich)   err 8.44e-06   profile [2,4,8,12,8,4,2]    32.2s
+cbe_bond_update_bug! (gate)  err 1.37e-06   profile [2,4,8,12,8,4,2]    31.1s
+cbe_lubich_bug!   (Lubich)   err 8.44e-06   profile [2,4,8,12,8,4,2]    32.2s
 ```
 
 (That run set `dex = 8` by hand. Since §7.1 the DEFAULT reaches the same regime, so
-`lubich_vs_gate_rank.jl`'s explicit `DEX = 8` is now redundant rather than load-bearing.)
+`lubich_vs_bond_update_rank.jl`'s explicit `DEX = 8` is now redundant rather than load-bearing.)
 
 Tests green: **1019/1019** `tests/RSVDCBEBondUpdate/runtests.jl`, **722/722**
 `tests/runtests.jl` (the validated integrator, untouched).
@@ -48,19 +77,19 @@ made the result transfer back to the Lubich path for free.
 ```julia
 cbe_expand(f::BondFrame, skl, skr; kwargs...)          # the selection core
 cbe_expand(f, h, i, lch, rch; kwargs...)               # MPO wrapper  (cbe.jl)
-cbe_expand_gate(f, gate; kwargs...)                    # gate wrapper (cbe_gate.jl)
+cbe_expand_bond(f, gate; kwargs...)                    # gate wrapper (cbe_bond_update.jl)
 ```
 
 Both existing call signatures are unchanged.
 
-### New file: `src/RSVDCBEBondUpdate/cbe_gate.jl`
+### New file: `src/RSVDCBEBondUpdate/cbe_bond_update.jl`
 
 | function | role |
 |---|---|
-| `sketch_gate_left/right(f, gate, Om)` | `(gate Θ) Ω†` **without ever forming the rank-4 `HΘ`** — `Ω` is folded into the gate first; largest intermediate is `O(d²·g·r)` |
-| `cbe_expand_gate(f, gate; …)` | the shared selection with gate sketch closures |
-| `cbe_gate_bond_update(f, gate, tau; …)` | drop-in for `BondUpdateBUG.kls_bond_update`; same return fields |
-| `cbe_gate_sweep!` / `cbe_gate_bug!` | the validated `parity_sweep!` / Strang driver, CBE basis update |
+| `sketch_bond_left/right(f, gate, Om)` | `(gate Θ) Ω†` **without ever forming the rank-4 `HΘ`** — `Ω` is folded into the gate first; largest intermediate is `O(d²·g·r)` |
+| `cbe_expand_bond(f, gate; …)` | the shared selection with gate sketch closures |
+| `cbe_bond_update(f, gate, tau; …)` | drop-in for `BondUpdateBUG.kls_bond_update`; same return fields |
+| `cbe_bond_update_sweep!` / `cbe_bond_update_bug!` | the validated `parity_sweep!` / Strang driver, CBE basis update |
 
 It replaces **both** of `kls_bond_update`'s basis mechanisms at once: the two K/L ODE solves
 (`expv` on the non-Hermitian `P⊥H_K`) and `missing_fill`'s random per-sector seeds. The S-step
@@ -117,7 +146,7 @@ left_residual(U, f, gate) = ‖HΘ − U U† HΘ‖ / ‖HΘ‖
 
 Printed as a **number**, per bond, next to `r → (dim_l, dim_r)` before and after. "Refused with
 room to spare" is then visible at a glance; a pass/fail assertion hides *which side* failed.
-Lives in `tests/RSVDCBEBondUpdate/test_cbe_gate.jl`; the ~1 min regression probe is
+Lives in `tests/RSVDCBEBondUpdate/test_cbe_bond_update.jl`; the ~1 min regression probe is
 `benchmarks/probe_edge_refusal.jl` (vs ~10 min for the suite).
 
 **Method note that would have saved several cycles:** after any change, check the bond profile
@@ -144,20 +173,20 @@ separates "no effect" from "small effect" in seconds.
 ## 6. Current status per path
 
 ### Gate-based BUG — **validated**
-`cbe_gate_bug!`. Sits inside the odd/even Trotter sweep, which is exact within a parity group.
+`cbe_bond_update_bug!`. Sits inside the odd/even Trotter sweep, which is exact within a parity group.
 103/103 tests, including: sketch pinned against a formed-`HΘ` reference; isometry +
 containment + losslessness; **exactness at full rank against `expv` on the block directly**;
 `tau=0` is the identity; residual→machine-zero at full budget; rank leaves 1 on step 1 and
 keeps growing; U(1) charge conserved; XX profile vs `xx_free_fermion_sz`.
 
 ### Lubich/Sulz BUG — **working, unchanged, benefits from the shared fixes**
-`cbe_bug!`. The sweep is the MPS specialisation of Sulz's TTN BUG (K-sweep, L-sweep, seed from
+`cbe_lubich_bug!`. The sweep is the MPS specialisation of Sulz's TTN BUG (K-sweep, L-sweep, seed from
 the sweep carries with no M/N overlap matrices, one centre Galerkin, then truncate), matching
 `exploratory_bug/src/BUG/discarded_bug.jl:16-31`. It needed **no change of its own** —
 `centre rank` now climbs `2,3,5,6,6,6,8,8,9,10,…,12` with `err_fnl = 0`.
 
 > **Correction to an intermediate conclusion in this session:** it was stated at one point that
-> "the selection is sound, so the fault in `cbe_bug.jl` is the sweep." The first half held, the
+> "the selection is sound, so the fault in `cbe_lubich.jl` is the sweep." The first half held, the
 > second did **not**. There was never a separate sweep bug. Do not act on that earlier claim.
 
 ---
@@ -179,28 +208,49 @@ Why a ratio and not an absolute floor of 8: 8 is where *this* chain saturates. T
 scales, and wide bonds stay bounded by `room` (a hard limit) and by `maxdim` at the
 truncation, which is where a rank ceiling belongs.
 
-`benchmarks/cbe_gate_budget.jl` now measures the schedule A/B (`growth = 1.1` vs `2.0`) on
-**both** paths alongside the absolute-`dex` curve, since `cbe_bug!` shares `cbe_expand` and
+#### `growth = 2.0` is a STARTING POINT, not a constant of the method
+
+It was measured on one chain (XX, L=10, a domain wall, `t = 0.5`), and a budget schedule is
+exactly the kind of parameter that should be expected to move with the problem — how fast the
+entanglement grows, how many channels `H` has, how close `maxdim` is to binding. Treat it as
+per-problem and **check it rather than inherit it**. The three diagnostics needed to decide are
+now recorded on every run, so this is a procedure and not a judgement call:
+
+| what you see | what it means | what to do |
+|---|---|---|
+| `err_fnl > 0` | the ranking is discarding candidate weight for want of budget — the cap is the accuracy limiter | raise `growth` (or set `dex` above the saturation point) |
+| `err_fnl == 0`, error still too high | budget is *not* the limiter; the subspace or `dt` is | leave `growth` alone; look at `dt`, `maxdim`, `comp_ratio` |
+| `err_fnl == 0` and time matters | the budget is past saturation and being paid for nothing | lower `growth` until `err_fnl` first leaves 0 |
+| `krylov_dims` high with small `mean_aug` | iterations, not size, are the cost — a poor subspace is hard to converge | raise `growth`; a bigger budget can be *cheaper* |
+| `krylov_dims` flat, time still rising | cost is in the sketch/SVDs, which scale with `npre` | lower `growth`, or pin `dex` |
+
+The saturation point is cheap to find — the `dex` curve in `benchmarks/cbe_bond_update_budget.jl`
+costs a few seconds per point at these sizes — so for a new problem, sweep `dex` once, read
+off where the error stops improving and `err_fnl` reaches 0, and set `growth` so the schedule
+lands there at the ranks that problem actually reaches.
+
+`benchmarks/cbe_bond_update_budget.jl` now measures the schedule A/B (`growth = 1.1` vs `2.0`) on
+**both** paths alongside the absolute-`dex` curve, since `cbe_lubich_bug!` shares `cbe_expand` and
 must be re-measured on the new default rather than assumed to follow.
 
-Measured (`benchmarks/cbe_gate_budget.jl`, XX L=10, dt=0.02, t=0.5, maxdim=64; run on a
+Measured (`benchmarks/cbe_bond_update_budget.jl`, XX L=10, dt=0.02, t=0.5, maxdim=64; run on a
 laptop, one thread, so wall times are ~1.5x the cluster's but internally comparable):
 
 ```
 bond_update_bug!        err 5.814e-07   maxbond 14   aug 17   141.9s
 
-cbe_gate (growth=1.1)   err 2.347e-04   maxbond 14   aug 16    24.4s   err_fnl 5.26e-01
-cbe_gate (growth=2.0)   err 1.165e-06   maxbond 13   aug 19     3.9s   err_fnl 0
-cbe_bug  (growth=1.1)   err 6.972e-06   maxbond  4   aug  4    19.7s   err_fnl 0
-cbe_bug  (growth=2.0)   err 8.445e-06   maxbond 14   aug 22     3.6s   err_fnl 3.5e-15
+bond_update (growth=1.1)   err 2.347e-04   maxbond 14   aug 16    24.4s   err_fnl 5.26e-01
+bond_update (growth=2.0)   err 1.165e-06   maxbond 13   aug 19     3.9s   err_fnl 0
+lubich (growth=1.1)   err 6.972e-06   maxbond  4   aug  4    19.7s   err_fnl 0
+lubich (growth=2.0)   err 8.445e-06   maxbond 14   aug 22     3.6s   err_fnl 3.5e-15
 
-cbe_gate (dex=1)        err 2.148e-03   maxbond 14   aug 15     4.1s   err_fnl 6.71e-01
-cbe_gate (dex=2)        err 1.209e-03   maxbond 12   aug 14     4.8s   err_fnl 1.90e-03
-cbe_gate (dex=4)        err 5.240e-04   maxbond 14   aug 18     6.0s   err_fnl 1.27e-04
-cbe_gate (dex=8)        err 1.165e-06   maxbond 13   aug 19     4.1s   err_fnl 0
-cbe_gate (dex=16)       err 1.165e-06   maxbond 13   aug 19     5.9s   err_fnl 0
-cbe_gate (dex=64)       err 1.165e-06   maxbond 13   aug 19    13.2s   err_fnl 0
-cbe_bug  (dex=8)        err 8.445e-06   maxbond 13   aug 21    16.5s   err_fnl 0
+bond_update (dex=1)        err 2.148e-03   maxbond 14   aug 15     4.1s   err_fnl 6.71e-01
+bond_update (dex=2)        err 1.209e-03   maxbond 12   aug 14     4.8s   err_fnl 1.90e-03
+bond_update (dex=4)        err 5.240e-04   maxbond 14   aug 18     6.0s   err_fnl 1.27e-04
+bond_update (dex=8)        err 1.165e-06   maxbond 13   aug 19     4.1s   err_fnl 0
+bond_update (dex=16)       err 1.165e-06   maxbond 13   aug 19     5.9s   err_fnl 0
+bond_update (dex=64)       err 1.165e-06   maxbond 13   aug 19    13.2s   err_fnl 0
+lubich (dex=8)        err 8.445e-06   maxbond 13   aug 21    16.5s   err_fnl 0
 ```
 
 What it says:
@@ -211,12 +261,11 @@ What it says:
   no longer the limiter on either path.
 * `err_fnl = 0.53` on the old default was the weight ranking **discarding half the candidate
   spectrum for want of budget** — the cap, not the selection, was the accuracy limiter.
-* **The generous default is FASTER, not merely affordable**: gate `24.4s → 3.9s`, MPO
-  `19.7s → 3.6s`. That was not the expectation (the sketch does strictly more work) and it is
-  not the sketch: `dex = 64` costs 13.2s, so cost *does* rise with budget. The starved runs
-  are paying somewhere else — most plausibly the 0-site Krylov, which has `maxiter = 30` and
-  a much worse subspace to converge in. **Not yet confirmed; record the Krylov dimension per
-  step before believing it.**
+* ~~**The generous default is FASTER, not merely affordable**: gate `24.4s → 3.9s`, MPO
+  `19.7s → 3.6s`.~~ **RETRACTED — this was a measurement artefact, not the method.** See
+  §7.5. The wall times in the table above are the first-of-their-kind rows and carry Julia's
+  JIT compilation; the budget buys accuracy at essentially **no** steady-state time cost,
+  which is a weaker and correct claim. All `err`, `maxbond` and `err_fnl` columns stand.
 * **The 1.1 schedule still stalls the Lubich path outright**: `maxbond 4` against the gate
   path's 14 at the same setting. §3's fixes removed the *selection's* veto; the ratchet was a
   second, independent throttle, and it was hurting the MPO sweep far more than the gate one.
@@ -279,6 +328,78 @@ is a 1-site-cost solver that still sees other symmetry sectors. §1 and §7.1 su
 rank and wall time (13 vs 14, 33× faster); the peak-working-set figure now comes out of the
 §7.2 run automatically.
 
+### 7.5 RETRACTED: "the generous budget is faster" — it was JIT compilation
+
+**Every wall-time claim about the expansion budget was wrong, and the mechanism is banal.**
+Julia compiles a call chain on first use, `@elapsed` charges that to the first timed row, and
+in every one of these benchmarks the starved setting ran first.
+
+The measurement that made it unarguable — three `growth=1.1` runs at caps 8/16/32 in
+`cbe_budget_cost.jl chi`:
+
+```
+mpo chi<=8  growth=1.1   err 5.710e-03  maxbond 4  wall 160.6s  kry/step 4.9  aug 1.6
+mpo chi<=16 growth=1.1   err 5.710e-03  maxbond 4  wall   4.6s  kry/step 4.9  aug 1.6
+mpo chi<=32 growth=1.1   err 5.710e-03  maxbond 4  wall   4.6s  kry/step 4.9  aug 1.6
+```
+
+Identical error to four digits, identical maxbond (4 — the cap never binds, so the runs are
+the *same computation*), identical iteration count, **35x** the wall time on the first. It also
+reproduces quantitatively elsewhere: the first gate row is ~280s in both `why` and `model`
+(281.6s, 278.8s), the first MPO row 80–160s, every later row 4–25s. And it explains the
+original numbers exactly — in `cbe_bond_update_budget.jl`, `bond_update_bug!` ran first and absorbed
+most of the shared Telum compilation, leaving the first CBE row ~20s of residue:
+`24.4s ≈ 3.9s + 20s`, `19.7s ≈ 3.6s + 16s`.
+
+**The Krylov hypothesis is dead too, and independently of the timings** — the counters are
+collected inside the runs, so contention cannot reach them:
+
+* gate path, starved vs generous: `347.9` vs `343.6` iterations per step — **identical** — with
+  the generous run doing **more** total iteration-times-size work (601.8k vs 486.6k).
+* MPO path, starved: **6x fewer** iterations on **4x smaller** objects, i.e. cheaper by every
+  internal measure. Nothing internal could have made it slower.
+
+**Fixes applied.** `cbe_budget_cost.jl` now calls `warmup(L)` — one throwaway step per path and
+per Hamiltonian — before any timing, and `why rev` reverses row order so an order-dependent
+artefact cannot survive unnoticed. **Any future timing table in this repo needs the same
+warm-up; without it the first row is a compilation measurement.**
+
+**What still stands:** the accuracy case for `growth = 2.0` is untouched (`err_fnl 0.53 → 0`,
+`1.4e-4 → 1.2e-6`, and the Lubich sweep stalling at maxbond 4 under the 1.1 ratchet).
+
+**The corrected cost table**, warmed up, and run in BOTH row orders on a verified-idle box
+(XX L=10, dt=0.02, t=0.5, maxdim=64; forward / reversed):
+
+```
+setting                      err        maxbond   fwd    rev    kry/step
+cbe_bond_update growth=1.1   2.347e-04     14    10.5s   9.1s     347.9
+cbe_bond_update growth=2.0   1.165e-06     13     9.5s   9.4s     343.6
+cbe_bond_update  maxiter=8   1.165e-06     13     6.3s   5.7s     105.8
+cbe_lubich      growth=1.1   6.972e-06      4     3.5s   3.1s       4.8
+cbe_lubich      growth=2.0   8.445e-06     14     6.8s   5.6s      27.8
+cbe_lubich       maxiter=8   8.445e-06     14     6.1s   5.5s       7.6
+```
+
+* **On `cbe_bond_update` the budget is free** — 9.5 vs 10.5s forward, 9.4 vs 9.1s reversed, i.e.
+  1.0 ± 0.1 either way — for a **200x** accuracy gain.
+* **On `cbe_lubich` the budget costs ~1.9x** (3.5 → 6.8s), which is the direction a cost model
+  predicts. The starved run is cheap only because it is STALLED at maxbond 4 and is not doing
+  the physics: at L=12, t=1.5 it is 22x less accurate (`5.71e-03` vs `2.64e-04`).
+* **`maxiter = 30` is the wasteful default, not the budget — but only on one path.** Capping at
+  8 cuts `cbe_bond_update` by **~36%** (9.7 → 6.2s) with the error *unchanged to all printed
+  digits* (`1.165e-06`); on `cbe_lubich` it saves **nothing** (5.6 → 6.0s, inside noise). That
+  asymmetry is structural and worth keeping in mind: `cbe_bond_update` solves one exponential
+  per BOND (~344 iterations per step, so ~36% of its cost), while `cbe_lubich` solves ONE at
+  the centre (27.8 iterations per step — a rounding error against its sweeps). **New task:
+  sweep `maxiter` properly and re-default it for the bond-update path.**
+* `dex = 64` at 13.2s against `dex = 8` at 4.1s says cost does rise with budget, so an
+  unboundedly generous budget is not free either.
+
+**Note on L=10 as a discriminator:** at t=0.5 the Lubich path's accuracy does NOT separate the
+schedules (`6.97e-06` starved, nominally *better* than `8.44e-06` generous) because both are
+dt-limited there. The accuracy case for that path rests on the longer window. Do not read a
+short-window run as evidence about rank.
+
 ### 7.4 Deferred by the user: fixed-rank vs rank-adaptive
 For that comparison, reinstate the bound as *max rank of the new orthonormal K/L matrices ≤ 2r*.
 `sulz_cap = true` is already wired in the **global** `2·rmax` form. Explicitly "for later".
@@ -306,6 +427,17 @@ For that comparison, reinstate the bound as *max rank of the new orthonormal K/L
   Assert against `P⊥HΘ`, never against an assumed bond list.
 * **Total Sz of a half-filled domain wall is 0**, so a charge-conservation test on it passes on a
   zero target. Use 5 up / 3 down (Sz = +1).
+* **A cancelled job can keep running.** Killing a wrapper script does NOT kill the `julia`
+  child it launched — it keeps a core and silently taxes whatever is measured next. This cost
+  two tables in one session: a "cancelled" L=18 calibration inflated the first cost table ~10x,
+  and a "cancelled" re-run inflated the second by ~2.2x. **Before any timing run, verify the
+  box is idle** (`Get-Process julia` / `pgrep julia`) rather than assuming a cancel took, and
+  kill leftovers by PID.
+* **Never trust one timing pass.** The order-swap control (`why rev`) is what caught the second
+  contamination: settings that agreed between passes were real, the ones that disagreed by 2x
+  were the machine. Rows that are the SAME COMPUTATION (e.g. a stalled run at three different
+  caps that never bind) are the sharpest check available — they must agree to noise, and when
+  they read 160.6s/4.6s/4.6s the table is measuring something other than the method.
 * **`find` on this cluster is `bfs`** — `pgrep -f "^find …"` does not match a running tree walk and
   a kill silently does nothing. Match on the command line and *verify*. And never walk the NFS
   home: `/home` is `10.1.0.110:/volume1/slurm-home`.
@@ -317,19 +449,43 @@ For that comparison, reinstate the bound as *max rank of the new orthonormal K/L
 ```bash
 # fast: the gate path only (~5 min)
 sbatch --job-name=cbegate --partition=short scripts/run_julia.sbatch \
-       tests/RSVDCBEBondUpdate/test_cbe_gate.jl
+       tests/RSVDCBEBondUpdate/test_cbe_bond_update.jl
 
 # the CBE module suite (~10 min) and the validated suite (~7 min)
 sbatch --partition=main scripts/run_julia.sbatch tests/RSVDCBEBondUpdate/runtests.jl
 sbatch --partition=main scripts/run_julia.sbatch tests/runtests.jl
 
 # the two measurements in this document
-sbatch --partition=short scripts/run_julia.sbatch benchmarks/cbe_gate_budget.jl
-sbatch --partition=short scripts/run_julia.sbatch benchmarks/lubich_vs_gate_rank.jl
+sbatch --partition=short scripts/run_julia.sbatch benchmarks/cbe_bond_update_budget.jl
+sbatch --partition=short scripts/run_julia.sbatch benchmarks/lubich_vs_bond_update_rank.jl
 
 # ~1 min regression probe for "refused with room to spare"
 sbatch --partition=short scripts/run_julia.sbatch benchmarks/probe_edge_refusal.jl
+
+# ── QUEUED, all cluster work (see WHICH RUNS GO WHERE below) ────────────────────
+# why is the generous budget FASTER, is it XX-specific, and does it scale in chi?
+sbatch --job-name=cbecost --partition=short scripts/run_julia.sbatch \
+       benchmarks/cbe_budget_cost.jl why
+sbatch --job-name=cbemodel --partition=short scripts/run_julia.sbatch \
+       benchmarks/cbe_budget_cost.jl model
+sbatch --job-name=cbechi --partition=main scripts/run_julia.sbatch \
+       benchmarks/cbe_budget_cost.jl chi
+
+# the L=18 campaign: choose dt where the cap binds, then the main run
+sbatch --job-name=xx18_calib32 --partition=short scripts/run_julia.sbatch \
+       benchmarks/xx_l18_campaign.jl calib 32 6.0
+sbatch --job-name=xx18_main --partition=main scripts/run_julia.sbatch \
+       benchmarks/xx_l18_campaign.jl main <dt from calib 32 6.0>
 ```
+
+**WHICH RUNS GO WHERE.** Local is for **small system sizes only** — the test suites, and
+L ≤ ~12 probes that finish in seconds to a couple of minutes. Everything else goes to the
+cluster via `sbatch`: L ≥ 16, long time windows, `maxdim` sweeps, the L=18 campaign, and **any
+wall-clock comparison** (a laptop shares cores with whatever else is running, so timings taken
+next to another job are not comparable). Measured the hard way this session: `calib 32 6.0`
+at L=18 ran long enough locally to block the timing benchmarks it was queued ahead of, and
+had to be killed and requeued. Size the local run to the question — a mechanism that breaks
+at L≥4 does not need L=18 to show it.
 
 **Running it off the cluster.** When the cluster is unreachable (VPN down — `ssh login-node`
 to `10.1.0.120` just times out) the whole suite runs on a laptop, and the L=8/L=10
@@ -340,7 +496,7 @@ measurements in this document are small enough to be worth doing there:
 cp -r BUG-Julia /tmp/bugjl && cd /tmp/bugjl
 julia --project=. -e 'using Pkg; Pkg.instantiate()'
 julia --project=. deps/build.jl        # the Telum :none SVD patch, NOT `Pkg.build`
-julia --project=. --threads=1 tests/RSVDCBEBondUpdate/test_cbe_gate.jl
+julia --project=. --threads=1 tests/RSVDCBEBondUpdate/test_cbe_bond_update.jl
 ```
 
 Two gotchas, both measured: `Pkg.build("BUGJulia")` re-resolves in a sandbox and dies on

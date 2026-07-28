@@ -30,7 +30,7 @@ cost. Both CBE-BUG and 2-site TDVP are *exact* once the manifold is the whole sp
 (measured ~1e-13 at L=6/`maxdim`=32), so at these sizes the rank cap has to be pushed so
 low to manufacture an error that the truncation floor dominates whatever is being measured.
 Those comparisons belong to a large-system run where the cap binds for physical reasons.
-`benchmarks/cbe_bug_vs_baselines.jl` is the harness for it, parked unrun.
+`benchmarks/cbe_lubich_vs_baselines.jl` is the harness for it, parked unrun.
 
 Reference implementation this follows (von Delft group, QSMPSLib, `Lib_MPS_MPO/`):
 
@@ -321,9 +321,9 @@ Acceptance:
 4. at `Dex = Dfull` the expansion recovers the full two-site space, so the bond update
    reproduces the exact two-site update.
 
-### Stage 3 — the step (`cbe_bug.jl`)
+### Stage 3 — the step (`cbe_lubich.jl`)
 
-Entry point `cbe_bug_bond_update`; `bond_update_bug!` and `kls_bond_update` are left
+Entry point `cbe_lubich_sweep`; `bond_update_bug!` and `kls_bond_update` are left
 untouched (validated reference, and the unitarity-critical path).
 
 ```
