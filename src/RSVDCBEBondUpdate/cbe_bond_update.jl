@@ -128,9 +128,10 @@ Keywords: `maxdim`, `trunc_thresh`, `s_tau`, `maxiter`, `tol` as in `kls_bond_up
 
   - `s_iters = 1` (default) --- one expansion, then a plain Lanczos. The original path.
   - `s_iters = n > 1` --- repeat the expansion `n` times, each pass re-sketching from the
-    state the last pass evolved. MEASURED TO PLATEAU AFTER TWO PASSES; kept as the control,
-    not as a recommendation. See the comment at the loop for why it cannot build a Krylov
-    space.
+    state the last pass evolved. THE BEST SCHEME MEASURED once the budget is below the room:
+    at `growth = 1.25` it takes the error from `1.449e-11` to `1.978e-15` (rank 9 -> 12). Flat
+    at `growth = 2.0` only because the budget already saturates the room there and nothing is
+    left to find. See the comment at the loop.
   - `s_iters = -g <= 0` --- the EXPANDING-BASIS LANCZOS of [`_expanding_lanczos`](@ref), with
     `g` the number of leading Krylov steps that carry a growth pass (`s_iters = 0` grows
     none, which is the plain Lanczos with no expansion at all). The basis grows around each
@@ -204,13 +205,25 @@ function cbe_bond_update(f::BondFrame, gate, tau::ComplexF64;
         n_iter, iter_weight = info.n_grow, info.beta_final
     else
         # ── ONE EXPANSION, THEN A PLAIN LANCZOS (the default) ────────────────────────
-        # `s_iters = 1` is the original single expansion and is the default path; the loop
-        # below only repeats it, re-sketching each pass from the state the previous pass
-        # evolved. MEASURED TO PLATEAU AFTER TWO PASSES and kept only as the control for the
-        # expanding-Lanczos solver: with tau small, exp(tau*H)Theta0 = Theta0 + tau*H*Theta0 +
-        # O(tau^2), so re-sketching a CONVERGED exponential asks for the same subspace again.
-        # It re-derives H*Theta0, never H^2*Theta0, and a Krylov space is exactly what it
-        # cannot build. That is why the growth had to move inside the solver.
+        # `s_iters = 1` is the original single expansion and is the default path; `n > 1`
+        # repeats it, re-sketching each pass from the state the previous pass evolved.
+        #
+        # THIS IS THE BEST SCHEME MEASURED, and the reason is NOT that it builds a Krylov
+        # space -- it does not. With tau small, exp(tau*H)Theta0 = Theta0 + tau*H*Theta0 +
+        # O(tau^2), so each pass re-derives H*Theta0, never H^2*Theta0. What it does instead
+        # is COMPOUND THE GROWTH SCHEDULE: the budget is recomputed from the CURRENT rank
+        # every pass, so r -> growth*r -> growth^2*r, and each step of that ladder is probed
+        # by a sketch whose width is matched to the rank it is probing. A sequence of
+        # well-conditioned narrow probes beats one wide draw.
+        #
+        # MEASURED at L=8 bond (4,5) against the exact two-site propagator, growth = 1.25:
+        # one-shot 1.449e-11 at rank 9, three passes 1.978e-15 at rank 12. The expanding
+        # Lanczos reaches the SAME rank 12 and stays at 1.450e-11 -- same basis size, four
+        # orders worse, so what differs is which directions get admitted and not how many.
+        #
+        # It is flat at growth = 2.0 only because the budget already saturates the room there
+        # (room = d*chi - r -> r, budget -> r for d = 2), so the first pass takes the whole
+        # local space and there is nothing left for a second one to find.
         #
         # `galerkin` always rebuilds S_start from the ORIGINAL theta0, never from the previous
         # pass's S_new, so exp(tau*H_eff) is applied exactly once however many passes run.

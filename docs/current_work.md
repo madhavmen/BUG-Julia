@@ -416,16 +416,15 @@ Two schemes were built and measured (`benchmarks/cbe_s_iterations.jl`, L=8, bond
 against the **exact** two-site propagator):
 
 **(a) Outer loop** (`s_iters = n > 1`): re-sketch from the state the previous pass evolved.
-**Plateaus after two passes**, five orders short of the one-shot.
+At `growth = 2.0` it looks useless — flat after two passes. **That reading was wrong**, and
+§7.6.1 explains why: at `growth = 2.0` the first pass already takes the whole local space.
+Measured where the budget is *below* the room, it is the best scheme tested (§7.6.2).
 
-| setting | err vs exact | rank | passes |
-|---|---|---|---|
-| `dex=1 s_iters=1` | 7.78e-10 | 8 | 1 |
-| `dex=1 s_iters=2…8` | 5.50e-10 | 9 | stops at 2 |
-| `growth=2.0` one-shot | **5.60e-16** | 11 | 1 |
-
-Why it cannot work: `exp(τH)Θ₀ = Θ₀ + τHΘ₀ + O(τ²)`, so re-sketching a *converged exponential*
-keeps rediscovering `HΘ₀` and never reaches `H²Θ₀`. An outer loop cannot build a Krylov space.
+It does **not** build a Krylov space — `exp(τH)Θ₀ = Θ₀ + τHΘ₀ + O(τ²)`, so each pass
+re-derives `HΘ₀`, never `H²Θ₀`. What it does is **compound the growth schedule**: the budget is
+recomputed from the *current* rank each pass, so `r → growth·r → growth²·r`, and every rung of
+that ladder is probed by a sketch whose width matches the rank it is probing. A sequence of
+well-conditioned narrow probes beats one wide draw.
 
 **(b) Expanding-basis Lanczos** (`s_iters = -g`, `_expanding_lanczos`): growth becomes **step 0
 of each Krylov iteration** — expand around `v_k` *before* applying `H` to it, so the bond
@@ -496,6 +495,55 @@ Consequences worth carrying forward:
 * Section G of `benchmarks/cbe_s_iterations.jl` runs `growth ∈ {1.1, 1.25, 1.5}` for this
   reason, and it is the only part of that benchmark whose result carries information about the
   selection.
+
+#### 7.6.2 The discriminating run — and it inverts two conclusions above
+
+`growth ∈ {1.1, 1.25, 1.5}` at the same bond, budget now **below** room (`room_l = room_r = 5`,
+`r = 7`). Error is against the exact two-site propagator.
+
+| growth | budget | scheme | err | rank | matvec |
+|---|---|---|---|---|---|
+| 1.10 | 1 | one-shot | 7.778e-10 | 8 | 30 |
+| 1.10 | 1 | `comp_ratio` 0.0 / 0.5 / 1.0 | 7.778e-10 (all) | 8 | 30 |
+| 1.10 | 1 | outer `s_iters=3` | 5.501e-10 | 9 | 60 |
+| 1.10 | 1 | expanding `grow=4` | 7.777e-10 | 10 | 23 |
+| **1.25** | 2 | one-shot | 1.449e-11 | 9 | 30 |
+| **1.25** | 2 | `comp_ratio` 0.0 / 0.5 / 1.0 | 1.440–1.449e-11 | 9 | 30 |
+| **1.25** | 2 | **outer `s_iters=3`** | **1.978e-15** | **12** | 60 |
+| **1.25** | 2 | expanding `grow=4` | 1.450e-11 | **12** | 11 |
+| 1.50 | 4 | one-shot | 1.401e-15 | 11 | 30 |
+| 1.50 | 4 | `comp_ratio=0.0` | 2.476e-14 | 10 | 20 |
+| 1.50 | 4 | `comp_ratio=1.0` | 2.671e-16 | 11 | 20 |
+| 1.50 | 4 | one-shot `+ reorth` | 4.675e-16 | 11 | **3** |
+| 1.50 | 4 | expanding `grow=1` | 4.682e-16 | 11 | **3** |
+
+**Corrections to §7.6, both material:**
+
+1. **The outer loop is not useless — it is the best scheme measured.** At `growth = 1.25` it
+   takes the error from `1.449e-11` to `1.978e-15`, a factor of **7300**, by growing rank 9 →
+   12. The earlier "plateaus, five orders short" reading came entirely from `growth = 2.0`,
+   where the first pass already takes the whole local space.
+2. **The expanding-basis Lanczos does not work, and rank is not the reason.** At `growth = 1.25`
+   it reaches the *same rank 12* as the outer loop and stays at `1.450e-11` — four orders worse
+   at identical basis size. What differs is *which* directions get admitted, not how many.
+   Likely cause: its probe is the Krylov residual `v_k`, not the physical evolved state, and its
+   tridiagonal is assembled across changing subspaces (the `beta_k` approximation flagged in
+   `_expanding_lanczos`). Not yet isolated.
+
+**Hyperparameters still barely matter, with one exception.** At `growth` 1.1 and 1.25,
+`comp_ratio` 0.0 → 1.0 and `dover` 0 → 4 move the error by <1%. Only at `growth = 1.5` does
+`comp_ratio` bite: `2.476e-14` (0.0, and it loses a direction — rank 10) vs `2.671e-16` (1.0), a
+100× spread. Below that the probe is too narrow (`npre = ⌈1.2·1⌉ = 2`) for the split to mean
+anything.
+
+**So the original proposal is vindicated, in its first form.** Iterating the expansion does
+replace hyperparameter tuning — but it is the *outer* loop compounding the growth schedule that
+does it, not growth inside the Lanczos.
+
+**Caveats before acting on this:** one bond, one state, one `dt`, three `growth` values. The
+7300× needs a sweep-level and longer-window confirmation before `s_iters > 1` becomes a
+recommended setting, and the cost is real (60 matvecs vs 30). The obvious follow-up is
+`s_iters = n` with `growth ≈ 1.25` versus one-shot `growth = 2.0` at matched *total* work.
 
 ---
 
