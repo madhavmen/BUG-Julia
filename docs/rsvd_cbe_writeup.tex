@@ -30,6 +30,7 @@
   columns=fullflexible,
   keepspaces=true,
   breaklines=true,
+  postbreak=\mbox{\textcolor{drop}{$\hookrightarrow$}\space},
   showstringspaces=false,
   xleftmargin=0.4em,
   aboveskip=0.8em,
@@ -648,27 +649,47 @@ step. \\
 % =====================================================================================
 
 \noindent
-Everything below is the output of \file{examples/cbe\_walkthrough.jl}: XX chain, $L=6$, $U(1)$
-symmetric, a domain wall warmed by three steps of $\delta t = 0.05$ so that the bond has real
-structure, then one bond update at the centre bond $(3,4)$. Run it with
+Everything below is the output of \file{examples/cbe\_walkthrough.jl}: XX chain, $L=8$, $U(1)$
+symmetric, a domain wall warmed by three steps of $\delta t = 0.05$ so the bond carries real
+structure, then one bond update at bond $(4,5)$. Run it with
 
 \begin{lstlisting}[language=bash]
 julia --project=. examples/cbe_walkthrough.jl
 \end{lstlisting}
 
 \noindent
-The nine stages below are the nine stages of the method. Each is stated as: what is computed,
+The bond is \textbf{chosen, not assumed}: the script takes the bond maximising
+$\min(\mathrm{room}_l, \mathrm{room}_r)$. That matters, and the first draft of this example got
+it wrong --- the centre cut of a short chain \emph{saturates} (at $L=6$ it caps at rank $8$ and a
+warmed state reaches it), giving $\mathrm{room} = 0$ on both sides, so CBE correctly declined to
+expand and every selection stage printed empty. A saturated bond is not a failure of the method
+and must not be read as one.
+
+The stages below are the stages of the method. Each is stated as: what is computed,
 what came out, and what the number \emph{means} --- because most of these quantities are only
 interesting relative to something else (a residual relative to the action, a discarded weight
 relative to the kept spectrum), and a bare figure invites the wrong reading.
 
 \section{Stage 0 --- the bond before anything happens}
 
-The state is warmed for three steps so the centre bond has genuine structure. Cutting at bond
-$(3,4)$ gives the frames and the core, and two derived quantities that bound everything
-afterwards: $\mathrm{room}_l$ and $\mathrm{room}_r$ of Eq.~\eqref{eq:room}.
+Three warm-up steps give the state \code{bond\_dims = [2, 4, 6, 7, 6, 4, 2]}. Cutting at bond
+$(4,5)$, where $r=7$ and both halves have five dimensions in hand, gives the frames, the core,
+and the two quantities that bound everything afterwards --- $\mathrm{room}_l$ and
+$\mathrm{room}_r$ of Eq.~\eqref{eq:room}, both $5$ here.
 
-\STAGEZERO
+\begin{lstlisting}
+chain          L = 8, XX, U(1), domain wall, 3 steps of dt = 0.05 (t = 0.15)
+state          bond_dims = [2, 4, 6, 7, 6, 4, 2]
+bond           (4, 5) -- chosen as the most expandable, rank r = 7
+U0  (6 x 2 x 7)       left frame   (link_l, site_l, bond)
+S0  (7 x 7)           core
+V0  (7 x 2 x 6)       right frame  (bond, site_r, link_r)
+Theta0 (6 x 2 x 2 x 6)  the two-site block, U0*S0*V0
+bond sectors on U0 leg 3: [-4 => 1,  -2 => 3,  0 => 3]
+left isometry defect  = 1.02e-15   (U0 is an isometry)
+room_l = d*chi_l - r = 6*2 - 7 = 5
+room_r = d*chi_r - r = 2*6 - 7 = 5
+\end{lstlisting}
 
 \noindent
 The left isometry defect confirms $U_0^\dagger U_0 = \mathbb{1}$ to machine precision, which is
@@ -681,7 +702,13 @@ which is the whole reason for a \emph{sector-graded} sketch.
 The two schedules are evaluated side by side on the same bond, which is the cleanest possible
 statement of what the session's default change did.
 
-\STAGEONE
+\begin{lstlisting}
+growth = 1.1 :  dmax = 7 -> budget = ceil(1.1*7) - 7 = 1    npre = 2
+growth = 2.0 :  dmax = 7 -> budget = ceil(2.0*7) - 7 = 7    npre = 9
+
+using growth = 2.0:  budget = 7, clipped per side to (dex_l, dex_r) = (5, 5)
+probe width npre = ceil(1.2*budget) = 9      (the 1.2 is the RSVD oversampling)
+\end{lstlisting}
 
 \noindent
 Read the two rows against each other: at the same $d_{\max}$, the reference's DMRG ratchet and
@@ -692,17 +719,35 @@ starved schedule cannot be compensated for downstream.
 
 \section{Stage 2 --- the random probe (the R in RSVD)}
 
-\STAGETWO
+\begin{lstlisting}
+Omega_R (10 x 2 x 6)      a stand-in RIGHT frame with 10 columns instead of r = 7
+its columns are drawn PER CHARGE SECTOR: [-2 => 2,  0 => 4,  2 => 3,  4 => 1]
+half the columns are random-then-projected-OUT of V0 (the complement half),
+half are random-then-projected-IN  (the isometry half, comp_ratio = 0.5).
+\end{lstlisting}
 
 \noindent
 $\Om$ is a \emph{stand-in} for the right frame: same leg structure, a different number of
-columns. Its per-sector column counts are the point --- a probe drawn without regard to charge
-would leave whole sectors unsampled, and a sector that is currently empty but reachable by
-$\Hb$ is exactly where the new physics lives.
+columns. Its per-sector counts are the point --- a probe drawn without regard to charge would
+leave whole sectors unsampled, and a sector currently empty but reachable by $\Hb$ is exactly
+where the new physics lives.
+
+Note that $\Om$ has $10$ columns where $\Dpre = 9$ was asked for. That is not an error: the
+allocator takes $\lceil\,\cdot\,\rceil$ per sector, so that a sector entitled to a fractional
+share still receives a whole column, and the total can exceed the request by less than the number
+of sectors. Also note the probe's charge sectors ($-2,0,2,4$) differ from the bond's
+($-4,-2,0$): the probe lives in the \emph{fused} local space of the right half, which is a
+larger set of charges than the current bond carries --- and reaching those is the mechanism by
+which a new sector can enter the state at all.
 
 \section{Stage 3 --- one application of $\Hb$, sketched}
 
-\STAGETHREE
+\begin{lstlisting}
+Y   (6 x 2 x 10)      the left image of the gate's action, 10 columns wide
+check: sketch with Omega = V0 equals contracting the formed H*Theta:  2.58e-22
+H*Theta itself is rank 4 (6 x 2 x 2 x 6) and IS NEVER FORMED in the method;
+it is built here only to check the sketch. Omega is folded into the gate first.
+\end{lstlisting}
 
 \noindent
 Two things to note. First, the check: sketching with $\Om = V_0$ reproduces the result of forming
@@ -715,29 +760,78 @@ allocates it.
 
 The candidate directions are the part of the sketched action lying outside the current frame.
 
-\STAGEFOUR
+\begin{lstlisting}
+||Y|| = 1.017861e+00     ||P_perp Y|| = 7.945719e-06   ->  ratio 7.806e-06
+Q_L (6 x 2 x 4)       4 orthonormal candidate directions, all orthogonal to U0
+weight the preselection SVD discarded: err_pre = 1.696e-12
+Q_L is orthogonal to U0 to 3.77e-17  (the RepairOrtho second pass earns this)
+\end{lstlisting}
 
 \noindent
-The ratio $\|\Pperp Y\|/\|Y\|$ says how much of the sketched action is genuinely new. It is
-neither $0$ (the frame does not already contain the action --- there is something to learn) nor
-$1$ (the action is not orthogonal to what we have --- the frame is not useless). The final line
-is the \code{RepairOrtho} pass earning its place: the candidates are orthogonal to $U_0$ to
-machine precision, without which the direct sum would not be an isometry and the norm would
-drift.
+\textbf{The most instructive number in the whole walkthrough is
+$\|\Pperp Y\|/\|Y\| \approx 8\times10^{-6}$.} The part of the gate's action lying outside the
+current frame is a \emph{millionth} of the action's norm --- and that tiny sliver is exactly the
+new physics, the thing the basis update exists to capture. It is small for a structural reason:
+the frame was built by the previous step, so it already spans almost everything $\Hb$ does to
+the block; what is new is $O(\tau)$ and, here, $O(\tau^2)$-ish in norm.
+
+Two consequences follow, and both are visible in the implementation.
+
+\begin{itemize}[leftmargin=1.2em]
+\item \textbf{The preselection must normalise before its SVD.} Telum's cutoff is relative to the
+largest singular value of the matrix it is given. Handing it $\Pperp Y$ unnormalised, with a
+tolerance meaningful on the scale of $\|Y\|$, would discard the entire complement as numerical
+noise. \code{\_preselect\_left} therefore divides by $\|\Pperp Y\|$ first, so the tolerance is
+relative to the new directions' \emph{own} scale.
+\item \textbf{Absolute thresholds anywhere in this path are a bug.} A cutoff of, say, $10^{-8}$
+applied to the action would delete every candidate at this bond.
+\end{itemize}
+
+\noindent
+The last line of the block is the \code{RepairOrtho} pass earning its place: the candidates are
+orthogonal to $U_0$ to $4\times10^{-17}$, without which the direct sum would not be an isometry
+and the norm would drift.
 
 \section{Stage 5 --- the ranking}
 
-\STAGEFIVE
+\begin{lstlisting}
+UMU (4 x 4)          = Q_L^dag (H Theta) Q_R   -- a SMALL matrix, 4 x 4
+singular values KEPT  (4): 3.039e-11  2.291e-12  4.951e-13  2.790e-15
+singular values CUT   (0): -- none --
+These singular values ARE the weights: this is the ranking the K/L augmentation
+cannot do, since it admits every direction it finds regardless of weight.
+\end{lstlisting}
 
 \noindent
 This is the step the $K$/$L$ augmentation cannot perform. The singular values of
 $M = Q_L^\dagger (\Hb\Theb) Q_R$ \emph{are} the weights of candidate pairs in the two-site
 action, so keeping the top $\Dex$ is a principled choice rather than an arbitrary cut. Note the
-size of $M$: it is a small matrix, and its SVD is the cheapest part of the whole procedure.
+size of $M$: $4\times4$, and its SVD is the cheapest part of the whole procedure.
+
+Their absolute magnitudes ($10^{-11}$ down to $10^{-15}$) are again the $O(\tau)$ smallness of
+Stage~4, not a sign that the candidates are worthless; what matters is their \emph{ordering} and
+their spread --- four orders of magnitude between the first and the last, so the ranking is
+carrying real information about which directions to prefer.
+
+Nothing is cut here, and it is worth being precise about why: there are $4$ candidates and the
+budget permits $5$, so the cap does not bind at this bond. This is the \code{err\_fnl}$\,=0$
+condition of Table~\ref{tab:decide} --- the healthy case. Under the old $\text{growth} = 1.1$
+schedule the budget would have been $1$ (Stage~1), three of these four directions would have been
+discarded, and \code{err\_fnl} would have reported the loss.
 
 \section{Stage 6 --- the expansion, and its losslessness}
 
-\STAGESIX
+\begin{lstlisting}
+U_ex (6 x 2 x 11)       r = 7 -> 11   (+4 new left directions)
+V_ex (11 x 2 x 6)       r = 7 -> 11   (+4 new right directions)
+err_pre = 5.322e-12   err_fnl = 0.000e+00   (err_fnl = 0 means nothing ranked out)
+LOSSLESS: ||U_ex S_hat0 V_ex - Theta0|| = 1.58e-17     ||S_hat0|| - ||Theta0|| = 0.00e+00
+So the expansion changes NO amplitude -- it only widens the space the step may use.
+This is also why an expansion alone cannot raise the Schmidt rank.
+
+left residual ||HT - U U^dag HT|| / ||HT||:  before 7.785e-06  ->  after 2.493e-16
+That is the whole point of the selection: the frame now spans the gate's image.
+\end{lstlisting}
 
 \noindent
 The two zeros on the losslessness line are the heart of the design. $\Uex \hat S_0 \Vex$
@@ -747,31 +841,59 @@ alone cannot raise the Schmidt rank, and hence why the evolution has to happen b
 truncation.
 
 The residual line is the discriminating measurement of the whole method: the fraction of the
-gate's action on the block that the frame cannot represent, before and after. Driving it to
-machine zero is the strongest thing an expansion at this bond can achieve, and it is the
-criterion the two selection defects were failing.
+gate's action on the block that the frame cannot represent, before and after. It falls
+\textbf{ten orders of magnitude}, $7.8\times10^{-6} \to 2.5\times10^{-16}$ --- from ``the frame
+misses a millionth of the action'' to ``the frame spans it to machine precision''. Driving this
+to zero is the strongest thing an expansion at this bond can achieve, and it is exactly the
+criterion the two selection defects of Sec.~\ref{sec:retraction} were failing: they left
+residuals of $0.19$ and $9.97\times10^{-3}$ untouched \emph{with room to spare}, which is why the
+diagnostic is printed as a number rather than asserted as a pass.
+
+Both sides gained four directions ($7 \to 11$) here, and the symmetry is a consequence of the
+per-side selection rather than an imposed constraint --- each side spent its own budget against
+its own candidates.
 
 \section{Stage 7 --- the $S$-step}
 
-\STAGESEVEN
+\begin{lstlisting}
+S_hat0 (11 x 11)       ->  S1 (11 x 11)        in 14 Lanczos iterations
+||S1|| = 1.0000000000   ||S_hat0|| = 1.0000000000    (unitary step: equal)
+S1 singular values: 9.950e-01  9.978e-02  5.736e-05  5.752e-06  4.946e-09  4.957e-10  2.852e-13  2.025e-13
+kept rank 10 of the expanded 11; discarded weight 2.41e-17
+The rank SURVIVES here and only here: S1 is dense on the new directions, so the
+truncation keeps them. Without this step they would collapse at the next gauge move.
+\end{lstlisting}
 
 \noindent
-The norm is preserved because the step is a unitary exponential in the expanded basis. The
-singular-value spectrum of $\hat S_1$ is now \emph{dense on the new directions} --- this is the
+The norm is preserved to ten digits because the step is a unitary exponential in the expanded
+basis. The spectrum of $\hat S_1$ is now \emph{dense on the new directions} --- this is the
 moment the expansion turns into rank --- and the truncation therefore keeps them rather than
 discarding them as it would have discarded the identically-zero block of $\hat S_0$.
 
+Read the spectrum as the story of the step: two large values ($0.995$, $0.0998$) are the physics
+the bond already carried, and the tail from $5.7\times10^{-5}$ down to $2\times10^{-13}$ is what
+the expansion just made available. Ten of the eleven directions survive the cutoff, at a
+discarded weight of $2.4\times10^{-17}$.
+
+\paragraph{The net effect of one bond update.} Rank $7 \to 11$ by expansion (lossless, no
+amplitude changed), then $11 \to 10$ by truncation after the evolution: the bond ends at rank
+$\mathbf{10}$, having grown by three. The $14$ Lanczos iterations are the only exponential
+anywhere in the update --- there is no $K$-ODE and no $L$-ODE.
+
 \section{Stages 8 and 9 --- the public entry point, and $\tau = 0$}
 
-\STAGEEIGHT
+\begin{lstlisting}
+left_core (6 x 2 x 10)     right_core (10 x 2 x 6)    
+aug_k = 11  aug_l = 11  keep = 10  n_matvec = 14  discarded = 2.41e-17
+err_pre = 5.322e-12  err_fnl = 0.000e+00
+
+||Theta(tau=0) - Theta0|| = 3.95e-15
+\end{lstlisting}
 
 \noindent
 The entry point reproduces the hand-assembled sequence, and $\tau = 0$ returns the state
 unchanged to machine precision --- the sanity check that the expansion has not perturbed
 anything, stated as an equation the code must satisfy rather than as an argument.
 
-\section{The full transcript}
-
-\STAGEFULL
 
 \end{document}
