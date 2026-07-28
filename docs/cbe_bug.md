@@ -215,6 +215,29 @@ inheritance. The `≤2r` order ceiling established earlier applies to `≤2r` *s
 is `r + Dex ⊆ 2r`, so second order is the expectation and first order is the failure
 mode to watch for.
 
+**MEASURED, and it is second order.** `xx_l18_campaign.jl calib 64 2.0`, L=18 XX domain wall,
+`maxdim = 64` (nothing truncates — `maxbond` peaks at 28), halving `dt`:
+
+| dt | CBE-BUG | ratio | 2-site TDVP | ratio |
+|---|---|---|---|---|
+| 0.100 | 1.0235e-03 | — | 2.0640e-04 | — |
+| 0.050 | 2.5648e-04 | 3.99 | 5.1784e-05 | 3.99 |
+| 0.025 | 6.4211e-05 | 3.99 | 1.2969e-05 | 3.99 |
+
+`err/dt²` is constant to three digits for CBE-BUG (0.1023, 0.1026, 0.1027), so the single
+centre Galerkin loses nothing in order: the failure mode did not happen. What it does carry
+is a ~5x larger error **constant** than 2-site TDVP at equal `dt` and equal (untruncated)
+rank — which is a statement about the subspace, not about the integrator's order, and is the
+thing the rank/memory comparison has to be read against.
+
+One correction to that bound as implemented: the default budget is **neighbourhood-coupled**,
+`Dex = ceil(growth*dmax) - r` with `dmax` the max over the bond and its two neighbours
+(`growth = 2.0`, `cbe.jl`). So `r + Dex ≤ ceil(growth*dmax)`, which equals `2r` only at a bond
+sitting *at* the neighbourhood max; a narrow bond beside a wide one is deliberately allowed
+past its own `2r`, which is what lets a wide bond pull its neighbours up instead of growth
+crawling one direction per bond per step. Per-bond `2r` was tried and measured: it froze L=8
+at `[1,1,2,4,2,1,1]`.
+
 ## 4. What has to be built (BUG-Julia has none of it)
 
 `BondUpdateBUG` is **gate-based**: `bond_gates` builds one two-site gate per bond and

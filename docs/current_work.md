@@ -21,6 +21,9 @@ cbe_gate_bug! (gate)  err 1.37e-06   profile [2,4,8,12,8,4,2]    31.1s
 cbe_bug!   (Lubich)   err 8.44e-06   profile [2,4,8,12,8,4,2]    32.2s
 ```
 
+(That run set `dex = 8` by hand. Since §7.1 the DEFAULT reaches the same regime, so
+`lubich_vs_gate_rank.jl`'s explicit `DEX = 8` is now redundant rather than load-bearing.)
+
 Tests green: **1019/1019** `tests/RSVDCBEBondUpdate/runtests.jl`, **722/722**
 `tests/runtests.jl` (the validated integrator, untouched).
 
@@ -161,39 +164,120 @@ the sweep carries with no M/N overlap matrices, one centre Galerkin, then trunca
 
 ## 7. Remaining tasks
 
-### 7.1 The default growth schedule is now the accuracy limiter — highest value
-`budget = max(ceil(1.1*dmax) - r, 1)` (`cbe.jl`, from `RSVDpreBE0SiQS.m:66-77`) is a ~10%
-schedule. Measured (`benchmarks/cbe_gate_budget.jl`, XX L=10, dt=0.02, t=0.5, maxdim=64):
+### 7.1 The default growth schedule — DONE, re-measured on both paths
+**The default is now `growth = 2.0`**: `budget = max(ceil(growth*dmax) - r, 1)`, exposed as a
+keyword on `cbe_expand` and a field on `CBEBugOptions`, so both paths inherit it and
+`growth = 1.1` reproduces the old behaviour for the A/B. The evidence is the table below.
+
+Why 2.0 and not the reference's 1.1: the reference is **DMRG**, where every sweep
+re-converges the same state, so a 10% ratchet compounds over sweeps and costs only
+iterations. A **time integrator gets one shot per step** — a direction the step needs and
+does not admit is not deferred, it is gone, and the state carries the error forward. At
+`r = 13` the 1.1 schedule proposes `ceil(1.1*13) - 13 = 2` directions.
+
+Why a ratio and not an absolute floor of 8: 8 is where *this* chain saturates. The ratio
+scales, and wide bonds stay bounded by `room` (a hard limit) and by `maxdim` at the
+truncation, which is where a rank ceiling belongs.
+
+`benchmarks/cbe_gate_budget.jl` now measures the schedule A/B (`growth = 1.1` vs `2.0`) on
+**both** paths alongside the absolute-`dex` curve, since `cbe_bug!` shares `cbe_expand` and
+must be re-measured on the new default rather than assumed to follow.
+
+Measured (`benchmarks/cbe_gate_budget.jl`, XX L=10, dt=0.02, t=0.5, maxdim=64; run on a
+laptop, one thread, so wall times are ~1.5x the cluster's but internally comparable):
 
 ```
-bond_update_bug!      err 5.81e-07   maxbond 14   157.0s
-cbe_gate (schedule)   err 1.43e-04   maxbond 14    22.4s   err_fnl 6.2e-01
-cbe_gate (dex=1)      err 2.28e-03   maxbond 14     3.8s   err_fnl 6.7e-01
-cbe_gate (dex=2)      err 1.21e-03   maxbond 12     4.2s   err_fnl 1.1e-02
-cbe_gate (dex=4)      err 3.54e-04   maxbond 15     4.6s   err_fnl 0
-cbe_gate (dex=8)      err 1.17e-06   maxbond 13     4.7s   err_fnl 0
-cbe_gate (dex=16)     err 1.17e-06   maxbond 13     4.5s   err_fnl 0
-cbe_gate (dex=64)     err 1.17e-06   maxbond 13     4.4s   err_fnl 0
+bond_update_bug!        err 5.814e-07   maxbond 14   aug 17   141.9s
+
+cbe_gate (growth=1.1)   err 2.347e-04   maxbond 14   aug 16    24.4s   err_fnl 5.26e-01
+cbe_gate (growth=2.0)   err 1.165e-06   maxbond 13   aug 19     3.9s   err_fnl 0
+cbe_bug  (growth=1.1)   err 6.972e-06   maxbond  4   aug  4    19.7s   err_fnl 0
+cbe_bug  (growth=2.0)   err 8.445e-06   maxbond 14   aug 22     3.6s   err_fnl 3.5e-15
+
+cbe_gate (dex=1)        err 2.148e-03   maxbond 14   aug 15     4.1s   err_fnl 6.71e-01
+cbe_gate (dex=2)        err 1.209e-03   maxbond 12   aug 14     4.8s   err_fnl 1.90e-03
+cbe_gate (dex=4)        err 5.240e-04   maxbond 14   aug 18     6.0s   err_fnl 1.27e-04
+cbe_gate (dex=8)        err 1.165e-06   maxbond 13   aug 19     4.1s   err_fnl 0
+cbe_gate (dex=16)       err 1.165e-06   maxbond 13   aug 19     5.9s   err_fnl 0
+cbe_gate (dex=64)       err 1.165e-06   maxbond 13   aug 19    13.2s   err_fnl 0
+cbe_bug  (dex=8)        err 8.445e-06   maxbond 13   aug 21    16.5s   err_fnl 0
 ```
 
-`err_fnl = 0.62` on the default means the weight ranking is **discarding 62% of the candidate
-spectrum for want of budget**. `dex = 8` saturates: 16 and 64 are identical, and cost the same
-wall time as `dex = 1` because the sweep dominates. The default was left alone only because the
-MPO path shares it and changing it mid-investigation would have confounded the comparison.
-**Decide the new default and re-measure both paths.**
+What it says:
 
-### 7.2 Re-run the L=18 XX campaign and the 2-site TDVP comparison
-`benchmarks/xx_l18_campaign.jl` + `plot_xx_l18_campaign.py` are ready. Previously **voided** by
-the user because the scheme was wrong; the scheme is now validated on both paths, so these
-measurements mean something. Note `profile_err` must normalise (`site_expval` does not divide
-by the norm, and both methods shed norm under truncation).
+* **The new default lands exactly on the saturated end of the curve.** `growth = 2.0` gives
+  `1.165e-06`, the same value to all printed digits as `dex = 8, 16, 64`, with `err_fnl = 0`.
+  Same on the MPO path: `growth = 2.0` and `dex = 8` both give `8.445e-06`. The schedule is
+  no longer the limiter on either path.
+* `err_fnl = 0.53` on the old default was the weight ranking **discarding half the candidate
+  spectrum for want of budget** — the cap, not the selection, was the accuracy limiter.
+* **The generous default is FASTER, not merely affordable**: gate `24.4s → 3.9s`, MPO
+  `19.7s → 3.6s`. That was not the expectation (the sketch does strictly more work) and it is
+  not the sketch: `dex = 64` costs 13.2s, so cost *does* rise with budget. The starved runs
+  are paying somewhere else — most plausibly the 0-site Krylov, which has `maxiter = 30` and
+  a much worse subspace to converge in. **Not yet confirmed; record the Krylov dimension per
+  step before believing it.**
+* **The 1.1 schedule still stalls the Lubich path outright**: `maxbond 4` against the gate
+  path's 14 at the same setting. §3's fixes removed the *selection's* veto; the ratchet was a
+  second, independent throttle, and it was hurting the MPO sweep far more than the gate one.
+* **A real residual gap remains between the two paths**: gate `1.17e-06` vs Lubich
+  `8.44e-06`, ~7x, with both at `err_fnl ≈ 0` and the same maxbond. Budget is now ruled out as
+  its cause, so it is the sweep-vs-Trotter difference itself. Next thing to chase after §7.2.
+* `bond_update_bug!` is still the most accurate at `5.81e-07`, and the gate path reaches
+  `1.17e-06` for **36x less wall time** (3.9s vs 141.9s) at one lower maxbond.
 
-### 7.3 Substantiate the memory claim
-`peak_elements` is wired into both `CBEBugInfo` and `TDVP2Info` at a matched definition (state +
-transients alive). The design thesis is that CBE-BUG needs a smaller bond dimension than 2-site
-TDVP at matched accuracy because it is a 1-site-cost solver that still sees other symmetry
-sectors. §1 and §7.1 support it on rank and wall time (13 vs 14, 33× faster); the **peak working
-set** figure has not been reported yet.
+### 7.2 The L=18 XX campaign — calibration done, `main` still to run
+`benchmarks/xx_l18_campaign.jl` + `plot_xx_l18_campaign.py`. Previously **voided** by the user
+because the scheme was wrong; the scheme is now validated on both paths, so these measurements
+mean something. Note `profile_err` must normalise (`site_expval` does not divide by the norm,
+and both methods shed norm under truncation).
+
+**`calib 64 2.0` result — CBE-BUG is second order, measured.** L=18, `maxdim = 64`:
+
+```
+scheme      dt     err(t=2)   maxbond        ratio per halving
+cbe     0.1000   1.0235e-03        28
+cbe     0.0500   2.5648e-04        28        3.99
+cbe     0.0250   6.4211e-05        25        3.99
+tdvp2   0.1000   2.0640e-04        28
+tdvp2   0.0500   5.1784e-05        25        3.99
+tdvp2   0.0250   1.2969e-05        24        3.99
+```
+
+`err/dt²` constant to three digits on both. This closes the open question in
+`docs/cbe_bug.md` §3 — the single centre Galerkin does **not** cost an order, and the failure
+mode named there (first order) did not happen. CBE-BUG does carry a ~5x larger error
+*constant* at equal `dt` and equal untruncated rank; that is a subspace statement, and the
+rank/memory comparison has to be read against it.
+
+**But this window cannot pick the main run's `dt`.** `maxbond` peaks at 28 against a cap of
+64, so nothing truncates and neither method is dt-converged at any of these `dt` — a `main`
+run at `dt = 0.05` would compare two dt-limited runs and report time-integration constants as
+if they were rank effects. `phase_calib` now takes `maxdim` and `tmax`
+(`calib [maxdim] [tmax]`), so the choice is made where the main run actually reports:
+
+```
+calib 64 2.0      # the order check (above)
+calib 32 6.0      # the dt choice: at the reported cap, has the error stopped moving?
+```
+
+`calib 32 6.0` is **running**; pick `dt` from it, then `main`. A `dt` whose halving barely
+moves the error there is dt-safe; one that still quarters it is not.
+
+### 7.3 Substantiate the memory claim — now plumbed end to end, needs the run
+`peak_elements` was already wired into both `CBEBugInfo` and `TDVP2Info` at a matched
+definition (state + transients alive) but **nothing reported it**. Now it is carried through:
+`xx_l18_campaign.jl` records it per sample as a `peak_elems` CSV column, and
+`plot_xx_l18_campaign.py` panels (c)/(d) and the printed table read that column instead of
+the old `state_elems + theta_elems` proxy.
+
+Dropping the proxy matters for honesty, not tidiness — it flattered CBE-BUG **twice**: its
+`theta_elems` is 0 by construction, and its basis sweep is transiently *wider* than the state
+that survives truncation, so the state alone understates its true peak. The design thesis is
+that CBE-BUG needs a smaller bond dimension than 2-site TDVP at matched accuracy because it
+is a 1-site-cost solver that still sees other symmetry sectors. §1 and §7.1 support it on
+rank and wall time (13 vs 14, 33× faster); the peak-working-set figure now comes out of the
+§7.2 run automatically.
 
 ### 7.4 Deferred by the user: fixed-rank vs rank-adaptive
 For that comparison, reinstate the bound as *max rank of the new orthonormal K/L matrices ≤ 2r*.
@@ -247,8 +331,27 @@ sbatch --partition=short scripts/run_julia.sbatch benchmarks/lubich_vs_gate_rank
 sbatch --partition=short scripts/run_julia.sbatch benchmarks/probe_edge_refusal.jl
 ```
 
-**Standing constraints.** Run everything via `sbatch` on compute nodes — never Julia on the
-login node (4 cores, 11 GB, `/home` on NFS). Never write `--time`; inherit the partition max
+**Running it off the cluster.** When the cluster is unreachable (VPN down — `ssh login-node`
+to `10.1.0.120` just times out) the whole suite runs on a laptop, and the L=8/L=10
+measurements in this document are small enough to be worth doing there:
+
+```bash
+# once: a project outside the repo, so instantiating never dirties the Manifest
+cp -r BUG-Julia /tmp/bugjl && cd /tmp/bugjl
+julia --project=. -e 'using Pkg; Pkg.instantiate()'
+julia --project=. deps/build.jl        # the Telum :none SVD patch, NOT `Pkg.build`
+julia --project=. --threads=1 tests/RSVDCBEBondUpdate/test_cbe_gate.jl
+```
+
+Two gotchas, both measured: `Pkg.build("BUGJulia")` re-resolves in a sandbox and dies on
+`JSON = "1.6.1"` against an older local registry — run `deps/build.jl` directly instead, it
+is the same patch without the sandbox. And first-time precompilation of Telum/HDF5/MKL takes
+several minutes during which the log stays EMPTY (block-buffered to a file), so an empty log
+is not a hung run. Timings are ~2x the cluster's on one thread; run wall-clock comparisons
+one at a time, never alongside a test suite.
+
+**Standing constraints.** On the cluster, run everything via `sbatch` on compute nodes — never
+Julia on the login node (4 cores, 11 GB, `/home` on NFS). Never write `--time`; inherit the partition max
 (`short` 1 h, `main` 7 d, `long` 30 d). Stay under 300 GB memory *and* 50 cores across all jobs;
 `short_qos`/`long_qos` cap `cpu=32` per user. Real time only: `tau = -im*dt`. Do not modify
 `src/BUG` / `src/BondUpdateBUG` unitarity-critical components without an explicit request. The
