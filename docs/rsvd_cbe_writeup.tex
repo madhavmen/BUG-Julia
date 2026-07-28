@@ -37,6 +37,23 @@
   belowskip=0.8em,
 }
 
+% Julia is not guaranteed to be predefined by `listings` (it depends on the installed
+% version), and an undefined language is a hard error. Define it here so the document
+% compiles against any listings release; a redefinition is harmless if one already exists.
+\lstdefinelanguage{julia}{
+  morekeywords={function,end,return,if,else,elseif,for,while,in,const,local,global,
+                struct,mutable,using,import,do,let,begin,true,false,nothing,Int,Float64},
+  sensitive=true,
+  morecomment=[l]{\#},
+  morestring=[b]",
+}
+
+\lstdefinestyle{jl}{
+  language=julia,
+  keywordstyle=\color{keep}\bfseries,
+  commentstyle=\color{drop}\itshape,
+}
+
 % Notation used throughout.
 \newcommand{\Hb}{\hat{H}}
 \newcommand{\Theb}{\Theta}
@@ -466,7 +483,157 @@ it means the probe is blind to the one-site component, which the reference imple
 matters, and it caps the probe's width at the opposite frame's complement dimension --- which
 near a chain edge is $0$ or $1$.
 
+\subsection{Budget, oversample, probe, candidates: the four steps in code}
+\label{sec:fourfunnel}
+
+The four quantities are produced in a strict order, each from the one before, and the
+distinction between them is where most of the confusion about this method lives. All line
+references are \file{src/RSVDCBEBondUpdate/cbe.jl}.
+
+\paragraph{Step 1 --- the budget $\Dex$: \emph{how many new directions this bond may admit}.}
+\begin{lstlisting}[style=jl]
+dmax         = max(leg_dim(U0,1), r, leg_dim(V0,3))          # neighbourhood max
+budget       = dex <= 0 ? max(ceil(Int, growth*dmax) - r, 1) : dex
+dex_l, dex_r = min(budget, room_l), min(budget, room_r)      # room = d*chi - r
+\end{lstlisting}
+Read it in four moves. \code{dex} (default $0$) is an \emph{absolute override}: any positive
+value bypasses the schedule completely, which is what benchmarks use so the budget is a fixed
+axis. Otherwise \code{growth} (default $2.0$) sets it relative to $d_{\max}$ --- the
+\textbf{neighbourhood} max over the left, centre and right bond dimensions, not $r$ alone, so a
+wide bond can pull narrow neighbours up. The \code{max(..., 1)} floor guarantees every bond may
+propose at least one direction. Finally each side is clipped by its own
+$\mathrm{room} = d\chi - r$, a hard ceiling: no frame can exceed the local space it lives in. If
+both sides clip to zero the routine returns immediately --- the frames are already complete, and
+that is success, not failure.
+
+\paragraph{Step 2 --- the oversample $\Dpre$: \emph{how wide the random probe is}.}
+\begin{lstlisting}[style=jl]
+npre = preselect_only ? max(budget, 1) :
+       dover === nothing ? ceil(Int, 1.2 * budget) : budget + dover
+\end{lstlisting}
+Three modes. Default (\code{dover = nothing}) is \textbf{relative}: $\Dpre = \lceil 1.2\,
+\text{budget}\rceil$, the reference's $20\%$ margin. Passing \code{dover = n} makes it
+\textbf{additive}, $\Dpre = \text{budget} + n$, which gives small budgets proportionally more
+help. \code{preselect\_only} drops the margin entirely, since in that mode there is no ranking
+stage for the extra columns to feed.
+
+\emph{Why oversample at all.} A probe of exactly $k$ columns does span a $k$-dimensional slice of
+$\mathrm{range}(A)$, but the chance that this particular random slice is well aligned with the
+true top-$k$ subspace is not close to $1$ --- the projection can be arbitrarily ill-conditioned.
+A handful of extra columns is what turns ``probably captures the range'' into ``misses it with
+exponentially small probability''. It is a reliability margin, not an accuracy parameter.
+
+\emph{One subtlety worth flagging}, because it is invisible in the code at a glance: \code{npre}
+is computed from the \textbf{unclipped} \code{budget}, not from \code{dex\_l}/\code{dex\_r}. A
+bond with almost no room still gets a full-width probe.
+
+\paragraph{Step 3 --- the probe $\Om$ itself (\code{sector\_graded\_sketch}).}
+Given $\Dpre$, build a tensor in the \emph{opposite} frame's layout:
+\begin{enumerate}[leftmargin=1.4em,itemsep=1pt]
+\item \code{fusion\_basis} gives the full local space; per charge sector $q$ it has dimension
+$d_{\text{full}}(q)$. The frame already spans $d_T(q)$ of it, leaving a complement
+$d_C(q) = d_{\text{full}}(q) - d_T(q)$.
+\item Split the width: $n_c = \mathrm{round}(\Dpre \cdot \code{comp\_ratio})$ complement columns,
+$n_t = \Dpre - n_c$ isometry columns.
+\item \code{\_alloc\_columns} spreads each half across sectors \emph{in proportion to sector
+dimension}, capped at each sector's own dimension, using a \textbf{per-sector \code{ceil}}.
+\item Any shortfall --- a half whose subspace is too small to supply its quota --- is
+\textbf{handed to the other half}, and back again if that one is short too.
+\item The complement half is random-then-projected-\emph{out} of the frame, the isometry half
+random-then-projected-\emph{in}; the two are direct-summed.
+\end{enumerate}
+
+Two consequences that surprise people, both load-bearing:
+
+\begin{itemize}[leftmargin=1.2em]
+\item \textbf{$\Dpre$ is a target, not the realised width.} The \code{ceil} in step 3 is applied
+\emph{per sector}, so the sum over sectors can exceed $\Dpre$. In the worked example
+$\Dpre = 9$ yet the probe comes out $10$ columns wide, split
+$[-2 \Rightarrow 2,\; 0 \Rightarrow 4,\; 2 \Rightarrow 3,\; 4 \Rightarrow 1]$. This is
+deliberate: the \code{ceil} guarantees every sector with room receives at least one column,
+which is precisely what matters when the sector you need is the currently \emph{empty} one. A
+\code{floor} would round the small sectors to zero and the probe would never reach them.
+\item \textbf{The redistribution in step 4 is not tidiness.} Near a chain edge the opposite
+frame's complement is $0$- or $1$-dimensional. Without redistribution a complement-weighted
+split collapses the probe to one column and the bond declines to expand \emph{with room to
+spare} --- measured, leaving right residuals of $3.1\times10^{-4}$ and $0.19$ untouched, and one
+blocked narrow bond then caps every bond inward.
+\end{itemize}
+
+\paragraph{Step 4 --- the preselection (\code{\_preselect\_left}).}
+\begin{lstlisting}[style=jl]
+R = perp_component(U0, Y)                             # P_perp Y, on legs (link_l, site_l)
+n = norm(R)
+n <= 100*eps * max(norm(Y), 1.0) && return nothing    # nothing outside the frame
+res = svd((1/n) * R, (1,2); cutoff = stol_pre)        # NORMALISED first
+Q   = res.U
+R2  = perp_component(U0, Q)                           # RepairOrtho
+Q   = svd(R2, (1,2); cutoff = 1e-13).U
+return (Q, trunc_weight(res))                         # the tail becomes err_pre
+\end{lstlisting}
+Project the frame out; bail if what remains is noise \emph{relative to} $\|Y\|$; normalise;
+SVD at \code{stol\_pre} ($10^{-10}$); then orthonormalise a \emph{second} time. The
+normalisation and the second pass are the two steps that look redundant and are not --- both are
+explained in \S\ref{sec:twostage} and in Stage~4 of the worked example.
+
+The output width is the \textbf{number of candidates}, and it is decided by the SVD cutoff alone
+--- not by $\Dex$, not by $\Dpre$. This is the point most easily got wrong, so state it flatly:
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{0.30\linewidth}p{0.62\linewidth}@{}}
+\toprule
+\textbf{Does the budget affect preselection?} & \textbf{Only through the probe's width.} \\
+\midrule
+Directly & No. Preselection is governed by \code{stol\_pre} and by what $\Hb$ actually
+produces outside the frame. \\
+Indirectly & Yes, and decisively: the budget sets $\Dpre$, and the probe can never yield more
+candidates than it has columns. A budget too small starves the probe and the directions are
+never \emph{generated}. \\
+Where it re-enters & At the \emph{final} selection, where \code{dex\_l}/\code{dex\_r} cap how
+many candidates are admitted, and \code{err\_fnl} reports what the cap cost. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+That split is the whole design. A starved budget fails \emph{silently at step 3} --- there is no
+diagnostic for a direction that was never probed. A generous budget lets the preselection decide
+on its own merits and leaves the cap non-binding, which is the \code{err\_fnl}$\,=0$ healthy
+case. It is why the $\text{growth}=1.1$ schedule showed \code{err\_fnl}$\,=0.62$: not a
+selection failure, a \emph{budget} failure.
+
+\paragraph{The funnel, on the worked example.} Every number below is from the transcript in
+Part~\ref{part:example}, at bond $(4,5)$ of an $L=8$ chain with $r=7$, $\chi_l=\chi_r=6$, $d=2$.
+
+\begin{center}
+\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+quantity & symbol & value & set by \\
+\midrule
+neighbourhood max        & $d_{\max}$ & $7$    & $\max(6,7,6)$ \\
+budget                   &            & $7$    & $\lceil 2.0\cdot 7\rceil - 7$ \\
+room, each side          &            & $5,\,5$ & $d\chi - r$ \\
+per-side budget          & $\Dex$     & $5$    & $\min(7, 5)$ \\
+oversampled target       & $\Dpre$    & $9$    & $\lceil 1.2\cdot 7\rceil$ \\
+\emph{realised} probe width &         & $10$   & per-sector \code{ceil} \\
+candidates surviving preselection &   & $4$    & SVD at \code{stol\_pre} \\
+admitted                 &            & $4$    & $\min(4, 5)$ --- cap does not bind \\
+rank after expansion     &            & $7 \to 11$ & direct sum \\
+rank after the $S$-step  &            & $10$   & truncation \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Read down that table and the method is one sentence: a budget of $7$ becomes a probe of $10$
+columns, which finds $4$ genuinely new directions, all $4$ of which fit under the cap of $5$ --- and
+under the old schedule the budget would have been $1$, the probe $2$ columns, and three of those
+four directions would never have existed to be ranked.
+
 \subsection{The two-stage selection}
+\label{sec:twostage}
 
 \begin{description}[leftmargin=1.4em,style=nextline]
 \item[Stage 1 --- preselection (cheap, generous).]
