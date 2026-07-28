@@ -466,6 +466,37 @@ nothing. The tuning burden the scheme was meant to remove is not, on this eviden
 it compounds with the known `maxiter` waste (§7.1). **Not yet a default** — it needs a
 sweep-level check across all bonds and a longer window before changing one.
 
+#### 7.6.1 Why none of it could discriminate — `growth = 2.0` saturates room when `d = 2`
+
+This is the finding that reframes the rest, and it is structural rather than an artefact of
+`L = 8`. At a bond whose neighbours are the same width (`χ = r`, so `dmax = r`):
+
+```
+room   = d·χ − r              →  r      (d = 2)
+budget = ⌈growth·dmax⌉ − r    →  r      (growth = 2.0)
+dex    = min(budget, room)    =  room
+```
+
+**The expansion therefore spans the entire local space.** The ranking never has to choose,
+`err_fnl = 0` at every bond, and every variant — every `comp_ratio`, every `dover`, every
+iteration scheme — is computing the *exact two-site propagator* and must agree to machine
+precision. Confirmed directly: `dex = 64` (no cap at all) gives 7.44e-16, the same as the
+default. **No experiment run at `growth = 2.0` on a spin-½ chain can discriminate between
+selection strategies**, because there is no selection happening.
+
+Consequences worth carrying forward:
+
+* Re-read §7.1: at `d = 2`, `growth = 2.0` does not mean "a generous budget", it means
+  "expand to the complete local space". That is why the budget looked free and 200× more
+  accurate, and why the RSVD's width advantage is eroded (§Cost in the write-up) — the probe
+  is as wide as the thing it is sketching.
+* The discriminating knob is **`growth`, not system size**. `growth < 2.0`, `d > 2`, or a
+  `maxdim` that binds hard enough to make neighbouring bonds uneven are the regimes where the
+  ranking, the hyperparameters, and any iteration scheme can differ at all.
+* Section G of `benchmarks/cbe_s_iterations.jl` runs `growth ∈ {1.1, 1.25, 1.5}` for this
+  reason, and it is the only part of that benchmark whose result carries information about the
+  selection.
+
 ---
 
 ## 8. Gotchas that cost real time
