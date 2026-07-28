@@ -392,6 +392,10 @@ const _CBE_EPS = 100 * eps(Float64)
 # `bond_frame` avoids by giving its two SVDs distinct tag pairs.
 const _TAG_L, _TAG_LR = "cbeL,L", "cbeL,R"
 const _TAG_R, _TAG_RR = "cbeR,L", "cbeR,R"
+# Distinct again for the final orthonormality guard, for the same reason: its output is a
+# fresh bond leg, and reusing a preselection tag risks the duplicate-index error above.
+const _TAG_OL, _TAG_OLR = "cbeO,L", "cbeO,R"
+const _TAG_OR, _TAG_ORR = "cbeP,L", "cbeP,R"
 
 """
     _preselect_left(U0, Y, stol) -> (Q, err) or (nothing, 0.0)
@@ -666,6 +670,12 @@ function cbe_expand(f::BondFrame, skl, skr;
         _trim_total(QR, 1, dex_r)
     end
 
+    # Re-establish orthonormality and orthogonality to the frame before the direct sum. See
+    # the guard block above `_trim_total` for why this is not redundant with the preselection's
+    # `RepairOrtho`: that pass ran on `Q`, this one runs on what the final selection made of it.
+    TLC = _reortho_left(U0, TLC)
+    TRC = _reortho_right(V0, TRC)
+
     (TLC === nothing && TRC === nothing) && return CBEExpansion(U0, V0, 0, 0, err_pre, 0.0)
 
     ltag, rtag = U0.inds[3].itags, V0.inds[1].itags
@@ -702,6 +712,41 @@ function cbe_expand(f::BondFrame, skl, skr;
     end
 
     return CBEExpansion(U_ex, V_ex, n_l, n_r, err_pre, err_fnl)
+end
+
+# ── orthonormality guard on the appended blocks ──────────────────────────────────────
+#
+# `[U0 | C_L]` is an isometry only while `C_L` is orthonormal AND `C_L ⊥ U0`, and every
+# downstream guarantee rests on that: the losslessness of the expansion, `Ŝ₀ = U_ex† Θ₀ V_ex†`
+# reproducing `Θ₀`, and the norm preservation of the S-step. Both properties hold by
+# construction -- the preselection returns an orthonormal `Q ⊥ U0`, the ranked branch rotates it
+# by an isometry, the fallback slices columns out of it -- so this re-establishes rather than
+# repairs. It is insurance on the one place error could enter (the ranked branch contracts over
+# a summed index) and it is cheap: one SVD of a `(dχ × n_new)` block with `n_new ≤ dex`.
+#
+# TELUM HAS NO QR PRIMITIVE, so `svd(...).U` is the orthonormalisation, exactly as in
+# `_preselect_left`'s `RepairOrtho` pass.
+#
+# THE FRAME IS PROJECTED OUT FIRST, and that ordering is the substance. Orthonormalising alone
+# would fix the block's internal Gram matrix while leaving any component along `U0` untouched --
+# and that component, not the internal one, is what breaks the direct sum's isometry.
+#
+# The cutoff is `1e-14`: tight enough to keep a column whose only defect is a `1e-16` overlap
+# with the frame, loose enough to drop one that genuinely collapses under the projection and so
+# carries no direction at all. A dropped column is reported through `n_new_*`, never silently.
+_reortho_left(U0, C) = _reortho(C, X -> perp_component(U0, X),
+                                R -> svd(R, (1, 2), _TAG_OL, _TAG_OLR; cutoff = 1e-14).U)
+
+_reortho_right(V0, C) = _reortho(C, X -> perp_component_right(V0, X),
+                                 R -> permutedims(
+                                     svd(R, (2, 3), _TAG_OR, _TAG_ORR; cutoff = 1e-14).U,
+                                     (3, 1, 2)))
+
+function _reortho(C, perp, orth)
+    C === nothing && return nothing
+    R = to_concrete(perp(C))
+    norm(R) <= _CBE_EPS * max(norm(C), 1.0) && return nothing
+    return to_concrete(orth(R))
 end
 
 "Keep at most `n` columns of `Q` on `leg`, walking sectors in Telum's order."
