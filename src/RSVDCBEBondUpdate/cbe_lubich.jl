@@ -528,6 +528,13 @@ Base.@kwdef struct CBEBugOptions
     normalize::Bool = true
     maxiter::Int = 30
     tol::Float64 = 1e-15
+    # S-step scheme, honoured by the `cbe_bond_update` path only. `s_iters` selects the solver
+    # (see `cbe_bond_update`: 1 = one expansion + plain Lanczos, >1 = the outer-loop control,
+    # <=0 = the expanding-basis Lanczos with `-s_iters` growth passes). `s_reorth` turns on full
+    # reorthogonalisation in the plain Lanczos -- measured ~5.7x fewer matvecs at one bond, not
+    # yet a default because it has not been checked across a sweep.
+    s_iters::Int = 1
+    s_reorth::Bool = false
     seed::UInt = 0x5EED
     record_magnetisation::Bool = false
     observe::Union{Nothing, Function} = nothing

@@ -32,7 +32,8 @@ using LurCGT, Telum
 
 using ..BondUpdateBUG: SymMPS, canonical!, bond_dims, leg_dim, local_space,
                        symmetry_mode, BondFrame, bond_frame, frame_theta,
-                       expv, tensor_inner, perp_component, perp_component_right,
+                       expv, hermitian_tridiagonal_exp_coeffs,
+                       tensor_inner, perp_component, perp_component_right,
                        fusion_basis, reachable_sectors, sector_dim, dual_charge,
                        align_charge, left_isometry_defect, right_isometry_defect,
                        energy, bond_gates, apply_gate, heisenberg_bond_gate,

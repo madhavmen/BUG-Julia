@@ -404,6 +404,68 @@ short-window run as evidence about rank.
 For that comparison, reinstate the bound as *max rank of the new orthonormal K/L matrices ≤ 2r*.
 `sulz_cap = true` is already wired in the **global** `2·rmax` form. Explicitly "for later".
 
+### 7.6 Iterating the basis instead of tuning the probe — MEASURED, mostly negative
+
+**The idea.** The one-shot expansion must guess the right subspace in a single draw, helped by
+two hyperparameters: the oversampling (`dover`, default `1.2×`) and the complement/isometry
+split (`comp_ratio`, default `0.5`). The proposal was to stop guessing — take a narrow probe,
+re-expand repeatedly, and let the basis converge on the relevant subspace, stopping when the
+Krylov matrix goes small.
+
+Two schemes were built and measured (`benchmarks/cbe_s_iterations.jl`, L=8, bond (4,5), r=7,
+against the **exact** two-site propagator):
+
+**(a) Outer loop** (`s_iters = n > 1`): re-sketch from the state the previous pass evolved.
+**Plateaus after two passes**, five orders short of the one-shot.
+
+| setting | err vs exact | rank | passes |
+|---|---|---|---|
+| `dex=1 s_iters=1` | 7.78e-10 | 8 | 1 |
+| `dex=1 s_iters=2…8` | 5.50e-10 | 9 | stops at 2 |
+| `growth=2.0` one-shot | **5.60e-16** | 11 | 1 |
+
+Why it cannot work: `exp(τH)Θ₀ = Θ₀ + τHΘ₀ + O(τ²)`, so re-sketching a *converged exponential*
+keeps rediscovering `HΘ₀` and never reaches `H²Θ₀`. An outer loop cannot build a Krylov space.
+
+**(b) Expanding-basis Lanczos** (`s_iters = -g`, `_expanding_lanczos`): growth becomes **step 0
+of each Krylov iteration** — expand around `v_k` *before* applying `H` to it, so the bond
+dimension runs `D`, `growth·D`, `growth²·D`, …  Here `v_k` genuinely carries `H^k`, so the
+objection to (a) does not apply.
+
+| setting | err vs exact | rank | matvec |
+|---|---|---|---|
+| `dex=1 grow=1` | 7.778e-10 | 8 | 22 |
+| `dex=1 grow=6` | 7.777e-10 | **12** | 17 |
+| `growth=2.0 grow=1..3` | 4.682e-16 | 11 | **3** |
+| `growth=2.0` one-shot, `reorth=false` | 5.600e-16 | 11 | 17 |
+| `growth=2.0` one-shot, **`reorth=true`** | 4.675e-16 | 11 | **3** |
+
+**Two findings, and the second kills the headline.**
+
+1. **A starved probe cannot be rescued by Krylov depth.** At `dex=1` the rank grows 8 → 12 —
+   *larger* than the 11 the default uses — and the error does not move (7.78e-10 vs 4.68e-16).
+   Directions drawn from a 2-column probe are poor, and more of them does not help. The
+   oversampling is a **reliability threshold, not a tunable to trade against depth**.
+
+2. **The 17 → 3 matvec drop is full reorthogonalisation, not the expanding basis.** The control
+   (`s_reorth = true`, one-shot, same expansion) reaches 3 matvecs on its own. The expanding
+   basis must not be credited for it.
+
+**β is not a sufficiency criterion.** `dex=1 grow=1` terminates with β = 2.8e-24 — as small as a
+stopping signal ever gets — and is still wrong by 7.8e-10. β measures whether the Krylov space
+has closed *inside the current basis*; it says nothing about whether that basis contains the
+right directions. A starved basis closes early, confidently, and wrongly.
+
+**Also measured: the hyperparameters barely matter at this bond**, so there was little to
+replace. `comp_ratio` 0.0 → 1.0 moves the error only 1.63e-15 → 5.60e-16; `dover` 0 → 8 moves
+nothing. The tuning burden the scheme was meant to remove is not, on this evidence, large.
+
+`tau = 0` stays the identity for both schemes (1.29e-16 / 2.53e-16), so neither double-evolves.
+
+**Actionable:** `s_reorth = true` is a ~5.7× matvec saving at no accuracy cost on this bond, and
+it compounds with the known `maxiter` waste (§7.1). **Not yet a default** — it needs a
+sweep-level check across all bonds and a longer window before changing one.
+
 ---
 
 ## 8. Gotchas that cost real time
