@@ -1,12 +1,9 @@
 # BUG-Julia — `bond_update_bug`
 
 A symmetry-native, rank-adaptive Basis-Update-and-Galerkin time integrator for
-1D tensor networks, built on [Telum](https://github.com/) / LurCGT so that U(1)
+1D tensor networks, built on Telum / LurCGT so that U(1)
 and non-Abelian symmetric tensors stay block-sparse throughout.
 
-**There is exactly one supported integrator: `bond_update_bug!`.** Everything
-else that used to live here is under `exploratory/` or at the tag
-`archive/pre-bond-update-legacy`.
 
 ## Quick start
 
@@ -26,9 +23,6 @@ Real time only: `dt` is real and the driver forms `tau = -im*dt` itself.
 
 ## The algorithm
 
-One local bond update, mirroring the verified Python kernel
-(`Alice/.../kls/discarded_candidate.py`), in six steps:
-
 1. **K-step.** `H_K x = V0'·gate(x ⊗ V0)`, then project *before* the exponential:
    `G_K x = H_K x − U0(U0'·H_K x)`. That makes `G_K` **non-Hermitian**, so the K
    and L substeps take an Arnoldi exponential, not Lanczos.
@@ -43,8 +37,7 @@ One local bond update, mirroring the verified Python kernel
    unpaired one is structurally zero and would be dead weight. The fill draws
    from the same `2r` budget as the complement, and goes **first**: starve it and
    the state freezes.
-5. **S-step.** `Ŝ0 = Û'·Θ0·V̂'` directly — **no overlap matrices** `M̂`/`N̂`. The
-   Galerkin generator on the augmented bases is Hermitian, so this one is Lanczos.
+5. **S-step.** `Ŝ0 = Û'·Θ0·V̂'` .
 6. **Truncate.** A symmetry-blocked SVD of `S1` sets the new bond dimension and
    prunes any seeded sector the dynamics left empty.
 
