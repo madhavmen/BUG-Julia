@@ -99,7 +99,7 @@ end
     @testset "carry is gauge-exact along a sweep" begin
         # The sweep reads the carry after `_absorb_left!` has rewritten psi[i], so the
         # carry must equal a stack rebuilt from the UPDATED state -- this is the property
-        # the ordering constraint in `cbe_bug_bond_update` exists to protect.
+        # the ordering constraint in `cbe_lubich_sweep` exists to protect.
         set_symmetry!(:U1)
         L = 6
         h = xxz_chain(L)

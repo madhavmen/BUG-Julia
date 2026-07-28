@@ -150,7 +150,7 @@ end
 One symmetric two-site TDVP step of `tau = -im*dt`, in place. Second order.
 
 Present as the memory/accuracy baseline for CBE-BUG; it is not part of the CBE scheme and
-nothing in `cbe_bug.jl` calls it. Like `cbe_bug_bond_update`, it carries its channel
+nothing in `cbe_lubich.jl` calls it. Like `cbe_lubich_sweep`, it carries its channel
 environments along each half-sweep, so environment work is `O(L)` per step and a wall-time
 comparison between the two is not distorted by one of them rebuilding.
 """
@@ -166,7 +166,7 @@ function tdvp2_step!(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     acc = Any[0, 0, 0.0, 0]
     half = tau / 2
 
-    # O(L) environments, as in `cbe_bug_bond_update`: each half-sweep carries its own side
+    # O(L) environments, as in `cbe_lubich_sweep`: each half-sweep carries its own side
     # and reads the other from one prebuilt stack. The forward sweep only writes sites
     # <= i+1, so the right stack stays valid; the backward sweep only writes sites >= i,
     # so the left stack (rebuilt once, after the forward sweep) stays valid.

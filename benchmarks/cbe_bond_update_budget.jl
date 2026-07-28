@@ -3,7 +3,7 @@
 # NOW A LEGITIMATE QUESTION, and it was not before. Every earlier tuning measurement was
 # taken on a scheme that did not expand its bonds correctly and is void. The gate path is
 # different: the CBE selection now drives the residual of the gate's action on every bond to
-# machine zero (`tests/RSVDCBEBondUpdate/test_cbe_gate.jl`), rank tracks the validated
+# machine zero (`tests/RSVDCBEBondUpdate/test_cbe_bond_update.jl`), rank tracks the validated
 # integrator, and the sweep underneath is the validated odd/even Trotter one. So a budget
 # sweep here measures the METHOD rather than a bug.
 #
@@ -88,10 +88,11 @@ function row(label, f; kwargs...)
             maximum(i.err_pre), maximum(i.err_fnl))
 end
 
-gate_run(p, o) = cbe_gate_bug!(p, xx_gates(p); opts = o)
-# The Lubich sweep drives a global MPO rather than per-bond gates, so it takes the chain.
+gate_run(p, o) = cbe_bond_update_bug!(p, xx_gates(p); opts = o)
+# The Lubich sweep dresses H with channel environments rather than using per-bond gates,
+# so it takes the whole chain rather than a gate list.
 const H = xxz_chain(L; J = 1.0, delta = 0.0)
-mpo_run(p, o) = cbe_bug!(p, H; opts = o)
+mpo_run(p, o) = cbe_lubich_bug!(p, H; opts = o)
 
 # ---- the schedule A/B, both paths -------------------------------------------
 # `dex = 0` hands the budget to the schedule: `ceil(growth*dmax) - r`, neighbourhood-coupled.
@@ -99,15 +100,15 @@ mpo_run(p, o) = cbe_bug!(p, H; opts = o)
 # at its default: the split governs the PROBE, not what is admitted, and probing with the
 # complement alone blinds the sketch to the 1-site component (`RSVDpreBE0SiQS.m:339`).
 for g in (1.1, 2.0)
-    row("cbe_gate (growth=$g)", gate_run; growth = g)
+    row("bond_update (growth=$g)", gate_run; growth = g)
 end
 for g in (1.1, 2.0)
-    row("cbe_bug  (growth=$g)", mpo_run; growth = g)
+    row("lubich      (growth=$g)", mpo_run; growth = g)
 end
 println()
 
 # ---- the absolute-budget curve, the yardstick the schedule must reach -------
 for dex in (1, 2, 4, 8, 16, 64)
-    row("cbe_gate (dex=$dex)", gate_run; dex = dex)
+    row("bond_update (dex=$dex)", gate_run; dex = dex)
 end
-row("cbe_bug  (dex=8)", mpo_run; dex = 8)
+row("lubich      (dex=8)", mpo_run; dex = 8)

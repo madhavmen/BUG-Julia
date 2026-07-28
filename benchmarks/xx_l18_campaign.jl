@@ -91,7 +91,7 @@ function run_cbe(; dt, maxdim, dex, tmax, sample_every)
     maxex = 0
     peak = 0
     for k in 1:nsteps
-        info = cbe_bug_bond_update(psi, h, -im * dt; dex = dex, maxdim = maxdim,
+        info = cbe_lubich_sweep(psi, h, -im * dt; dex = dex, maxdim = maxdim,
                                    trunc_thresh = 1e-12)
         maxex = max(maxex, maximum(info.expanded; init = 0))
         peak = max(peak, info.peak_elements)
@@ -182,7 +182,7 @@ function phase_centre()
     for ce in (true, false)
         psi = domain_wall_state(L)
         for _ in 1:40
-            cbe_bug_bond_update(psi, h, -im * 0.05; maxdim = 64, trunc_thresh = 1e-12,
+            cbe_lubich_sweep(psi, h, -im * 0.05; maxdim = 64, trunc_thresh = 1e-12,
                                 centre_expand = ce)
         end
         @printf("centre_expand=%-5s  err=%.4e  maxbond=%d  centre=%d\n",

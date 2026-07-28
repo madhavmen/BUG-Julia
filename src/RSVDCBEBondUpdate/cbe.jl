@@ -492,7 +492,7 @@ Keywords:
 
 THE K/L ODEs ARE NEVER SOLVED. This routine supplies the DIRECTIONS those solves would
 have found -- one application of `H`, sketched -- and the per-bond Galerkin update in
-[`cbe_bug_bond_update`](@ref) then builds the Krylov basis on the expanded bond and takes
+[`cbe_lubich_sweep`](@ref) then builds the Krylov basis on the expanded bond and takes
 the step in it. So there is no `expv` per bond on a one-site object, only the `O(χ²)`
 matrix-free 0-site Krylov, and no rank-4 tensor anywhere.
 """
@@ -515,7 +515,7 @@ closures instead of read off a global Hamiltonian:
 Everything downstream of those two calls -- the growth budget, the sector-graded sketch,
 the two preselections with `RepairOrtho`, the weight ranking of the final selection, the
 `Empty` branch, the direct sums -- is shared. That is the point of the split: the
-gate-based path (`cbe_gate.jl`) and the global-MPO path exercise the SAME selection code,
+gate-based path (`cbe_bond_update.jl`) and the environment-dressed path exercise the SAME selection code,
 so confirming CBE works against a validated Trotter sweep also validates the selection the
 Lubich sweep depends on. Nothing here knows which caller it has.
 """
@@ -553,14 +553,14 @@ function cbe_expand(f::BondFrame, skl, skr;
     # The reference is DMRG, where each sweep re-converges the same state, so a 10% ratchet
     # compounds over sweeps and costs only iterations. A TIME INTEGRATOR gets one shot per
     # step: a direction the step needs and does not admit is not deferred, it is gone, and
-    # the state carries that error forward. Measured (`benchmarks/cbe_gate_budget.jl`,
+    # the state carries that error forward. Measured (`benchmarks/cbe_bond_update_budget.jl`,
     # XX L=10, dt=0.02, t=0.5, maxdim=64) at the 1.1 schedule, whose budget on a bond at
     # r=13 is `ceil(1.1*13)-13 = 2`:
     #
-    #   cbe_gate (1.1 schedule)  err 1.43e-04   err_fnl 6.2e-01   22.4s
-    #   cbe_gate (dex=4)         err 3.54e-04   err_fnl 0          4.6s
-    #   cbe_gate (dex=8)         err 1.17e-06   err_fnl 0          4.7s
-    #   cbe_gate (dex=16, 64)    err 1.17e-06   err_fnl 0          4.5s   <- saturated
+    #   bond_update (1.1 schedule)  err 1.43e-04   err_fnl 6.2e-01   22.4s
+    #   bond_update (dex=4)         err 3.54e-04   err_fnl 0          4.6s
+    #   bond_update (dex=8)         err 1.17e-06   err_fnl 0          4.7s
+    #   bond_update (dex=16, 64)    err 1.17e-06   err_fnl 0          4.5s   <- saturated
     #   bond_update_bug!         err 5.81e-07                    157.0s
     #
     # `err_fnl = 0.62` is the schedule DISCARDING 62% of the ranked candidate weight for want
@@ -687,7 +687,7 @@ function cbe_expand(f::BondFrame, skl, skr;
     # expansion. It was not: an expansion is LOSSLESS, so it cannot change the state's
     # Schmidt rank, and `canonical!` collapsing a widened bond back is correct reporting
     # rather than deletion. Rank grows only where the state is EVOLVED in the widened space,
-    # which is what the per-bond Algorithm 7 update in `cbe_bug_bond_update` is for. The
+    # which is what the per-bond Algorithm 7 update in `cbe_lubich_sweep` is for. The
     # rotation was lossless but bought nothing, so it is gone.
     if sulz_cap
         # Only checked when the bound is deliberately switched on, and in its GLOBAL form

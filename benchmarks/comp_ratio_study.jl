@@ -40,7 +40,7 @@ function run(; comp_ratio, dex, sulz_cap)
     nsteps = round(Int, TMAX / DT)
     t0 = time()
     for _ in 1:nsteps
-        cbe_bug_bond_update(psi, h, -im * DT; comp_ratio = comp_ratio, dex = dex,
+        cbe_lubich_sweep(psi, h, -im * DT; comp_ratio = comp_ratio, dex = dex,
                             sulz_cap = sulz_cap, maxdim = MAXD, trunc_thresh = 1e-12)
     end
     return perr(psi, TMAX), bond_dims(psi), time() - t0

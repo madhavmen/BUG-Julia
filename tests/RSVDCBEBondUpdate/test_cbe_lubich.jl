@@ -28,7 +28,7 @@ function evolved(L::Int; n_steps = 6, dt = 0.05, maxdim = 32)
     return psi
 end
 
-@testset "cbe_bug_bond_update" begin
+@testset "cbe_lubich_sweep" begin
 
     @testset "0-site action agrees with the two-site route" begin
         # `apply_zero_site` must be the same operator as `apply_h_two_site` sandwiched
@@ -80,7 +80,7 @@ end
             H = dense_heisenberg(L; delta = delta)
             want = dense_exact_propagate(H, v0, dt)
 
-            cbe_bug_bond_update(psi, h, -im * dt; maxdim = 32, trunc_thresh = 1e-14)
+            cbe_lubich_sweep(psi, h, -im * dt; maxdim = 32, trunc_thresh = 1e-14)
             got = dense_state(psi)
             @test norm(got - want) < 1e-9
         end
@@ -92,7 +92,7 @@ end
         h = xxz_chain(L)
         psi = evolved(L)
         before = dense_state(psi)
-        cbe_bug_bond_update(psi, h, 0.0 + 0.0im; maxdim = 32, trunc_thresh = 1e-14)
+        cbe_lubich_sweep(psi, h, 0.0 + 0.0im; maxdim = 32, trunc_thresh = 1e-14)
         @test norm(dense_state(psi) - before) < 1e-10
     end
 
@@ -103,7 +103,7 @@ end
         psi = evolved(L)
         sz0, n0 = total_sz(copy(psi)), norm(psi)
         for _ in 1:3
-            cbe_bug_bond_update(psi, h, -im * 0.02; maxdim = 32, trunc_thresh = 1e-14)
+            cbe_lubich_sweep(psi, h, -im * 0.02; maxdim = 32, trunc_thresh = 1e-14)
         end
         @test abs(total_sz(copy(psi)) - sz0) < 1e-10       # U(1) is exact, not approximate
         @test abs(norm(psi) - n0) < 1e-8                   # 0-site generator is Hermitian
@@ -128,7 +128,7 @@ end
         v0 = dense_state(psi)
         dt = 0.02
         for _ in 1:8
-            cbe_bug_bond_update(psi, h, -im * dt; maxdim = 32, trunc_thresh = 1e-14)
+            cbe_lubich_sweep(psi, h, -im * dt; maxdim = 32, trunc_thresh = 1e-14)
         end
         @test norm(dense_state(psi) - dense_exact_propagate(H, v0, dt * 8)) < 1e-12
     end
@@ -146,7 +146,7 @@ end
         function err_with(dex)
             psi = evolved(L; n_steps = 1, dt = 0.05, maxdim = 6)
             v0 = dense_state(psi)
-            cbe_bug_bond_update(psi, h, -im * dt; dex = dex, maxdim = 6,
+            cbe_lubich_sweep(psi, h, -im * dt; dex = dex, maxdim = 6,
                                 trunc_thresh = 1e-14)
             return norm(dense_state(psi) - dense_exact_propagate(H, v0, dt))
         end
@@ -164,7 +164,7 @@ end
         psi = evolved(L; n_steps = 2)
         dims = Vector{Int}[]
         for _ in 1:5
-            cbe_bug_bond_update(psi, h, -im * 0.02; maxdim = 8, trunc_thresh = 1e-12)
+            cbe_lubich_sweep(psi, h, -im * 0.02; maxdim = 8, trunc_thresh = 1e-12)
             push!(dims, bond_dims(psi))
         end
         @test all(maximum(d) <= 8 for d in dims)           # maxdim is respected
@@ -175,8 +175,8 @@ end
         set_symmetry!(:U1)
         L = 6
         h = xxz_chain(L)
-        info_small = cbe_bug_bond_update(evolved(L), h, -im * 0.02; dex = 1, maxdim = 32)
-        info_full  = cbe_bug_bond_update(evolved(L), h, -im * 0.02; dex = 0, maxdim = 32)
+        info_small = cbe_lubich_sweep(evolved(L), h, -im * 0.02; dex = 1, maxdim = 32)
+        info_full  = cbe_lubich_sweep(evolved(L), h, -im * 0.02; dex = 0, maxdim = 32)
         @test maximum(info_small.n_new) <= 1
         @test maximum(info_full.expanded) >= maximum(info_small.expanded)
     end
@@ -195,7 +195,7 @@ end
             psi = domain_wall_state(L)
             r = Int[]
             for _ in 1:6
-                cbe_bug_bond_update(psi, h, -im * 0.05; maxdim = 32,
+                cbe_lubich_sweep(psi, h, -im * 0.05; maxdim = 32,
                                     trunc_thresh = 1e-12, centre_expand = centre_expand)
                 push!(r, bond_dims(psi)[c])
             end
@@ -213,7 +213,7 @@ end
             h = xxz_chain(L)
             psi = evolved(L; n_steps = 2)
             n0 = norm(psi)
-            cbe_bug_bond_update(psi, h, -im * 0.02; maxdim = 16, trunc_thresh = 1e-13)
+            cbe_lubich_sweep(psi, h, -im * 0.02; maxdim = 16, trunc_thresh = 1e-13)
             @test abs(norm(psi) - n0) < 1e-8
             @test all(d >= 1 for d in bond_dims(psi))
         finally

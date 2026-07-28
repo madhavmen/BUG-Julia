@@ -6,7 +6,7 @@ include("../common/free_fermion.jl")
 
 # CBE inside the VALIDATED gate-based Trotter sweep.
 #
-# WHY THIS FILE IS THE DECIDING ONE. In `cbe_bug.jl` a rank stall has four possible homes:
+# WHY THIS FILE IS THE DECIDING ONE. In `cbe_lubich.jl` a rank stall has four possible homes:
 # the Lubich basis sweep, the channel environments, the CBE selection, or the placement of
 # the single centre Galerkin step. Here there are no environments (the Hamiltonian at a bond
 # IS the gate), no basis sweep (`canonical!` before every bond, as the validated integrator
@@ -14,7 +14,7 @@ include("../common/free_fermion.jl")
 # only thing left that can be wrong is the SELECTION -- which is shared code, not a
 # reimplementation. So:
 #
-#   rank grows here  =>  the selection is sound, and the fault in cbe_bug.jl is the sweep.
+#   rank grows here  =>  the selection is sound, and the fault in cbe_lubich.jl is the sweep.
 #   rank stalls here =>  the selection is the fault, isolated with nothing else to blame.
 #
 # The order of the testsets is that argument: pin the sketch, pin the expansion, pin
@@ -76,7 +76,7 @@ function frame_and_gate(psi, i; delta = 1.0)
     return f, heisenberg_bond_gate(f.site_l, f.site_r; delta = delta)
 end
 
-@testset "cbe_gate" begin
+@testset "cbe_bond_update" begin
 
     # ── 0. the symmetry these tests claim to be exercising ────────────────
     @testset "the model under test really is U(1)" begin
@@ -110,9 +110,9 @@ end
             f, gate = frame_and_gate(psi, i)
 
             # (a) the EXACT probe: Ω = the frame itself recovers the exact factor.
-            @test norm(to_concrete(sketch_gate_left(f, gate, f.V0) -
+            @test norm(to_concrete(sketch_bond_left(f, gate, f.V0) -
                                    reference_sketch_left(f, gate, f.V0))) < 1e-12
-            @test norm(to_concrete(sketch_gate_right(f, gate, f.U0) -
+            @test norm(to_concrete(sketch_bond_right(f, gate, f.U0) -
                                    reference_sketch_right(f, gate, f.U0))) < 1e-12
 
             # (b) an ARBITRARY probe, the one the production path actually passes. A sketch
@@ -121,9 +121,9 @@ end
             OmR = sector_graded_sketch(f.V0, :right, 5; rng = Random.MersenneTwister(11))
             OmL = sector_graded_sketch(f.U0, :left,  5; rng = Random.MersenneTwister(12))
             OmR === nothing || @test norm(to_concrete(
-                sketch_gate_left(f, gate, OmR) - reference_sketch_left(f, gate, OmR))) < 1e-12
+                sketch_bond_left(f, gate, OmR) - reference_sketch_left(f, gate, OmR))) < 1e-12
             OmL === nothing || @test norm(to_concrete(
-                sketch_gate_right(f, gate, OmL) - reference_sketch_right(f, gate, OmL))) < 1e-12
+                sketch_bond_right(f, gate, OmL) - reference_sketch_right(f, gate, OmL))) < 1e-12
         end
     end
 
@@ -131,8 +131,8 @@ end
         psi = warm_state(6)
         f, _ = frame_and_gate(psi, 2)
         wrong = heisenberg_bond_gate(psi[4].inds[2], psi[5].inds[2])
-        @test_throws ArgumentError sketch_gate_left(f, wrong, f.V0)
-        @test_throws ArgumentError sketch_gate_right(f, wrong, f.U0)
+        @test_throws ArgumentError sketch_bond_left(f, wrong, f.V0)
+        @test_throws ArgumentError sketch_bond_right(f, wrong, f.U0)
     end
 
     # ── 2. the expansion is an isometry that CONTAINS the old frame ────────────
@@ -141,11 +141,11 @@ end
     # block is exactly orthogonal to U0 -- the omission that duplicated a column in
     # `augment.jl` and grew the norm 128x over five steps. Containment is what makes
     # `Ŝ₀ = U_ex† Θ₀ V_ex†` lossless, hence `tau = 0` the identity on the state.
-    @testset "cbe_expand_gate: isometry, contains the frame, lossless" begin
+    @testset "cbe_expand_bond: isometry, contains the frame, lossless" begin
         psi = warm_state(8)
         for i in (1, 2, 4, 5, 7)
             f, gate = frame_and_gate(psi, i)
-            ex = cbe_expand_gate(f, gate; rng = Random.MersenneTwister(0xC0FFEE))
+            ex = cbe_expand_bond(f, gate; rng = Random.MersenneTwister(0xC0FFEE))
 
             @test left_isometry_defect(ex.U_ex) < 1e-11
             @test right_isometry_defect(ex.V_ex) < 1e-11
@@ -183,7 +183,7 @@ end
             @test length(before) == 1
             HT = apply_gate(gate, frame_theta(f), TL_TAG(f), TR_TAG(f))
             reachable = norm(to_concrete(perp_component(f.U0, HT))) / norm(HT)
-            ex = cbe_expand_gate(f, gate; rng = Random.MersenneTwister(0xD00D))
+            ex = cbe_expand_bond(f, gate; rng = Random.MersenneTwister(0xD00D))
             after = frame_sectors(ex.U_ex, 3)
             @info "bond $i product state: P⊥HΘ = $reachable, " *
                   "sectors $(length(before)) -> $(length(after)), " *
@@ -219,7 +219,7 @@ end
             tl, tr = TL_TAG(f), TR_TAG(f)
             exact = expv(x -> apply_gate(gate, x, tl, tr), tau, frame_theta(f);
                          hermitian = true, maxiter = 60, tol = 1e-16)
-            r = cbe_gate_bond_update(f, gate, tau;
+            r = cbe_bond_update(f, gate, tau;
                                      maxdim = 400, trunc_thresh = 1e-16, dex = 64,
                                      rng = Random.MersenneTwister(7))
             got = to_concrete(r.left_core * r.right_core)
@@ -231,7 +231,7 @@ end
         psi = warm_state(8)
         f, gate = frame_and_gate(psi, 4)
         th = frame_theta(f)
-        r = cbe_gate_bond_update(f, gate, 0.0 + 0.0im; rng = Random.MersenneTwister(3))
+        r = cbe_bond_update(f, gate, 0.0 + 0.0im; rng = Random.MersenneTwister(3))
         got = to_concrete(r.left_core * r.right_core)
         @test norm(to_concrete(got - th)) / norm(th) < 1e-11
     end
@@ -259,7 +259,7 @@ end
             f, gate = frame_and_gate(psi, i)
             before_l = left_residual(f.U0, f, gate)
             before_r = right_residual(f.V0, f, gate)
-            ex = cbe_expand_gate(f, gate; dex = 64, rng = Random.MersenneTwister(0xBEEF))
+            ex = cbe_expand_bond(f, gate; dex = 64, rng = Random.MersenneTwister(0xBEEF))
             after_l = left_residual(ex.U_ex, f, gate)
             after_r = right_residual(ex.V_ex, f, gate)
             @info "bond $i: left residual $(before_l) -> $(after_l), " *
@@ -281,7 +281,7 @@ end
     @testset "the rank leaves 1 on the first step" begin
         psi = domain_wall_state(8)
         @test maximum(bond_dims(psi)) == 1
-        info = cbe_gate_bug!(psi, bond_gates(psi);
+        info = cbe_bond_update_bug!(psi, bond_gates(psi);
                              opts = CBEBugOptions(dt = 0.05, n_steps = 1, maxdim = 32))
         @info "after one gate-CBE step: bond_dims = $(info.bond_dims[end])"
         @test maximum(info.bond_dims[end]) > 1
@@ -292,7 +292,7 @@ end
         L, dt, n = 8, 0.05, 12
 
         pc = domain_wall_state(L)
-        ic = cbe_gate_bug!(pc, gates_of(pc);
+        ic = cbe_bond_update_bug!(pc, gates_of(pc);
                            opts = CBEBugOptions(dt = dt, n_steps = n, maxdim = 32,
                                                 trunc_thresh = 1e-12))
         pk = domain_wall_state(L)
@@ -321,7 +321,7 @@ end
         psi = product_state([:up, :up, :up, :up, :up, :down, :down, :down])
         m0 = sum(magnetisation(copy(psi)))
         @test abs(m0 - 1.0) < 1e-12
-        cbe_gate_bug!(psi, bond_gates(psi);
+        cbe_bond_update_bug!(psi, bond_gates(psi);
                       opts = CBEBugOptions(dt = 0.05, n_steps = 8, maxdim = 32))
         @test abs(sum(magnetisation(copy(psi))) - m0) < 1e-10
     end
@@ -336,7 +336,7 @@ end
         prof(p) = (q = copy(p); magnetisation(q) ./ norm(q)^2)
 
         pc = domain_wall_state(L)
-        cbe_gate_bug!(pc, xxg(pc);
+        cbe_bond_update_bug!(pc, xxg(pc);
                       opts = CBEBugOptions(dt = dt, n_steps = n, maxdim = 64,
                                            trunc_thresh = 1e-14))
         pk = domain_wall_state(L)

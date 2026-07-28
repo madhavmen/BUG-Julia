@@ -61,7 +61,7 @@ secset(t, l) = Set((q, d) for (q, d) in t.spaces[l])
         psi = domain_wall_state(L)
         widths = Int[]
         for _ in 1:10
-            cbe_bug_bond_update(psi, h, ComplexF64(0, -0.05); maxdim = 64,
+            cbe_lubich_sweep(psi, h, ComplexF64(0, -0.05); maxdim = 64,
                                 trunc_thresh = 1e-12)
             push!(widths, maximum(bond_dims(psi)))
         end
@@ -87,7 +87,7 @@ secset(t, l) = Set((q, d) for (q, d) in t.spaces[l])
         for dt in (0.1, 0.05)
             psi = domain_wall_state(L)
             for _ in 1:round(Int, 1.0 / dt)
-                cbe_bug_bond_update(psi, h, ComplexF64(0, -dt); maxdim = 64,
+                cbe_lubich_sweep(psi, h, ComplexF64(0, -dt); maxdim = 64,
                                     trunc_thresh = 1e-12)
             end
             p = copy(psi)
@@ -109,7 +109,7 @@ secset(t, l) = Set((q, d) for (q, d) in t.spaces[l])
         psi = domain_wall_state(L)
         q0 = total_sz(psi)
         for _ in 1:8
-            cbe_bug_bond_update(psi, h, ComplexF64(0, -0.05); maxdim = 64,
+            cbe_lubich_sweep(psi, h, ComplexF64(0, -0.05); maxdim = 64,
                                 trunc_thresh = 1e-12)
             p = copy(psi)
             @test abs(total_sz(p) / norm(p)^2 - q0) < 1e-10

@@ -1,6 +1,6 @@
 # CBE-BUG against its baselines: accuracy, rank, and the memory of a bond expansion.
 #
-# Run with: sbatch --job-name=cbe_bench scripts/run_julia.sbatch benchmarks/cbe_bug_vs_baselines.jl
+# Run with: sbatch --job-name=cbe_bench scripts/run_julia.sbatch benchmarks/cbe_lubich_vs_baselines.jl
 #
 # PARKED FOR THE LARGE-SYSTEM CAMPAIGN. The accuracy, order-in-dt and rank comparisons
 # here are NOT meaningful at the sizes below: both CBE-BUG and 2-site TDVP are exact once
@@ -19,11 +19,11 @@
 #
 #   (2) MEMORY OF THE EXPANSION. The largest object each scheme builds per bond update.
 #       CBE-BUG's is rank 3 by construction (verified structurally in
-#       tests/RSVDCBEBondUpdate/test_cbe_bug.jl, which is where that claim is actually
+#       tests/RSVDCBEBondUpdate/test_cbe_lubich.jl, which is where that claim is actually
 #       pinned); both baselines materialise a rank-4 two-site block, and 2-site TDVP
 #       evolves one inside its Krylov loop.
 #
-# WALL TIME. `cbe_bug_bond_update` carries its channel environments along each sweep, so it
+# WALL TIME. `cbe_lubich_sweep` carries its channel environments along each sweep, so it
 # is O(L) per step. `tdvp2_step!` still rebuilds per bond, O(L^2) -- it is a baseline, and
 # that has to be fixed before any timing comparison between the two is meaningful. Rank and
 # memory figures are unaffected.
@@ -57,7 +57,7 @@ function run_cbe(maxdim, dex)
     h = xxz_chain(L; delta = DELTA)
     maxbond, t = 0, 0.0
     t = @elapsed for _ in 1:NSTEPS
-        cbe_bug_bond_update(psi, h, -im * DT; dex = dex, maxdim = maxdim,
+        cbe_lubich_sweep(psi, h, -im * DT; dex = dex, maxdim = maxdim,
                             trunc_thresh = 1e-12)
         maxbond = max(maxbond, maximum(bond_dims(psi)))
     end
@@ -96,7 +96,7 @@ function _run_dt_cbe(maxdim, dex, dt, nsteps)
     v0 = dense_state(psi)
     h = xxz_chain(L; delta = DELTA)
     for _ in 1:nsteps
-        cbe_bug_bond_update(psi, h, -im * dt; dex = dex, maxdim = maxdim,
+        cbe_lubich_sweep(psi, h, -im * dt; dex = dex, maxdim = maxdim,
                             trunc_thresh = 1e-12)
     end
     want = dense_exact_propagate(dense_heisenberg(L; delta = DELTA), v0, dt * nsteps)
@@ -127,7 +127,7 @@ function matvec_memory(maxdim)
     psi = domain_wall_state(L)
     h = xxz_chain(L; delta = DELTA)
     for _ in 1:8
-        cbe_bug_bond_update(psi, h, -im * DT; maxdim = maxdim, trunc_thresh = 1e-12)
+        cbe_lubich_sweep(psi, h, -im * DT; maxdim = maxdim, trunc_thresh = 1e-12)
     end
     i = L ÷ 2
     canonical!(psi, i)

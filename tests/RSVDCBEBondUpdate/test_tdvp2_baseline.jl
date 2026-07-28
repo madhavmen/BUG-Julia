@@ -54,7 +54,7 @@ end
         # for ANY dt -- so this, not a convergence ratio, is the right unit test. MEASURED
         # 8.2e-14 over 2 steps of dt=0.08 and 1.4e-13 over 4 of dt=0.04 (job 94971): both
         # machine noise, and an order-in-dt test placed here would be comparing two
-        # epsilons. Order is measured in benchmarks/cbe_bug_vs_baselines.jl, where the
+        # epsilons. Order is measured in benchmarks/cbe_lubich_vs_baselines.jl, where the
         # rank is capped below full so there is a dt error to see.
         set_symmetry!(:U1)
         L = 6

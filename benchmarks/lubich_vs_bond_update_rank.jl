@@ -3,18 +3,20 @@
 # The gate path proved the CBE selection is sound (it grows rank and tracks
 # `bond_update_bug!` bond for bond). Both fixes -- the probe-width shortfall and the
 # per-side final selection -- landed in `cbe.jl`, which the Lubich/MPO sweep in
-# `cbe_bug.jl` calls through the same `cbe_expand(f, skl, skr; ...)` core. So the MPO path
+# `cbe_lubich.jl` calls through the same `cbe_expand(f, skl, skr; ...)` core. So the MPO path
 # gets them for free, and the only question left is what the SWEEP itself costs.
 #
 # Three runs on the same state, same dt, same maxdim, same truncation:
 #
 #   bond_update_bug!  validated odd/even gate Trotter, K/L ODEs + random sector fill
-#   cbe_gate_bug!     the same validated sweep, CBE basis update            <- confirmed
-#   cbe_bug!          the Lubich basis sweep + one centre Galerkin, global MPO
+#   cbe_bond_update_bug!     the same validated sweep, CBE basis update            <- confirmed
+#   cbe_lubich_bug!          the Lubich basis sweep + one centre Galerkin, H dressed
+#                            with channel environments (an EFFECTIVE local operator, not a
+#                            global H applied to the state)
 #
-# Read the BOND PROFILES against each other, not against a target. If `cbe_bug!` now tracks
+# Read the BOND PROFILES against each other, not against a target. If `cbe_lubich_bug!` now tracks
 # the other two, the fixes closed it and there was never a separate sweep bug. If it still
-# stalls while `cbe_gate_bug!` does not, the residue is the sweep -- and since the selection
+# stalls while `cbe_bond_update_bug!` does not, the residue is the sweep -- and since the selection
 # is identical code driven by identical states, the difference has to be in what the sweep
 # feeds it or what it does with the result.
 #
@@ -54,21 +56,22 @@ tk = @elapsed bond_update_bug!(pk, xx_gates(pk);
 report("bond_update_bug!", pk, tk)
 
 pg = domain_wall_state(L)
-tg = @elapsed cbe_gate_bug!(pg, xx_gates(pg);
+tg = @elapsed cbe_bond_update_bug!(pg, xx_gates(pg);
                             opts = CBEBugOptions(dt = DT, n_steps = NSTEPS,
                                                  maxdim = MAXDIM, trunc_thresh = TRUNC,
                                                  dex = DEX))
-report("cbe_gate_bug! (gate)", pg, tg)
+report("cbe_bond_update_bug! (gate)", pg, tg)
 
-# The Lubich sweep drives a global MPO rather than per-bond gates, so it takes the chain.
+# The Lubich sweep dresses H with channel environments rather than using per-bond gates,
+# so it takes the whole chain rather than a gate list.
 h = xxz_chain(L; J = 1.0, delta = 0.0)
 pm = domain_wall_state(L)
-tm = @elapsed im = cbe_bug!(pm, h;
+tm = @elapsed im = cbe_lubich_bug!(pm, h;
                             opts = CBEBugOptions(dt = DT, n_steps = NSTEPS,
                                                  maxdim = MAXDIM, trunc_thresh = TRUNC,
                                                  dex = DEX))
-report("cbe_bug! (Lubich)", pm, tm)
-@printf("\ncbe_bug! max_expanded per step: %s\n", string(im.max_expanded))
-@printf("cbe_bug! centre ranks   per step: %s\n", string(im.centre_ranks))
-@printf("cbe_bug! err_pre %.2e  err_fnl %.2e  discarded %.2e\n",
+report("cbe_lubich_bug! (Lubich)", pm, tm)
+@printf("\ncbe_lubich_bug! max_expanded per step: %s\n", string(im.max_expanded))
+@printf("cbe_lubich_bug! centre ranks   per step: %s\n", string(im.centre_ranks))
+@printf("cbe_lubich_bug! err_pre %.2e  err_fnl %.2e  discarded %.2e\n",
         maximum(im.err_pre), maximum(im.err_fnl), maximum(im.discarded))

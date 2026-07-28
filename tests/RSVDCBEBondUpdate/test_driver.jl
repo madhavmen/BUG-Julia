@@ -9,7 +9,7 @@ include("../common/dense_reference.jl")
 # what pins the reproducibility contract: one RNG for the whole run, so consecutive steps
 # draw different sketches but a rerun draws the same ones.
 
-@testset "cbe_bug! driver" begin
+@testset "cbe_lubich_bug! driver" begin
 
     @testset "equals a hand-rolled loop with the same rng" begin
         set_symmetry!(:U1)
@@ -19,12 +19,12 @@ include("../common/dense_reference.jl")
                              trunc_thresh = 1e-13, seed = 0xABCD)
 
         a = domain_wall_state(L)
-        cbe_bug!(a, h; opts = opts)
+        cbe_lubich_bug!(a, h; opts = opts)
 
         b = domain_wall_state(L)
         rng = Random.MersenneTwister(opts.seed)
         for _ in 1:opts.n_steps
-            cbe_bug_bond_update(b, h, ComplexF64(-im * opts.dt);
+            cbe_lubich_sweep(b, h, ComplexF64(-im * opts.dt);
                                 maxdim = opts.maxdim, trunc_thresh = opts.trunc_thresh,
                                 rng = rng)
         end
@@ -37,7 +37,7 @@ include("../common/dense_reference.jl")
         h = xxz_chain(L)
         n = 5
         psi = domain_wall_state(L)
-        info = cbe_bug!(psi, h;
+        info = cbe_lubich_bug!(psi, h;
                         opts = CBEBugOptions(dt = 0.02, n_steps = n, maxdim = 8,
                                              record_magnetisation = true,
                                              observe = (p, s, t) -> total_sz(p)))
@@ -62,7 +62,7 @@ include("../common/dense_reference.jl")
         h = xxz_chain(L)
         psi = domain_wall_state(L)
         sz0 = total_sz(copy(psi))
-        info = cbe_bug!(psi, h; opts = CBEBugOptions(dt = 0.02, n_steps = 4, maxdim = 8,
+        info = cbe_lubich_bug!(psi, h; opts = CBEBugOptions(dt = 0.02, n_steps = 4, maxdim = 8,
                                                      normalize = true))
         @test abs(norm(psi) - 1.0) < 1e-10
         @test abs(total_sz(copy(psi)) - sz0) < 1e-10
@@ -74,8 +74,8 @@ include("../common/dense_reference.jl")
         L = 6
         h = xxz_chain(L)
         opts = CBEBugOptions(dt = 0.02, n_steps = 3, maxdim = 8, seed = 0x1234)
-        a = domain_wall_state(L); cbe_bug!(a, h; opts = opts)
-        b = domain_wall_state(L); cbe_bug!(b, h; opts = opts)
+        a = domain_wall_state(L); cbe_lubich_bug!(a, h; opts = opts)
+        b = domain_wall_state(L); cbe_lubich_bug!(b, h; opts = opts)
         @test norm(dense_state(a) - dense_state(b)) == 0.0
     end
 end

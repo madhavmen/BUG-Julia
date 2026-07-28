@@ -74,7 +74,7 @@ end
 # but only a little, or the question is no longer about early-time edge weight.
 psi = domain_wall_state(L)
 for _ in 1:4
-    cbe_bug_bond_update(psi, h, -im * DT; maxdim = 64, trunc_thresh = 1e-12)
+    cbe_lubich_sweep(psi, h, -im * DT; maxdim = 64, trunc_thresh = 1e-12)
 end
 println("after 4 CBE-BUG steps:  bond_dims = ", bond_dims(psi))
 
@@ -85,7 +85,7 @@ probe(psi, "LOOSENED tolerances"; stol_pre = 1e-14, stol_fnl = 1e-16)
 for (sp, sf) in ((1e-10, 1e-13), (1e-14, 1e-16))
     q = domain_wall_state(L)
     for _ in 1:20
-        cbe_bug_bond_update(q, h, -im * DT; maxdim = 64, trunc_thresh = 1e-12,
+        cbe_lubich_sweep(q, h, -im * DT; maxdim = 64, trunc_thresh = 1e-12,
                             stol_pre = sp, stol_fnl = sf)
     end
     @printf("\n20 steps at stol_pre=%.0e: bond_dims = %s\n", sp, string(bond_dims(q)))
@@ -101,10 +101,10 @@ let Ls = 6
     set_symmetry!(:U1)
     hh = xxz_chain(Ls; delta = 0.0)
     a = domain_wall_state(Ls)
-    for _ in 1:4; cbe_bug_bond_update(a, hh, -im * DT; maxdim = 64, trunc_thresh = 1e-14); end
+    for _ in 1:4; cbe_lubich_sweep(a, hh, -im * DT; maxdim = 64, trunc_thresh = 1e-14); end
     b = copy(a)
     for _ in 1:6
-        cbe_bug_bond_update(a, hh, -im * DT; maxdim = 64, trunc_thresh = 1e-14)
+        cbe_lubich_sweep(a, hh, -im * DT; maxdim = 64, trunc_thresh = 1e-14)
         tdvp2_step!(b, hh, -im * DT; maxdim = 64, trunc_thresh = 1e-14)
     end
     e = maximum(abs.(magnetisation(copy(a)) .- magnetisation(copy(b))))

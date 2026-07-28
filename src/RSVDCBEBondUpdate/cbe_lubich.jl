@@ -86,7 +86,7 @@ end
 
 `bond_frame`'s factorisation, but on tensors handed in rather than read out of `psi`.
 
-The basis sweeps must not touch the state (see `cbe_bug_bond_update`), so the tensor whose
+The basis sweeps must not touch the state (see `cbe_lubich_sweep`), so the tensor whose
 left frame is wanted is a CARRY -- `C_{i-1}·psi[i]`, the left block already expressed in the
 expanded basis -- and not `psi[i]` itself. `bond_frame` cannot express that: it insists the
 orthogonality centre sit on site `i`, and reads the state directly.
@@ -253,7 +253,7 @@ end
 """
     CBEBugInfo
 
-What one [`cbe_bug_bond_update`](@ref) step did.
+What one [`cbe_lubich_sweep`](@ref) step did.
 
   - `expanded` -- expanded bond dimension at each bond of the basis sweep, before the
     truncation. The headline rank diagnostic, and the one to compare against `aug_k`.
@@ -287,7 +287,7 @@ end
 _state_stored(psi::SymMPS) = sum(tensor_elements(psi[i]) for i in 1:length(psi); init = 0)
 
 """
-    cbe_bug_bond_update(psi, h, tau; kwargs...) -> CBEBugInfo
+    cbe_lubich_sweep(psi, h, tau; kwargs...) -> CBEBugInfo
 
 One CBE-BUG time step of `tau = -im*dt`, in place.
 
@@ -311,7 +311,7 @@ so the write-back only ever touches sites that stack does not depend on
 `<= j`; mirror for the other sweep). Getting this backwards reads a stale environment,
 which does not throw -- it silently evolves with the wrong Hamiltonian.
 """
-function cbe_bug_bond_update(psi::SymMPS, h::XXZChain, tau::ComplexF64;
+function cbe_lubich_sweep(psi::SymMPS, h::XXZChain, tau::ComplexF64;
                              dex::Int = 0,
                              growth::Float64 = 2.0,
                              dover::Union{Nothing, Int} = nothing,
@@ -327,7 +327,7 @@ function cbe_bug_bond_update(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     L = length(psi)
     length(h) == L || throw(DimensionMismatch(
         "chain has $(length(h)) sites, state has $L"))
-    L >= 2 || throw(ArgumentError("cbe_bug_bond_update needs at least two sites"))
+    L >= 2 || throw(ArgumentError("cbe_lubich_sweep needs at least two sites"))
     c = max(1, min(L - 1, L ÷ 2))                     # the centre bond
 
     expanded = zeros(Int, L - 1)
@@ -443,8 +443,13 @@ function cbe_bug_bond_update(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     S0 = to_concrete(contract(AL, (2,), AR, (1,)))                 # (b_L, b_R)
     peak!(W[c], Z[c], S0)
 
+    # `krylov_dim` is COUNTED here rather than reported by `expv` (which returns only the
+    # vector, and belongs to the validated module): one increment per operator application is
+    # the Lanczos dimension. It separates "more work per step" from "more steps of work" when
+    # comparing expansion budgets -- see the note in `cbe_bond_update`.
     H0 = zero_site_h(h, c, lenv_c, renv_c, W[c], Z[c])
-    S1 = expv(x -> apply_zero_site(H0, x), tau, S0;
+    nmv = Ref(0)
+    S1 = expv(x -> (nmv[] += 1; apply_zero_site(H0, x)), tau, S0;
               hermitian = true, maxiter = maxiter, tol = tol)
     res = svd(S1, (1,); cutoff = max(trunc_thresh, 1e-14), Nkeep = maxdim, get_lists = true)
     discarded = _trunc_weight(res)
@@ -477,18 +482,18 @@ function cbe_bug_bond_update(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     # see docs/current_work.md section 5.)
     truncate_sweep!(psi; maxdim = maxdim, cutoff = max(trunc_thresh, 1e-14))
 
-    return CBEBugInfo(expanded, n_new, centre_rank, err_pre, err_fnl, discarded, 0, peak)
+    return CBEBugInfo(expanded, n_new, centre_rank, err_pre, err_fnl, discarded, nmv[], peak)
 end
 
-cbe_bug_bond_update(psi::SymMPS, h::XXZChain, tau::Number; kwargs...) =
-    cbe_bug_bond_update(psi, h, ComplexF64(tau); kwargs...)
+cbe_lubich_sweep(psi::SymMPS, h::XXZChain, tau::Number; kwargs...) =
+    cbe_lubich_sweep(psi, h, ComplexF64(tau); kwargs...)
 
 # ── driver ───────────────────────────────────────────────────────────────────
 
 """
     CBEBugOptions
 
-Controls for one `cbe_bug!` run. Mirrors `BondUpdateOptions` where the meaning is the
+Controls for one `cbe_lubich_bug!` run. Mirrors `BondUpdateOptions` where the meaning is the
 same, so the two integrators can be driven from the same campaign code.
 
   - `dt`, `n_steps` -- real time step and how many to take.
@@ -531,11 +536,18 @@ end
 """
     CBEBugRunInfo
 
-Per-step record of a `cbe_bug!` run; every field has length `n_steps`.
+Per-step record of a `cbe_lubich_bug!` run; every field has length `n_steps`.
 
 `max_expanded` is the headline rank diagnostic and the one to compare against
 `BondUpdateInfo.aug_k_dims`: it is the largest bond the basis sweep proposed BEFORE the
 truncation, i.e. `r + Dex`, against the K/L augmentation's `2r`.
+
+`krylov_dims` and `mean_aug` are the COST pair, and they are only useful together:
+`krylov_dims` counts operator applications in the step's exponential(s) (summed over bonds in
+the gate path, the single centre solve in the MPO path) and `mean_aug` is the size those
+applications acted on. Wall time is roughly their product, so a setting can be slower either
+by doing more iterations or by doing them on bigger objects -- and the budget A/B in
+`benchmarks/cbe_budget_cost.jl` turns on telling those two apart.
 """
 struct CBEBugRunInfo
     times::Vector{Float64}
@@ -550,28 +562,31 @@ struct CBEBugRunInfo
     discarded::Vector{Float64}
     magnetisations::Vector{Vector{Float64}}
     observations::Vector{Any}
+    krylov_dims::Vector{Int}
+    mean_aug::Vector{Float64}
 end
 
 Base.length(info::CBEBugRunInfo) = length(info.times)
 
 """
-    cbe_bug!(psi, h; opts=CBEBugOptions()) -> CBEBugRunInfo
+    cbe_lubich_bug!(psi, h; opts=CBEBugOptions()) -> CBEBugRunInfo
 
 Evolve `psi` in place for `opts.n_steps` real-time steps of `opts.dt` with CBE-BUG.
 
 One RNG is threaded through the whole run rather than re-seeded per step, so the sketches
 are reproducible without every step drawing the same directions.
 """
-function cbe_bug!(psi::SymMPS, h::XXZChain; opts::CBEBugOptions = CBEBugOptions())
+function cbe_lubich_bug!(psi::SymMPS, h::XXZChain; opts::CBEBugOptions = CBEBugOptions())
     rng = MersenneTwister(opts.seed)
     times = Float64[]; norms = Float64[]
     bdims = Vector{Int}[]; maxb = Int[]
     expanded = Vector{Int}[]; maxex = Int[]
     cranks = Int[]; epre = Float64[]; efnl = Float64[]; disc = Float64[]
     mags = Vector{Float64}[]; obs = Any[]
+    kdim = Int[]; maug = Float64[]
 
     for step in 1:opts.n_steps
-        info = cbe_bug_bond_update(psi, h, ComplexF64(-im * opts.dt);
+        info = cbe_lubich_sweep(psi, h, ComplexF64(-im * opts.dt);
                                    dex = opts.dex, growth = opts.growth,
                                    dover = opts.dover,
                                    comp_ratio = opts.comp_ratio,
@@ -594,6 +609,11 @@ function cbe_bug!(psi::SymMPS, h::XXZChain; opts::CBEBugOptions = CBEBugOptions(
         push!(cranks, info.centre_rank)
         push!(epre, info.err_pre); push!(efnl, info.err_fnl)
         push!(disc, info.discarded)
+        push!(kdim, info.krylov_dim)
+        # The centre solve acts on `expanded[c] x expanded[c]`, so the mean over the sweep's
+        # bonds is the right size scale to pair the iteration count with.
+        push!(maug, isempty(info.expanded) ? 0.0 :
+                    sum(info.expanded) / length(info.expanded))
 
         # Diagnostics read a copy, so moving the centre can never disturb the live state.
         opts.record_magnetisation && push!(mags, magnetisation(copy(psi)))
@@ -601,5 +621,5 @@ function cbe_bug!(psi::SymMPS, h::XXZChain; opts::CBEBugOptions = CBEBugOptions(
     end
 
     return CBEBugRunInfo(times, norms, bdims, maxb, expanded, maxex, cranks,
-                         epre, efnl, disc, mags, obs)
+                         epre, efnl, disc, mags, obs, kdim, maug)
 end

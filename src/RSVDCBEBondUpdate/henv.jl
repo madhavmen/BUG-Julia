@@ -132,7 +132,7 @@ _accum(a, b) = to_concrete(a + b)
 # ORDERING CONSTRAINT, which a rebuild hides. `canonical!` rewrites tensors, so a stack
 # precomputed before it is stale. A carried sweep must therefore canonicalise FIRST, then
 # build the one stack it needs for the opposite side, then sweep -- see
-# `cbe_bug_bond_update`, where each sweep only ever touches sites the other side's stack
+# `cbe_lubich_sweep`, where each sweep only ever touches sites the other side's stack
 # does not depend on.
 
 """
