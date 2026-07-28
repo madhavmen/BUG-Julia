@@ -46,6 +46,7 @@
 \newcommand{\Vex}{V_{\mathrm{ex}}}
 \newcommand{\Dex}{D_{\mathrm{ex}}}
 \newcommand{\Dpre}{D_{\mathrm{pre}}}
+\newcommand{\Djoint}{D_{\mathrm{joint}}}
 \newcommand{\code}[1]{\texttt{\small #1}}
 \newcommand{\file}[1]{\texttt{\small #1}}
 
@@ -90,6 +91,7 @@ what is true now rather than accreting a dated copy per session.
 \section{What was decided and measured}
 
 \subsection{The expansion budget: default \texorpdfstring{$\text{growth}=2.0$}{growth = 2.0}}
+\label{sec:budget}
 
 The expansion budget per bond was
 \begin{equation}
@@ -489,6 +491,7 @@ Form the \emph{small} matrix
 \begin{equation}
   M = Q_L^\dagger\,(\Hb\Theb)\,Q_R
   \qquad (\Dpre \times \Dpre),
+  \label{eq:M}
 \end{equation}
 take its SVD and keep $\Dex$ singular directions. Its singular values \emph{are} the weights
 of the candidate pairs in the two-site action, so this is the ranking step, and it is what the
@@ -502,8 +505,65 @@ only ever ranks the side being expanded. Reusing $M$ to rank both sides at once 
 side veto its partner, and it did: capping each side at $\min(\Dex^{(l)}, \Dex^{(r)})$ throttled
 one side to the other's headroom, and a global ``$M$ is negligible'' verdict returned nothing on
 \emph{either} side while a residual of $0.19$ went unaddressed on one of them. Each side now
-decides independently, falling back to its own weight-ordered preselected candidates when the
-joint SVD cannot serve its whole budget.
+decides independently, falling back to its own preselected candidates when the joint SVD cannot
+serve its whole budget --- ordered by the preselection SVD's singular values, though see the
+caution in \S\ref{sec:clcr} on how that ordering interacts with charge sectors.
+
+\subsection{Constructing the appended blocks \texorpdfstring{$C_L$}{CL} and \texorpdfstring{$C_R$}{CR}}
+\label{sec:clcr}
+
+$C_L$ and $C_R$ are the candidate directions after ranking and after trimming to budget. They are
+built \emph{per side and independently} (\code{cbe\_expand}), and each side takes one of two
+branches. Write $\Djoint = \min(\Dex^{(l)}, \Dex^{(r)}, \Dpre^{(l)}, \Dpre^{(r)})$ for the number
+of directions the joint SVD can rank.
+
+\begin{description}[leftmargin=1.4em,style=nextline]
+\item[Ranked branch.] Take the SVD $M = U_M \Sigma_M V_M^\dagger$ of the small matrix
+Eq.~\eqref{eq:M}, truncated at \code{stol\_fnl} to $\Djoint$ directions, and \emph{rotate the
+preselected candidates into that ranked basis}:
+\begin{equation}
+  C_L \;=\; Q_L\,U_M,
+  \qquad
+  C_R \;=\; V_M^\dagger\,Q_R .
+  \label{eq:clcr}
+\end{equation}
+No new directions are created here --- $C_L$ spans exactly the same space as $Q_L$; the rotation
+only \emph{orders} that space so that trimming to $\Dex$ keeps the heaviest combinations.
+
+\item[Fallback branch.] Otherwise the side keeps the first $\Dex$ columns of its own preselected
+$Q$ (\code{\_trim\_total}), with no joint rotation at all.
+\end{description}
+
+\noindent
+The branch condition is \code{dex\_l <= joint}, and since $\Djoint \le \Dex^{(l)}$ by
+construction, that fires \emph{only} when $\Djoint = \Dex^{(l)}$ --- i.e.\ only when the joint SVD
+can serve that side's entire budget. This is the ``each side decides independently'' design of the
+previous subsection expressed in code: a side whose budget the joint ranking cannot fill does not
+get a partially-ranked block, it falls back to its own candidates.
+
+Two properties matter and both are inherited rather than re-established. First,
+\textbf{orthonormality}: $Q_L$ is orthonormal and $\perp U_0$ (the \code{RepairOrtho} pass), and
+$U_M$ is an isometry, so $C_L$ is orthonormal and $\perp U_0$ --- which is precisely what makes
+$[\,U_0 \mid C_L\,]$ an isometry. The right side is the mirror image, with $V_M^\dagger$ carrying
+orthonormal rows. Second, \textbf{tagging}: the new block's bond leg is retagged to $U_0$'s bond
+tag before the direct sum, because the two preselections deliberately use distinct tags and the
+tensor library forbids duplicate indices.
+
+\begin{center}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Caution} & \textbf{Why} \\
+\midrule
+The fallback is not globally weight-ordered
+  & \code{\_trim\_total} walks charge sectors in storage order and takes \\
+  & a prefix of each, filling greedily. Within a sector the columns are \\
+  & SVD-ordered, but the \emph{allocation across} sectors is by storage \\
+  & order, not by weight. A heavy direction in a late sector can lose \\
+  & to a light one in an early sector. Unquantified --- worth a test. \\
+\bottomrule
+\end{tabular}
+\end{center}
 
 \subsection{The expansion is lossless}
 
@@ -818,6 +878,22 @@ budget permits $5$, so the cap does not bind at this bond. This is the \code{err
 condition of Table~\ref{tab:decide} --- the healthy case. Under the old $\text{growth} = 1.1$
 schedule the budget would have been $1$ (Stage~1), three of these four directions would have been
 discarded, and \code{err\_fnl} would have reported the loss.
+
+\paragraph{A caveat this transcript makes easy to misread.} The ranking is \emph{computed and
+printed} above, but at this bond it is \emph{not} what builds the appended block. Following
+\S\ref{sec:clcr}: $\Dex^{(l)} = 5$ while $\Djoint = \min(5,5,4,4) = 4$, so the guard
+$\Dex^{(l)} \le \Djoint$ is $5 \le 4$, which is false --- \emph{both} sides take the fallback
+branch, and since each $Q$ has $4$ columns against a budget of $5$, the trim returns them
+untouched. So here
+\begin{equation}
+  C_L = Q_L, \qquad C_R = Q_R \qquad\text{(no rotation by } U_M, V_M^\dagger\text{)},
+\end{equation}
+and the joint SVD's only effect is to report \code{err\_fnl}$\,=0$. The column count cannot
+distinguish the two branches --- both would yield $4$ --- so this is visible from the branch
+condition alone, not from the output. The ranked branch fires when a bond is
+\emph{candidate-rich relative to its budget}, which is the regime a tighter \code{growth} or a
+wider bond puts you in; it is exactly the regime the old $1.1$ schedule lived in, and where the
+$62\%$ discarded weight of \S\ref{sec:budget} was being thrown away.
 
 \section{Stage 6 --- the expansion, and its losslessness}
 
