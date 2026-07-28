@@ -291,7 +291,7 @@ _state_stored(psi::SymMPS) = sum(tensor_elements(psi[i]) for i in 1:length(psi);
 
 One CBE-BUG time step of `tau = -im*dt`, in place.
 
-Keywords: `dex`, `dover`, `comp_ratio`, `sulz_cap`, `preselect_only` forward to
+Keywords: `dex`, `growth`, `dover`, `comp_ratio`, `sulz_cap`, `preselect_only` forward to
 [`cbe_expand`](@ref); `maxdim` and `trunc_thresh` control the truncations; `maxiter` and
 `tol` the Krylov budget of the single 0-site exponential.
 
@@ -313,6 +313,7 @@ which does not throw -- it silently evolves with the wrong Hamiltonian.
 """
 function cbe_bug_bond_update(psi::SymMPS, h::XXZChain, tau::ComplexF64;
                              dex::Int = 0,
+                             growth::Float64 = 2.0,
                              dover::Union{Nothing, Int} = nothing,
                              comp_ratio::Float64 = 0.5,
                              sulz_cap::Bool = false,
@@ -337,7 +338,8 @@ function cbe_bug_bond_update(psi::SymMPS, h::XXZChain, tau::ComplexF64;
 
     # `rmax` is the state's widest bond, so the (optional) Sulz bound is read GLOBALLY
     # rather than per bond. Captured once, before the sweeps widen anything.
-    exkw = (dex = dex, dover = dover, comp_ratio = comp_ratio, sulz_cap = sulz_cap,
+    exkw = (dex = dex, growth = growth, dover = dover,
+            comp_ratio = comp_ratio, sulz_cap = sulz_cap,
             rmax = maximum(bond_dims(psi); init = 0),
             preselect_only = preselect_only, rng = rng)
 
@@ -468,8 +470,11 @@ function cbe_bug_bond_update(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     psi.center = c + 1
     centre_rank = leg_dim(psi[c], 3)
 
-    # Compress once at the end. Every bond has now had its Galerkin step, so a direction
-    # with no weight left is genuinely unwanted rather than merely not-yet-populated.
+    # Compress once at the end. The evolved centre core has now propagated out through every
+    # retained frame, so a direction carrying no weight is genuinely unwanted rather than
+    # merely not-yet-populated. (It is NOT that every bond took its own Galerkin step -- there
+    # is exactly one, at the centre; a per-bond Galerkin over-counts `tau` and was abandoned,
+    # see docs/current_work.md section 5.)
     truncate_sweep!(psi; maxdim = maxdim, cutoff = max(trunc_thresh, 1e-14))
 
     return CBEBugInfo(expanded, n_new, centre_rank, err_pre, err_fnl, discarded, 0, peak)
@@ -487,8 +492,9 @@ Controls for one `cbe_bug!` run. Mirrors `BondUpdateOptions` where the meaning i
 same, so the two integrators can be driven from the same campaign code.
 
   - `dt`, `n_steps` -- real time step and how many to take.
-  - `dex`, `dover`, `comp_ratio`, `sulz_cap`, `preselect_only` -- the expansion, forwarded
-    to [`cbe_expand`](@ref). `dex = 0` is the full Sulz budget `r`.
+  - `dex`, `growth`, `dover`, `comp_ratio`, `sulz_cap`, `preselect_only` -- the expansion,
+    forwarded to [`cbe_expand`](@ref). `dex = 0` (default) uses the `growth` schedule;
+    `growth = 1.1` reproduces the reference's DMRG ratchet, for the A/B.
   - `maxdim`, `trunc_thresh` -- truncation, applied at the centre and in the final sweep.
   - `normalize` -- rescale after each step; the norm is recorded BEFORE rescaling.
   - `maxiter`, `tol` -- Krylov budget for the single 0-site exponential.
@@ -506,6 +512,7 @@ Base.@kwdef struct CBEBugOptions
     dt::Float64 = 0.05
     n_steps::Int = 10
     dex::Int = 0
+    growth::Float64 = 2.0
     dover::Union{Nothing, Int} = nothing
     comp_ratio::Float64 = 0.5
     sulz_cap::Bool = false
@@ -565,7 +572,8 @@ function cbe_bug!(psi::SymMPS, h::XXZChain; opts::CBEBugOptions = CBEBugOptions(
 
     for step in 1:opts.n_steps
         info = cbe_bug_bond_update(psi, h, ComplexF64(-im * opts.dt);
-                                   dex = opts.dex, dover = opts.dover,
+                                   dex = opts.dex, growth = opts.growth,
+                                   dover = opts.dover,
                                    comp_ratio = opts.comp_ratio,
                                    sulz_cap = opts.sulz_cap,
                                    preselect_only = opts.preselect_only,

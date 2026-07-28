@@ -233,7 +233,8 @@ function cbe_gate_bug!(psi::SymMPS, gates; opts::CBEBugOptions = CBEBugOptions()
     tau = -im * opts.dt
     kw = (; maxdim = opts.maxdim, trunc_thresh = opts.trunc_thresh,
             maxiter = opts.maxiter, tol = opts.tol, rng = rng,
-            dex = opts.dex, dover = opts.dover, comp_ratio = opts.comp_ratio,
+            dex = opts.dex, growth = opts.growth,
+            dover = opts.dover, comp_ratio = opts.comp_ratio,
             sulz_cap = opts.sulz_cap, preselect_only = opts.preselect_only)
 
     times = Float64[]; norms = Float64[]

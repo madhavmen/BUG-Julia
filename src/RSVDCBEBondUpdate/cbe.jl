@@ -472,10 +472,13 @@ empty-but-reachable sectors through `H` itself).
 
 Keywords:
 
-  - `dex` -- new directions to admit per side. `0` (default) means the full Sulz budget
-    `r`, so the expanded rank is `2r` and the comparison against `bond_update_bug!` is
-    like for like; the point of the method is that a much smaller `dex` should do, which
-    is what stage 4 measures.
+  - `dex` -- new directions to admit per side. `0` (default) hands the budget to the
+    `growth` schedule below; any positive value is an absolute per-side budget and
+    overrides the schedule entirely.
+  - `growth` -- the schedule's target, as a multiple of the NEIGHBOURHOOD max bond
+    dimension: `budget = ceil(growth*dmax) - r`. Default `2.0`, i.e. a bond at the
+    neighbourhood max may double. See the budget block in the body for the measurement
+    that set it.
   - `dover` -- oversampling for the preselection. `nothing` gives `ceil(0.2*dex)`, i.e.
     `Dpre = ceil(1.2*dex)` as in the reference.
   - `comp_ratio` -- the sketch's complement/isometry split (`CompRatio`, default 0.5).
@@ -518,6 +521,7 @@ Lubich sweep depends on. Nothing here knows which caller it has.
 """
 function cbe_expand(f::BondFrame, skl, skr;
                     dex::Int = 0,
+                    growth::Float64 = 2.0,
                     dover::Union{Nothing, Int} = nothing,
                     comp_ratio::Float64 = 0.5,
                     sulz_cap::Bool = false,
@@ -544,8 +548,30 @@ function cbe_expand(f::BondFrame, skl, skr;
     # crawls one direction per bond per step and stalls -- measured at L=8, `bond_dims`
     # froze at [1,1,2,4,2,1,1] while 2-site TDVP had [2,4,6,8,6,4,2] at the same time, and
     # the centre then hit `room_l = d·χ_{i-1} − r = 0` and could not expand at all.
+    #
+    # THE CONSTANT IS OURS, NOT THE REFERENCE'S: `growth = 2.0`, not the reference's `1.1`.
+    # The reference is DMRG, where each sweep re-converges the same state, so a 10% ratchet
+    # compounds over sweeps and costs only iterations. A TIME INTEGRATOR gets one shot per
+    # step: a direction the step needs and does not admit is not deferred, it is gone, and
+    # the state carries that error forward. Measured (`benchmarks/cbe_gate_budget.jl`,
+    # XX L=10, dt=0.02, t=0.5, maxdim=64) at the 1.1 schedule, whose budget on a bond at
+    # r=13 is `ceil(1.1*13)-13 = 2`:
+    #
+    #   cbe_gate (1.1 schedule)  err 1.43e-04   err_fnl 6.2e-01   22.4s
+    #   cbe_gate (dex=4)         err 3.54e-04   err_fnl 0          4.6s
+    #   cbe_gate (dex=8)         err 1.17e-06   err_fnl 0          4.7s
+    #   cbe_gate (dex=16, 64)    err 1.17e-06   err_fnl 0          4.5s   <- saturated
+    #   bond_update_bug!         err 5.81e-07                    157.0s
+    #
+    # `err_fnl = 0.62` is the schedule DISCARDING 62% of the ranked candidate weight for want
+    # of budget -- the cap, not the selection, was the accuracy limiter. Wall time is flat in
+    # the budget (4.4-4.7s from dex=1 to dex=64) because the sweep dominates the sketch, so a
+    # generous default is very nearly free. `growth = 2.0` puts a bond at the neighbourhood
+    # max on `budget = r`, past the measured saturation at every rank in that run, and it
+    # SCALES -- an absolute floor of 8 would have been tuned to this one chain. Wide bonds are
+    # still bounded by `room` (a hard limit) and by `maxdim` at the truncation.
     dmax = max(leg_dim(U0, 1), r, leg_dim(V0, 3))
-    budget = dex <= 0 ? max(ceil(Int, 1.1 * dmax) - r, 1) : dex
+    budget = dex <= 0 ? max(ceil(Int, growth * dmax) - r, 1) : dex
     # NO SULZ BOUND BY DEFAULT. The `2r` bound belongs to the RANK-ADAPTIVE BUG, and this
     # method is not that -- the rank here is set by CBE's selection, so the bound has nothing
     # to enforce and only throttles. Growth is limited by `room` (the local space, a hard
