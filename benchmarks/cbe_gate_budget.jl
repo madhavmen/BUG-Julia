@@ -22,6 +22,21 @@
 #
 # XX free fermions, because the reference is analytic: no truth run to trust, no truncation
 # in the reference, and `xx_free_fermion_sz` is already pinned in the validated suite.
+#
+# SECOND PASS (the run that set the new default). The curve above closed -- `dex = 8`
+# saturates at 1.17e-6 against the schedule's 1.43e-4, with `err_fnl = 0.62` on the schedule,
+# i.e. it was discarding 62% of the ranked candidate weight for want of budget. So the
+# DEFAULT was the limiter, and the default is now `growth = 2.0` (`cbe.jl`) instead of the
+# reference's DMRG ratchet of 1.1. This file now measures three things at once:
+#
+#   * the A/B of the schedule itself, `growth = 1.1` vs `2.0`, at `dex = 0`;
+#   * the absolute-budget curve, unchanged, as the yardstick the schedule must reach;
+#   * BOTH PATHS -- the Lubich/MPO sweep shares `cbe_expand`, so it inherits the new default
+#     and has to be re-measured on it rather than assumed.
+#
+# What to read: the new default should land on the saturated end of the `dex` curve (~1.2e-6),
+# with `err_fnl` at 0 -- nothing ranked out for want of budget -- and wall time within noise
+# of the old one, because the sweep dominates the sketch (4.4-4.7s across dex = 1 .. 64).
 
 using BUGJulia.BondUpdateBUG
 using BUGJulia.RSVDCBEBondUpdate
@@ -62,19 +77,37 @@ tk = @elapsed ik = bond_update_bug!(pk, xx_gates(pk);
         maximum(ik.aug_k_dims), tk)
 println()
 
-# ---- gate-CBE across the budget ---------------------------------------------
-# `dex = 0` is the neighbourhood-coupled growth schedule (`ceil(1.1*dmax) - r`); the rest are
-# fixed per-side budgets. `comp_ratio` stays at its default: the split governs the PROBE, not
-# what is admitted, and probing with the complement alone blinds the sketch to the 1-site
-# component (`RSVDpreBE0SiQS.m:339`).
-for dex in (0, 1, 2, 4, 8, 16, 64)
-    pc = domain_wall_state(L)
-    t = @elapsed ic = cbe_gate_bug!(pc, xx_gates(pc);
-                                    opts = CBEBugOptions(dt = DT, n_steps = NSTEPS,
-                                                         maxdim = MAXDIM,
-                                                         trunc_thresh = TRUNC, dex = dex))
-    label = dex == 0 ? "cbe_gate (schedule)" : "cbe_gate (dex=$dex)"
-    @printf("%-22s  err %.3e   maxbond %3d   aug %3d   %6.1fs   err_pre %.2e  err_fnl %.2e\n",
-            label, err_of(pc), maximum(ic.max_bond_dims), maximum(ic.max_expanded), t,
-            maximum(ic.err_pre), maximum(ic.err_fnl))
+"One row: run `f` on a fresh domain wall with these expansion controls and report."
+function row(label, f; kwargs...)
+    p = domain_wall_state(L)
+    o = CBEBugOptions(; dt = DT, n_steps = NSTEPS, maxdim = MAXDIM,
+                      trunc_thresh = TRUNC, kwargs...)
+    t = @elapsed i = f(p, o)
+    @printf("%-24s  err %.3e   maxbond %3d   aug %3d   %6.1fs   err_pre %.2e  err_fnl %.2e\n",
+            label, err_of(p), maximum(i.max_bond_dims), maximum(i.max_expanded), t,
+            maximum(i.err_pre), maximum(i.err_fnl))
 end
+
+gate_run(p, o) = cbe_gate_bug!(p, xx_gates(p); opts = o)
+# The Lubich sweep drives a global MPO rather than per-bond gates, so it takes the chain.
+const H = xxz_chain(L; J = 1.0, delta = 0.0)
+mpo_run(p, o) = cbe_bug!(p, H; opts = o)
+
+# ---- the schedule A/B, both paths -------------------------------------------
+# `dex = 0` hands the budget to the schedule: `ceil(growth*dmax) - r`, neighbourhood-coupled.
+# 1.1 is the reference's DMRG ratchet (the old default), 2.0 the new one. `comp_ratio` stays
+# at its default: the split governs the PROBE, not what is admitted, and probing with the
+# complement alone blinds the sketch to the 1-site component (`RSVDpreBE0SiQS.m:339`).
+for g in (1.1, 2.0)
+    row("cbe_gate (growth=$g)", gate_run; growth = g)
+end
+for g in (1.1, 2.0)
+    row("cbe_bug  (growth=$g)", mpo_run; growth = g)
+end
+println()
+
+# ---- the absolute-budget curve, the yardstick the schedule must reach -------
+for dex in (1, 2, 4, 8, 16, 64)
+    row("cbe_gate (dex=$dex)", gate_run; dex = dex)
+end
+row("cbe_bug  (dex=8)", mpo_run; dex = 8)

@@ -9,10 +9,13 @@ The four panels answer four separate questions, and it matters that they are sep
 
   (a) accuracy       err(t) against the FREE-FERMION EXACT profile, not a finer run
   (b) bond growth    max_i chi_i (t) -- how fast each method's manifold has to widen
-  (c) working set    stored elements the step must hold at once. For 2-site TDVP that
-                     includes the rank-4 Theta it evolves; CBE-BUG never allocates one,
-                     so its working set is the state alone. This is the second design
-                     goal made quantitative.
+  (c) working set    stored elements the step must hold at once -- the MEASURED
+                     `peak_elems` (`state + transients alive`, sampled inside the step at
+                     a definition both integrators share), not `state + theta`. The proxy
+                     flattered CBE-BUG twice over: its `theta_elems` is 0 by construction,
+                     and its basis sweep is transiently WIDER than the state that survives
+                     truncation, so the state alone understates it. This is the second
+                     design goal made quantitative, and it has to be made on the peak.
   (d) efficiency     accuracy against working set -- the Pareto view. A method is more
                      resource efficient only if it sits DOWN AND LEFT of the other; a
                      lower error bought with a wider bond is not an efficiency claim.
@@ -67,9 +70,9 @@ for s in series:
     r, kw = s["r"], dict(color=s["c"], ls=s["ls"], lw=1.9, label=s["lbl"])
     a.semilogy(r["t"], np.maximum(r["err"], 1e-16), **kw)
     b.plot(r["t"], r["maxbond"], **kw)
-    # working set: the state, plus the largest two-site block the step had to hold
-    ws = r["state_elems"] + r["theta_elems"]
-    c.plot(r["t"], ws / 1e3, **kw)
+    # working set: MEASURED inside the step (state + transients alive), same definition
+    # for both integrators. See the module docstring on why the state+theta proxy is out.
+    c.plot(r["t"], r["peak_elems"] / 1e3, **kw)
 
 a.set(xlabel="time $t$", ylabel=r"$\max_j\,|\langle S^z_j\rangle - \mathrm{exact}|$",
       title="(a) accuracy vs the exact free-fermion profile")
@@ -80,8 +83,8 @@ b.set(xlabel="time $t$", ylabel=r"$\max_i \chi_i$",
       title="(b) bond-dimension growth")
 b.grid(alpha=.3)
 
-c.set(xlabel="time $t$", ylabel="working set  [$10^3$ stored elements]",
-      title="(c) memory the step must hold (state + two-site block)")
+c.set(xlabel="time $t$", ylabel="peak working set  [$10^3$ stored elements]",
+      title="(c) memory the step must hold (measured peak: state + live transients)")
 c.grid(alpha=.3)
 
 # (d) The Pareto view. Each method contributes one point per maxdim: its WORST error
@@ -92,7 +95,7 @@ for s in series:
     r = s["r"]
     late = r[r["t"] >= 0.5 * r["t"].max()]
     err = late["err"].max() if len(late) else r["err"][-1]
-    peak = (r["state_elems"] + r["theta_elems"]).max()
+    peak = r["peak_elems"].max()
     d.loglog([peak / 1e3], [max(err, 1e-16)], s["mk"], color=s["c"], ms=11,
              mfc=s["c"] if s["maxdim"] == 64 else "white", mew=1.8, label=s["lbl"])
     d.annotate(f"  {s['lbl'].split(',')[0]}", (peak / 1e3, max(err, 1e-16)),
@@ -118,6 +121,6 @@ for s in sorted(series, key=lambda s: (s["maxdim"], s["scheme"], s["dex"])):
     r = s["r"]
     late = r[r["t"] >= 0.5 * r["t"].max()]
     err = late["err"].max() if len(late) else r["err"][-1]
-    ws = (r["state_elems"] + r["theta_elems"]).max()
+    ws = r["peak_elems"].max()
     print(f"{s['lbl']:34s} {ws:10d} {err:11.3e} {r['maxbond'].max():9d} "
           f"{r['elapsed'][-1]:8.1f}")

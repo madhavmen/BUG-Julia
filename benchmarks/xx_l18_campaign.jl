@@ -46,8 +46,19 @@ function profile_err(psi, t)
     return maximum(abs.(magnetisation(p) ./ n2 .- exact_profile(t)))
 end
 
-"Largest stored elements of any two-site block the step would need. CBE-BUG never builds
-one, so this is 0 for it by construction -- see docs/cbe_bug.md section 2b."
+"""
+One sample of one run.
+
+`theta_elems` is the largest two-site block the step would need. CBE-BUG never builds one,
+so it is 0 for it by construction -- see docs/cbe_bug.md section 2b.
+
+`peak_elems` is the WORKING SET, and it is the number the memory claim stands or falls on:
+`state + transients alive at that moment`, measured inside the step at a definition both
+integrators share (`CBEBugInfo.peak_elements`, `TDVP2Info.peak_elements`). `state_elems`
+alone would flatter CBE-BUG, whose basis sweep is transiently wider than what survives the
+truncation, and `theta_elems` alone would flatter it further by being 0 -- the honest
+comparison is the peak, reported here as the max over the sampling window.
+"""
 struct Row
     scheme::String
     maxdim::Int
@@ -59,6 +70,7 @@ struct Row
     centrebond::Int
     theta_elems::Int
     state_elems::Int
+    peak_elems::Int
     norm::Float64
     elapsed::Float64
 end
@@ -77,15 +89,17 @@ function run_cbe(; dt, maxdim, dex, tmax, sample_every)
     c = L ÷ 2
     t0 = time()
     maxex = 0
+    peak = 0
     for k in 1:nsteps
         info = cbe_bug_bond_update(psi, h, -im * dt; dex = dex, maxdim = maxdim,
                                    trunc_thresh = 1e-12)
         maxex = max(maxex, maximum(info.expanded; init = 0))
+        peak = max(peak, info.peak_elements)
         if k % sample_every == 0 || k == nsteps
             t = k * dt
             bd = bond_dims(psi)
             push!(rows, Row("cbe", maxdim, dex, dt, t, profile_err(psi, t),
-                            maximum(bd), bd[c], 0, state_elements(psi),
+                            maximum(bd), bd[c], 0, state_elements(psi), peak,
                             norm(psi), time() - t0))
         end
     end
@@ -101,14 +115,16 @@ function run_tdvp2(; dt, maxdim, tmax, sample_every)
     c = L ÷ 2
     t0 = time()
     theta = 0
+    peak = 0
     for k in 1:nsteps
         info = tdvp2_step!(psi, h, -im * dt; maxdim = maxdim, trunc_thresh = 1e-12)
         theta = max(theta, info.theta_elements)
+        peak = max(peak, info.peak_elements)
         if k % sample_every == 0 || k == nsteps
             t = k * dt
             bd = bond_dims(psi)
             push!(rows, Row("tdvp2", maxdim, 0, dt, t, profile_err(psi, t),
-                            maximum(bd), bd[c], theta, state_elements(psi),
+                            maximum(bd), bd[c], theta, state_elements(psi), peak,
                             norm(psi), time() - t0))
         end
     end
@@ -118,23 +134,42 @@ end
 # ── phases ───────────────────────────────────────────────────────────────────
 
 """
-Calibration: is the comparison dt-limited or rank-limited? Run a short window at a
-generous maxdim and halve dt. Whichever dt leaves both methods' error essentially
-unchanged on halving is the dt the main run uses.
+Calibration: is the comparison dt-limited or rank-limited? Halve dt and watch the error.
+
+    calib [maxdim] [tmax]        default 64 and 2.0
+
+MEASURE IT AT THE MAXDIM THE MAIN RUN REPORTS. The default `maxdim = 64, tmax = 2.0` window
+answers only "what is the time-integration error", and MEASURED it answers it cleanly: both
+methods are exactly second order there (ratio 4.00 per halving, `err/dt^2` constant to three
+digits), with `maxbond` peaking at 28 against a cap of 64 -- nothing truncates, so those
+numbers carry no rank information at all and NEITHER method is dt-converged at any of
+dt = 0.1, 0.05, 0.025.
+
+That makes the default window the wrong place to pick the main run's dt from: at maxdim=32
+out to t=15 the truncation is supposed to dominate, and the dt only has to be small enough
+that it is not what is being measured. So run this twice --
+
+    calib 64 2.0        # the order check: is each method O(dt^2)?
+    calib 32 6.0        # the choice: at the reported cap, has the error stopped moving?
+
+-- and pick dt from the SECOND. A dt whose halving barely moves the error there is dt-safe
+for the main run; one that still halves the error four-fold is not.
 """
-function phase_calib()
-    println("# dt calibration, L=$L, XX domain wall, t=2.0, maxdim=64")
-    @printf("%-8s %8s %12s %9s\n", "scheme", "dt", "err(t=2)", "maxbond")
-    println(repeat("-", 42))
+function phase_calib(maxdim::Int = 64, tmax::Float64 = 2.0)
+    println("# dt calibration, L=$L, XX domain wall, t=$tmax, maxdim=$maxdim")
+    @printf("%-8s %8s %12s %9s %9s\n", "scheme", "dt", "err(t=$tmax)", "maxbond", "norm")
+    println(repeat("-", 52))
     for dt in (0.1, 0.05, 0.025)
-        n = round(Int, 2.0 / dt)
-        r, _ = run_cbe(dt = dt, maxdim = 64, dex = 0, tmax = 2.0, sample_every = n)
-        @printf("%-8s %8.4f %12.4e %9d\n", "cbe", dt, r[end].err, r[end].maxbond)
+        n = round(Int, tmax / dt)
+        r, _ = run_cbe(dt = dt, maxdim = maxdim, dex = 0, tmax = tmax, sample_every = n)
+        @printf("%-8s %8.4f %12.4e %9d %9.5f\n",
+                "cbe", dt, r[end].err, r[end].maxbond, r[end].norm)
     end
     for dt in (0.1, 0.05, 0.025)
-        n = round(Int, 2.0 / dt)
-        r, _ = run_tdvp2(dt = dt, maxdim = 64, tmax = 2.0, sample_every = n)
-        @printf("%-8s %8.4f %12.4e %9d\n", "tdvp2", dt, r[end].err, r[end].maxbond)
+        n = round(Int, tmax / dt)
+        r, _ = run_tdvp2(dt = dt, maxdim = maxdim, tmax = tmax, sample_every = n)
+        @printf("%-8s %8.4f %12.4e %9d %9.5f\n",
+                "tdvp2", dt, r[end].err, r[end].maxbond, r[end].norm)
     end
     println("\nCALIB_DONE")
 end
@@ -163,12 +198,13 @@ function phase_main(dt)
     sample_every = max(1, round(Int, 0.5 / dt))       # a sample every 0.5 time units
     open(path, "w") do io
         println(io, "scheme,maxdim,dex,dt,t,err,maxbond,centrebond,theta_elems," *
-                    "state_elems,norm,elapsed")
+                    "state_elems,peak_elems,norm,elapsed")
         function emit(rows)
             for r in rows
-                @printf(io, "%s,%d,%d,%g,%g,%.8e,%d,%d,%d,%d,%.8f,%.2f\n",
+                @printf(io, "%s,%d,%d,%g,%g,%.8e,%d,%d,%d,%d,%d,%.8f,%.2f\n",
                         r.scheme, r.maxdim, r.dex, r.dt, r.t, r.err, r.maxbond,
-                        r.centrebond, r.theta_elems, r.state_elems, r.norm, r.elapsed)
+                        r.centrebond, r.theta_elems, r.state_elems, r.peak_elems,
+                        r.norm, r.elapsed)
             end
             flush(io)
         end
@@ -202,7 +238,8 @@ end
 
 const PHASE = isempty(ARGS) ? "calib" : ARGS[1]
 if PHASE == "calib"
-    phase_calib()
+    phase_calib(length(ARGS) >= 2 ? parse(Int, ARGS[2]) : 64,
+                length(ARGS) >= 3 ? parse(Float64, ARGS[3]) : 2.0)
 elseif PHASE == "centre"
     phase_centre()
 elseif PHASE == "main"
