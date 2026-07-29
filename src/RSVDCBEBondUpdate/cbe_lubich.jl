@@ -315,7 +315,7 @@ function cbe_lubich_sweep(psi::SymMPS, h::XXZChain, tau::ComplexF64;
                              dex::Int = 0,
                              growth::Float64 = 2.0,
                              dover::Union{Nothing, Int} = nothing,
-                             comp_ratio::Float64 = 0.5,
+                             comp_ratio::Union{Float64, Nothing} = 0.5,
                              sulz_cap::Bool = false,
                              preselect_only::Bool = false,
                              centre_expand::Bool = true,
@@ -519,7 +519,7 @@ Base.@kwdef struct CBEBugOptions
     dex::Int = 0
     growth::Float64 = 2.0
     dover::Union{Nothing, Int} = nothing
-    comp_ratio::Float64 = 0.5
+    comp_ratio::Union{Float64, Nothing} = 0.5
     sulz_cap::Bool = false
     preselect_only::Bool = false
     centre_expand::Bool = true
@@ -535,6 +535,13 @@ Base.@kwdef struct CBEBugOptions
     # yet a default because it has not been checked across a sweep.
     s_iters::Int = 1
     s_reorth::Bool = false
+    # Order P_perp against Omega in the sketch. An IDENTITY (disjoint legs), so it
+    # cannot change a result; `true` forms the rank-4 H*Theta and costs more. A/B only.
+    project_first::Bool = false
+    # Second Gaussian on the PROJECTORS: sample the complement with a thin
+    # Gaussian and contract both sides to a small core, so P_perp never touches a
+    # chi-sized object. See the two_sided block in `cbe_expand`.
+    two_sided::Bool = false
     seed::UInt = 0x5EED
     record_magnetisation::Bool = false
     observe::Union{Nothing, Function} = nothing

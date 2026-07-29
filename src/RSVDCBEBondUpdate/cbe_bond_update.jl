@@ -102,10 +102,50 @@ Controlled bond expansion of the frames at one bond, with the bare two-site gate
 the environment-dressed effective Hamiltonian. Keywords are [`cbe_expand`](@ref)'s, unchanged -- this is the same
 selection with different sketch closures.
 """
-cbe_expand_bond(f::BondFrame, gate; kwargs...) =
-    cbe_expand(f,
-               Om -> sketch_bond_left(f, gate, Om),
-               Om -> sketch_bond_right(f, gate, Om); kwargs...)
+cbe_expand_bond(f::BondFrame, gate; project_first::Bool = false, kwargs...) =
+    project_first ?
+        cbe_expand(f,
+                   Om -> sketch_bond_left_pfirst(f, gate, Om),
+                   Om -> sketch_bond_right_pfirst(f, gate, Om); kwargs...) :
+        cbe_expand(f,
+                   Om -> sketch_bond_left(f, gate, Om),
+                   Om -> sketch_bond_right(f, gate, Om); kwargs...)
+
+# ── project-first sketches ────────────────────────────────────────────────────────────
+#
+# THESE COMPUTE EXACTLY THE SAME NUMBERS as `sketch_bond_left/right` followed by the
+# preselection's projection. `P_perp = I - U0 U0'` acts on `(link_l, site_l)` and `Om` acts on
+# `(site_r, link_r)`: DISJOINT LEGS, so the two operators commute and
+#
+#     P_perp((H Theta) Om')  ==  (P_perp (H Theta)) Om'
+#
+# is an identity, not an approximation. Ordering them differently cannot change a result, and
+# `tests/.../test_expand.jl` pins that.
+#
+# WHAT IT DOES CHANGE IS COST, and only for the worse. `H Theta` has `d*chi_r` columns against
+# `Om`'s `npre`, so projecting first forces the rank-4 two-site object into existence -- the one
+# thing the sketch exists to avoid -- and applies the gate to all of it. Folding `Om` in first
+# applies the gate to `npre` columns instead.
+#
+# Provided as `project_first = true` because it was asked for explicitly after that tradeoff was
+# raised, and because having both makes the identity measurable rather than merely argued
+# (`benchmarks/cbe_project_first.jl`). It is not the default and should not become one.
+function sketch_bond_left_pfirst(f::BondFrame, gate, Om)
+    tl, tr = f.site_l.itags, f.site_r.itags
+    HT = apply_gate(gate, frame_theta(f), tl, tr)       # (link_l, site_l, site_r, link_r)
+    c  = contract(f.U0', (1, 2), HT, (1, 2))            # (bond, site_r, link_r)
+    A  = to_concrete(HT - to_concrete(contract(f.U0, (3,), c, (1,))))
+    return to_concrete(contract(A, (3, 4), Om', (2, 3)))          # (link_l, site_l, g)
+end
+
+function sketch_bond_right_pfirst(f::BondFrame, gate, Om)
+    tl, tr = f.site_l.itags, f.site_r.itags
+    HT = apply_gate(gate, frame_theta(f), tl, tr)
+    c  = contract(HT, (3, 4), f.V0', (2, 3))            # (link_l, site_l, bond)
+    A  = to_concrete(HT - to_concrete(contract(c, (3,), f.V0, (1,))))
+    Y  = contract(A, (1, 2), Om', (1, 2))               # (site_r, link_r, g)
+    return to_concrete(permutedims(Y, (3, 1, 2)))       # (g, site_r, link_r)
+end
 
 # ── the bond update ──────────────────────────────────────────────────────────
 
@@ -308,11 +348,18 @@ function _expanding_lanczos(f::BondFrame, gate, tau::ComplexF64, theta0, tl, tr,
     # Embed a core from the (Uo,Vo) basis into (Un,Vn). `oplus` keeps the old block first so
     # this is `[S; 0]`, but it is COMPUTED as an overlap rather than assumed, which keeps it
     # correct if the orthonormality guard rotates within the appended span.
-    function embed(Uo, Vo, Un, Vn, S)
-        PL = to_concrete(contract(Un', (1, 2), Uo, (1, 2)))      # (new_l, old_l)
-        PR = to_concrete(contract(Vo, (2, 3), Vn', (2, 3)))      # (old_r, new_r)
-        return to_concrete(contract(contract(PL, (2,), S, (1,)), (2,), PR, (1,)))
-    end
+    #
+    # THE OVERLAPS ARE BUILT ONCE PER GROWTH PASS, NOT ONCE PER VECTOR. `PL` and `PR` depend
+    # only on the frames, so computing them inside a per-vector `embed` -- as the first version
+    # did -- repeated two `O(d*chi*r_old*r_new)` contractions for every stored Krylov vector.
+    # With a Krylov dimension of ~30 that is ~30x the frame work per pass, and it grows with
+    # chi. Hoisted here; the per-vector cost is now the two `O(chi^3)` core contractions alone.
+    embed_ops(Uo, Vo, Un, Vn) =
+        (to_concrete(contract(Un', (1, 2), Uo, (1, 2))),         # PL (new_l, old_l)
+         to_concrete(contract(Vo, (2, 3), Vn', (2, 3))))         # PR (old_r, new_r)
+
+    embed_with(PL, PR, S) =
+        to_concrete(contract(contract(PL, (2,), S, (1,)), (2,), PR, (1,)))
 
     U, V = f.U0, f.V0
     S0 = project(U, V, theta0)
@@ -362,10 +409,11 @@ function _expanding_lanczos(f::BondFrame, gate, tau::ComplexF64, theta0, tl, tr,
             if (ex.n_new_l + ex.n_new_r) > 0
                 Uo, Vo = U, V
                 U, V = ex.U_ex, ex.V_ex
+                PL, PR = embed_ops(Uo, Vo, U, V)
                 for k in eachindex(basis)
-                    basis[k] = embed(Uo, Vo, U, V, basis[k])
+                    basis[k] = embed_with(PL, PR, basis[k])
                 end
-                image === nothing || (image = embed(Uo, Vo, U, V, image))
+                image === nothing || (image = embed_with(PL, PR, image))
                 err_pre, err_fnl, n_grow = ex.err_pre, ex.err_fnl, n_grow + 1
             end
         end
@@ -507,6 +555,7 @@ function cbe_bond_update_bug!(psi::SymMPS, gates; opts::CBEBugOptions = CBEBugOp
     kw = (; maxdim = opts.maxdim, trunc_thresh = opts.trunc_thresh,
             maxiter = opts.maxiter, tol = opts.tol, rng = rng,
             s_iters = opts.s_iters, s_reorth = opts.s_reorth,
+            project_first = opts.project_first, two_sided = opts.two_sided,
             dex = opts.dex, growth = opts.growth,
             dover = opts.dover, comp_ratio = opts.comp_ratio,
             sulz_cap = opts.sulz_cap, preselect_only = opts.preselect_only)

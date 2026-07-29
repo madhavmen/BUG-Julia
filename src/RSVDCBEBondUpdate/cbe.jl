@@ -274,7 +274,7 @@ that decision in here would silently refuse to expand one side of the bond becau
 other was full.
 """
 function sector_graded_sketch(frame, side::Symbol, npre::Int;
-                              comp_ratio::Float64 = 0.5,
+                              comp_ratio::Union{Float64, Nothing} = 0.5,
                               rng::AbstractRNG = MersenneTwister(0x5EED),
                               tag::AbstractString = "cbeG")
     side in (:left, :right) || throw(ArgumentError("side must be :left or :right"))
@@ -282,8 +282,8 @@ function sector_graded_sketch(frame, side::Symbol, npre::Int;
     # complement-only (the pure discarded space), `0.0` isometry-only. An earlier version
     # demanded strict inequality and also floored both halves at one column, so
     # "complement only" silently still drew one kept-space column and could not be measured.
-    0.0 <= comp_ratio <= 1.0 || throw(ArgumentError(
-        "comp_ratio must be in [0, 1], got $comp_ratio"))
+    comp_ratio === nothing || 0.0 <= comp_ratio <= 1.0 || throw(ArgumentError(
+        "comp_ratio must be in [0, 1] or nothing, got $comp_ratio"))
     npre >= 1 || throw(ArgumentError("npre must be at least 1, got $npre"))
 
     fl = side === :left ? 3 : 1                       # the frame's bond leg
@@ -297,6 +297,32 @@ function sector_graded_sketch(frame, side::Symbol, npre::Int;
     dfull = Dict(q => d for (q, d) in F.spaces[3])
     dT    = Dict(q => sector_dim(frame, fl, q) for q in keys(dfull))
     dC    = Dict(q => max(dfull[q] - dT[q], 0) for q in keys(dfull))
+
+    # ── comp_ratio = nothing: NO PROJECTOR IN THE PROBE AT ALL ─────────────────────────
+    #
+    # A plain sector-graded Gaussian on the full local space: columns allocated across charge
+    # sectors as usual, but neither projected out of the frame nor into it. The complement is
+    # then reached by SAMPLING rather than by construction.
+    #
+    # WHY THIS IS WORTH HAVING. `comp_ratio` is one of the two hyperparameters the iterative
+    # scheme was meant to remove: a fixed split is a GUESS at how much of the probe should look
+    # for new directions versus refine old ones, made once, before anything is known. With the
+    # expanding-basis solver the probe is REDRAWN at every growth pass from an advancing RNG
+    # stream, so successive passes explore different directions in every sector and the
+    # coverage accumulates. Sampling over passes replaces guessing once.
+    #
+    # ORTHOGONALITY IS NOT AT RISK. The probe only decides which directions get LOOKED AT; the
+    # preselection still applies the exact `P_perp = I - U0 U0'` to what comes back, and the
+    # guard before the direct sum re-establishes orthonormality. So dropping the projection
+    # here cannot admit a direction that overlaps the frame.
+    #
+    # It is also strictly cheaper: two `perp_component` calls per side per pass disappear.
+    if comp_ratio === nothing
+        R = _trim_per_sector(_randomize_like(F, rng), 3, _alloc_columns(dfull, npre))
+        R === nothing && return nothing
+        Rl = to_concrete(tolayout(R))
+        return norm(Rl) > 0 ? Rl : nothing
+    end
 
     # `n_c + n_t == npre` is only the TARGET split, and either may be zero -- that is what
     # makes the pure cases reachable.
@@ -527,10 +553,11 @@ function cbe_expand(f::BondFrame, skl, skr;
                     dex::Int = 0,
                     growth::Float64 = 2.0,
                     dover::Union{Nothing, Int} = nothing,
-                    comp_ratio::Float64 = 0.5,
+                    comp_ratio::Union{Float64, Nothing} = 0.5,
                     sulz_cap::Bool = false,
                     rmax::Int = 0,
                     preselect_only::Bool = false,
+                    two_sided::Bool = false,
                     stol_pre::Float64 = 1e-10,
                     stol_fnl::Float64 = 1e-13,
                     rng::AbstractRNG = MersenneTwister(0x5EED))
@@ -595,6 +622,53 @@ function cbe_expand(f::BondFrame, skl, skr;
 
     npre = preselect_only ? max(budget, 1) :
            dover === nothing ? ceil(Int, 1.2 * budget) : budget + dover
+
+    # ── TWO-SIDED: the second Gaussian acts on the PROJECTORS, not on the state ────────
+    #
+    # The shipped path applies `P_perp` to `Y = (H Theta) Om_R'`, an object with `d*chi_l`
+    # rows, and then SVDs it -- `O(d*chi_l * Dpre^2)`, i.e. it grows with the bond dimension.
+    #
+    # Here the projector is applied to a THIN GAUSSIAN instead: draw `Om_L` in the complement
+    # of `U0` (`comp_ratio = 1.0` is exactly "random, then projected out"), orthonormalise it
+    # to `Q_L`, and likewise `Q_R` on the right. Then
+    #
+    #     M = Q_L' (H Theta) Q_R          (Dpre_l x Dpre_r)
+    #
+    # is contracted down with BOTH Gaussians folded into the gate, so neither the rank-4
+    # object nor any `d*chi`-sized projected intermediate is ever formed, and the SVD is on a
+    # matrix whose size does not depend on chi at all.
+    #
+    # WHAT IS GIVEN UP. The candidate space is now a RANDOM `Dpre`-dimensional subspace of the
+    # complement, not the range of `P_perp (H Theta) Om_R'`. That is a weaker object: the
+    # shipped preselection sees where `H` actually points and keeps the largest pieces of it,
+    # while this sees a random slice and asks how much of `H`'s action lands in it. The bet is
+    # that redrawing every growth pass covers the space over iterations -- which is only a bet
+    # worth making WITH the iteration, and is why this is measured at `s_iters < 0`.
+    if two_sided
+        OmL = sector_graded_sketch(U0, :left,  npre; comp_ratio = 1.0, rng = rng)
+        OmR = sector_graded_sketch(V0, :right, npre; comp_ratio = 1.0, rng = rng)
+        QL = dex_l > 0 && OmL !== nothing ? _reortho_left(U0, OmL)  : nothing
+        QR = dex_r > 0 && OmR !== nothing ? _reortho_right(V0, OmR) : nothing
+        (QL === nothing && QR === nothing) && return none()
+
+        TLC, TRC = nothing, nothing
+        if QL !== nothing && QR !== nothing
+            M = to_concrete(contract(skr(QL), (2, 3), QR', (2, 3)))       # (g_l, g_r), SMALL
+            if length(M.qlabels) > 0 && norm(M) >= 1e-11
+                k = min(dex_l, dex_r, leg_dim(QL, 3), leg_dim(QR, 1))
+                if k > 0
+                    res = svd(M, (1,); Nkeep = k, cutoff = stol_fnl, get_lists = true)
+                    err_fnl2 = _trunc_weight(res)
+                    TLC = to_concrete(contract(QL, (3,), res.U, (1,)))
+                    TRC = to_concrete(contract(res.Vd, (2,), QR, (1,)))
+                    TLC = _reortho_left(U0, TLC)
+                    TRC = _reortho_right(V0, TRC)
+                    return _assemble(U0, V0, TLC, TRC, 0.0, err_fnl2)
+                end
+            end
+        end
+        return none()
+    end
 
     # ---- preselection: sketch H from each side, project off the frame ----------
     QL, err_l = if dex_l > 0
@@ -747,6 +821,26 @@ function _reortho(C, perp, orth)
     R = to_concrete(perp(C))
     norm(R) <= _CBE_EPS * max(norm(C), 1.0) && return nothing
     return to_concrete(orth(R))
+end
+
+
+"""
+    _assemble(U0, V0, TLC, TRC, err_pre, err_fnl) -> CBEExpansion
+
+Append the selected blocks to the frames by direct sum. `oplus` keeps `U0` first, which is
+what makes the expansion lossless and what the embedding in `_expanding_lanczos` relies on.
+The new bond leg is retagged to the frame's own tag first: the selections deliberately use
+distinct tags, and Telum rejects a tensor carrying two identical indices.
+"""
+function _assemble(U0, V0, TLC, TRC, err_pre::Float64, err_fnl::Float64)
+    (TLC === nothing && TRC === nothing) &&
+        return CBEExpansion(U0, V0, 0, 0, err_pre, 0.0)
+    ltag, rtag = U0.inds[3].itags, V0.inds[1].itags
+    U_ex, n_l = TLC === nothing ? (U0, 0) :
+        (to_concrete(oplus([U0, to_concrete(setitag(TLC, 3, ltag))], (3,))), leg_dim(TLC, 3))
+    V_ex, n_r = TRC === nothing ? (V0, 0) :
+        (to_concrete(oplus([V0, to_concrete(setitag(TRC, 1, rtag))], (1,))), leg_dim(TRC, 1))
+    return CBEExpansion(U_ex, V_ex, n_l, n_r, err_pre, err_fnl)
 end
 
 "Keep at most `n` columns of `Q` on `leg`, walking sectors in Telum's order."
