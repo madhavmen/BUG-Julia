@@ -545,6 +545,49 @@ does it, not growth inside the Lanczos.
 recommended setting, and the cost is real (60 matvecs vs 30). The obvious follow-up is
 `s_iters = n` with `growth ≈ 1.25` versus one-shot `growth = 2.0` at matched *total* work.
 
+#### 7.6.3 The sweep, against an ANALYTIC reference — the outer-loop result does not survive
+
+Everything in §7.6.2 is one bond of a warmed state judged against an exact two-site propagator.
+That is a diagnostic, not a decision. `benchmarks/cbe_sweep_cost.jl` runs whole evolutions
+(L=8, dt=0.02, t=0.5, maxdim=32), warms up before any timing, and scores against the **exact**
+answer rather than another integrator.
+
+**The reference is now analytic.** The XX chain is free-fermionic: Jordan–Wigner on
+`H = J Σ (SxSx + SySy)` gives `H = (J/2) Σ (c†ⱼcⱼ₊₁ + h.c.)`, a tridiagonal single-particle
+matrix, so for a Fock initial state `nⱼ(t) = Σₖ |[exp(−iht)]ⱼₖ|² nₖ(0)` is **exact for the
+finite open chain** — no infinite-chain or short-time assumption, unlike the Bessel-function
+domain-wall profile. Two conventions cannot go wrong: the hopping's *sign* is irrelevant (it
+enters as `|U|²`), and the wall's orientation is read off the MPS rather than assumed. Checks:
+`‖analytic(0) − ψ(0)‖ = 0.000e+00`, and `‖tdvp2(t) − analytic(t)‖ = 1.76e-06`, dt-limited.
+
+| scheme | err | wall(s) | matvec | maxbd |
+|---|---|---|---|---|
+| growth=2.0 one-shot (default) | 1.940e-06 | 6.38 | 6523 | 12 |
+| growth=2.0 + reorth | 1.940e-06 | 5.97 | **2672** | 12 |
+| growth=1.25 one-shot | 1.537e-05 | 6.35 | 6639 | 12 |
+| growth=1.25 + reorth | 1.537e-05 | 6.05 | 2805 | 12 |
+| growth=1.25 **outer `s_iters=3`** | 1.199e-05 | **10.55** | 12850 | 12 |
+| growth=1.25 expanding grow=2 | 9.256e-06 | 5.92 | 1986 | 12 |
+| growth=1.5 one-shot | 1.940e-06 | 5.67 | 6606 | 12 |
+| growth=1.5 expanding grow=2 | **1.399e-06** | 5.42 | **1452** | 12 |
+| growth=1.5 expanding grow=8 | 1.399e-06 | 5.76 | 1155 | 12 |
+
+**The outer loop reverses.** Best scheme at one bond (§7.6.2, 7300× better at `growth = 1.25`);
+across a full evolution it is the **worst** — 6.2× the default's error, 1.65× the wall time,
+1.97× the matvecs. A single-bond improvement against an exact local propagator did not survive
+composition over 25 steps and all bonds. **Do not promote a bond-level result again without
+this run.**
+
+**`s_reorth` confirms — with an important qualification.** Identical error, 59% fewer matvecs
+(0.41×), but only ~6% less wall time. So **matvecs are not the dominant cost**: the expansion
+work (sketches, preselection and ranking SVDs) is. Any scheme sold on a matvec count is
+overstating its case, including the ones above.
+
+**Wall-clock here is weak evidence.** All schemes but the outer loop sit in 5.4–6.4 s — under
+20% spread on a single un-repeated timing, on a box that already produced one retracted speedup
+claim (§7.5). Trust the matvec column; treat wall differences below ~1.3× as noise until
+repeated.
+
 ---
 
 ## 8. Gotchas that cost real time

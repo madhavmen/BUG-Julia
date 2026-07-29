@@ -33,19 +33,60 @@ const MAXDIM = 32
 
 xx_gates(p) = Any[xx_bond_gate(p[i].inds[2], p[i + 1].inds[2]) for i in 1:(length(p) - 1)]
 
-ref = domain_wall_state(L)
-let h = xxz_chain(L; delta = 0.0)
+# ── ANALYTIC REFERENCE: exact free fermions ──────────────────────────────────────────
+#
+# The XX chain is free-fermionic, so the exact answer is available and there is no reason to
+# validate against another approximate integrator. Jordan-Wigner on
+# `H = J * sum (Sx Sx + Sy Sy) = (J/2) * sum (S+ S- + S- S+)` gives, with the strings
+# cancelling between neighbours,
+#
+#     H = (J/2) sum_j (c_j^dag c_{j+1} + h.c.)
+#
+# i.e. a single-particle hopping matrix `h` that is tridiagonal with off-diagonal J/2 -- an
+# L x L matrix, exact for the FINITE OPEN chain the MPS actually simulates, with no
+# infinite-chain or short-time assumption (unlike the Bessel-function profile).
+#
+# TWO CONVENTIONS THAT COULD HAVE GONE WRONG, AND WHY NEITHER CAN:
+#
+#   * the SIGN of the hopping is irrelevant here. Flipping it sends U -> conj(U), and the
+#     density depends on |U_jk|^2 only. So only |J/2| matters.
+#   * the ORIENTATION of the domain wall is not assumed. The initial occupations are read off
+#     the MPS itself (`n = <Sz> + 1/2`), which is exact because the initial state is a Fock
+#     state and its correlation matrix is therefore diagonal.
+#
+# For a diagonal C(0), the exact density is  n_j(t) = sum_k |[exp(-i h t)]_jk|^2 n_k(0).
+function analytic_sz(L::Int, t::Float64, n0::Vector{Float64}; J::Float64 = 1.0)
+    h = zeros(ComplexF64, L, L)
+    for j in 1:(L - 1)
+        h[j, j + 1] = J / 2
+        h[j + 1, j] = J / 2
+    end
+    U = exp(-im * h * t)
+    return [sum(abs2(U[j, k]) * n0[k] for k in 1:L) - 0.5 for j in 1:L]
+end
+
+const N0 = magnetisation(domain_wall_state(L)) .+ 0.5
+const REF_MAG = analytic_sz(L, TMAX, N0)
+
+# Convention check: at t = 0 the analytic profile must reproduce the initial state exactly,
+# and 2-site TDVP must agree with the analytic answer at TMAX to its own accuracy. If the
+# hopping were off by a factor of two, the second check would fail grossly.
+let z0 = analytic_sz(L, 0.0, N0), m0 = magnetisation(domain_wall_state(L))
+    @printf("convention check: ||analytic(t=0) - psi(0)|| = %.3e\n", norm(z0 - m0))
+end
+let ref = domain_wall_state(L), h = xxz_chain(L; delta = 0.0)
     for _ in 1:NSTEP
         tdvp2_step!(ref, h, ComplexF64(-im * DT); maxdim = MAXDIM, trunc_thresh = 1e-14)
     end
+    @printf("convention check: ||tdvp2(TMAX) - analytic(TMAX)|| = %.3e  (dt-limited, small)\n\n",
+            norm(magnetisation(copy(ref)) - REF_MAG))
 end
-const REF_MAG = magnetisation(copy(ref))
 
 function evolve(nsteps; kwargs...)
     psi = domain_wall_state(L)
     gates = xx_gates(psi)
     info = cbe_bond_update_bug!(psi, gates;
-                                opts = CBEBugOptions(dt = DT, n_steps = nsteps,
+                                opts = CBEBugOptions(; dt = DT, n_steps = nsteps,
                                                      maxdim = MAXDIM, trunc_thresh = 1e-14,
                                                      kwargs...))
     return psi, info
@@ -63,7 +104,7 @@ function bench(label; kwargs...)
 end
 
 @printf("L = %d, dt = %.3f, t = %.2f (%d steps), maxdim = %d\n", L, DT, TMAX, NSTEP, MAXDIM)
-println("reference: 2-site TDVP, same dt and maxdim.  Timings are post-warm-up.\n")
+println("reference: EXACT free fermions (analytic).  Timings are post-warm-up.\n")
 @printf("%-32s %-11s %-8s %-9s %-7s %s\n",
         "scheme", "err", "wall(s)", "matvec", "maxbd", "profile")
 println("-"^94)
@@ -75,8 +116,13 @@ bench("growth=1.25 + reorth"; growth = 1.25, s_reorth = true)
 bench("growth=1.25 outer s_iters=3"; growth = 1.25, s_iters = 3)
 bench("growth=1.25 expanding grow=2"; growth = 1.25, s_iters = -2)
 bench("growth=1.5  one-shot"; growth = 1.5)
+# THE CONTROL. The expanding solver reorthogonalises fully and expands repeatedly; without
+# this row the two cannot be separated, and the same confound has already overturned three
+# readings in this investigation.
+bench("growth=1.5  + reorth (CONTROL)"; growth = 1.5, s_reorth = true)
 bench("growth=1.5  expanding grow=2"; growth = 1.5, s_iters = -2)
 bench("growth=1.5  expanding grow=8"; growth = 1.5, s_iters = -8)
+bench("growth=2.0  expanding grow=2"; s_iters = -2)
 
 println("-"^94)
 base = rows[1]
