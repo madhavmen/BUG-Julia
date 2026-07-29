@@ -158,6 +158,7 @@ function cbe_bond_update(f::BondFrame, gate, tau::ComplexF64;
                          s_iters::Int = 1,
                          iter_tol::Float64 = 1e-12,
                          s_reorth::Bool = false,
+                         s_probe::Symbol = :residual,
                          rng::AbstractRNG = MersenneTwister(0x5EED),
                          expand_kwargs...)
     tau_s = s_tau === nothing ? tau : s_tau
@@ -199,7 +200,7 @@ function cbe_bond_update(f::BondFrame, gate, tau::ComplexF64;
         # `s_iters <= 0` selects the expanding-basis solver; see `_expanding_lanczos`.
         U_aug, V_aug, S_new, info = _expanding_lanczos(
             f, gate, tau_s, theta0, tl, tr, nmv;
-            maxiter = maxiter, tol = tol, grow_iters = -s_iters,
+            maxiter = maxiter, tol = tol, grow_iters = -s_iters, probe = s_probe,
             rng = rng, expand_kwargs = expand_kwargs)
         err_pre, err_fnl = info.err_pre, info.err_fnl
         n_iter, iter_weight = info.n_grow, info.beta_final
@@ -299,6 +300,7 @@ current one and the recurrence alone would drift.
 """
 function _expanding_lanczos(f::BondFrame, gate, tau::ComplexF64, theta0, tl, tr, nmv;
                             maxiter::Int, tol::Float64, grow_iters::Int,
+                            probe::Symbol = :residual,
                             rng::AbstractRNG, expand_kwargs)
     project(U, V, th) = to_concrete(contract(contract(U', (1, 2), th, (1, 2)),
                                              (2, 3), V', (2, 3)))
@@ -323,17 +325,47 @@ function _expanding_lanczos(f::BondFrame, gate, tau::ComplexF64, theta0, tl, tr,
     alpha, betas, ranks = Float64[], Float64[], Int[leg_dim(U, 3)]
     b_last = 0.0
 
+    image = nothing        # the PREVIOUS iteration's output, H*v_{k-1}, before orthogonalisation
+
     for it in 1:maxiter
-        # ---- step 0: grow the basis around the vector we are about to hit with H ----
+        # ---- step 0: grow the basis around the probe ----
+        #
+        # WHICH VECTOR DRIVES THE EXPANSION IS THE WHOLE QUESTION, and the two choices are not
+        # close numerically:
+        #
+        #   :residual  (DEFAULT) the orthonormal Lanczos vector `basis[it]`, i.e. the Krylov
+        #              vector itself as the centre gauge. `Theta = U*v_k*V` is then in mixed
+        #              bond-canonical form -- VERIFIED, `U'U - I` and `VV' - I` both 1.5e-15
+        #              and `||S|| = ||U S V|| = 1` at every pass.
+        #   :image     the previous step's output `H*v_{k-1}`, before the Lanczos subtraction.
+        #              TRIED AND IT MAKES NO DIFFERENCE: at growth = 1.25 both give 1.450e-11,
+        #              with :image at rank 11 against :residual's 12. Kept only so the null
+        #              result stays reproducible; it is not a knob worth turning.
+        #
+        # NEITHER IS THE RANDOM GAUSSIAN. The chosen vector becomes the CORE `S0` of the frame
+        # handed to `cbe_expand_bond`, which then draws its own sector-graded Gaussian inside
+        # `sector_graded_sketch` exactly as on the first pass. Every other step -- preselection,
+        # the P_perp projection, the ranking, the direct sum -- is unchanged.
+        #
+        # The Lanczos RECURRENCE is untouched either way: `H` is still applied to the
+        # orthonormal `basis[it]`, so alpha/beta and the tridiagonal are unchanged. Only the
+        # basis the next vector is built IN differs.
+        #
+        # Why H is applied to the ORTHONORMALISED vector and not to the raw output: measured,
+        # `H*v_k` overlaps an EARLIER basis vector by 100% of its own norm (k = 2 and 3 at the
+        # L=8 test bond), so without the beta subtraction the "next Krylov vector" is
+        # numerically the previous one and the iteration stalls. The alpha subtraction, by
+        # contrast, IS redundant here: `<v_k, H v_k>` is 1e-15 to 1e-20 on this Hamiltonian.
         if it <= grow_iters
-            ex = cbe_expand_bond(_reframe(f, U, basis[it], V), gate;
-                                 rng = rng, expand_kwargs...)
+            pv = (probe === :image && image !== nothing) ? image : basis[it]
+            ex = cbe_expand_bond(_reframe(f, U, pv, V), gate; rng = rng, expand_kwargs...)
             if (ex.n_new_l + ex.n_new_r) > 0
                 Uo, Vo = U, V
                 U, V = ex.U_ex, ex.V_ex
                 for k in eachindex(basis)
                     basis[k] = embed(Uo, Vo, U, V, basis[k])
                 end
+                image === nothing || (image = embed(Uo, Vo, U, V, image))
                 err_pre, err_fnl, n_grow = ex.err_pre, ex.err_fnl, n_grow + 1
             end
         end
@@ -342,6 +374,7 @@ function _expanding_lanczos(f::BondFrame, gate, tau::ComplexF64, theta0, tl, tr,
         nmv[] += 1
         theta = to_concrete((U * basis[it]) * V)
         w = project(U, V, apply_gate(gate, theta, tl, tr))
+        image = w          # this iteration's output, carried to the next expansion
 
         a = real(tensor_inner(basis[it], w))
         push!(alpha, a)
@@ -429,7 +462,7 @@ factor of the Trotter step.
 function cbe_bond_update_sweep!(psi::SymMPS, gates, parity::Symbol, tau::ComplexF64; kwargs...)
     aug_k = 0; aug_l = 0
     discarded = 0.0; err_pre = 0.0; err_fnl = 0.0
-    n_matvec = 0; aug_sum = 0; nbond = 0
+    n_matvec = 0; aug_sum = 0; nbond = 0; iter_sum = 0
     for i in parity_bonds(length(psi), parity)
         gates[i] === nothing && continue
         canonical!(psi, i)
@@ -438,6 +471,7 @@ function cbe_bond_update_sweep!(psi::SymMPS, gates, parity::Symbol, tau::Complex
         n_matvec += r.n_matvec
         aug_sum += r.aug_k * r.aug_l          # the SIZE each of those matvecs acted on
         nbond += 1
+        iter_sum += r.n_iter                  # growth passes this bond actually needed
         psi[i] = r.left_core
         psi[i + 1] = r.right_core
         psi.center = i + 1
@@ -447,7 +481,7 @@ function cbe_bond_update_sweep!(psi::SymMPS, gates, parity::Symbol, tau::Complex
         err_pre = max(err_pre, r.err_pre)
         err_fnl = max(err_fnl, r.err_fnl)
     end
-    return (; aug_k, aug_l, discarded, err_pre, err_fnl, n_matvec, aug_sum, nbond)
+    return (; aug_k, aug_l, discarded, err_pre, err_fnl, n_matvec, aug_sum, nbond, iter_sum)
 end
 
 cbe_bond_update_sweep!(psi::SymMPS, gates, parity::Symbol, tau::Number; kwargs...) =
