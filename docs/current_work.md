@@ -583,10 +583,44 @@ this run.**
 work (sketches, preselection and ranking SVDs) is. Any scheme sold on a matvec count is
 overstating its case, including the ones above.
 
-**Wall-clock here is weak evidence.** All schemes but the outer loop sit in 5.4–6.4 s — under
-20% spread on a single un-repeated timing, on a box that already produced one retracted speedup
-claim (§7.5). Trust the matvec column; treat wall differences below ~1.3× as noise until
-repeated.
+#### 7.6.4 With the control in: the expanding solver DOES earn its place
+
+The row that decides it is `growth = 1.5 + reorth` — same reorthogonalisation the expanding
+solver does, without the expanding basis. Adding it, and a `growth = 2.0` expanding row:
+
+| scheme | err | matvec | err vs default | matvec vs default |
+|---|---|---|---|---|
+| growth=2.0 one-shot (default) | 1.940e-06 | 6523 | 1.00× | 1.00× |
+| growth=2.0 + reorth | 1.940e-06 | 2672 | 1.00× | 0.41× |
+| growth=1.5 one-shot | 1.940e-06 | 6606 | 1.00× | 1.01× |
+| **growth=1.5 + reorth (CONTROL)** | **1.940e-06** | **2693** | **1.00×** | **0.41×** |
+| growth=1.5 expanding grow=2 | **1.399e-06** | 1452 | **0.72×** | 0.22× |
+| growth=2.0 expanding grow=2 | **1.399e-06** | **1386** | **0.72×** | **0.21×** |
+
+**Reorthogonalisation alone changes the error by nothing** (1.940e-06, identical to one-shot at
+every `growth`); it only halves the matvecs. **The expanding basis lowers the error to
+1.399e-06 and halves the matvecs again** relative to the control. So the accuracy gain is
+attributable to the expanding basis, not to reorthogonalisation — which reverses the bond-level
+verdict in §7.6 that it "buys nothing and pays an extra expansion per bond". At sweep level it
+is the best scheme measured on both reliable axes.
+
+**Two caveats that stop this being a decision yet.**
+
+1. **Wall-clock is unusable, worse than §7.6.3 suggested.** The *identical* default
+   configuration timed **6.38 s** in one run and **16.45 s** in the next — a 2.6× swing on the
+   same computation, despite a warm-up pass. Every "relative wall" figure in that run is
+   measured against an inflated baseline and must be ignored. This is §7.5's artefact
+   resurfacing; a 2-step warm-up does not compile every scheme's path. **Only `err` and
+   `matvec` are trustworthy here** (both deterministic).
+2. **The errors sit at the dt-limited floor.** 2-site TDVP reaches 1.761e-06 at this `dt`, and
+   the schemes span 1.399e-06 – 1.940e-06 — all the same order, all at maxbd 12. The 28% gap
+   may be a Trotter-error prefactor rather than basis quality. **A `dt` scan settles it**: if
+   both scale as `dt²` with different constants it is prefactor; if the expanding solver
+   plateaus lower, the basis is genuinely better. Do that before changing a default.
+
+**Wall-clock generally is weak evidence on this box.** Trust the matvec column; treat wall
+differences below ~1.3× as noise until repeated, and note that even 2.6× turned out to be an
+artefact here.
 
 ---
 
