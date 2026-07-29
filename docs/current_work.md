@@ -614,9 +614,44 @@ is the best scheme measured on both reliable axes.
    `matvec` are trustworthy here** (both deterministic).
 2. **The errors sit at the dt-limited floor.** 2-site TDVP reaches 1.761e-06 at this `dt`, and
    the schemes span 1.399e-06 – 1.940e-06 — all the same order, all at maxbd 12. The 28% gap
-   may be a Trotter-error prefactor rather than basis quality. **A `dt` scan settles it**: if
-   both scale as `dt²` with different constants it is prefactor; if the expanding solver
-   plateaus lower, the basis is genuinely better. Do that before changing a default.
+   may be a Trotter-error prefactor rather than basis quality. **A `dt` scan settles it** —
+   and it did: see §7.6.5. It is not a prefactor.
+
+#### 7.6.5 The `dt` scan — the expanding basis RESTORES second order
+
+`benchmarks/cbe_dt_scan.jl`, fixed `t = 0.5`, halving `dt`, against the analytic reference. A
+second-order scheme quarters its error per halving (ratio 4).
+
+| dt | one-shot / +reorth | ratio | expanding grow=2 | ratio |
+|---|---|---|---|---|
+| 0.020 | 1.9402e-06 | — | 1.3986e-06 | — |
+| 0.010 | 5.6045e-07 | **3.46** | 3.4964e-07 | **4.00** |
+| 0.005 | 1.8639e-07 | **3.01** | 8.7411e-08 | **4.00** |
+
+*(the `dt = 0.04` row is outside the asymptotic regime — err 6.3e-03 for every scheme — so only
+the last two ratios carry information.)*
+
+**The expanding solver is cleanly second order; the one-shot is not.** Its ratio decays
+3.46 → 3.01, drifting away from 4 as `dt` shrinks — the signature of a **basis floor**, an error
+that does not scale as `dt²` and so dominates more as the Trotter error falls. Reorthogonalisation
+does not touch it (the control is bit-identical to the one-shot at every `dt`).
+
+**So the 28% was not a prefactor.** A prefactor holds the ratio at 4 and keeps the gap constant;
+instead the gap *widens*: 1.39× at `dt=0.02`, 1.60× at 0.01, **2.13×** at 0.005. The one-shot
+expansion leaves physics unresolved and the in-Lanczos growth recovers it.
+
+**And it is cheaper, increasingly so.** At `dt = 0.005`: 4748 matvecs against 27255 for the
+one-shot (0.17×) and 10739 for the reorth control (0.44×).
+
+`growth` is irrelevant to the expanding solver (1.5 vs 2.0 gives 3.4956e-07 vs 3.4964e-07),
+consistent with §7.6.1 — once the growth happens inside the Krylov iteration, the one-shot
+budget stops mattering.
+
+**Status: the strongest result in this section, and the one worth acting on.** Remaining before
+`s_iters = -2` becomes a default: confirm on a non-free-fermion model (XXZ with `delta ≠ 0`,
+where the analytic reference is unavailable and 2-site TDVP must serve), and at a larger `L`
+where `maxdim` binds hard — both cluster runs. Wall-clock must be re-measured there with
+repeats, since it is unusable on this box (§7.6.4).
 
 **Wall-clock generally is weak evidence on this box.** Trust the matvec column; treat wall
 differences below ~1.3× as noise until repeated, and note that even 2.6× turned out to be an
