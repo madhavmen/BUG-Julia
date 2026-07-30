@@ -25,5 +25,6 @@ Random.seed!(42)
     include("test_driver.jl")
     include("test_modes.jl")
     include("test_tdvp1_cbe.jl")
+    include("test_dimer.jl")
     include("test_su2.jl")
 end

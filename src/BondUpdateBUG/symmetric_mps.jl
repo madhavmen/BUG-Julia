@@ -297,9 +297,12 @@ independent dimers. Every link carries ONE multiplet, so `bond_dims` reports all
 multiplet is not a state, and this is a genuinely entangled state in the physical basis.
 """
 function dimer_state(L::Int)
-    symmetry_mode() === :SU2 || throw(ArgumentError(
-        "dimer_state needs symmetry_mode() === :SU2, got $(symmetry_mode()); " *
-        "under :U1 or :none use product_state / neel_state"))
+    # Available in EVERY mode, unlike `product_state` (which `:SU2` cannot represent) and unlike
+    # the old `:SU2`-only version of this function. That matters because an SU(2)-vs-no-symmetry
+    # comparison is only meaningful if both sides evolve the SAME state: the claim under test is
+    # that symmetry changes the cost and not the physics. Under `:none`/`:U1` the construction is
+    # by projection — see `_dimer_state_projected`.
+    symmetry_mode() === :SU2 || return _dimer_state_projected(L)
     L >= 2 && iseven(L) || throw(ArgumentError(
         "dimer_state needs an even number of sites >= 2, got $L"))
     q = local_space(:SU2)

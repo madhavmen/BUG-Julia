@@ -84,3 +84,32 @@ spec = entanglement_spectrum(psi)    # spec[b] = Schmidt values of bond b
 """
 entanglement_spectrum(psi::SymMPS) =
     [bond_spectrum(psi, b) for b in 1:(length(psi) - 1)]
+
+"""
+    bond_energies(psi, gates) -> Vector{Float64}
+
+`⟨ψ|h_b|ψ⟩ / ⟨ψ|ψ⟩` resolved BY BOND, i.e. [`energy`](@ref) without the final sum.
+`out[b]` is the bond between sites `b` and `b+1`; bonds whose gate is `nothing` give `0.0`.
+
+THIS IS THE LIGHT-CONE OBSERVABLE FOR A SYMMETRIC RUN, and the reason it exists is that
+`magnetisation` cannot play that role under `:SU2`. An `:SU2` state carries total-spin
+multiplets, so `⟨Sz_j⟩` is identically zero by symmetry — and the operator is not even exposed
+(`local_space(:SU2)` has `(:I, :S)`, no `Sz`), so asking for it throws rather than returning the
+zero. `S_j·S_{j+1}` is an SU(2) SCALAR: it is invariant under the symmetry, nonzero, and defined
+in every mode. A dimer quench therefore produces a genuine light cone in `:none`, `:U1` and
+`:SU2` alike, and the three are directly comparable because it is the same operator.
+
+Like `energy`, this canonicalises `psi` as it goes — the gauge changes, the state does not.
+"""
+function bond_energies(psi::SymMPS, gates)
+    out = zeros(Float64, length(psi) - 1)
+    for i in 1:(length(psi) - 1)
+        gates[i] === nothing && continue
+        canonical!(psi, i)
+        f = bond_frame(psi, i)
+        th = frame_theta(f)
+        num = tensor_inner(th, apply_gate(gates[i], th, f.site_l, f.site_r))
+        out[i] = real(num) / real(tensor_inner(th, th))
+    end
+    return out
+end

@@ -42,7 +42,7 @@ export SymMPS, canonical!, move_left!, move_right!, bond_dims, leg_dim,
        augmented_left_isometry, augmented_right_isometry, random_sector_seed,
        heisenberg_bond_gate, xx_bond_gate, magnetisation_gate, apply_gate,
        kls_bond_update, pairable_charges,
-       parity_bonds, bond_gates, parity_sweep!, energy,
+       parity_bonds, bond_gates, parity_sweep!, energy, bond_energies,
        BondUpdateOptions, BondUpdateInfo, bond_update_bug!, SUPPORTED_ORDERS
 
 end # module
