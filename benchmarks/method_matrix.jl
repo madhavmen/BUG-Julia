@@ -282,7 +282,14 @@ let nst = nsteps(BETA, DT * 2.5), dtb = DT * 2.5, tau = ComplexF64(-DT * 2.5)
 end
 
 # ── GROUND STATE ─────────────────────────────────────────────────────────────────────
-println("\nGROUND STATE -- E - E0 MUST be >= 0 (the local solve is variational)")
+# "Variational" bounds the EXACT quantity, not the floating-point one. Both sides carry their
+# own roundoff -- the MPS energy and `eigen`'s E0 -- so at convergence `E - E0` lands at a few
+# ulp of |E0| and its SIGN is noise. Measured -8.882e-15 and -3.553e-15 against |E0| ~ 5.14,
+# i.e. ~2-8 ulp: that is agreement, not a variational violation. What WOULD be a real failure is
+# a negative value far outside roundoff, which is why the tolerance is stated rather than left
+# to be eyeballed against a bare ">= 0".
+const VARTOL = 1e-10
+println("\nGROUND STATE -- E - E0 >= -$(VARTOL) (variational up to roundoff; sign is noise at 1e-15)")
 @printf("  %-30s %-16s %-13s %-8s %-7s %s\n",
         "arm", "energy", "E - E0", "sweeps", "maxbd", "matvec")
 println("  " * "-"^70)
@@ -293,9 +300,12 @@ for (name, f) in (("rsvd_cbe_dmrg", GroundState.rsvd_cbe_dmrg!),
     info = f(p, h; opts = CBEBugOptions(maxdim = MAXDIM, trunc_thresh = TRUNC),
              n_sweeps = 40, etol = 1e-12)
     e = info.energies[end]
-    @printf("  %-30s %-16.10f %-13s %-8d %-7d %d\n", name, e,
+    # Flag a genuine variational failure instead of leaving it to be spotted in a column of
+    # exponents. Only a value BELOW -VARTOL means anything; -8.9e-15 does not.
+    flag = (HAVE_EXACT && e - REF_E0 < -VARTOL) ? "  <-- BELOW E0, NOT VARIATIONAL" : ""
+    @printf("  %-30s %-16.10f %-13s %-8d %-7d %d%s\n", name, e,
             HAVE_EXACT ? @sprintf("%.3e", e - REF_E0) : "-",
-            length(info.energies), maximum(info.max_bond_dims), sum(info.krylov_dims))
+            length(info.energies), maximum(info.max_bond_dims), sum(info.krylov_dims), flag)
     flush(stdout)
 end
 
