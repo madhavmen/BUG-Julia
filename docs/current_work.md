@@ -863,6 +863,10 @@ Structure follows QSMPSLib `TDVPSweepCBE1Si.m`: per bond, CBE → forward **one-
 backward **zero-site** at `−τ` → absorb. Two half-sweeps at `τ/2`. Note that 2-site TDVP's
 backward substep is *one*-site where this one is *zero*-site.
 
+**Two arms, and only two: `1site_tdvp_cbe` (exact CBE) and `1site_tdvp_cbe_rsvd` (sketched).**
+Bare 1-site TDVP is *not* an arm and is not benchmarked anywhere — no bare stepper exists in
+`src/`. It appears below only as the reason CBE is mandatory.
+
 **Bare 1-site TDVP is fixed-rank.** Splitting a `(χ_l, d, χ_r)` site tensor cannot yield a bond
 wider than `χ_r`, because the bond tensor must contract back into a neighbour whose leg is
 `χ_r`. From a product state it stays a product state forever. CBE is what supplies the rank: it
@@ -912,8 +916,13 @@ This is the second time in this document a comparison passed for the wrong reaso
 where a domain wall's logarithmic entanglement growth meant a χ-scan never engaged its cap. See
 §7.8.2.2 — it happened twice more before the day was out.
 
-**Bond growth is unaffected by the bug and remains demonstrated:** `maxbd = 8` from a
-bond-dimension-1 start, where bare 1-site TDVP is pinned at 1 by construction.
+**Bond growth remains demonstrated:** `maxbd = 10`, `maxexp = 12` from a bond-dimension-1 start
+(L=8 XX, dt=0.02, 20 steps), i.e. the expansion is what supplies the rank.
+
+Note this figure *did* move with the fix — it was `8` pre-fix — so the earlier claim that bond
+growth is "unaffected by the bug" was wrong. The boundary sites were being under-evolved, which
+suppressed the entanglement they generate, so the reachable rank was lower. What is true is the
+weaker statement: growth was already non-trivial before the fix, so it never signalled the bug.
 
 **Post-fix, confirmed.** L=12, Heisenberg, Néel, dt=0.02, t=0.4, against exact
 diagonalisation of the 924-state `Sz=0` sector:

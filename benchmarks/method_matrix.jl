@@ -144,8 +144,9 @@ opts(; kw...) = CBEBugOptions(; dt = DT, maxdim = MAXDIM, trunc_thresh = TRUNC,
 # showed up here as 5.73e-02 against 6.99e-09. It is NOT an accuracy comparison. The
 # fixed-rank table below is the one that ranks the arms, because there the cap binds.
 println("REAL TIME -- <Sz_j> profile error at t = $TMAX")
-println("  (correctness check: cap $MAXDIM vs maxbd ~20, so this SATURATES -- see the")
-println("   fixed-rank table for the actual ranking)")
+println("  (CORRECTNESS check against exact diagonalisation. The cap ($MAXDIM) is far above the")
+println("   bond this state needs, so every arm sits at its floor and the errors do NOT rank")
+println("   them. Ranking is a cluster question: FIXEDRANK=1 for the fixed-rank table.)")
 @printf("  %-30s %-14s %-8s %s\n", "arm", "err", "maxbd", "note")
 println("  " * "-"^70)
 flush(stdout)
@@ -191,10 +192,16 @@ end
 # `t = TDISC` is deliberately past the headline `TMAX`: at t = 0.4 from a Neel state the exact
 # state still fits in bond 20, so even a cap of 16 barely bites. Later, entanglement has grown
 # and the caps genuinely compete.
+#
+# OFF BY DEFAULT (`FIXEDRANK=1` to enable). Ranking the arms is a CLUSTER question: at the sizes
+# that run locally the differences are not the ones that will matter at scale, and this table
+# costs more than the three correctness sections around it put together -- it evolves every arm
+# to t = TDISC once per cap. The correctness sections are what a local run is for.
+const FIXEDRANK = get(ENV, "FIXEDRANK", "0") != "0"
 const TDISC = parse(Float64, get(ENV, "TDISC", "2.0"))
 const CAPS  = [parse(Int, s) for s in split(get(ENV, "CAPS", "4,8,16"), ",")]
 
-if HAVE_EXACT
+if HAVE_EXACT && FIXEDRANK
     ref_disc = exact_profile(EREF, TDISC)
     nst = nsteps(TDISC, DT)
     tau = ComplexF64(-im * DT)
