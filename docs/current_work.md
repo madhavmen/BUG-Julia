@@ -426,7 +426,7 @@ recomputed from the *current* rank each pass, so `r → growth·r → growth²·
 that ladder is probed by a sketch whose width matches the rank it is probing. A sequence of
 well-conditioned narrow probes beats one wide draw.
 
-**(b) Expanding-basis Lanczos** (`s_iters = -g`, `_expanding_lanczos`): growth becomes **step 0
+**(b) Expanding-basis Lanczos** (`s_iters = -g`, `_expanding_krylov`): growth becomes **step 0
 of each Krylov iteration** — expand around `v_k` *before* applying `H` to it, so the bond
 dimension runs `D`, `growth·D`, `growth²·D`, …  Here `v_k` genuinely carries `H^k`, so the
 objection to (a) does not apply.
@@ -528,7 +528,7 @@ Consequences worth carrying forward:
    at identical basis size. What differs is *which* directions get admitted, not how many.
    Likely cause: its probe is the Krylov residual `v_k`, not the physical evolved state, and its
    tridiagonal is assembled across changing subspaces (the `beta_k` approximation flagged in
-   `_expanding_lanczos`). Not yet isolated.
+   `_expanding_krylov`). Not yet isolated.
 
 **Hyperparameters still barely matter, with one exception.** At `growth` 1.1 and 1.25,
 `comp_ratio` 0.0 → 1.0 and `dover` 0 → 4 move the error by <1%. Only at `growth = 1.5` does
@@ -657,9 +657,430 @@ repeats, since it is unusable on this box (§7.6.4).
 differences below ~1.3× as noise until repeated, and note that even 2.6× turned out to be an
 artefact here.
 
+### 7.6.6 The χ-scan that measured nothing, and why
+
+`benchmarks/cbe_chi_scaling.jl` was written to answer "does the expanding solver blow up at
+large χ". Its first version used a **melting domain wall**, and it produced this:
+
+| maxdim | wall(s) | p | err | matvec | maxbd |
+|--------|---------|-------|-------------|--------|-------|
+| 8 | 1.33 | — | 8.1005e-06 | 2532 | 8 |
+| 16 | 1.21 | −0.13 | 8.1005e-06 | 2549 | 10 |
+| 32 | 1.28 | 0.08 | 8.1005e-06 | 2549 | 10 |
+| 64 | 1.29 | 0.01 | 8.1005e-06 | 2549 | 10 |
+
+Identical error, identical matvecs, identical rank from `maxdim = 16` up: **the cap never
+bound**, so χ = 32 and χ = 64 were the same run as χ = 16 and the fitted exponent was pure
+jitter on ~1.2 s runs. All four configurations looked the same because they *were* the same.
+
+**Cause: a domain wall is the one free-fermion quench whose entanglement grows only
+logarithmically**, so at L = 12 it saturates at χ = 10. A **Néel** quench grows it linearly.
+Measured at L = 12, `maxdim = 64`: χ = 25 at t = 1, 44 at t = 2, 64 (saturated) at t = 4. The
+benchmark now uses Néel at t = 2, where the natural χ is 44 so caps 8/16/32 bind and 64 does
+not — the only configuration in which "wall time versus χ" is a statement about χ.
+
+**Generalise the lesson:** a benchmark in which every arm agrees to the last digit is not
+evidence of equivalence, it is evidence that the knob under test was never engaged.
+
+---
+
+## 7.7 Three modes on one engine — real time, imaginary time, ground state
+
+**Layout.** `cbe.jl` + `cbe_bond_update.jl` merged into **`cbe_core.jl`** (the shared engine;
+Part I is the RSVD selection, Part II drives it and solves the local problem), with
+`CBEBugOptions` / `CBEBugRunInfo` moved in from `cbe_lubich.jl` since all three modes are
+configured by them. The modes are thin submodules in `src/RSVDCBEBondUpdate/modes/`.
+
+**The modes differ in exactly two places.** `_expanding_lanczos` became
+`_expanding_krylov(f, applyH, expand, solver, theta0, nmv; …)`, and the growth passes, sketch,
+`P⊥` projection, ranking, direct sum, Krylov-vector embedding and reorthogonalisation are one
+copy of one function shared by all three. What varies:
+
+| mode | `applyH` at a bond | S-step reduction | path |
+|---|---|---|---|
+| `RealTime` | gate, or env-dressed `H` | `exp(-i·dt·H)` | gate + MPO |
+| `ImaginaryTime` | gate, or env-dressed `H` | `exp(-dt·H)` | gate + MPO |
+| `GroundState` | env-dressed `H` **only** | lowest Ritz vector | MPO |
+
+So the ground-state solver is a **drop-in replacement for the S step**, not a second algorithm.
+Real and imaginary time now differ by one argument to `cbe_gate_evolve!`, and
+`cbe_bond_update_bug!` is a one-line alias at `tau = -im*dt` so every existing caller is
+untouched.
+
+### 7.7.1 Why the gate path has no environments, and what that costs
+
+It *has* environments — they are the **identity**, by construction rather than by neglect.
+`H = H_odd + H_even`, each group is a sum of two-site terms on disjoint pairs, so
+`exp(tau·H_odd)` factorises exactly into one `exp(tau·h_i)` per bond: the operator at a bond
+IS the bare gate, and the rest of the chain is not approximated away, it is a different factor
+of the same product applied at its own bond. `canonical!(psi, i)` before each bond makes
+everything left a left isometry and everything right a right isometry, so `L = R = I` exactly.
+Canonicalisation *is* the environment storage, and it costs a QR sweep instead of a stack.
+
+**The consequence, and it is what fixes the mode/path matrix:** the gate path's local operator
+has no knowledge of the chain, so a local *eigensolve* there returns the ground state of one
+two-site term with frozen neighbours — a different quantity, not an approximation to the
+global ground state. Each bond would drive its own pair toward a local singlet and the next
+bond would undo it. DMRG converges precisely because `L + h + R` makes a local minimisation
+lower the **total** energy. Ground state is therefore MPO-path only. Imaginary time is
+unaffected: Trotterisation does not care whether `tau` is real or imaginary.
+
+### 7.7.2 The two-phase local solve — buying back the variational bound
+
+`_expanding_krylov`'s tridiagonal is a Galerkin approximation across a **nested sequence of
+subspaces**: `alpha_k` is exact, but `beta_k` is measured against the projector in force at
+step `k` and misses whatever part of `H·v_k` fell outside the then-current basis. For a
+short-time exponential that is a small correction to a small correction. **For an eigensolve it
+is not tolerable** — the Ritz value *is* the answer, and one from an inconsistent tridiagonal
+is not variational, so it can sit *below* the true ground energy and report false convergence.
+
+Hence the local solve is two phases: **A** grows the frames (`grow_iters` passes driven by
+successive Krylov vectors), **B** runs a clean Lanczos in the now-**fixed** frames, which is an
+exact Rayleigh–Ritz. Phase B is the same function with `grow_iters = 0`, so there is still only
+one Lanczos to maintain, and phase A costs 2–3 matvecs — cheap for a variational guarantee.
+`E − E_exact ≥ 0` is therefore a **correctness assertion**, not a hope.
+
+### 7.7.3 Validation
+
+**Real time — bit-identical across the refactor**, on both solver paths, and
+`RealTime.evolve!` returns exactly what `cbe_bond_update_bug!` does (`==`, not `isapprox`):
+
+| variant | err | pre-refactor |
+|---|---|---|
+| one-shot | 1.172340e-06 | 1.172340e-06 |
+| expanding | 9.119571e-07 | 9.119570e-07 |
+
+**Imaginary time — and a trap worth naming.** There are two independent errors and reading a
+residual without separating them misattributes it, because both shrink under "run it harder":
+
+* incomplete cooling `~ exp(-2β·gap)` — falls with **β**, flat in `dt`
+* Trotter splitting `~ dt²` — falls with **`dt`**, flat in β
+
+L = 8, δ = 1, half filling, exact `E₀ = -3.3749325987`:
+
+| β | dt | E − E_exact | ratio |
+|---|-----|-------------|-------|
+| 5 | 0.05 | 1.219e-02 | — |
+| 10 | 0.05 | 2.476e-04 | 49.3 |
+| 20 | 0.05 | 1.691e-07 | 1464 |
+| 40 | 0.05 | 7.307e-08 | 2.31 |
+| 40 | 0.10 | 1.167e-06 | — |
+| 40 | 0.025 | 4.568e-09 | — |
+
+At β = 10 the residual is **2.48e-04 at both `dt = 0.1` and `dt = 0.05`** — unmoved by halving
+`dt`, so it is entirely the cooling term and says nothing whatever about the splitting error.
+(An earlier draft of the check labelled it `O(dt²)`; the flat column is what refuted that.)
+The β ratio collapsing from 1464 to **2.31** at β = 20→40 is the cooling term crossing below
+the Trotter floor: past that point extra β buys nothing and only `dt` moves the number.
+
+**The `dt` ratios at β = 40 are 15.98 and 15.99 — fourth order, and expected rather than
+suspicious.** The energy is stationary about the ground state, so a state error of `O(dt²)`
+shows up in the *energy* as `O(dt⁴)`. Do not read this as the integrator being fourth order:
+the state is still second order, as §7.6.5 measures in real time.
+
+**Ground state — exact to machine precision, and one control that matters more than the
+result.** L = 8, δ = 1, half filling, `maxdim = 32`, `etol = 1e-12`:
+
+| `grow_iters` | energy | E − E_exact | sweeps | maxbd | matvec |
+|---|---|---|---|---|---|
+| 0 | −1.7500000000 | 1.625e+00 | 2 | **1** | 14 |
+| 1 | −3.3749325987 | −1.776e-15 | 6 | 16 | **425** |
+| 2 | −3.3749325987 | −3.553e-15 | 6 | 16 | 598 |
+| 3 | −3.3749325987 | −1.332e-15 | 6 | 16 | 631 |
+
+The residuals are negative at 2–3 ulp of `|E| ≈ 3.4`, i.e. the variational bound of §7.7.2
+holds to machine precision. Anything larger and negative would be a broken Rayleigh–Ritz.
+
+**`grow_iters = 0` freezes at exactly the Néel product-state energy** — `(L−1)·(−0.25) = −1.75`
+at `maxbd = 1` — and "converges" in two sweeps because it never leaves the start state. This is
+the DMRG analogue of the standard-BUG χ=1 freeze recorded elsewhere: **the CBE growth pass is
+doing all of the rank generation**, and the local eigensolve contributes none of it. It also
+means `info.converged` is worthless as evidence on its own, which is now asserted in
+`test_modes.jl` rather than left as a comment.
+
+**`grow_iters = 1` suffices here and is 30% cheaper** than the default 2 (425 vs 598 matvecs,
+identical energy to all digits). Not yet changed: one easy model is not grounds for moving a
+default, and the cluster runs below are where a harder case would show whether extra passes
+earn their cost. Same shape of reasoning as §7.1 for `growth`.
+
+---
+
+## 7.8 The method matrix — seven arms, and two new ones
+
+| | arm | selection | status |
+|---|---|---|---|
+| **time** | `rsvd_cbe_bond_update` gate | sketched | verified, bit-identical across the §7.7 refactor |
+| | `rsvd_cbe_bond_update` lubich | sketched | in the 1046-test suite |
+| | `tdvp2` | — | baseline, **no discarded projectors** by design |
+| | `1site_tdvp_cbe_rsvd` | sketched | **new**, verified |
+| | `1site_tdvp_cbe` | exact | **new**, verified |
+| **ground** | `rsvd_cbe_dmrg` | sketched | verified, machine precision |
+| | `cbe_dmrg` | exact | **new**, verified, machine precision |
+
+`benchmarks/method_matrix.jl` runs all of them against **exact diagonalisation** rather than
+against another integrator: the Sz=0 sector at L=12 is C(12,6) = 924 states, so one dense
+eigendecomposition supplies both the real-time propagator and the ground energy. Past
+`MAXDENSE` it falls back to 2-site TDVP and *labels the column as consistency-only* — several
+comparisons earlier in this document used an integrator as its own reference and so measured
+agreement rather than correctness.
+
+### 7.8.1 Plain CBE is a substitution, not a second implementation
+
+`full_local_basis(frame, side)` returns the complete fused isometry **in the same frame layout**
+`sector_graded_sketch` uses, so the whole exact/sketched distinction is one line:
+
+```julia
+probe(frame, side) = exact ? full_local_basis(frame, side) :
+                     sector_graded_sketch(frame, side, npre; comp_ratio, rng)
+```
+
+With the full basis `skl(F)` *is* the exact `H·Θ`, so the preselection SVD returns the true
+leading directions of `P⊥(HΘ)`. Preselection, ranking, `_trim_total`, the orthonormality guard
+and the direct sum are untouched and never learn which probe they got. `exact = true` makes
+`comp_ratio`, `npre`, `dover` and the RNG inert. One flag therefore produces four arms:
+`cbe_dmrg`, `rsvd_cbe_dmrg`, `1site_tdvp_cbe`, `1site_tdvp_cbe_rsvd`.
+
+**Ground state, L = 8, δ = 1, half filling** (`E₀ = -3.3749325987`):
+
+| arm | E − E_exact | sweeps | maxbd | maxexp | matvec |
+|---|---|---|---|---|---|
+| `cbe_dmrg` (exact) | −4.885e-15 | 5 | 16 | 16 | 318 |
+| `rsvd_cbe_dmrg` | −1.776e-15 | 6 | 16 | 16 | 425 |
+
+**`maxexp` is IDENTICAL, which is a null result and was predicted wrongly.** The comparison was
+run at `growth = 2.0`, where the budget saturates `room` at `d = 2` (§7.6.1), so both arms
+expand to the whole local space and only the *ordering* of candidates differs — visible as one
+fewer sweep, not as a wider basis. **Discriminating the two selections needs `growth < 2.0`**,
+still to do. Third instance in this document of a comparison run with the knob under test
+disengaged; see also §7.6.1 and §7.6.6.
+
+Also: `matvec` **understates the exact arm**, which counts Krylov applications and not the
+rank-4 formation inside its own preselection. Fewer matvecs there does not mean cheaper.
+
+### 7.8.2 One-site TDVP + CBE, and why CBE is mandatory rather than optional
+
+Structure follows QSMPSLib `TDVPSweepCBE1Si.m`: per bond, CBE → forward **one-site** at `+τ` →
+backward **zero-site** at `−τ` → absorb. Two half-sweeps at `τ/2`. Note that 2-site TDVP's
+backward substep is *one*-site where this one is *zero*-site.
+
+**Bare 1-site TDVP is fixed-rank.** Splitting a `(χ_l, d, χ_r)` site tensor cannot yield a bond
+wider than `χ_r`, because the bond tensor must contract back into a neighbour whose leg is
+`χ_r`. From a product state it stays a product state forever. CBE is what supplies the rank: it
+widens the bond *before* the update by padding the neighbour with complement directions and the
+current site with matching zeros, and the one-site evolution then fills them. That is the appeal
+over 2-site TDVP — rank adaptivity while every solve stays one-site `O(dχ³)` or zero-site
+`O(χ²)`, and the rank-4 block is never formed (provided the expansion is sketched).
+
+The zero-site back-step is equally non-optional: evolving site `i` and then `i+1` counts the
+shared bond twice, and the `−τ` zero-site step removes exactly that. Dropping it does not
+degrade the order, it makes the scheme wrong.
+
+### 7.8.2.1 The boundary bug, and the test design that hid it
+
+**The first version omitted the closing one-site update at each pass's far end**, and the
+consequence is worth spelling out because it is a whole-step error that a plausible test suite
+reported as success.
+
+Count the sites. The rightward loop runs over **bonds** `1..L-1` and evolves each bond's *left*
+site, so it covers sites `1..L-1` and never site `L`. The leftward loop evolves each bond's
+*right* site, covering `L..2` and never site `1`. So without a closing update per pass, **sites
+1 and L receive `τ/2` where every interior site receives `τ`** — the boundary integrated at half
+the rate of the bulk. `TDVPSweepCBE1Si.m` closes each pass with `Update1Si(…, 'vv')` precisely
+for this; there is no back-step there because no shared bond extends past the chain end.
+
+**What it measured, with the bug present:**
+
+| test | result | verdict |
+|---|---|---|
+| L=8 XX, domain wall, vs analytic | 2.09e-06 | **passed — blind** |
+| dt ratios, same setup | 3.92, 3.96 | **passed — blind** |
+| L=12 Heisenberg, Néel, vs exact | **5.73e-02** vs tdvp2's 6.99e-09 | caught it |
+
+**A domain wall cannot see this bug at all**: its edges are frozen, carry no amplitude, and
+mis-integrating them changes nothing — so both the accuracy check and the order-in-`dt` check
+passed cleanly with a broken scheme. A Néel start makes every site active and the error is
+immediate and gross: seven orders, *while carrying more bond dimension than 2-site TDVP* (25 vs
+20), which is the signature of a wrong scheme rather than a starved basis.
+
+**Lesson worth generalising:** an initial state with frozen degrees of freedom silently removes
+those degrees of freedom from every test built on it. The domain wall was chosen because it has
+an analytic reference — and that convenience is exactly what made it blind. `test_tdvp1_cbe.jl`
+now carries a Néel/`δ=1` case with explicit assertions on the *end sites*, compared against an
+independent scheme.
+
+This is the second time in this document a comparison passed for the wrong reason; see §7.6.6,
+where a domain wall's logarithmic entanglement growth meant a χ-scan never engaged its cap. See
+§7.8.2.2 — it happened twice more before the day was out.
+
+**Bond growth is unaffected by the bug and remains demonstrated:** `maxbd = 8` from a
+bond-dimension-1 start, where bare 1-site TDVP is pinned at 1 by construction.
+
+**Post-fix, confirmed.** L=12, Heisenberg, Néel, dt=0.02, t=0.4, against exact
+diagonalisation of the 924-state `Sz=0` sector:
+
+| arm | pre-fix | post-fix |
+|---|---|---|
+| tdvp2 | 6.989474e-09 | 6.989474e-09 |
+| `1site_tdvp_cbe_rsvd` | **5.733650e-02** | **6.989480e-09** |
+| `1site_tdvp_cbe` (exact) | **5.733650e-02** | **6.989867e-09** |
+| `rsvd_cbe_bond_update` gate | 5.513000e-06 | 5.513000e-06 |
+| `rsvd_cbe_bond_update` lubich | *crashed on a kwarg* | 5.257197e-06 |
+
+Imaginary time, L=8, dt=0.05, against exact `E0 = -3.3749325987`. The bug was **inflating the
+cooling residual**, which is why those numbers were discarded rather than reused: cooling
+converges to whatever fixed point the scheme has, and a boundary integrated at half the bulk
+rate moves that fixed point.
+
+| β | pre-fix (buggy) | post-fix |
+|---|---|---|
+| 5 | 5.248e-02 | **1.220e-02** |
+| 10 | 6.008e-03 | **2.478e-04** |
+
+`test_tdvp1_cbe.jl` is 18/18 green, including the Néel boundary regression case.
+
+### 7.8.2.2 The same blind spot, twice more, after writing it down
+
+The §7.8.2.1 lesson was written, and then immediately violated twice. Recording both because
+the pattern — not the individual slip — is the finding.
+
+**(a) The method-matrix headline table cannot rank anything.** At L=12, t=0.4, `maxdim=48` the
+state's widest bond is 20–22. The cap never engages, nothing truncates, and all three TDVP arms
+land on a common floor — they agree to *six significant digits* (6.989474e-09 / 6.989480e-09 /
+6.989867e-09). Six-digit agreement between a 2-site block evolve and a 1-site+0-site splitting
+is not a coincidence; it means the test is saturated. That table is a **correctness** check — it
+is what caught the boundary bug at 5.73e-02 — and it is *not* an accuracy comparison. It now
+says so in its own printed output, and `benchmarks/method_matrix.jl` carries a second
+**fixed-rank** table (hard caps χ ∈ {4,8,16} at t=2.0) for the actual ranking.
+
+**(b) The exact-vs-sketched A/B, written one step after (a), repeated (a).** Set up at L=10,
+t=0.4, `MAXDIM=64` where `maxbd` is 20–27. Result: error flat at ~8.1e-09 for every `growth`
+from 1.05 to 2.0, while `maxexp` moved 27→31. The knob was demonstrably working and the metric
+could not respond, because a state that is already representable cannot be damaged by a
+narrower candidate space. Re-run at `MAXDIM=8`, `t=2.0`.
+
+**The rule, stated operationally.** `growth`, `maxdim`, `dex` and `comp_ratio` are all
+allocation knobs: they decide *what to keep when you cannot keep everything*. Every one of them
+is inert unless the run is actually rank-starved. So **before reading an error column, check
+that `maxbd` reached the cap** — if it did not, the row is measuring the integrator's floor, not
+the knob. Both benchmark scripts now flag a non-binding row explicitly rather than leaving that
+inference to the reader.
+
+Four instances now share one shape: a configuration chosen for convenience (an analytic
+reference, a short run, a round cap) removed the very degree of freedom under test, and the
+green result was indistinguishable from a meaningful one.
+
+### 7.8.3 SU(2) — the operator algebra changes, the environments do not
+
+**`:Sp`, `:Sz`, `:Sm` do not exist under `:SU2`**, and cannot: none is an SU(2) tensor by
+itself. Telum exposes `:S` and `:I` only, so the coupling is ONE irreducible `S·S` term with an
+`S = 1` op-leg in place of three. Since `q.S` is rank-3 with an op-leg — **measured: the same
+shape as `:U1`'s `Sp`** — `push_left_channels`, `apply_h_two_site`, `zero_site_h` and
+`one_site_h` all take the single-term list unmodified. The expensive part was already done.
+
+Three consequences that are physics, not missing features:
+
+* **Only δ = 1 exists.** Anisotropy singles out the z axis and breaks SU(2) down to U(1), so
+  `heisenberg_su2_chain` has no `delta` argument and the SU(2) gate refuses `delta ≠ 1`.
+* **Néel and domain-wall states are unrepresentable at any bond dimension** — they carry weight
+  across many total-`S` sectors. `dimer_state(L)` (a product of nearest-neighbour singlets,
+  `S = 0`, norm 1) is the representable start.
+* **`magnetisation` is useless** — it needs `Sz`, and is identically 0 for a singlet anyway.
+  Use the energy or a bond correlator.
+
+**`room` had to be fixed first, and it would have failed silently-ish.** `cbe_expand` computed
+`room_l = leg_dim(U0,1) * leg_dim(U0,2) - r`, and that product is only correct when every pair
+of input sectors fuses to exactly one output — i.e. for abelian charges. Under SU(2) a spin-½
+site is *one* multiplet, so it reads `χ·1 − r ≈ 0` and CBE would decline to expand, freezing at
+χ=1 with the same signature as `grow_iters = 0`. Now `sum(d for (_,d) in reachable_sectors(...))`,
+which goes through `fusion_basis → getIdentity + svd` and so applies whatever symmetry the
+tensors carry. Reduces exactly to the old product for abelian charges, so it is not a special
+case. Known cost: duplicates a `fusion_basis` the probe rebuilds a few lines later.
+
+**Measured, L = 8, δ = 1, half filling:**
+
+| symmetry | ground energy | E − E_exact | sweeps | maxbd | matvec |
+|---|---|---|---|---|---|
+| `:SU2` | −3.3749325987 | 4.441e-16 | 5 | **6** multiplets | **126** |
+| `:U1` | −3.3749325987 | −1.776e-15 | 6 | 16 states | 425 |
+
+Same energy to 4e-16, 3.4× fewer matvecs. **The overall constant needed no correction** —
+`XXZTerm(q.S, q.S', J)` is exactly `J·S·S`, unlike the `:none` gate branch which carries a
+measured `−1`. The ratio `E_su2/E₀ = 1.0000000000` is the test that pins it.
+
+Two caveats on reading that table. `maxbd` counts **multiplets** under SU(2) and **states**
+under U(1), so the integers are not comparable except as "the reduced basis is smaller". And
+the two runs start from *different* states (Néel is unrepresentable under SU(2)), so it is the
+same converged state reached from different starts — the energy agreement is a clean result,
+the cost ratio is indicative rather than a controlled A/B.
+
 ---
 
 ## 8. Gotchas that cost real time
+
+* **`contract` verifies itags, not just arrow directions.** Two tensors whose contracted legs
+  span the same space but carry different tags are REJECTED. Combined with the rule that a
+  single tensor may not carry a duplicate non-empty itag, this is a squeeze: in
+  `tdvp1_cbe.jl` the bond tensor `C` has legs `(new, bond_ex)` which are different spaces (so
+  they must be tagged differently) while `apply_zero_site` needs them to match the environment
+  built from the site tensors (so they must be tagged the same). The only way through is to
+  keep the SVD's own tag through the zero-site step and rename BOTH ends of the bond together
+  afterwards — which is what `cbe_lubich_sweep` already does with `U_ex`/`V_ex`. Cost two
+  failed runs.
+
+* **The RANK of what comes out of an `svd` decides whether a tag line is safe.** `tdvp2` writes
+  `setitag(res.S * res.Vd, 1, tag)` safely because its SVD splits a rank-4 `Theta`, so `Vd` is
+  `(new, site_r, link_r)` and contains no bond leg. The identical line in a 1-site sweep splits
+  a rank-3 site tensor, `Vd` is `(new, bond_ex)`, and the bond tag collides. Copying a line
+  between the two is not safe.
+
+* **`product_state` under `:SU2` returned a plausible-looking wrong answer** rather than
+  failing: `SECTOR_UP` is `((1,),)` and the SU(2) spin-½ irrep is *also* `((1,),)`, so `:up`
+  sites matched the `getsub` filter while `:down` sites (`((-1,),)`, nonexistent under SU(2))
+  selected nothing. It reported `bond_dims = [1,1,1]`. Now guarded with a throw. The general
+  shape: a sector-label coincidence between symmetries turns a type error into a silent one.
+
+* **A probe that fails for the wrong reason proves nothing.** The SU(2) probe's `xxz_chain`
+  test reported `UndefVarError: xxz_chain not defined in Main` — the script had imported only
+  `BondUpdateBUG`. That is not evidence the function refuses under SU(2); the real check
+  (`FieldError: no field Sp, available: I, S`) came later.
+
+* **JIT dominates short local runs, so a timeout is not evidence of a hang.** First-call
+  compilation of the tensor stack costs ~3 min on the dev box (Néel probe: 211 s for run 1
+  against 14.9 s for run 2), and `Test` buffers output until a testset closes, so a suite can
+  print nothing for 28 minutes and still be healthy. Diagnose with a longer timeout before
+  concluding a deadlock.
+
+* **`bond_dims` counts MULTIPLETS, not states, so χ means different things under different
+  symmetries.** `leg_dim` sums sector *multiplicities* (`sum(d for (_, d) in t.spaces[l])`).
+  Under U(1) each sector is one state and the two coincide; under SU(2) a spin-`S` multiplet
+  stands for `2S+1` states, and `maxdim`/`Nkeep` cap multiplets. So an SU(2) run at χ=8 is
+  holding materially more physical information than a U(1) run at χ=8, and **the fixed-rank
+  table in `method_matrix.jl` must not be read across symmetries** without converting to state
+  counts first — SU(2) would look better at equal χ for free. The dimer state is the extreme
+  illustration: every link carries one multiplet, `bond_dims` reports all ones, and the state is
+  genuinely entangled.
+
+* **An allocation knob is inert unless the run is rank-starved, so check `maxbd` before reading
+  the error.** `growth`, `maxdim`, `dex`, `comp_ratio` all answer "what do you keep when you
+  cannot keep everything". If `maxbd` never reached the cap, nothing was discarded and the error
+  column is the integrator's floor, identical across arms — see §7.8.2.2, where this produced
+  six-digit agreement between three different schemes and a `growth` scan that was flat to four
+  digits while the knob visibly moved `maxexp`. Both benchmark scripts now print a
+  "CAP DID NOT BIND" marker on such rows. Cost four wasted comparisons across two days, twice
+  *after* the lesson was written down.
+
+* **Harness scripts need `using Telum` for `to_concrete`** — hit three separate times
+  (`cbe_project_first.jl`, an ad-hoc probe, and `benchmarks/method_matrix.jl`). It surfaces late
+  and looks like a library bug: in `method_matrix.jl` the real-time section passed cleanly and
+  only the imaginary-time section died, because `to_concrete` is reached solely on the
+  `normalise = true` path. `Hint: a global variable of this name also exists in Telum` is the
+  tell.
+
+* **A background job started before a fix landed will happily report post-fix-looking numbers.**
+  The imaginary-time β scan was launched at 11:21, the boundary fix landed at 11:55, and the job
+  was still running at 12:06 — its output would have read as a fresh measurement. Julia loads
+  the package once at startup and never sees later edits. Check a job's start time against
+  `git`/file mtimes before trusting its output, and kill anything that predates the change.
 
 * **Telum has no QR primitive** — only `svd` + `getIdentity`. `frame.jl` uses `svd(…; cutoff=0.0)`
   as a rank-revealing stand-in, which is *why* re-deriving a frame from a zero-padded tensor

@@ -318,6 +318,7 @@ function cbe_lubich_sweep(psi::SymMPS, h::XXZChain, tau::ComplexF64;
                              comp_ratio::Union{Float64, Nothing} = 0.5,
                              sulz_cap::Bool = false,
                              preselect_only::Bool = false,
+                             exact::Bool = false,
                              centre_expand::Bool = true,
                              maxdim::Int = 200,
                              trunc_thresh::Float64 = 1e-12,
@@ -341,7 +342,7 @@ function cbe_lubich_sweep(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     exkw = (dex = dex, growth = growth, dover = dover,
             comp_ratio = comp_ratio, sulz_cap = sulz_cap,
             rmax = maximum(bond_dims(psi); init = 0),
-            preselect_only = preselect_only, rng = rng)
+            preselect_only = preselect_only, exact = exact, rng = rng)
 
 
     function record!(ex)
@@ -490,97 +491,6 @@ cbe_lubich_sweep(psi::SymMPS, h::XXZChain, tau::Number; kwargs...) =
 
 # ── driver ───────────────────────────────────────────────────────────────────
 
-"""
-    CBEBugOptions
-
-Controls for one `cbe_lubich_bug!` run. Mirrors `BondUpdateOptions` where the meaning is the
-same, so the two integrators can be driven from the same campaign code.
-
-  - `dt`, `n_steps` -- real time step and how many to take.
-  - `dex`, `growth`, `dover`, `comp_ratio`, `sulz_cap`, `preselect_only` -- the expansion,
-    forwarded to [`cbe_expand`](@ref). `dex = 0` (default) uses the `growth` schedule;
-    `growth = 1.1` reproduces the reference's DMRG ratchet, for the A/B.
-  - `maxdim`, `trunc_thresh` -- truncation, applied at the centre and in the final sweep.
-  - `normalize` -- rescale after each step; the norm is recorded BEFORE rescaling.
-  - `maxiter`, `tol` -- Krylov budget for the single 0-site exponential.
-  - `seed` -- one RNG for the whole run, so a run is reproducible while consecutive steps
-    still draw different sketches.
-
-NO `order` FIELD. `bond_update_bug!` offers `:lie` / `:strang` because it Trotterises the
-even and odd bond groups and has a splitting error to compose away. CBE-BUG takes one
-projected exponential per step over a globally expanded subspace -- there is no operator
-splitting to symmetrise, so a composition parameter here would be meaningless.
-
-REAL TIME ONLY, as for `bond_update_bug!`: the driver forms `tau = -im*dt` itself.
-"""
-Base.@kwdef struct CBEBugOptions
-    dt::Float64 = 0.05
-    n_steps::Int = 10
-    dex::Int = 0
-    growth::Float64 = 2.0
-    dover::Union{Nothing, Int} = nothing
-    comp_ratio::Union{Float64, Nothing} = 0.5
-    sulz_cap::Bool = false
-    preselect_only::Bool = false
-    centre_expand::Bool = true
-    maxdim::Int = 200
-    trunc_thresh::Float64 = 1e-12
-    normalize::Bool = true
-    maxiter::Int = 30
-    tol::Float64 = 1e-15
-    # S-step scheme, honoured by the `cbe_bond_update` path only. `s_iters` selects the solver
-    # (see `cbe_bond_update`: 1 = one expansion + plain Lanczos, >1 = the outer-loop control,
-    # <=0 = the expanding-basis Lanczos with `-s_iters` growth passes). `s_reorth` turns on full
-    # reorthogonalisation in the plain Lanczos -- measured ~5.7x fewer matvecs at one bond, not
-    # yet a default because it has not been checked across a sweep.
-    s_iters::Int = 1
-    s_reorth::Bool = false
-    # Order P_perp against Omega in the sketch. An IDENTITY (disjoint legs), so it
-    # cannot change a result; `true` forms the rank-4 H*Theta and costs more. A/B only.
-    project_first::Bool = false
-    # Second Gaussian on the PROJECTORS: sample the complement with a thin
-    # Gaussian and contract both sides to a small core, so P_perp never touches a
-    # chi-sized object. See the two_sided block in `cbe_expand`.
-    two_sided::Bool = false
-    seed::UInt = 0x5EED
-    record_magnetisation::Bool = false
-    observe::Union{Nothing, Function} = nothing
-end
-
-"""
-    CBEBugRunInfo
-
-Per-step record of a `cbe_lubich_bug!` run; every field has length `n_steps`.
-
-`max_expanded` is the headline rank diagnostic and the one to compare against
-`BondUpdateInfo.aug_k_dims`: it is the largest bond the basis sweep proposed BEFORE the
-truncation, i.e. `r + Dex`, against the K/L augmentation's `2r`.
-
-`krylov_dims` and `mean_aug` are the COST pair, and they are only useful together:
-`krylov_dims` counts operator applications in the step's exponential(s) (summed over bonds in
-the gate path, the single centre solve in the MPO path) and `mean_aug` is the size those
-applications acted on. Wall time is roughly their product, so a setting can be slower either
-by doing more iterations or by doing them on bigger objects -- and the budget A/B in
-`benchmarks/cbe_budget_cost.jl` turns on telling those two apart.
-"""
-struct CBEBugRunInfo
-    times::Vector{Float64}
-    norms::Vector{Float64}
-    bond_dims::Vector{Vector{Int}}
-    max_bond_dims::Vector{Int}
-    expanded::Vector{Vector{Int}}
-    max_expanded::Vector{Int}
-    centre_ranks::Vector{Int}
-    err_pre::Vector{Float64}
-    err_fnl::Vector{Float64}
-    discarded::Vector{Float64}
-    magnetisations::Vector{Vector{Float64}}
-    observations::Vector{Any}
-    krylov_dims::Vector{Int}
-    mean_aug::Vector{Float64}
-end
-
-Base.length(info::CBEBugRunInfo) = length(info.times)
 
 """
     cbe_lubich_bug!(psi, h; opts=CBEBugOptions()) -> CBEBugRunInfo
@@ -605,7 +515,7 @@ function cbe_lubich_bug!(psi::SymMPS, h::XXZChain; opts::CBEBugOptions = CBEBugO
                                    dover = opts.dover,
                                    comp_ratio = opts.comp_ratio,
                                    sulz_cap = opts.sulz_cap,
-                                   preselect_only = opts.preselect_only,
+                                   preselect_only = opts.preselect_only, exact = opts.exact,
                                    centre_expand = opts.centre_expand,
                                    maxdim = opts.maxdim,
                                    trunc_thresh = opts.trunc_thresh,

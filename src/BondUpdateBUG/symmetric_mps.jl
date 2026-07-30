@@ -38,12 +38,28 @@ symmetry_mode() = _SYMMETRY[]
 """
     set_symmetry!(sym) -> Symbol
 
-Select the symmetry the local space is built with: `:U1` (charge-conserving
-spin sectors) or `:none` (a single dense block). Set this before building the
-state and its gates; they must share a mode.
+Select the symmetry the local space is built with: `:SU2` (total-spin multiplets),
+`:U1` (charge-conserving spin sectors) or `:none` (a single dense block). Set this
+before building the state and its gates; they must share a mode.
+
+`:SU2` IS NOT JUST A FASTER `:U1`, AND THE DIFFERENCE IS ABOUT WHICH STATES EXIST.
+A non-abelian MPS stores REDUCED matrix elements on total-spin multiplets, so every
+state it can represent has a definite total spin. That is a strict win where the
+target has one -- the even-`L` Heisenberg ground state is a singlet, and the
+multiplet basis reaches it with far fewer stored numbers -- but it means a Neel or
+domain-wall state is not slow to write down, it is UNWRITABLE: those have weight
+across many total-`S` sectors. `product_state` therefore refuses under `:SU2`; use
+[`dimer_state`](@ref) for a representable `S = 0` starting point.
+
+Consequences worth knowing before switching a benchmark over:
+  * `magnetisation` is identically zero for any `S = 0` state, so an `<Sz_j>`
+    profile carries no information here -- use the energy or a bond correlator.
+  * bond dimensions are counted in MULTIPLETS, so they are not comparable
+    digit-for-digit with `:U1` numbers; a multiplet stands for `2S+1` states.
 """
 function set_symmetry!(sym::Symbol)
-    sym in (:U1, :none) || throw(ArgumentError("symmetry must be :U1 or :none, got $sym"))
+    sym in (:SU2, :U1, :none) || throw(ArgumentError(
+        "symmetry must be :SU2, :U1 or :none, got $sym"))
     _SYMMETRY[] = sym
     return sym
 end
@@ -60,9 +76,10 @@ charge), under `:none` they are rank-2 plain matrices. See
 """
 function local_space(sym::Symbol = symmetry_mode())
     haskey(_LOCAL_SPACES, sym) && return _LOCAL_SPACES[sym]
-    opts = sym === :U1   ? SpinOptions(:U1, 1)     :
+    opts = sym === :SU2  ? SpinOptions(:SU2, 1)    :
+           sym === :U1   ? SpinOptions(:U1, 1)     :
            sym === :none ? SpinOptions(nothing, 1) :
-           throw(ArgumentError("symmetry must be :U1 or :none, got $sym"))
+           throw(ArgumentError("symmetry must be :SU2, :U1 or :none, got $sym"))
     _LOCAL_SPACES[sym] = getLocalSpace(opts, ("s", "s", "op"))
     return _LOCAL_SPACES[sym]
 end
@@ -195,6 +212,19 @@ makes a product state report bond dimension 1.
 function product_state(spins::Vector{Symbol})
     L = length(spins)
     L >= 1 || throw(ArgumentError("product_state needs at least one site"))
+    # NOT a missing feature. An `:SU2` MPS carries total-spin multiplets, and a definite-Sz
+    # product state is a superposition across many total-S sectors, so there is no bond
+    # dimension at which this is representable. See [`dimer_state`](@ref).
+    #
+    # THIS GUARD REPLACES A SILENT WRONG ANSWER, WHICH IS WHY IT IS A THROW AND NOT A WARNING.
+    # Without it the U(1) path ran to completion under `:SU2` and returned `bond_dims = [1,1,1]`
+    # with no error (MEASURED). The reason is a coincidence of labels: `SECTOR_UP` is `((1,),)`
+    # and the SU(2) spin-1/2 irrep is ALSO `((1,),)`, so `:up` sites match the `getsub` filter
+    # while `:down` sites (`((-1,),)`, a label that does not exist under SU(2)) silently select
+    # nothing. The result looks like a state and is not one.
+    symmetry_mode() === :SU2 && throw(ArgumentError(
+        "product_state is not representable under :SU2 -- a definite-Sz product state has " *
+        "weight in many total-spin sectors. Use dimer_state(L) for an S = 0 start."))
     return symmetry_mode() === :none ? _product_state_none(spins) :
                                        _product_state_u1(spins)
 end
@@ -232,6 +262,58 @@ function _product_state_u1(spins::Vector{Symbol})
         # BUG evolves complex amplitudes; promote once, here.
         A = to_concrete(A * (1.0 + 0.0im))
 
+        push!(tensors, A)
+        prev = (A, 3)
+    end
+
+    return SymMPS(tensors, L)
+end
+
+"SU(2) irrep label for a single spin-½ site (2S = 1). MEASURED from `local_space(:SU2)`."
+const SECTOR_SU2_HALF = ((1,),)
+"SU(2) irrep label for a singlet (2S = 0) -- what two spin-½ multiplets fuse down to."
+const SECTOR_SU2_SINGLET = ((0,),)
+
+"""
+    dimer_state(L) -> SymMPS
+
+The product of nearest-neighbour singlets, `(1,2)(3,4)…`, under `:SU2`. `L` must be even.
+
+WHY THIS EXISTS RATHER THAN `product_state`. Under SU(2) an MPS stores reduced matrix elements
+on TOTAL-SPIN multiplets, so every representable state has a definite total spin -- and a Néel
+or domain-wall state does not. `product_state` cannot express one here at any bond dimension,
+which is why it refuses under `:SU2`. A product of singlets is `S = 0`, so it is representable,
+and it is the natural starting point for both cooling and real-time evolution.
+
+HOW IT IS BUILT. Same fusion recursion as `_product_state_u1`, but the selection happens on the
+OUTGOING LINK rather than the physical leg -- under SU(2) the physical leg has only one sector
+(`S = 1/2`), so there is nothing to select there. Fusing alternately gives
+
+    vac (S=0) (x) 1/2  ->  1/2                    keep 1/2   (odd  sites)
+    1/2       (x) 1/2  ->  0 (+) 1                keep 0     (even sites)
+
+so after every even site the running total spin is a singlet, which is exactly a chain of
+independent dimers. Every link carries ONE multiplet, so `bond_dims` reports all ones -- but a
+multiplet is not a state, and this is a genuinely entangled state in the physical basis.
+"""
+function dimer_state(L::Int)
+    symmetry_mode() === :SU2 || throw(ArgumentError(
+        "dimer_state needs symmetry_mode() === :SU2, got $(symmetry_mode()); " *
+        "under :U1 or :none use product_state / neel_state"))
+    L >= 2 && iseven(L) || throw(ArgumentError(
+        "dimer_state needs an even number of sites >= 2, got $L"))
+    q = local_space(:SU2)
+
+    tensors = Any[]
+    prev = (getvac(q.I, ("L,0", "L,1")), 2)
+
+    for i in 1:L
+        F = to_concrete(getIdentity(prev, (q.I, 1); itag = "L,$(i + 1)"))
+        F = to_concrete(setitag(F, 2, "S,$i"))
+        # Select on leg 3, the FUSED total spin, not on the physical leg.
+        target = isodd(i) ? SECTOR_SU2_HALF : SECTOR_SU2_SINGLET
+        A = to_concrete(getsub(F, 3, s -> s == target ? Colon() : nothing))
+        A = to_concrete(A * (1.0 + 0.0im))
         push!(tensors, A)
         prev = (A, 3)
     end

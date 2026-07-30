@@ -18,12 +18,32 @@ Contents, in dependency order:
   - `henv.jl`  — channel environments for a nearest-neighbour XXZ chain: `H` globally,
     which neither the CBE selection nor a single centre-bond Galerkin step can do
     without. Replaces the per-bond gate the Trotter sweep uses.
-  - `cbe.jl`   — the RSVD bond expansion itself (sector-graded sketch, preselection,
-    final selection).
-  - `cbe_lubich.jl` — `cbe_lubich_sweep`: basis sweep + one centre-bond Galerkin step.
-  - `cbe_bond_update.jl` — the same CBE selection inside the VALIDATED odd/even gate Trotter sweep.
-    No environments, no basis sweep, one Galerkin per bond: it isolates the selection from
-    everything `cbe_lubich.jl` could also be getting wrong, and is the path to confirm first.
+  - `cbe_core.jl` — THE MAIN CODE, and what all three modes share. Part I is the RSVD bond
+    expansion (sector-graded sketch, preselection, final selection); Part II drives it from
+    a bond frame and solves the local problem in the expanded basis (`_expanding_krylov`),
+    plus the shared `CBEBugOptions` / `CBEBugRunInfo`.
+  - `cbe_lubich.jl` — `cbe_lubich_sweep`: basis sweep + one centre-bond Galerkin step, on
+    the environment-dressed effective `H`.
+  - `modes/` — the three modes. Each is a THIN submodule: it fixes the operator the local
+    problem is posed with and the reduction applied to the Krylov tridiagonal, and adds no
+    algorithm of its own.
+
+THE THREE MODES, and what actually distinguishes them:
+
+| mode             | `applyH` at a bond      | S-step reduction        | path        |
+|------------------|-------------------------|-------------------------|-------------|
+| `RealTime`       | gate, or env-dressed H  | `exp(-i dt H)`          | gate + MPO  |
+| `ImaginaryTime`  | gate, or env-dressed H  | `exp(-dt H)`            | gate + MPO  |
+| `GroundState`    | env-dressed H ONLY      | lowest Ritz vector      | MPO         |
+
+The Krylov space, and every RSVD-CBE growth pass that builds it, is IDENTICAL in all three:
+the ground-state solver is a drop-in replacement for the S step, not a second algorithm.
+
+Why `GroundState` is MPO-only: the gate path's environments are the identity by canonical
+form, which is exact for a Trotter factor but means the local operator is the bare two-site
+term. Minimising that at each bond independently does not have the global ground state as
+its fixed point. Imaginary time is unaffected -- `exp(-dt H)` Trotterises exactly as
+`exp(-im dt H)` does -- so it runs on both paths.
 """
 module RSVDCBEBondUpdate
 
@@ -40,25 +60,35 @@ using ..BondUpdateBUG: SymMPS, canonical!, bond_dims, leg_dim, local_space,
                        magnetisation, center_bond, parity_bonds
 
 include("henv.jl")
-include("cbe.jl")
+include("cbe_core.jl")
 include("cbe_lubich.jl")
-include("cbe_bond_update.jl")
 include("tdvp2_baseline.jl")
+include("tdvp1_cbe.jl")
 
-export XXZTerm, XXZChain, xxz_chain, hamiltonian_terms, bond_gate,
+# The modes come last: each imports from the parent, so everything they name must already be
+# defined. They are submodules rather than files so `RealTime.evolve!` and
+# `GroundState.solve!` read as what they are at the call site.
+include("modes/real_time.jl")
+include("modes/imaginary_time.jl")
+include("modes/ground_state.jl")
+
+export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bond_gate,
        LeftEnvStack, RightEnvStack,
        left_env_stack, right_env_stack, env_energy, env_energy_right,
        ChannelSet, boundary_channels, left_channels, right_channels,
        push_left_channels, push_right_channels,
        apply_h_two_site,
        sketch_h_left, sketch_h_right,
-       sector_graded_sketch,
+       sector_graded_sketch, full_local_basis,
        CBEExpansion, cbe_expand,
        CBEBugInfo, cbe_lubich_sweep, truncate_sweep!,
        CBEBugOptions, CBEBugRunInfo, cbe_lubich_bug!,
        sketch_bond_left, sketch_bond_right, cbe_expand_bond,
        cbe_bond_update, cbe_bond_update_sweep!, cbe_bond_update_bug!,
+       cbe_gate_evolve!, SStepSolver, Propagate, LowestEigen,
+       RealTime, ImaginaryTime, GroundState,
        ZeroSiteH, zero_site_h, apply_zero_site,
-       OneSiteH, one_site_h, apply_one_site, TDVP2Info, tdvp2_step!, tensor_elements
+       OneSiteH, one_site_h, apply_one_site, TDVP2Info, tdvp2_step!, tensor_elements,
+       TDVP1CBEInfo, tdvp1_cbe_step!
 
 end # module

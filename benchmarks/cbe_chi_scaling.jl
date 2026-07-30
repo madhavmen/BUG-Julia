@@ -5,7 +5,7 @@
 # The scheme grows the basis inside the Krylov iteration, so the worry is a runtime that
 # degrades faster in chi than the one-shot it replaces. Three things are measured:
 #
-#   1. WALL TIME vs maxdim, as MIN OF THREE repeats. Minimum, not mean: timing noise on this
+#   1. WALL TIME vs maxdim, as MIN OF `REPS` repeats. Minimum, not mean: timing noise on this
 #      box is one-sided (interference only ever adds), and the identical configuration has
 #      already been seen to swing 2.6x (docs 7.6.4). The minimum is the robust statistic.
 #   2. The fitted exponent p in t ~ chi^p between consecutive maxdim values. If the expanding
@@ -18,6 +18,17 @@
 #
 # L = 12 keeps this local (standing rule: L <= ~12 here, larger goes to the cluster) while
 # still reaching chi = 64 at the centre.
+#
+# THE INITIAL STATE IS A NEEL QUENCH, NOT A DOMAIN WALL, AND THAT IS THE WHOLE POINT.
+# A melting domain wall is the one free-fermion quench whose entanglement grows only
+# LOGARITHMICALLY, so at L = 12 it saturates at chi = 10 and every cap from 16 up is slack.
+# The first version of this benchmark used it and measured nothing: identical error, identical
+# matvecs, identical rank at maxdim 16, 32 and 64, and a fitted exponent that was pure timing
+# jitter (-0.22 to +0.24 with no trend). A Neel quench grows entanglement LINEARLY. Measured
+# at L = 12, maxdim = 64: chi = 25 at t = 1, 44 at t = 2, 64 (saturated) at t = 4.
+#
+# t = 2 is chosen so the natural chi is 44: caps 8, 16 and 32 all BIND and 64 does not, which
+# is the only configuration in which "wall time versus chi" is a statement about chi.
 
 using BUGJulia.BondUpdateBUG
 using BUGJulia.RSVDCBEBondUpdate
@@ -27,9 +38,11 @@ set_symmetry!(:U1)
 
 const L     = parse(Int, get(ENV, "L", "12"))
 const DT    = 0.05
-const TMAX  = 0.4
+const TMAX  = 2.0
 const NSTEP = round(Int, TMAX / DT)
-const REPS  = 3
+const REPS  = 2
+
+initial_state() = neel_state(L)
 
 xx_gates(p) = Any[xx_bond_gate(p[i].inds[2], p[i + 1].inds[2]) for i in 1:(length(p) - 1)]
 
@@ -43,11 +56,11 @@ function analytic_sz(L::Int, t::Float64, n0::Vector{Float64}; J::Float64 = 1.0)
     return [sum(abs2(U[j, k]) * n0[k] for k in 1:L) - 0.5 for j in 1:L]
 end
 
-const N0  = magnetisation(domain_wall_state(L)) .+ 0.5
+const N0  = magnetisation(initial_state()) .+ 0.5
 const REF = analytic_sz(L, TMAX, N0)
 
 function run_once(maxdim, nsteps; kwargs...)
-    psi = domain_wall_state(L)
+    psi = initial_state()
     gates = xx_gates(psi)
     info = cbe_bond_update_bug!(psi, gates;
                                 opts = CBEBugOptions(; dt = DT, n_steps = nsteps,

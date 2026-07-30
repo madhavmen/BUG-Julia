@@ -105,6 +105,42 @@ function xxz_chain(L::Int; J::Float64 = 1.0, delta::Float64 = 1.0)
     return XXZChain(L, terms, J, delta)
 end
 
+"""
+    heisenberg_su2_chain(L; J=1.0) -> XXZChain
+
+`H = J Σ_i S_i · S_{i+1}` on `L` sites, as a SINGLE term, for `symmetry_mode() === :SU2`.
+
+WHY THIS EXISTS SEPARATELY FROM [`xxz_chain`](@ref), rather than as a branch inside it. Under
+SU(2) Telum's local space exposes `:S` and `:I` only -- there is no `:Sp`, `:Sz`, `:Sm`, and
+there cannot be, because none of those three is an SU(2) tensor on its own. Only the full
+vector `S` is, so the coupling is ONE irreducible term whose two halves are joined by an
+`S = 1` op-leg, in place of the three (`Sp Sm`, `Sm Sp`, `Sz Sz`) the abelian form needs.
+
+NOTHING DOWNSTREAM HAD TO CHANGE FOR THIS, which is the useful part: the channel environments
+already carry operators with op-legs, since that is how `:U1`'s `Sp`/`Sm` work (see the rank-3
+branch in `xxz_chain`). So `push_left_channels`, `apply_h_two_site`, `zero_site_h` and
+`one_site_h` take this term list unmodified.
+
+ONLY THE ISOTROPIC POINT EXISTS HERE. Any `delta != 1` breaks SU(2) down to U(1), so there is
+no `delta` argument -- an anisotropic chain has to be run under `:U1` with `xxz_chain`.
+
+THE OVERALL CONSTANT IS MEASURED, NOT ASSUMED. Telum normalises its spin operators through
+Clebsch-Gordan coefficients (`get_SU2_symmops` scales by `sqrt(S(S+1))`), exactly the reason
+`heisenberg_bond_gate` carries a measured `-1` on its `:none` branch. The check that pins it is
+the ground energy against dense diagonalisation, in `tests/RSVDCBEBondUpdate/test_su2.jl`.
+"""
+function heisenberg_su2_chain(L::Int; J::Float64 = 1.0)
+    L >= 2 || throw(ArgumentError("heisenberg_su2_chain needs at least two sites, got $L"))
+    symmetry_mode() === :SU2 || throw(ArgumentError(
+        "heisenberg_su2_chain needs symmetry_mode() === :SU2, got $(symmetry_mode()); " *
+        "use xxz_chain for :U1 or :none"))
+    q = local_space(:SU2)
+    # One term, op-leg contracted between the two halves -- the same shape the rank-3 `:U1`
+    # branch of `xxz_chain` builds for `Sp`/`Sm`.
+    terms = [XXZTerm(q.S, to_concrete(q.S'), J)]
+    return XXZChain(L, terms, J, 1.0)
+end
+
 "The term list of `h`. `hamiltonian_terms(h)[t]` pairs with `open[i][t]`."
 hamiltonian_terms(h::XXZChain) = h.terms
 

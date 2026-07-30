@@ -55,6 +55,23 @@ function heisenberg_bond_gate(site_l, site_r; J::Float64 = 1.0, delta::Float64 =
     # (ket_l, bra_l, ket_r, bra_r) -> (ket_l, ket_r, bra_l, bra_r).
     pair(A, B) = to_concrete(permutedims(
         contract(_retag_site(A, tl), (3,), _retag_site(B, tr)', (3,)), (1, 4, 2, 3)))
+
+    # ── :SU2 ────────────────────────────────────────────────────────────────
+    # ONE term, not three. Under SU(2) the local space exposes only `:S` (rank 3, op-leg
+    # carrying the S=1 irrep -- MEASURED: the same shape as `:U1`'s `Sp`), because none of
+    # Sx/Sy/Sz is an SU(2) tensor by itself. Contracting the op-leg sums over the vector
+    # index, so a single `pair` IS the full `S_i . S_j` rather than one Cartesian piece.
+    #
+    # NO `delta` HERE, and that is physics rather than an unimplemented case: anisotropy
+    # singles out the z axis, which breaks SU(2) down to U(1). Refusing is the only correct
+    # response -- silently building an isotropic gate for a `delta != 1` request would
+    # evolve the wrong Hamiltonian.
+    if symmetry_mode() === :SU2
+        delta == 1.0 || throw(ArgumentError(
+            "SU(2) admits only the isotropic point, got delta = $delta; anisotropy breaks " *
+            "the symmetry down to U(1), so run that case under set_symmetry!(:U1)"))
+        return to_concrete(J * pair(q.S, q.S) * (1.0 + 0.0im))
+    end
     outer(A, B) = to_concrete(permutedims(
         contract(_retag_site(A, tl), (), _retag_site(B, tr), ()), (1, 3, 2, 4)))
 

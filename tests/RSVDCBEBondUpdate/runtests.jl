@@ -23,4 +23,7 @@ Random.seed!(42)
     include("test_cbe_lubich.jl")
     include("test_tdvp2_baseline.jl")
     include("test_driver.jl")
+    include("test_modes.jl")
+    include("test_tdvp1_cbe.jl")
+    include("test_su2.jl")
 end
