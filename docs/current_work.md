@@ -944,6 +944,18 @@ rate moves that fixed point.
 |---|---|---|
 | 5 | 5.248e-02 | **1.220e-02** |
 | 10 | 6.008e-03 | **2.478e-04** |
+| 20 | — | **9.625e-08** |
+
+Cross-checked against an independent scheme: cooled at identical β=10/dt=0.05, `1site_tdvp_cbe`
+and 2-site TDVP agree on the residual to four digits (2.478e-04 both) with **bit-identical bond
+dimensions** `[2, 4, 8, 16, 8, 4, 2]`. That is the strongest correctness evidence for this arm —
+energy alone is a weak probe here (see below), so the state was compared too.
+
+**The residual at β=20 is still flat in `dt`** (9.626e-08 at `dt=0.1` vs 9.625e-08 at
+`dt=0.05`), which refutes the prediction previously recorded in `imaginary_time.jl` that the
+`dt²` scaling would emerge once β was large enough. It does not, because the ground state is
+stationary: an `O(dt²)` error in the *state* enters the *energy* at `O(dt⁴)` and stays under the
+cooling term. Measuring a splitting error through the energy is the wrong instrument.
 
 `test_tdvp1_cbe.jl` is 18/18 green, including the Néel boundary regression case.
 

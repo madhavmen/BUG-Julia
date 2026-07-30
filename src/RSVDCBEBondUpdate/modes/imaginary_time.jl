@@ -25,8 +25,17 @@ physics, though, is worth being explicit about, because three things stop being 
 
      MEASURED at L=8, delta=1, half filling: at beta = 10 the residual is 2.48e-04 at
      `dt = 0.1` and 2.48e-04 at `dt = 0.05` -- unmoved by halving `dt`, so at that beta it is
-     ENTIRELY the cooling term and says nothing about the splitting. Only once beta is large
-     enough for the cooling term to drop below it does the `dt^2` scaling become visible.
+     ENTIRELY the cooling term and says nothing about the splitting.
+
+     AND THE `dt^2` SCALING DOES NOT SIMPLY APPEAR ONCE BETA IS LARGE, which is what this note
+     used to predict. Cooling further does drop the residual -- 1.220e-02 at beta=5, 2.478e-04
+     at beta=10, 9.625e-08 at beta=20 -- but at beta=20 it is STILL flat in `dt` (9.626e-08 at
+     `dt=0.1` against 9.625e-08 at `dt=0.05`, ratio 1.00).
+
+     The reason is that ENERGY IS THE WRONG INSTRUMENT for the splitting error. The ground state
+     is stationary, so an `O(dt^2)` error in the STATE is second order in the energy -- it shows
+     up as `O(dt^4)` -- and it stays buried under the cooling term at every beta reachable here.
+     To see the splitting, measure the STATE (a profile or an overlap), not the energy.
 
      The converged-in-beta state is the ground state of the TROTTERISED Hamiltonian, `O(dt^2)`
      from the true one, and no amount of extra cooling removes that. It is why the fixed point
