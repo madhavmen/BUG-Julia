@@ -43,12 +43,31 @@ os.makedirs(OUT, exist_ok=True)
 with open(SRC) as fh:
     data = json.load(fh)
 
-ref = data.pop("__reference__", None)
+# The reference is keyed by INIT (`__reference__dimer` / `__reference__domainwall`) so a dimer
+# and a domain-wall run can share one file. Match the PREFIX: looking for the bare
+# `__reference__` finds nothing, and because the reference dict has no "arm" key it is filtered
+# out of `runs` silently -- so the failure mode is not a crash but light-cone figures that
+# quietly lose the EXACT panel, which is the panel that makes the others interpretable.
+refs = {k: v for k, v in data.items() if k.startswith("__reference__")}
+for k in refs:
+    data.pop(k)
+ref = next(iter(refs.values()), None)
+if ref is None:
+    print("WARNING: no __reference__* entry found -- light cones will have no exact panel")
 runs = [v for v in data.values() if isinstance(v, dict) and "arm" in v]
 if not runs:
     sys.exit("no runs in %s" % SRC)
 
 L = ref["L"] if ref else (len(runs[0]["obs"][0]) + 1)
+
+# Label from the DATA, not from a hardcoded guess. A dimer run measures <S_j.S_{j+1}> per BOND
+# and a domain-wall run measures <Sz_j> per SITE; printing the wrong one turns a correct figure
+# into a misleading one, which is worse than a missing label.
+OBS = (ref or {}).get("obs_name") or runs[0].get("obs_name") or r"observable"
+INIT = (ref or {}).get("init") or runs[0].get("init") or "dimer"
+XLAB = "bond $j$" if INIT == "dimer" else "site $j$"
+CBLAB = (r"$\langle S_j \cdot S_{j+1} \rangle$" if INIT == "dimer"
+         else r"$\langle S^z_j \rangle$")
 
 
 def groups(mode):
@@ -81,10 +100,10 @@ def light_cone(mode, ref_key):
             im = ax.pcolormesh(np.arange(1, obs.shape[1] + 1), t, obs,
                                shading="nearest", vmin=vmin, vmax=vmax, cmap="magma")
             ax.set_title(name, fontsize=8)
-            ax.set_xlabel("bond $j$")
+            ax.set_xlabel(XLAB)
         axes[0].set_ylabel(r"$\beta$" if mode == "imag" else "$t$")
-        fig.colorbar(im, ax=axes[-1], label=r"$\langle S_j\cdot S_{j+1}\rangle$")
-        fig.suptitle(f"{mode}  sym={sym}  $\\chi$={md}  cutoff={ct:g}  (L={L})", fontsize=10)
+        fig.colorbar(im, ax=axes[-1], label=CBLAB)
+        fig.suptitle(f"{mode}  {INIT}  sym={sym}  $\\chi$={md}  cutoff={ct:g}  (L={L})", fontsize=10)
         fig.savefig(f"{OUT}/lightcone_{mode}_{sym}_chi{md}_ct{ct:g}.png", dpi=140)
         plt.close(fig)
 
@@ -126,7 +145,8 @@ def curves(mode, field, ylabel, fname, logy=True):
 
 for mode, rk in (("real", "obs_real"), ("imag", "obs_imag")):
     light_cone(mode, rk)
-    curves(mode, "err", r"$\|\langle S.S\rangle-\mathrm{exact}\|$", "error", logy=True)
+    # Label from the data too -- this panel is the error in whichever observable was measured.
+    curves(mode, "err", r"$\|$obs $-$ exact$\|$", "error", logy=True)
     curves(mode, "maxbd", r"max bond dim", "bonddim", logy=False)
 
 # ── ground state ─────────────────────────────────────────────────────────────────────
