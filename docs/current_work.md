@@ -1036,6 +1036,92 @@ the cost ratio is indicative rather than a controlled A/B.
 
 ---
 
+### 7.9 The L = 18 benchmark: exact reference, one state, one constraint
+
+`benchmarks/l18_matrix.jl` runs every arm and all three modes for no-symmetry, U(1) and SU(2),
+against an **exact** reference. Three things had to be built before the comparison meant
+anything, and each corrected a claim recorded earlier in this document.
+
+#### 7.9.1 An exact reference at L = 18 *is* available
+
+I recorded that no exact reference was possible at L = 18 because the `Sz = 0` sector is
+C(18,9) = 48620 states and a dense `eigen` is ~19 GB. **That conflated the spectrum with the
+state.** Real-time evolution needs `exp(-iHt)|ψ⟩`, not the eigendecomposition — and that vector
+is 48620 complex numbers (~780 kB) against a sparse `H` with ~18 nonzeros per row. Sparse
+Krylov delivers it comfortably, so the benchmark measures **accuracy, not mutual consistency**.
+
+Validated at L = 8 against independent dense calculations: `expv` vs dense `exp(-iHt)` agrees
+to **1.4e-14 at t = 15** (the far end of the production window), Lanczos `E0` vs dense `eigen`
+to 1.8e-15, and `dimer_vector` vs the MPS `dimer_state` to 3.3e-16.
+
+#### 7.9.2 One state and one observable that exist in every symmetry
+
+The comparison is only meaningful if both sides evolve **the same state**, and before this work
+none existed: `product_state`/`neel_state` are guarded off under `:SU2`, while `dimer_state` was
+`:SU2`-only. `dimer_state` now works in every mode.
+
+The observable had to change too. **`⟨Sz_j⟩` cannot serve under SU(2)** — the state is a
+total-spin multiplet so it is identically zero, and `Sz` is not even exposed, so asking throws.
+`bond_energies` gives `⟨S_j·S_{j+1}⟩`, an SU(2) **scalar**: nonzero, defined everywhere, the same
+operator on both sides. `INIT=domainwall` keeps the `⟨Sz_j⟩` light cone for the abelian modes and
+**refuses** under `:SU2` rather than plotting a blank cone.
+
+#### 7.9.3 HARD CONSTRAINT: rank grows only through `rsvd_cbe`
+
+No random sector seeds, no padding. Verified across `cbe_core.jl`, `cbe_lubich.jl`,
+`tdvp1_cbe.jl` and the three mode files: no `missing_fill`, no `pad`, no call to the KLS
+augmenter. A **source-level test** in `test_dimer.jl` pins it (comments stripped first, since the
+header legitimately discusses what CBE replaces).
+
+The excluded mechanism is real and was measured. Cooling a Néel state to odd-bond singlets,
+`:even` group, `maxdim = 8`, 60 × `τ = -0.5`:
+
+| mode    | kernel                | bond_dims       | err vs analytic |
+|---------|-----------------------|-----------------|-----------------|
+| `:none` | kls, every variant    | `[1,1,…]`       | 5.000e-01       |
+| `:U1`   | kls default           | `[2,1,2,…]`     | 1.110e-16       |
+| `:U1`   | kls `missing_fill=0`  | `[1,1,…]`       | 5.000e-01       |
+| both    | cbe, either rule      | `[2,1,2,…]`     | ~1e-16          |
+
+**KLS's U(1) growth is entirely the random seed** — a column dropped into an empty-but-reachable
+charge sector. Disable it and it freezes. `:none` has one dense sector, nothing to seed, so it
+never grows there at all. CBE needs none of this, and **the proof is not the absent keyword but
+that CBE grows under `:none`, where no empty sector exists to seed.**
+
+This also corrects a claim made twice above: "the standard BUG cannot grow rank from a product
+state" is **symmetry-dependent**, true under `:none` and false under `:U1`. KLS is no longer used
+anywhere; it appears here only as the concrete example of the banned mechanism.
+
+#### 7.9.4 Measured (smoke, L = 8, against the exact reference)
+
+* **Symmetry invariance holds exactly.** `:none`, `:U1` and `:SU2` agree to **every printed
+  digit** on all seven arms, at both cutoffs and both caps, in real *and* imaginary time, on both
+  the dimer and the domain wall. SU(2) does it at `maxbd 6` where `:none` needs 16 — and note
+  SU(2) at χ=8 equals `:none` at χ=16, which is multiplet counting, not superior accuracy.
+* **`cbe_rsvd` tracks exact CBE everywhere in time evolution**, and parts from it only where the
+  cap BINDS: `dmrg_cbe_rsvd` 7.53e-07 against `dmrg_cbe` 1.78e-15 at χ=8, gap gone at χ=16. That
+  is the sketch doing real selection work — a padding scheme could not track the deterministic
+  arm to all digits and then lose exactly where directions must be rejected.
+* **The domain wall discriminates where the dimer saturates.** At t=1 the dimer left all three
+  TDVP arms on a common floor; the domain wall separated them (2.99e-05 / 5.24e-05 / 8.18e-05 /
+  2.07e-04). Prefer it wherever SU(2) is not required.
+
+#### 7.9.5 Two failure modes that look identical
+
+Debugging the `:none` dimer cost real time because **a skipped-every-bond no-op and a genuine
+rank freeze produce byte-identical output**: `bond_dims` unchanged, state normalised, nothing
+raised. The no-op came from `parity_bonds(L, :even)` being `1,3,5,…` and `:odd` being `2,4,6,…`
+— the names follow Python's 0-based convention — so requesting `:odd` with gates on `1,3,5,…`
+left every gate in the group `nothing`.
+
+I diagnosed it as the rank freeze, which was plausible (that freeze is real) and wrong. The
+consequence went further: the "frozen standard BUG" **control** in the new test had the same
+misalignment, so it passed by doing nothing. `group_gates` now derives the gate list *from*
+`parity_bonds`, so the two cannot drift apart.
+
+**"The state did not change" does not identify why.** A control has to be shown to do something
+before its passing means anything.
+
 ## 8. Gotchas that cost real time
 
 * **`contract` verifies itags, not just arrow directions.** Two tensors whose contracted legs
@@ -1070,6 +1156,14 @@ the cost ratio is indicative rather than a controlled A/B.
   against 14.9 s for run 2), and `Test` buffers output until a testset closes, so a suite can
   print nothing for 28 minutes and still be healthy. Diagnose with a longer timeout before
   concluding a deadlock.
+
+* **A no-op and a genuine freeze produce identical output.** `parity_bonds(L, :even)` is
+  `1,3,5,…` and `:odd` is `2,4,6,…` (0-based names, not Julia indices), so requesting the wrong
+  one with a hand-built gate list leaves every gate in the group `nothing`; the sweep skips every
+  bond and returns the input unchanged, unflagged, and indistinguishable from a rank freeze. Cost
+  a wrong diagnosis that then propagated into a test *control*, which passed by doing nothing.
+  Derive gate lists FROM `parity_bonds`, and never conclude a mechanism from "the state did not
+  change" alone. See §7.9.5.
 
 * **`bond_dims` counts MULTIPLETS, not states, so χ means different things under different
   symmetries.** `leg_dim` sums sector *multiplicities* (`sum(d for (_, d) in t.spaces[l])`).
