@@ -174,7 +174,12 @@ cost real time and each is easy to repeat.
 
 ## 9. Environment notes
 
-- Branch `feature/cbe-bug`, 8 commits, **none pushed**.
+- `feature/cbe-bug` (41 commits) is **merged into `main`** as of 2026-07-31, merge commit
+  `92fc033`, no conflicts. **`main` is NOT pushed** — `origin/main` is still at `bdb29d1`.
+- ⚠️ **The full suite was not re-run for that merge** — the user interrupted it. The last known
+  green runs are per-file (`test_dimer.jl` 69/69, `test_tdvp1_cbe.jl` 21/21) and predate the
+  final docs/benchmark commits, which touch no `src`. Run `julia --project=. tests/runtests.jl`
+  before pushing or building on this.
 - Laptop: 14 logical cores, 31 GB, MKL with a 12-thread pool.
 - A Julia process (PID 31952) has been resident since **2026-07-27** holding ~700 MB. It was
   flagged to the user twice and left alone — it may be their REPL. Not the agent's to kill.
