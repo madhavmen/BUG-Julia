@@ -1122,6 +1122,115 @@ misalignment, so it passed by doing nothing. `group_gates` now derives the gate 
 **"The state did not change" does not identify why.** A control has to be shown to do something
 before its passing means anything.
 
+### 7.9.1 Why the L=18 run cost 69 minutes a row — and three wrong answers before the right one
+
+The first row of the L=18 domain wall came back at **4161.8 s**:
+
+```
+real  none  tdvp2           chi=32  ct=0  err_end=3.991e-05  maxbd=32  4161.8s
+real  none  1site_tdvp_cbe  chi=32  ct=0  err_end=5.605e-05  maxbd=32  3677.9s
+```
+
+84 rows at that rate is ~97 h for real time alone, and χ=32 is the *cheapest* column. Two
+things in that line were already worth keeping: `maxbd` reached the cap, so the row is
+genuinely rank-starved rather than saturated-inert; and `err_end ≈ 4e-05` — the prediction
+that errors would saturate near O(1) at t=15 was wrong by four orders of magnitude.
+
+**The three refuted explanations.** Each was formed by reading code or a profile, and each was
+killed by a measurement that was designed to be able to kill it:
+
+| # | claim | how it died |
+|---|-------|-------------|
+| 1 | "it rebuilds environments per bond" | the source carries channels `O(L)` and says so — `_tdvp2_bond!` returns `push_left_channels(...)` as "the O(1) alternative to rebuilding a stack" |
+| 2 | "it is Krylov-**matvec**-bound, loosen `tol`" | cutting iterations 5× changed the step time by nothing (5.08 → 5.45 s) |
+| 3 | "MKL fans small `gemm`s across 14 cores" | `BLAS.set_num_threads(1)` gave 1.03× / 0.98× / 0.93× / 1.07× |
+
+(2) and (3) were worse than wrong, they were *self-inflicted*. The tolerance sweep counted
+iterations at **one bond** and assumed the count generalised. The BLAS claim came from a flat
+profile that counted **all threads**: MKL parks a 12-thread pool, those threads sit in
+`ZwDelayExecution`/`NtCreateSemaphore` doing nothing, and the sampler dutifully counted them as
+21.8% + 4.2% of "time". Profiling `threads = 1:1` deleted that artifact entirely.
+
+**The actual cause.** With the profile restricted to the main thread, a `tdvp2` step is 97%
+`expv` — 917 samples in the two-site solve, 307 + 288 in the two one-site solves, out of 1564.
+And `lanczos_expv` has a **breakdown-only exit**:
+
+```julia
+for _ in 2:maxiter
+    b = norm(w)
+    b < tol && break        # tests the off-diagonal Lanczos norm, NOT convergence
+```
+
+`tol` gates *breakdown*, not convergence of the exponential — as its own docstring says. For a
+generic `Θ`, `b` never falls below `1e-12`, so **every solve runs the full `maxiter`**. Measured
+with the module's own `enable_krylov_log`, one L=18 step:
+
+| maxiter | expv calls | matvecs | mean dim | s/step |
+|---------|-----------|---------|----------|--------|
+| 30      | 66        | 1806    | **27.4** | 6.036  |
+| 8       | 66        |  486    | 7.4      | 1.380  |
+| lubich  | **1**     |   30    | 30.0     | 0.439  |
+
+A mean of 27.4 against a cap of 30 is a budget being *spent*, not converged into. The
+`lubich` row also explains the 15× gap that started this: 66 expv calls per `tdvp2` step versus
+1 per sweep. That is structural, not a defect in either.
+
+**What the depth actually buys** (40 steps, dt=0.05, χ cap 32, vs the `maxiter=30` trajectory):
+
+| maxiter | speedup | max\|ΔSz\| |
+|---------|---------|-----------|
+| 16 | 2.02× | 1.7e-13 |
+| 12 | 2.50× | 2.0e-13 |
+| **8** | **3.64×** | **2.1e-13** |
+| 6  | 4.75× | 3.5e-12 |
+| 4  | 5.77× | 3.2e-07 ← the cliff |
+
+`maxiter = 8` is 3.6× faster at machine precision, an ample margin above the cliff. `‖τH‖ ≈ 0.3`
+here (dt/2 = 0.025, `‖H‖ ~ L/2`), so eight Krylov vectors are plenty; 30 was always waste.
+
+**What was done, and what deliberately was not.** The benchmark driver now sets `MAXITER`
+(default 8, an ENV knob) on *every* time arm — uniformly, because the arms differ in how many
+expv calls they issue, so a per-arm depth would confound "does less Krylov work" with "was
+given a smaller budget". Ground-state arms are excluded: their `maxiter` drives a Lanczos
+*eigensolver*, which none of this measured.
+
+The *right* fix is a convergence test inside `lanczos_expv` — it would adapt to `dt`, `L` and
+the spectrum instead of relying on a constant that is only right for this problem. It was NOT
+done: `expv.jl` is in `src/BondUpdateBUG`, which is not to be modified without asking, and it
+would change numerics for every arm rather than for this benchmark.
+
+**`MAXITER` is part of the results key.** Resume works by key, so without it a rerun at a new
+depth would skip existing rows and leave the file holding a silent mixture — `maxiter=30` rows
+at 4159 s beside `maxiter=8` rows at ~1150 s, with nothing to distinguish them. The errors would
+still agree (2e-13); the *timings* would not, and timing is the point.
+
+**Validated late, with the cap binding.** The 40-step table above stops at t=2 with the cap
+never binding, and Krylov error compounds — so `maxiter=8` was re-checked over 120 steps to t=6
+at a χ=64 cap that *did* bind (`reached_bd=64` on every trajectory):
+
+| maxiter | t=2 | t=4 | t=6 |
+|---------|-----|-----|-----|
+| 12 | 2.05e-13 | 2.65e-13 | 2.52e-13 |
+| **8** | **2.17e-13** | **2.97e-13** | **2.90e-13** |
+| 6  | 3.46e-12 | 1.63e-11 | 3.29e-11 ← grows with time |
+
+`maxiter=8` stays flat at ~3e-13 while `maxiter=6` degrades an order of magnitude between t=2
+and t=6. 8 is confirmed with margin.
+
+**The timing column of that same run is worthless, and it was self-inflicted.** It read
+2.51× / 0.79× / 1.47× for maxiter 12 / 8 / 6 — non-monotonic, i.e. *less* Krylov work taking 3×
+longer, which is impossible. A second Julia probe was launched while the validation was still
+running, so the trajectories were differently contended. This is the third time in this campaign
+that a timing number has been taken under contention; the rule that keeps being violated is
+simple and worth stating flatly: **one timing job at a time, or the numbers are fiction.**
+Accuracy numbers are unaffected (they are deterministic), which is the only reason the run was
+still usable.
+
+**Also spotted, not yet fixed:** `apply_h_two_site` calls `bond_gate(h, tl, tr)` →
+`heisenberg_bond_gate` on **every matvec** ([henv.jl:639](../src/RSVDCBEBondUpdate/henv.jl#L639)),
+rebuilding a tensor that depends only on `(site_l, site_r, J, delta)`. ~107/1564 ≈ 7% of a step.
+Pure memoisation, numerics-identical — small next to the Krylov factor, worth doing beside it.
+
 ## 8. Gotchas that cost real time
 
 * **`contract` verifies itags, not just arrow directions.** Two tensors whose contracted legs

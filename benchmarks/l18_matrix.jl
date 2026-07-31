@@ -45,6 +45,34 @@ const MAXDIMS = [parse(Int, s) for s in split(get(ENV, "MAXDIMS", "32,64,128"), 
 # with `max(trunc_thresh, 1e-14)` and Telum's SVD selector drops exactly-zero directions anyway,
 # so 0.0 means "the smallest cutoff the code can express", not "keep every direction".
 const CUTOFFS = [parse(Float64, s) for s in split(get(ENV, "CUTOFFS", "0.0,1e-12"), ",")]
+# KRYLOV DEPTH FOR THE TIME ARMS. The library default is 30 and that is 3.6x more work than
+# this problem needs, because `lanczos_expv` has a BREAKDOWN-ONLY exit -- `b < tol && break`
+# tests the off-diagonal Lanczos norm, NOT convergence of the exponential -- so for a generic
+# Theta it never fires and every solve runs the full budget. MEASURED at L=18, one step:
+#
+#   maxiter=30  66 expv calls  1806 matvecs  mean dim 27.4   6.04 s/step
+#   maxiter=8   66 expv calls   486 matvecs  mean dim  7.4   1.38 s/step
+#
+# i.e. the mean Krylov dimension sits at 27.4 out of a cap of 30: the budget is spent, not
+# converged into. What that extra depth buys, over 40 steps at dt=0.05 against the maxiter=30
+# trajectory:
+#
+#   maxiter=16  2.02x faster  max|dSz| = 1.7e-13
+#   maxiter=12  2.50x faster  max|dSz| = 2.0e-13
+#   maxiter=8   3.64x faster  max|dSz| = 2.1e-13      <- default here
+#   maxiter=6   4.75x faster  max|dSz| = 3.5e-12
+#   maxiter=4   5.77x faster  max|dSz| = 3.2e-07      <- the cliff
+#
+# 8 sits an ample margin above the cliff at machine precision. It is NOT a universal constant:
+# Krylov depth is set by ||tau*H||, which here is ~0.3 (dt/2 = 0.025, ||H|| ~ L/2). A larger
+# dt or a wider spectrum needs more, so this is an ENV knob rather than a hardcoded literal,
+# and the real fix is a convergence test inside `lanczos_expv` (deliberately not done here --
+# src/BondUpdateBUG is not to be modified without asking, and it would change numerics for
+# every arm, not just this benchmark).
+#
+# GROUND-STATE ARMS DELIBERATELY EXCLUDED: their `maxiter` drives a Lanczos EIGENSOLVER, not
+# an exponential, and nothing above measures that. They keep the library default.
+const MAXITER = parse(Int, get(ENV, "MAXITER", "8"))
 const SYMS    = [Symbol(s) for s in split(get(ENV, "SYMS", "none,SU2"), ",")]
 # INITIAL STATE AND OBSERVABLE ARE ONE CHOICE, NOT TWO -- each state has the observable that
 # actually shows its light cone, and each pairing has a different symmetry reach:
@@ -85,16 +113,23 @@ function make_advance(arm::String, h, gates, maxdim::Int, cutoff::Float64)
     # `cbe_gate_evolve!` -- so the options object is rebuilt per chunk rather than hoisted.
     # `s_iters = -1` selects the expanding-basis Lanczos; note `cbe_lubich_sweep` does NOT
     # accept it (it has no S-step solver choice), which is why only the gate arm passes it.
+    # `maxiter = MAXITER` on EVERY time arm, so the Krylov depth is one number across the
+    # comparison. Leaving it at the library default for some arms and not others would make
+    # the timings incomparable -- the arms differ in how MANY expv calls they issue per step
+    # (measured: 66 for tdvp2, 1 for a lubich sweep), so a per-arm depth would confound
+    # "does less Krylov work" with "was given a smaller budget".
     o(exact, n) = CBEBugOptions(; dt = DT, n_steps = n, maxdim = maxdim, trunc_thresh = cutoff,
-                                s_iters = -1, exact = exact, normalize = false)
+                                s_iters = -1, exact = exact, normalize = false,
+                                maxiter = MAXITER)
     if arm == "tdvp2"
         return (psi, tau, n) -> for _ in 1:n
-            tdvp2_step!(psi, h, tau; maxdim = maxdim, trunc_thresh = cutoff)
+            tdvp2_step!(psi, h, tau; maxdim = maxdim, trunc_thresh = cutoff, maxiter = MAXITER)
         end
     elseif arm in ("1site_tdvp_cbe", "1site_tdvp_cbe_rsvd")
         ex = arm == "1site_tdvp_cbe"
         return (psi, tau, n) -> for _ in 1:n
-            tdvp1_cbe_step!(psi, h, tau; maxdim = maxdim, trunc_thresh = cutoff, exact = ex)
+            tdvp1_cbe_step!(psi, h, tau; maxdim = maxdim, trunc_thresh = cutoff, exact = ex,
+                            maxiter = MAXITER)
         end
     elseif arm in ("bug_cbe_gate", "bug_cbe_rsvd_gate")
         ex = arm == "bug_cbe_gate"
@@ -102,7 +137,8 @@ function make_advance(arm::String, h, gates, maxdim::Int, cutoff::Float64)
     elseif arm in ("bug_cbe_lubich", "bug_cbe_rsvd_lubich")
         ex = arm == "bug_cbe_lubich"
         return (psi, tau, n) -> for _ in 1:n
-            cbe_lubich_sweep(psi, h, tau; maxdim = maxdim, trunc_thresh = cutoff, exact = ex)
+            cbe_lubich_sweep(psi, h, tau; maxdim = maxdim, trunc_thresh = cutoff, exact = ex,
+                             maxiter = MAXITER)
         end
     end
     error("unknown arm $arm")
@@ -167,7 +203,13 @@ jsonsafe(v::Vector{Float64}) = Any[isfinite(x) ? x : nothing for x in v]
 jsonsafe(x) = x
 
 results = isfile(OUT) ? JSON.parsefile(OUT) : Dict{String, Any}()
-key(mode, sym, arm, md, ct) = "$(INIT)|$(mode)|$(sym)|$(arm)|$(md)|$(ct)"
+# MAXITER IS PART OF THE KEY, and it has to be. Results are resumed by key, so without it a
+# rerun at a different Krylov depth would SKIP every row already present and leave the file
+# holding a mixture -- rows at maxiter=30 (measured: tdvp2 4159 s) sitting beside rows at
+# maxiter=8 (~1150 s) with nothing on either to say which is which. The errors would still be
+# comparable (the depths agree to 2e-13) but the TIMINGS would not, and timing is the point.
+# Including it means a depth change recomputes instead of silently mixing.
+key(mode, sym, arm, md, ct) = "$(INIT)|$(mode)|$(sym)|$(arm)|$(md)|$(ct)|mi$(MAXITER)"
 
 # The reference goes in the file too, not just the errors computed from it. Without it the
 # plots can show how far each arm is from the truth but never what the truth LOOKS like, and
@@ -222,7 +264,7 @@ function run_time_arm(mode, sym, arm, md, ct)
         push!(errs, haskey(ref, done) ? norm(be - ref[done]) : NaN)
     end
     results[k] = Dict("mode" => mode, "sym" => String(sym), "arm" => arm, "init" => String(INIT), "obs_name" => OBSNAME,
-                      "maxdim" => md, "cutoff" => ct, "t" => ts,
+                      "maxdim" => md, "cutoff" => ct, "t" => ts, "maxiter" => MAXITER,
                       "err" => jsonsafe(errs), "maxbd" => bds, "obs" => obs,
                       "seconds" => time() - t0)
     save()
@@ -255,8 +297,8 @@ function run_ground_arm(sym, arm, md, ct)
     return true
 end
 
-@printf("\nL=%d dt=%.3f t=%.1f beta=%.1f snap=%.2f  maxdims=%s cutoffs=%s syms=%s\n\n",
-        L, DT, TMAX, BETA, SNAP, MAXDIMS, CUTOFFS, SYMS)
+@printf("\nL=%d dt=%.3f t=%.1f beta=%.1f snap=%.2f  maxdims=%s cutoffs=%s syms=%s maxiter=%d\n\n",
+        L, DT, TMAX, BETA, SNAP, MAXDIMS, CUTOFFS, SYMS, MAXITER)
 flush(stdout)
 
 for mode in MODES, sym in SYMS, md in MAXDIMS, ct in CUTOFFS

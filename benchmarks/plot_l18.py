@@ -60,6 +60,15 @@ if not runs:
 
 L = ref["L"] if ref else (len(runs[0]["obs"][0]) + 1)
 
+# MIXED KRYLOV DEPTHS IN ONE FILE ARE A SILENT TRAP. Rows are resumed by key, and the key now
+# carries `maxiter`, so a file can legitimately hold rows computed at different depths. Their
+# ERRORS stay comparable (depths 8 and 30 agree to 2e-13) but their TIMINGS differ ~3.6x, and
+# nothing in a plotted curve reveals which is which. Legacy rows predate the field entirely.
+mis = {r.get("maxiter", "legacy(30)") for r in runs}
+if len(mis) > 1:
+    print("WARNING: rows span multiple Krylov depths %s -- errors are comparable but "
+          "'seconds' is NOT. Plot them from separate files if timing matters." % sorted(map(str, mis)))
+
 # Label from the DATA, not from a hardcoded guess. A dimer run measures <S_j.S_{j+1}> per BOND
 # and a domain-wall run measures <Sz_j> per SITE; printing the wrong one turns a correct figure
 # into a misleading one, which is worse than a missing label.
