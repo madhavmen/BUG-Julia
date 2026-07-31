@@ -8,10 +8,19 @@ which hold the full derivations; this file is the operational summary.
 
 ## 1. The one-line status
 
-The benchmark **cannot run as specified** (84 rows × ~69 min = ~97 h). The cause was found and
-fixed at the driver level (Krylov depth 30 → 8, **3.64× measured, machine-precision accurate**),
-but even so the full grid is ~tens of hours, so **a scope trim is still required and has not yet
-been agreed with the user.** Nothing is blocked on code.
+The benchmark could not run as specified — 84 rows × ~69 min ≈ **97 h**. The cause was found and
+fixed at the driver level (Krylov depth 30 → 8: **3.64× faster, accurate to 2.9e-13 with the cap
+binding**), and a subsequent cost-vs-χ scan showed cost is roughly **linear** in χ here, not
+cubic. Together those put the real-time grid at **~6 h with the cutoff axis dropped** — an
+overnight laptop run.
+
+**Nothing is blocked on code.** The grid is ready to relaunch (§5); the only judgement call left
+is whether to drop `CUTOFFS=1e-12`, which needs one L=18 pair to confirm rather than the L=8
+agreement currently standing in for it.
+
+⚠️ Note this reverses an earlier conclusion in this campaign that "the grid must be trimmed".
+That was based on a *guessed* χ-scaling exponent (~3× per doubling); measured, it is ~1.9× per
+doubling of χ for ~1.86× the time, i.e. linear.
 
 ## 2. What is PROVEN (measured, not argued)
 
@@ -31,9 +40,9 @@ been agreed with the user.** Nothing is blocked on code.
 - **No valid timing data exists for ANY arm.** Every timing this campaign has produced ran
   contended. Arm-vs-arm ranking is **unmeasured**. Do not quote `seconds` from any JSON as a
   comparison.
-- **Cost scaling in χ is not measured.** The 53 h grid projection uses a *guessed* exponent.
-  Two indirect points suggest ~1.9× per doubling; the direct measurement was still running when
-  this was written (`/tmp/chi_scan.log`, `scratchpad/chi_scaling.jl`).
+- **Cost scaling in χ is measured but the scan is INCOMPLETE** — see §4a. It reached step 100 of
+  200 (χ=103 of a 128 cap) before being stopped, so the plateau at the cap was never observed and
+  the 300-step extrapolation below is an estimate, not a measurement.
 - **Whether `cbe_rsvd` costs accuracy at a binding cap at L=18.** The one place exact and
   sketched CBE ever diverged was a binding cap. At L=18 the caps *do* bind (`maxbd=32` at cap 32).
   This is the single most interesting open number in the campaign.
@@ -58,6 +67,40 @@ the depth) but would still be *plotted* together, mixing 4159 s rows with ~1150 
 
 Result JSONs are untracked by convention — no result file has ever been committed here.
 
+## 4a. Cost vs χ — the projection is much better than first feared
+
+`tdvp2`, L=18, `maxiter=8`, cap 128, domain wall, one step at a time (`scratchpad/chi_scaling.jl`).
+**Steps 1–40 overlapped another job and are contended; steps 60–100 ran alone.**
+
+| step | χ reached | s/step | cum s |
+|------|-----------|--------|-------|
+| 1 | 4 | 1.264 | 1.3 |
+| 20 | 21 | 1.473 | 27.6 |
+| 40 | 34 | 2.610 | 65.2 |
+| 60 | 53 | 3.468 | 128.1 |
+| 80 | 76 | 7.491 | 219.4 |
+| 100 | 103 | 6.470 | 358.0 |
+
+**Cost is roughly LINEAR in χ over this range, not χ³**: χ 53 → 103 is 1.94× the bond dimension
+for 1.86× the time. That is the signature of a regime dominated by per-contraction overhead and
+dispatch rather than by BLAS arithmetic — consistent with the profile, where no `gemm` appears at
+all. It is also why the earlier ~3×-per-doubling guess overestimated the grid so badly.
+
+**Revised estimate** (extrapolating the remaining 200 steps at ~7–8 s): `tdvp2` at cap 128 for
+300 steps ≈ **30–35 min**, versus 69 min at cap 32 with `maxiter=30`. Scaling the other arms by
+their measured per-step ratios (`1site` ≈ 0.7×, `gate` ≈ 0.15×, `lubich` ≈ 0.07× of `tdvp2`,
+measured at `maxiter=30` so treat as indicative):
+
+| grid | estimate |
+|------|----------|
+| one sym, one cutoff, 7 arms × 3 caps | ~3 h |
+| `SYMS=none,U1`, `CUTOFFS=0.0` | **~6 h** |
+| `SYMS=none,U1`, both cutoffs | ~12 h |
+
+So with the cutoff axis dropped the real-time grid is an **overnight laptop run, not a four-day
+one**. Caveats that must travel with these numbers: the scan never reached the cap, the arm
+ratios come from a `maxiter=30` probe, and none of it is arm-vs-arm timing evidence.
+
 ## 5. How to relaunch
 
 ```bash
@@ -78,11 +121,11 @@ INIT=domainwall SYMS=none,U1 MODES=real L=18 TMAX=15.0 DT=0.05 SNAP=0.25 \
 
 ## 6. Open work, in priority order
 
-1. **Agree the trim with the user.** Even at 3.64×, the full grid is tens of hours on a laptop.
-   Candidates: drop the cutoff axis (halves it, needs the L=18 check above); cap at χ=64; fewer
-   arms. This is a scope decision and is the user's, not the agent's.
-2. **Measure cost(χ) properly** — finish `scratchpad/chi_scaling.jl` on an otherwise idle
-   machine, so the projection stops resting on a guessed exponent.
+1. **Relaunch the real-time grid.** Per §4a this is now an **~6 h overnight run** with
+   `CUTOFFS=0.0` — no trim beyond the cutoff axis appears necessary, which reverses the earlier
+   "the grid must be cut" conclusion. Confirm the cutoff drop with one L=18 pair first (§5).
+2. **Finish `scratchpad/chi_scaling.jl`** on an idle machine if a firmer projection is wanted —
+   it stopped at step 100 of 200, so the plateau at the cap was never seen.
 3. **Cache the bond gate.** `apply_h_two_site` calls `bond_gate(h, tl, tr)` →
    `heisenberg_bond_gate` on **every matvec** (`src/RSVDCBEBondUpdate/henv.jl:639`), rebuilding a
    tensor that depends only on `(site_l, site_r, J, delta)`. ~107/1564 ≈ 7% of a step. Pure
