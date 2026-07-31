@@ -1,0 +1,1142 @@
+% RSVD-CBE as the basis update of the BUG integrator.
+%
+% Companion to:
+%   docs/current_work.md          -- the living status document
+%   docs/cbe_bug.md               -- the design and its reference implementations
+%   examples/cbe_walkthrough.jl   -- produces every number in Part III
+%
+% Compile:  pdflatex rsvd_cbe_writeup.tex   (twice, for references)
+% No exotic packages: amsmath, amssymb, booktabs, listings, geometry, hyperref, xcolor.
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{enumitem}
+
+\definecolor{codebg}{gray}{0.96}
+\definecolor{keep}{rgb}{0.10,0.45,0.20}
+\definecolor{drop}{rgb}{0.65,0.10,0.10}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  framerule=0pt,
+  columns=fullflexible,
+  keepspaces=true,
+  breaklines=true,
+  postbreak=\mbox{\textcolor{drop}{$\hookrightarrow$}\space},
+  showstringspaces=false,
+  xleftmargin=0.4em,
+  aboveskip=0.8em,
+  belowskip=0.8em,
+}
+
+% Julia is not guaranteed to be predefined by `listings` (it depends on the installed
+% version), and an undefined language is a hard error. Define it here so the document
+% compiles against any listings release; a redefinition is harmless if one already exists.
+\lstdefinelanguage{julia}{
+  morekeywords={function,end,return,if,else,elseif,for,while,in,const,local,global,
+                struct,mutable,using,import,do,let,begin,true,false,nothing,Int,Float64},
+  sensitive=true,
+  morecomment=[l]{\#},
+  morestring=[b]",
+}
+
+\lstdefinestyle{jl}{
+  language=julia,
+  keywordstyle=\color{keep}\bfseries,
+  commentstyle=\color{drop}\itshape,
+}
+
+% Notation used throughout.
+\newcommand{\Hb}{\hat{H}}
+\newcommand{\Theb}{\Theta}
+\newcommand{\Om}{\Omega}
+\newcommand{\Pperp}{P^{\perp}}
+\newcommand{\Uex}{U_{\mathrm{ex}}}
+\newcommand{\Vex}{V_{\mathrm{ex}}}
+\newcommand{\Dex}{D_{\mathrm{ex}}}
+\newcommand{\Dpre}{D_{\mathrm{pre}}}
+\newcommand{\Djoint}{D_{\mathrm{joint}}}
+\newcommand{\code}[1]{\texttt{\small #1}}
+\newcommand{\file}[1]{\texttt{\small #1}}
+
+\title{\textbf{RSVD-CBE as the basis update of the BUG integrator}\\[2mm]
+\large Session record, method description, and a worked example}
+\author{BUG-Julia, branch \code{feature/cbe-bug}}
+\date{28 July 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+The BUG (Basis-Update and Galerkin) integrator updates its bases by solving two auxiliary
+ODEs per bond --- the $K$-step and the $L$-step --- and then takes one Galerkin step in the
+augmented basis. This document describes replacing those two ODEs with \emph{controlled bond
+expansion} (CBE) driven by a \emph{randomised SVD} (RSVD): instead of evolving a basis, one
+applies $\Hb$ once, sketches the result against a random probe, and keeps the directions
+carrying the largest weight. Part~\ref{part:session} records what was done, measured, and
+\emph{retracted} in the session of 27--28 July 2026, including a wrong claim that survived
+several hours and how it was caught. Part~\ref{part:method} explains the method: the RSVD
+step from first principles, exactly which operations replace the $K$/$L$ ODEs, the knobs and
+what each controls, and how the $S$-step is taken. Part~\ref{part:example} walks one bond
+update numerically, printing every intermediate; all numbers there are output of
+\file{examples/cbe\_walkthrough.jl} rather than illustration.
+\end{abstract}
+
+\tableofcontents
+
+% =====================================================================================
+\part{Session record}
+\label{part:session}
+% =====================================================================================
+
+\section{Starting point}
+
+The session opened with a handoff document reporting that RSVD-CBE worked in both integrator
+paths after two defects in the selection had been fixed, and listing four remaining tasks. The
+first act was to rename that handoff to \file{docs/current\_work.md}, so that one file states
+what is true now rather than accreting a dated copy per session.
+
+\section{What was decided and measured}
+
+\subsection{The expansion budget: default \texorpdfstring{$\text{growth}=2.0$}{growth = 2.0}}
+\label{sec:budget}
+
+The expansion budget per bond was
+\begin{equation}
+  \Dex = \max\!\big(\lceil 1.1\, d_{\max}\rceil - r,\; 1\big),
+  \qquad
+  d_{\max} = \max(\chi_{i-1},\, r,\, \chi_{i+1}),
+  \label{eq:budget}
+\end{equation}
+with $r$ the current bond rank; the constant $1.1$ is taken from the reference DMRG
+implementation. Measurement showed this to be the accuracy limiter: on XX, $L=10$, the
+quantity \code{err\_fnl} --- the fraction of ranked candidate weight discarded for want of
+budget --- sat at $0.53$, and raising the budget improved the error from
+$2.3\times10^{-4}$ to $1.2\times10^{-6}$.
+
+The default is now $\text{growth} = 2.0$. The reasoning is not that $2.0$ is special but that
+$1.1$ is a \emph{DMRG} schedule: there every sweep re-converges the same state, so a ten
+percent ratchet compounds over sweeps and costs only iterations. A time integrator gets one
+shot per step --- a direction the step needs and does not admit is not deferred, it is gone,
+and the state carries that error forward. At $r=13$, Eq.~\eqref{eq:budget} proposes two
+directions.
+
+A ratio was chosen over an absolute floor (the measured saturation point was $\Dex=8$)
+because $8$ is where \emph{that} chain saturates, whereas a ratio scales with the state. Wide
+bonds remain bounded by \code{room} (the local space, a hard limit) and by \code{maxdim} at the
+truncation, which is where a rank ceiling belongs.
+
+\paragraph{The budget is problem-dependent.} This is recorded as a standing rule rather than a
+caveat: the value was tuned on one chain (XX, $L=10$, domain wall, $t=0.5$), and a growth
+schedule tracks how fast entanglement grows, how many channels $\Hb$ has, and how close
+\code{maxdim} is to binding. Table~\ref{tab:decide} is the decision procedure, and it is cheap
+to execute --- the $\Dex$ curve costs seconds per point at small $L$.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{@{}p{0.32\linewidth}p{0.34\linewidth}p{0.26\linewidth}@{}}
+\toprule
+\textbf{observation} & \textbf{meaning} & \textbf{action} \\
+\midrule
+\code{err\_fnl} $>0$ & the cap is the accuracy limiter & raise \code{growth} \\
+\code{err\_fnl} $=0$, error still high & budget is not the limiter & look at $\delta t$,
+\code{maxdim}, \code{comp\_ratio} \\
+\code{err\_fnl} $=0$ and time matters & past saturation & lower \code{growth} until
+\code{err\_fnl} leaves $0$ \\
+\code{krylov\_dims} high, \code{mean\_aug} small & iterations dominate & raise \code{growth};
+bigger can be cheaper \\
+\code{krylov\_dims} flat, time rising & cost is in sketch/SVDs & lower \code{growth}, or pin
+\code{dex} \\
+\bottomrule
+\end{tabular}
+\caption{Choosing the budget for a new problem from recorded diagnostics.}
+\label{tab:decide}
+\end{table}
+
+\subsection{Second order in \texorpdfstring{$\delta t$}{dt}, measured}
+
+Whether the single centre Galerkin step costs an order in $\delta t$ was an open question in
+the design notes, with first order named as the failure mode to watch for. It does not:
+at $L=18$ with \code{maxdim}$=64$ (nothing truncates, \code{maxbond} peaks at 28),
+
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+$\delta t$ & CBE-BUG & ratio & 2-site TDVP & ratio \\
+\midrule
+$0.100$ & $1.0235\times10^{-3}$ & --- & $2.0640\times10^{-4}$ & --- \\
+$0.050$ & $2.5648\times10^{-4}$ & $3.99$ & $5.1784\times10^{-5}$ & $3.99$ \\
+$0.025$ & $6.4211\times10^{-5}$ & $3.99$ & $1.2969\times10^{-5}$ & $3.99$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+and $\mathrm{err}/\delta t^2$ is constant to three digits for CBE-BUG ($0.1023$, $0.1026$,
+$0.1027$). CBE-BUG does carry a $\sim 5\times$ larger error \emph{constant} than 2-site TDVP at
+equal $\delta t$ and equal untruncated rank; that is a statement about the subspace, not the
+order, and the rank/memory comparison has to be read against it.
+
+\subsection{A calibration that could not calibrate}
+
+The campaign's $\delta t$ calibration ran only at \code{maxdim}$=64$, where \code{maxbond}
+peaks at $28$: nothing truncates, so those numbers carry no rank information and cannot be used
+to choose the main run's $\delta t$. A run at $\delta t = 0.05$ would have compared two
+$\delta t$-limited runs and reported time-integration constants as if they were rank effects.
+The calibration now takes \code{maxdim} and $t_{\max}$, so the choice is made where the main run
+reports.
+
+\subsection{The memory claim, plumbed}
+
+\code{peak\_elements} --- the working set, \emph{state $+$ transients alive}, measured inside
+the step at a definition both integrators share --- was already recorded by both integrators
+but nothing reported it. The plots used \code{state\_elems} $+$ \code{theta\_elems} instead,
+which flatters CBE-BUG twice: its \code{theta\_elems} is $0$ by construction, and its basis
+sweep is transiently \emph{wider} than the state that survives truncation, so the state alone
+understates its peak. The campaign now emits \code{peak\_elems} and the plots read it.
+
+\section{The retraction}
+\label{sec:retraction}
+
+\textbf{A claim reported during this session was wrong: that a generous expansion budget makes
+the integrator \emph{faster}.} It was measured as \code{gate} $24.4\,\mathrm{s} \to
+3.9\,\mathrm{s}$ and \code{mpo} $19.7\,\mathrm{s}\to 3.6\,\mathrm{s}$, and it was an artefact
+of measurement order: Julia compiles a call chain on first use, \code{@elapsed} charges that
+compilation to the first timed row, and the starved setting ran first in every table.
+
+What made it unarguable was a set of rows that are the \emph{same computation}. At
+$\text{growth}=1.1$ the Lubich path stalls at \code{maxbond} $4$, so caps of $8$, $16$ and $32$
+never bind:
+
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+run & error & \code{maxbond} & iterations/step & wall \\
+\midrule
+\code{chi<=8}  & $5.710\times10^{-3}$ & 4 & 4.9 & $160.6\,\mathrm{s}$ \\
+\code{chi<=16} & $5.710\times10^{-3}$ & 4 & 4.9 & $4.6\,\mathrm{s}$ \\
+\code{chi<=32} & $5.710\times10^{-3}$ & 4 & 4.9 & $4.6\,\mathrm{s}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Identical to four digits in every column except wall time, which differs by $35\times$. It also
+reconciles the original numbers arithmetically: in the budget benchmark the validated
+integrator ran first and absorbed most of the shared compilation, leaving the first CBE row
+$\sim20\,\mathrm{s}$ of residue, so $24.4 \approx 3.9 + 20$ and $19.7 \approx 3.6 + 16$.
+
+The hypothesis offered for the speedup --- that a starved basis makes the $0$-site exponential
+harder to converge --- is also dead, and independently of any timing, because the counters are
+collected inside the runs where contention cannot reach them: on the bond-update path the
+starved and generous settings use $347.9$ versus $343.6$ iterations per step (identical), with
+the generous run doing \emph{more} total work; on the Lubich path the starved setting uses
+$6\times$ fewer iterations on $4\times$ smaller objects.
+
+\paragraph{Fixes.} A \code{warmup} routine now runs one throwaway step per path and per
+Hamiltonian before any timing; a \code{rev} mode reverses row order so an order-dependent
+artefact cannot pass unnoticed; and two operational rules are recorded --- verify the machine is
+idle before timing (killing a wrapper script does \emph{not} kill the Julia child it launched,
+which cost two tables in one session), and never trust a single pass when rows that are the same
+computation can be used as a consistency check.
+
+\paragraph{The corrected cost picture}, warmed up and run in both row orders on a verified-idle
+machine (XX, $L=10$, $\delta t = 0.02$, $t=0.5$, \code{maxdim}$=64$):
+
+\begin{center}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+setting & error & \code{maxbond} & forward & reversed & iters/step \\
+\midrule
+\code{cbe\_bond\_update} $1.1$ & $2.347\times10^{-4}$ & 14 & $10.5\,$s & $9.9\,$s & 347.9 \\
+\code{cbe\_bond\_update} $2.0$ & $1.165\times10^{-6}$ & 13 & $9.5\,$s & $9.7\,$s & 343.6 \\
+\code{cbe\_bond\_update} \code{maxiter=8} & $1.165\times10^{-6}$ & 13 & $6.2\,$s & $6.4\,$s & 105.8 \\
+\code{cbe\_lubich} $1.1$ & $6.972\times10^{-6}$ & 4 & $3.5\,$s & $3.3\,$s & 4.8 \\
+\code{cbe\_lubich} $2.0$ & $8.445\times10^{-6}$ & 14 & $6.8\,$s & $5.6\,$s & 27.8 \\
+\code{cbe\_lubich} \code{maxiter=8} & $8.445\times10^{-6}$ & 14 & $6.1\,$s & $6.0\,$s & 7.6 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{itemize}[leftmargin=1.2em]
+\item On \code{cbe\_bond\_update} the budget is \textbf{free} --- $1.0\pm0.1$ in either order ---
+for a $200\times$ accuracy gain.
+\item On \code{cbe\_lubich} the budget costs $\sim1.9\times$, the direction a cost model
+predicts. The starved run is cheap only because it is stalled and not doing the physics: at
+$L=12$, $t=1.5$ it is $22\times$ less accurate.
+\item \code{maxiter}$=30$ is the wasteful default, not the budget --- capping at $8$ cuts
+\code{cbe\_bond\_update} by $\sim36\%$ with the error unchanged to all printed digits, while
+saving nothing on \code{cbe\_lubich}. The asymmetry is structural: one exponential per
+\emph{bond} versus one per \emph{step}.
+\end{itemize}
+
+\section{Naming, and one further correction}
+
+The two paths are now named for what they are, and every occurrence was renamed across sources,
+tests, benchmarks and documents:
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+old & new \\
+\midrule
+\code{cbe\_gate\_bond\_update} & \code{cbe\_bond\_update} \\
+\code{cbe\_gate\_sweep!} & \code{cbe\_bond\_update\_sweep!} \\
+\code{cbe\_gate\_bug!} & \code{cbe\_bond\_update\_bug!} \\
+\code{cbe\_expand\_gate} & \code{cbe\_expand\_bond} \\
+\code{sketch\_gate\_left/right} & \code{sketch\_bond\_left/right} \\
+\code{cbe\_bug\_bond\_update} & \code{cbe\_lubich\_sweep} \\
+\code{cbe\_bug!} & \code{cbe\_lubich\_bug!} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+\textbf{Neither path applies a global $\Hb$ to the state}, and earlier wording in the documents
+that said so was wrong. Every application is an \emph{effective local} operator: a two-site
+effective $\Hb$ for the basis sketch, assembled from the left channel environments at link $i$,
+the right channels at link $i+2$ and the local terms; and a zero-site effective $\Hb$ for the
+Galerkin step, the environments contracted with the augmented frames. The only defensible sense
+of ``global'' is \emph{which terms the effective operator contains}: all of $\Hb$ for
+\code{cbe\_lubich\_sweep}, versus only the local bond term for \code{cbe\_bond\_update}, where
+the rest of the chain reaches the bond solely through the canonical gauge. The environment
+module says as much in its own header: \emph{not a symmetric MPO} --- it is an MPO contraction
+with the virtual leg \emph{named} rather than fused.
+
+\section{Verification}
+
+Both suites pass with the new default and after the rename: $1019/1019$ in the CBE module suite
+and $722/722$ in the validated integrator's suite, the latter untouched by this work.
+
+% =====================================================================================
+\part{The method}
+\label{part:method}
+% =====================================================================================
+
+\section{Setting and notation}
+
+Work at one bond $(i, i+1)$ of an MPS. Cutting there gives the two-site block
+\begin{equation}
+  \Theb = U_0\, S_0\, V_0,
+\end{equation}
+where $U_0$ carries legs $(\chi_{i-1}, d, r)$ and is a left isometry
+($U_0^\dagger U_0 = \mathbb{1}$), $V_0$ carries $(r, d, \chi_{i+1})$ and is a right isometry,
+$S_0$ is the $r\times r$ core, $d$ is the physical dimension and $r$ the bond rank. The
+\emph{frames} $U_0, V_0$ define the variational manifold the step may move in; the whole
+difficulty of a rank-adaptive integrator is choosing \emph{new columns} for them.
+
+The two local spaces bound how far each side can grow:
+\begin{equation}
+  \mathrm{room}_l = d\,\chi_{i-1} - r,
+  \qquad
+  \mathrm{room}_r = d\,\chi_{i+1} - r .
+  \label{eq:room}
+\end{equation}
+These are hard limits: a frame cannot have more columns than its local space has dimensions.
+
+\section{What the $K$- and $L$-steps do, and why they can be replaced}
+\label{sec:kl}
+
+\subsection{The original $K$/$L$ steps}
+
+In BUG the basis at a bond is updated by evolution. The $K$-step forms $K = U_0 S_0$ and
+evolves it with the \emph{opposite} frame held fixed. In this codebase --- the
+\emph{discarded} variant --- the complement projector is applied to the \emph{generator}, before
+the exponential (\file{src/BondUpdateBUG/kls\_step.jl}):
+\begin{equation}
+  \dot K(t) = \Pperp_{U_0}\Big[\big(\Hb\,(K(t)\,V_0)\big)V_0^\dagger\Big],
+  \qquad
+  \Pperp_{U_0} = \mathbb{1} - U_0U_0^\dagger,
+  \qquad K(0) = U_0 S_0,
+  \label{eq:kstep}
+\end{equation}
+integrated over the step, after which one augments
+$\hat U = \mathrm{orth}\big([\,K(\tau) \mid U_0\,]\big)$; the $L$-step is the mirror on the
+right. Note the inner bracket: $\Hb$ acts on the two-site block $K V_0$ and the result is closed
+against $V_0^\dagger$, so this is already an \emph{effective} operator, not a global one.
+Applying $\Pperp$ to the generator makes it \textbf{non-Hermitian}, which is why the $K$/$L$
+substeps take the Arnoldi path while only the $S$-step stays Hermitian.
+
+Two observations drive everything that follows.
+
+\begin{enumerate}[leftmargin=1.4em]
+\item \textbf{Only the span survives.} $K(\tau)$ itself is discarded; what enters the Galerkin
+step is the \emph{subspace} $\mathrm{range}([K(\tau) \mid U_0])$. Any procedure returning that
+subspace is as good as solving Eq.~\eqref{eq:kstep}.
+\item \textbf{To first order the span is an $\Hb$-image.} Expanding
+Eq.~\eqref{eq:kstep},
+\begin{equation}
+  K(\tau) = U_0 S_0 - \mathrm{i}\tau\, \Pperp_{\text{right}} \Hb\, (U_0 S_0) + O(\tau^2),
+\end{equation}
+so
+\begin{equation}
+  \boxed{\;\mathrm{range}\big([\,K(\tau) \mid U_0\,]\big)
+       = \mathrm{range}\big([\,U_0 \mid \Pperp (\Hb\Theb)\,]\big) + O(\tau).\;}
+  \label{eq:equiv}
+\end{equation}
+\end{enumerate}
+
+The right-hand side of Eq.~\eqref{eq:equiv} contains \emph{no time evolution}: one application
+of $\Hb$, with the current frame projected out. That is the entire idea. The $\tau^2$ and higher
+powers are not lost --- they are recovered by the Krylov iteration inside the $S$-step
+(Sec.~\ref{sec:sstep}), which builds a genuine Krylov space over the \emph{expanded} basis.
+
+\subsection{What replaces them, operation by operation}
+
+\begin{center}
+\begin{tabular}{@{}p{0.30\linewidth}p{0.32\linewidth}p{0.30\linewidth}@{}}
+\toprule
+& \textbf{standard BUG} & \textbf{RSVD-CBE} \\
+\midrule
+new left directions & solve Eq.~\eqref{eq:kstep} (\code{expv} on a
+\emph{non-Hermitian} operator, Arnoldi) & one sketched application of $\Hb$, then two small
+SVDs \\
+new right directions & the mirror $L$-ODE & the mirror sketch \\
+empty charge sectors & random per-sector seed columns (\code{missing\_fill}) & reached
+\emph{through} $\Hb$ by a sector-graded probe \\
+ranking of candidates & none: every direction found is admitted & candidates ranked by weight
+in $\Hb\Theb$, top $\Dex$ kept \\
+exponentials per bond & two (non-Hermitian) & \textbf{zero} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The last two rows are the substantive gains. Admitting every direction found means the rank
+grows by whatever the ODE happened to produce; ranking means a small $\Dex$ can be
+\emph{targeted}. And reaching an empty-but-reachable charge sector through $\Hb$ returns the
+direction the dynamics actually wants, rather than a random column the $S$-step's SVD then
+discards.
+
+\paragraph{The $K$/$L$ machinery already needed an $\Hb\Theb$ patch.} This is the strongest
+argument for the replacement, and it predates it. Because the $K$- and $L$-half-steps hold the
+opposite frame fixed, on a product state the off-diagonal part of the generator in
+Eq.~\eqref{eq:kstep} projects to zero and \emph{the rank cannot grow at all} --- the state
+freezes, fatally so without $U(1)$ sectors where a random fill cannot help either. The validated
+kernel therefore carries a ``criterion-2'' enrichment: it forms the residual of the \emph{full}
+two-site action $\Hb\Theb$ and enriches the frames with the part of it orthogonal to what $K$/$L$
+found. So the existing integrator already applies $\Hb$ once per bond and already grows its basis
+from that residual --- it just does so as a corrective patch bolted onto two ODE solves.
+RSVD-CBE keeps that mechanism, drops the ODEs and the random fill, and adds a weight ranking:
+one $\Hb$ application doing the whole job it was previously doing only as a rescue.
+
+\section{The RSVD step, from first principles}
+\label{sec:rsvd}
+
+\subsection{The problem it solves}
+
+We need an orthonormal basis for the part of the left image of $\Hb\Theb$ that lies outside
+$U_0$:
+\begin{equation}
+  \mathcal{C} \;=\; \mathrm{range}\big(\Pperp\,(\Hb\Theb)_{\text{left}}\big),
+  \qquad \Pperp = \mathbb{1} - U_0 U_0^\dagger,
+  \label{eq:target}
+\end{equation}
+and we want the $\Dex$ directions in $\mathcal{C}$ of largest weight. The direct route --- form
+$\Hb\Theb$, matricise, take its SVD --- is exactly what this method exists to avoid:
+$\Hb\Theb$ is the rank-4 two-site object that 2-site TDVP allocates and BUG does not.
+
+\subsection{Randomised range finding in three sentences}
+
+Let $A$ be a matrix whose column space we want but whose entries we would rather not form. Take
+a thin random matrix $\Om$ with a few more columns than the rank we seek, and compute
+$Y = A\,\Om$. Because a random vector has a component along every direction almost surely, the
+columns of $Y$ span the dominant part of $\mathrm{range}(A)$; orthonormalising $Y$ therefore
+gives a basis for it, and the ``few more columns'' (the \emph{oversampling}) is what makes the
+statement reliable rather than merely likely.
+
+That is the whole of RSVD as used here, with three specialisations.
+
+\paragraph{(i) $A$ is never formed.} $A\Om$ is computed by folding $\Om$ into the operator
+before contracting. In the bond-update path, $\Om$ is absorbed into the gate's bra leg first, so
+the largest intermediate is $O(d^2 g r)$ and the rank-4 object never exists:
+\begin{equation}
+  Y = (\Hb\Theb)\,\Om^\dagger,
+  \qquad
+  \Om \;\text{in the layout of}\; V_0,\;\text{with } g \;\text{columns instead of } r .
+\end{equation}
+Setting $\Om = V_0$ recovers the exact left factor of $\Hb\Theb$, which is how the sketch is
+tested against a formed reference.
+
+\paragraph{(ii) The probe is drawn per charge sector.} With a $U(1)$ symmetry the bond leg
+carries charge sectors, and a probe drawn without regard to them can miss a sector entirely ---
+including a sector that is currently empty but reachable by $\Hb$. The probe's columns are
+therefore allocated across sectors in proportion to sector dimension. This is what makes the
+random per-sector seeding of standard BUG unnecessary.
+
+\paragraph{(iii) The probe is half complement, half isometry.} The probe is built in two halves:
+random columns with $V_0$ projected \emph{out} (the complement half), and random columns with
+$V_0$ projected \emph{in} (the isometry half), mixed by \code{comp\_ratio} (default $0.5$). It
+is worth being precise about what this does \emph{not} do: it does not control what is admitted.
+The admitted block is always outside the frame, because the preselection projects the frame out
+regardless. \code{comp\_ratio} $=1$ therefore does not mean ``keep only the discarded space'';
+it means the probe is blind to the one-site component, which the reference implementation warns
+matters, and it caps the probe's width at the opposite frame's complement dimension --- which
+near a chain edge is $0$ or $1$.
+
+\subsection{Budget, oversample, probe, candidates: the four steps in code}
+\label{sec:fourfunnel}
+
+The four quantities are produced in a strict order, each from the one before, and the
+distinction between them is where most of the confusion about this method lives. All line
+references are \file{src/RSVDCBEBondUpdate/cbe.jl}.
+
+\paragraph{Step 1 --- the budget $\Dex$: \emph{how many new directions this bond may admit}.}
+\begin{lstlisting}[style=jl]
+dmax         = max(leg_dim(U0,1), r, leg_dim(V0,3))          # neighbourhood max
+budget       = dex <= 0 ? max(ceil(Int, growth*dmax) - r, 1) : dex
+dex_l, dex_r = min(budget, room_l), min(budget, room_r)      # room = d*chi - r
+\end{lstlisting}
+Read it in four moves. \code{dex} (default $0$) is an \emph{absolute override}: any positive
+value bypasses the schedule completely, which is what benchmarks use so the budget is a fixed
+axis. Otherwise \code{growth} (default $2.0$) sets it relative to $d_{\max}$ --- the
+\textbf{neighbourhood} max over the left, centre and right bond dimensions, not $r$ alone, so a
+wide bond can pull narrow neighbours up. The \code{max(..., 1)} floor guarantees every bond may
+propose at least one direction. Finally each side is clipped by its own
+$\mathrm{room} = d\chi - r$, a hard ceiling: no frame can exceed the local space it lives in. If
+both sides clip to zero the routine returns immediately --- the frames are already complete, and
+that is success, not failure.
+
+\paragraph{Step 2 --- the oversample $\Dpre$: \emph{how wide the random probe is}.}
+\begin{lstlisting}[style=jl]
+npre = preselect_only ? max(budget, 1) :
+       dover === nothing ? ceil(Int, 1.2 * budget) : budget + dover
+\end{lstlisting}
+Three modes. Default (\code{dover = nothing}) is \textbf{relative}: $\Dpre = \lceil 1.2\,
+\text{budget}\rceil$, the reference's $20\%$ margin. Passing \code{dover = n} makes it
+\textbf{additive}, $\Dpre = \text{budget} + n$, which gives small budgets proportionally more
+help. \code{preselect\_only} drops the margin entirely, since in that mode there is no ranking
+stage for the extra columns to feed.
+
+\emph{Why oversample at all.} A probe of exactly $k$ columns does span a $k$-dimensional slice of
+$\mathrm{range}(A)$, but the chance that this particular random slice is well aligned with the
+true top-$k$ subspace is not close to $1$ --- the projection can be arbitrarily ill-conditioned.
+A handful of extra columns is what turns ``probably captures the range'' into ``misses it with
+exponentially small probability''. It is a reliability margin, not an accuracy parameter.
+
+\emph{One subtlety worth flagging}, because it is invisible in the code at a glance: \code{npre}
+is computed from the \textbf{unclipped} \code{budget}, not from \code{dex\_l}/\code{dex\_r}. A
+bond with almost no room still gets a full-width probe.
+
+\paragraph{Step 3 --- the probe $\Om$ itself (\code{sector\_graded\_sketch}).}
+Given $\Dpre$, build a tensor in the \emph{opposite} frame's layout:
+\begin{enumerate}[leftmargin=1.4em,itemsep=1pt]
+\item \code{fusion\_basis} gives the full local space; per charge sector $q$ it has dimension
+$d_{\text{full}}(q)$. The frame already spans $d_T(q)$ of it, leaving a complement
+$d_C(q) = d_{\text{full}}(q) - d_T(q)$.
+\item Split the width: $n_c = \mathrm{round}(\Dpre \cdot \code{comp\_ratio})$ complement columns,
+$n_t = \Dpre - n_c$ isometry columns.
+\item \code{\_alloc\_columns} spreads each half across sectors \emph{in proportion to sector
+dimension}, capped at each sector's own dimension, using a \textbf{per-sector \code{ceil}}.
+\item Any shortfall --- a half whose subspace is too small to supply its quota --- is
+\textbf{handed to the other half}, and back again if that one is short too.
+\item The complement half is random-then-projected-\emph{out} of the frame, the isometry half
+random-then-projected-\emph{in}; the two are direct-summed.
+\end{enumerate}
+
+Two consequences that surprise people, both load-bearing:
+
+\begin{itemize}[leftmargin=1.2em]
+\item \textbf{$\Dpre$ is a target, not the realised width.} The \code{ceil} in step 3 is applied
+\emph{per sector}, so the sum over sectors can exceed $\Dpre$. In the worked example
+$\Dpre = 9$ yet the probe comes out $10$ columns wide, split
+$[-2 \Rightarrow 2,\; 0 \Rightarrow 4,\; 2 \Rightarrow 3,\; 4 \Rightarrow 1]$. This is
+deliberate: the \code{ceil} guarantees every sector with room receives at least one column,
+which is precisely what matters when the sector you need is the currently \emph{empty} one. A
+\code{floor} would round the small sectors to zero and the probe would never reach them.
+\item \textbf{The redistribution in step 4 is not tidiness.} Near a chain edge the opposite
+frame's complement is $0$- or $1$-dimensional. Without redistribution a complement-weighted
+split collapses the probe to one column and the bond declines to expand \emph{with room to
+spare} --- measured, leaving right residuals of $3.1\times10^{-4}$ and $0.19$ untouched, and one
+blocked narrow bond then caps every bond inward.
+\end{itemize}
+
+\paragraph{Step 4 --- the preselection (\code{\_preselect\_left}).}
+\begin{lstlisting}[style=jl]
+R = perp_component(U0, Y)                             # P_perp Y, on legs (link_l, site_l)
+n = norm(R)
+n <= 100*eps * max(norm(Y), 1.0) && return nothing    # nothing outside the frame
+res = svd((1/n) * R, (1,2); cutoff = stol_pre)        # NORMALISED first
+Q   = res.U
+R2  = perp_component(U0, Q)                           # RepairOrtho
+Q   = svd(R2, (1,2); cutoff = 1e-13).U
+return (Q, trunc_weight(res))                         # the tail becomes err_pre
+\end{lstlisting}
+Project the frame out; bail if what remains is noise \emph{relative to} $\|Y\|$; normalise;
+SVD at \code{stol\_pre} ($10^{-10}$); then orthonormalise a \emph{second} time. The
+normalisation and the second pass are the two steps that look redundant and are not --- both are
+explained in \S\ref{sec:twostage} and in Stage~4 of the worked example.
+
+The output width is the \textbf{number of candidates}, and it is decided by the SVD cutoff alone
+--- not by $\Dex$, not by $\Dpre$. This is the point most easily got wrong, so state it flatly:
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{0.30\linewidth}p{0.62\linewidth}@{}}
+\toprule
+\textbf{Does the budget affect preselection?} & \textbf{Only through the probe's width.} \\
+\midrule
+Directly & No. Preselection is governed by \code{stol\_pre} and by what $\Hb$ actually
+produces outside the frame. \\
+Indirectly & Yes, and decisively: the budget sets $\Dpre$, and the probe can never yield more
+candidates than it has columns. A budget too small starves the probe and the directions are
+never \emph{generated}. \\
+Where it re-enters & At the \emph{final} selection, where \code{dex\_l}/\code{dex\_r} cap how
+many candidates are admitted, and \code{err\_fnl} reports what the cap cost. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+That split is the whole design. A starved budget fails \emph{silently at step 3} --- there is no
+diagnostic for a direction that was never probed. A generous budget lets the preselection decide
+on its own merits and leaves the cap non-binding, which is the \code{err\_fnl}$\,=0$ healthy
+case. It is why the $\text{growth}=1.1$ schedule showed \code{err\_fnl}$\,=0.62$: not a
+selection failure, a \emph{budget} failure.
+
+\paragraph{The funnel, on the worked example.} Every number below is from the transcript in
+Part~\ref{part:example}, at bond $(4,5)$ of an $L=8$ chain with $r=7$, $\chi_l=\chi_r=6$, $d=2$.
+
+\begin{center}
+\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+quantity & symbol & value & set by \\
+\midrule
+neighbourhood max        & $d_{\max}$ & $7$    & $\max(6,7,6)$ \\
+budget                   &            & $7$    & $\lceil 2.0\cdot 7\rceil - 7$ \\
+room, each side          &            & $5,\,5$ & $d\chi - r$ \\
+per-side budget          & $\Dex$     & $5$    & $\min(7, 5)$ \\
+oversampled target       & $\Dpre$    & $9$    & $\lceil 1.2\cdot 7\rceil$ \\
+\emph{realised} probe width &         & $10$   & per-sector \code{ceil} \\
+candidates surviving preselection &   & $4$    & SVD at \code{stol\_pre} \\
+admitted                 &            & $4$    & $\min(4, 5)$ --- cap does not bind \\
+rank after expansion     &            & $7 \to 11$ & direct sum \\
+rank after the $S$-step  &            & $10$   & truncation \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Read down that table and the method is one sentence: a budget of $7$ becomes a probe of $10$
+columns, which finds $4$ genuinely new directions, all $4$ of which fit under the cap of $5$ --- and
+under the old schedule the budget would have been $1$, the probe $2$ columns, and three of those
+four directions would never have existed to be ranked.
+
+\subsection{The two-stage selection}
+\label{sec:twostage}
+
+\begin{description}[leftmargin=1.4em,style=nextline]
+\item[Stage 1 --- preselection (cheap, generous).]
+Sketch, project the frame out, orthonormalise:
+\begin{equation}
+  Y = (\Hb\Theb)\Om^\dagger,
+  \qquad
+  R = \Pperp Y,
+  \qquad
+  Q_L = \mathrm{orth}(R) \;\text{via SVD at tolerance \code{stol\_pre}} .
+\end{equation}
+$R$ is normalised before the SVD because the cutoff is relative to the largest singular value
+and the new directions are $O(\tau)$-small in absolute terms. The orthonormalisation is then
+\emph{repeated} --- the reference's \code{RepairOrtho} --- because a direction surviving the
+cutoff can still carry a component along $U_0$ of order $\varepsilon/\text{cutoff}$, and the
+direct sum $[U_0 \mid Q_L]$ is an isometry only if $Q_L \perp U_0$ exactly. This is not
+bookkeeping: the same omission elsewhere in the codebase grew a state's norm by $128\times$
+over five steps.
+
+\item[Stage 2 --- final selection (the ranking).]
+Form the \emph{small} matrix
+\begin{equation}
+  M = Q_L^\dagger\,(\Hb\Theb)\,Q_R
+  \qquad (\Dpre \times \Dpre),
+  \label{eq:M}
+\end{equation}
+take its SVD and keep $\Dex$ singular directions. Its singular values \emph{are} the weights
+of the candidate pairs in the two-site action, so this is the ranking step, and it is what the
+$K$/$L$ augmentation structurally cannot do.
+\end{description}
+
+\noindent
+One subtlety that was a defect and is now the design: this selection is applied \emph{per side}.
+The reference's CBE is directional --- it expands one side per call --- so its joint matrix $M$
+only ever ranks the side being expanded. Reusing $M$ to rank both sides at once lets a saturated
+side veto its partner, and it did: capping each side at $\min(\Dex^{(l)}, \Dex^{(r)})$ throttled
+one side to the other's headroom, and a global ``$M$ is negligible'' verdict returned nothing on
+\emph{either} side while a residual of $0.19$ went unaddressed on one of them. Each side now
+decides independently, falling back to its own preselected candidates when the joint SVD cannot
+serve its whole budget --- ordered by the preselection SVD's singular values, though see the
+caution in \S\ref{sec:clcr} on how that ordering interacts with charge sectors.
+
+\subsection{Constructing the appended blocks \texorpdfstring{$C_L$}{CL} and \texorpdfstring{$C_R$}{CR}}
+\label{sec:clcr}
+
+$C_L$ and $C_R$ are the candidate directions after ranking and after trimming to budget. They are
+built \emph{per side and independently} (\code{cbe\_expand}), and each side takes one of two
+branches. Write $\Djoint = \min(\Dex^{(l)}, \Dex^{(r)}, \Dpre^{(l)}, \Dpre^{(r)})$ for the number
+of directions the joint SVD can rank.
+
+\begin{description}[leftmargin=1.4em,style=nextline]
+\item[Ranked branch.] Take the SVD $M = U_M \Sigma_M V_M^\dagger$ of the small matrix
+Eq.~\eqref{eq:M}, truncated at \code{stol\_fnl} to $\Djoint$ directions, and \emph{rotate the
+preselected candidates into that ranked basis}:
+\begin{equation}
+  C_L \;=\; Q_L\,U_M,
+  \qquad
+  C_R \;=\; V_M^\dagger\,Q_R .
+  \label{eq:clcr}
+\end{equation}
+No new directions are created here --- $C_L$ spans exactly the same space as $Q_L$; the rotation
+only \emph{orders} that space so that trimming to $\Dex$ keeps the heaviest combinations.
+
+\item[Fallback branch.] Otherwise the side keeps the first $\Dex$ columns of its own preselected
+$Q$ (\code{\_trim\_total}), with no joint rotation at all.
+\end{description}
+
+\noindent
+The branch condition is \code{dex\_l <= joint}, and since $\Djoint \le \Dex^{(l)}$ by
+construction, that fires \emph{only} when $\Djoint = \Dex^{(l)}$ --- i.e.\ only when the joint SVD
+can serve that side's entire budget. This is the ``each side decides independently'' design of the
+previous subsection expressed in code: a side whose budget the joint ranking cannot fill does not
+get a partially-ranked block, it falls back to its own candidates.
+
+Two properties matter and both are inherited rather than re-established. First,
+\textbf{orthonormality}: $Q_L$ is orthonormal and $\perp U_0$ (the \code{RepairOrtho} pass), and
+$U_M$ is an isometry, so $C_L$ is orthonormal and $\perp U_0$ --- which is precisely what makes
+$[\,U_0 \mid C_L\,]$ an isometry. The right side is the mirror image, with $V_M^\dagger$ carrying
+orthonormal rows. Second, \textbf{tagging}: the new block's bond leg is retagged to $U_0$'s bond
+tag before the direct sum, because the two preselections deliberately use distinct tags and the
+tensor library forbids duplicate indices.
+
+\begin{center}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Caution} & \textbf{Why} \\
+\midrule
+The fallback is not globally weight-ordered
+  & \code{\_trim\_total} walks charge sectors in storage order and takes \\
+  & a prefix of each, filling greedily. Within a sector the columns are \\
+  & SVD-ordered, but the \emph{allocation across} sectors is by storage \\
+  & order, not by weight. A heavy direction in a late sector can lose \\
+  & to a light one in an early sector. Unquantified --- worth a test. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{The expansion is lossless}
+
+The new columns are appended by direct sum,
+\begin{equation}
+  \Uex = [\,U_0 \mid C_L\,],
+  \qquad
+  \Vex = [\,V_0 \mid C_R\,],
+\end{equation}
+and the core is re-expressed in the wider basis,
+$\hat S_0 = \Uex^\dagger \Theb \Vex^\dagger$. Since $\Uex$ contains $U_0$ as a block,
+\begin{equation}
+  \Uex \hat S_0 \Vex = \Theb
+  \qquad\text{exactly},
+\end{equation}
+so the expansion changes \emph{no amplitude} --- it only widens the space the step may use, and
+$\hat S_0$ is identically zero on the new directions. Two consequences that repeatedly caused
+confusion, and are worth stating plainly:
+
+\begin{itemize}[leftmargin=1.2em]
+\item \textbf{An expansion cannot raise the Schmidt rank.} A widened bond collapses back at the
+next gauge move, and that is correct reporting rather than a lost expansion. Rank grows only
+where the state is \emph{evolved} in the widened space.
+\item \textbf{Therefore the evolution must happen before the truncation}, which it does: the
+$S$-step makes $\hat S_1$ dense on the new directions, and only then is the bond compressed.
+\end{itemize}
+
+\section{The $S$-step}
+\label{sec:sstep}
+
+The $S$-step is unchanged from the validated integrator, and deliberately so. In the expanded
+basis, define the projected generator
+\begin{equation}
+  \mathcal{A}(X) \;=\; \Uex^\dagger \,\Hb\, \big(\Uex X \Vex\big)\, \Vex^\dagger,
+\end{equation}
+and take one exponential,
+\begin{equation}
+  \hat S_1 = \exp(\tau \mathcal{A})\, \hat S_0,
+  \qquad \tau = -\mathrm{i}\,\delta t ,
+\end{equation}
+by Lanczos, matrix-free, with $\mathcal{A}$ supplied as a closure. Then SVD $\hat S_1$, truncate
+to \code{maxdim} and \code{trunc\_thresh}, and write the two cores back.
+
+Three properties matter.
+
+\begin{enumerate}[leftmargin=1.4em]
+\item \textbf{Exact at full rank.} When the expanded frames span the whole local space,
+$\mathcal{A}$ \emph{is} the local Hamiltonian and the step is the exact two-site propagator.
+This is the first thing the tests check.
+\item \textbf{$\tau = 0$ is the identity}, because $\hat S_0$ is lossless.
+\item \textbf{Hermitian, hence Lanczos}, not Arnoldi --- unlike the $K$/$L$ ODEs it replaces,
+whose generator $\Pperp\Hb$ is non-Hermitian. Removing them removes a non-symmetric Krylov
+problem from the integrator.
+\end{enumerate}
+
+\paragraph{Where the two paths differ.} \code{cbe\_bond\_update} takes one such step \emph{per
+bond} inside an odd/even Trotter sweep, with the bare gate as $\Hb$; the projection
+$\Uex X \Vex$ builds a rank-4 block on every iteration, which is affordable at small $\chi$ and
+is why this path is the diagnostic vehicle rather than the production one.
+\code{cbe\_lubich\_sweep} takes \emph{one} step per time step, at the centre bond, with $\Hb$
+dressed by channel environments; its $\mathcal{A}$ contracts a rank-2 core against rank-2 and
+rank-3 environment blocks, so no rank-4 object is ever formed. This is the measured origin of the
+\code{maxiter} asymmetry in Sec.~\ref{sec:retraction}: $\sim344$ iterations per step in the
+first case, $\sim28$ in the second.
+
+\section{Cost}
+
+With $\Dpre \sim 1.2\,\text{growth}\cdot\chi$, per bond:
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+stage & cost & with $\Dpre \propto \chi$ & note \\
+\midrule
+sketch $(\Hb\Theb)\Om^\dagger$ & $O(w\,d\,\chi^2 \Dpre)$ & $O(\chi^3)$ & $w$ = channel count \\
+preselection SVD & $O(d\,\chi\, \Dpre^2)$ & $O(\chi^3)$ & thin \\
+final SVD & $O(\Dpre^3)$ & $O(\chi^3)$ & small matrix \\
+$S$-step, per iteration & $O(w\,\chi^2)$ & $O(\chi^2)$ & rank-2 only (Lubich path) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+So the ratio schedule costs the same \emph{order} as the canonicalisation the sweep already
+pays --- a larger constant, not a worse exponent. A fixed $\Dex$ would be $O(\chi^2 \Dex)$,
+asymptotically cheaper, which is precisely the trade the accuracy measurements rejected.
+
+Measured at small $\chi$ ($L=12$, caps $8/16/32$) the fitted exponent is far below cubic
+($k \approx 0.05$ then $0.43$ per doubling) because $L$-dependent constants dominate there; the
+asymptotic figure needs larger $\chi$ than a laptop should be asked for. No super-cubic
+behaviour appears.
+
+\paragraph{What can blow up, in order of how real it is.}
+\begin{enumerate}[leftmargin=1.4em]
+\item \textbf{Norm growth from non-orthogonal direct sums} --- the one that actually happened
+($128\times$ over five steps, elsewhere in the codebase). Guarded by the repeated
+orthonormalisation.
+\item \textbf{A strict SVD selector} dropping exactly-zero directions, so re-deriving a frame
+from a zero-padded tensor collapses it. This caused an early rank freeze; the fix was to
+accumulate frames separately and assemble the state only after the step.
+\item \textbf{What cannot blow up:} there is no inverse anywhere in this path --- no $S^{-1}$,
+no overlap matrices to invert --- so ill-conditioned small singular values have nothing to
+divide into. Rank is bounded by Eq.~\eqref{eq:room} and by \code{maxdim}, and the expansion is
+lossless.
+\end{enumerate}
+
+\section{The knobs}
+
+\begin{center}
+\begin{tabular}{@{}llp{0.44\linewidth}@{}}
+\toprule
+knob & default & what it controls \\
+\midrule
+\code{growth} & $2.0$ & the budget schedule
+$\Dex = \lceil \text{growth}\cdot d_{\max}\rceil - r$, neighbourhood-coupled through
+$d_{\max}$. Problem-dependent; see Table~\ref{tab:decide}. \\
+\code{dex} & $0$ & absolute per-side budget; any positive value \emph{overrides}
+\code{growth} entirely. Use for measurement, where a fixed axis is wanted. \\
+\code{dover} & \code{nothing} & oversampling of the probe; \code{nothing} gives
+$\Dpre = \lceil 1.2 \Dex\rceil$. This is the RSVD reliability margin. \\
+\code{comp\_ratio} & $0.5$ & complement/isometry split of the \emph{probe}. Does not control
+what is admitted. Leave alone unless testing. \\
+\code{stol\_pre} & $10^{-10}$ & relative cutoff of the preselection SVD. \\
+\code{stol\_fnl} & $10^{-13}$ & relative cutoff of the final selection SVD. \\
+\code{maxiter} & $30$ & Lanczos budget of the $S$-step. Measured wasteful on
+\code{cbe\_bond\_update} ($\sim36\%$ of its time for no accuracy); irrelevant on
+\code{cbe\_lubich}. \\
+\code{maxdim}, \code{trunc\_thresh} & $200$, $10^{-12}$ & the truncation after the $S$-step ---
+where a rank ceiling belongs. \\
+\code{sulz\_cap} & \code{false} & optional global $2r_{\max}$ bound; belongs to the
+rank-adaptive BUG, kept only for an A/B. \\
+\code{preselect\_only} & \code{false} & skip the ranking and take preselected candidates
+directly (the reference's \code{-p} mode). Diagnostic: isolates what the ranking is worth. \\
+\code{expand} & \code{true} & \code{false} freezes the frames, giving a fixed-rank projector
+step. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% =====================================================================================
+\part{A worked example}
+\label{part:example}
+% =====================================================================================
+
+\noindent
+Everything below is the output of \file{examples/cbe\_walkthrough.jl}: XX chain, $L=8$, $U(1)$
+symmetric, a domain wall warmed by three steps of $\delta t = 0.05$ so the bond carries real
+structure, then one bond update at bond $(4,5)$. Run it with
+
+\begin{lstlisting}[language=bash]
+julia --project=. examples/cbe_walkthrough.jl
+\end{lstlisting}
+
+\noindent
+The bond is \textbf{chosen, not assumed}: the script takes the bond maximising
+$\min(\mathrm{room}_l, \mathrm{room}_r)$. That matters, and the first draft of this example got
+it wrong --- the centre cut of a short chain \emph{saturates} (at $L=6$ it caps at rank $8$ and a
+warmed state reaches it), giving $\mathrm{room} = 0$ on both sides, so CBE correctly declined to
+expand and every selection stage printed empty. A saturated bond is not a failure of the method
+and must not be read as one.
+
+The stages below are the stages of the method. Each is stated as: what is computed,
+what came out, and what the number \emph{means} --- because most of these quantities are only
+interesting relative to something else (a residual relative to the action, a discarded weight
+relative to the kept spectrum), and a bare figure invites the wrong reading.
+
+\section{Stage 0 --- the bond before anything happens}
+
+Three warm-up steps give the state \code{bond\_dims = [2, 4, 6, 7, 6, 4, 2]}. Cutting at bond
+$(4,5)$, where $r=7$ and both halves have five dimensions in hand, gives the frames, the core,
+and the two quantities that bound everything afterwards --- $\mathrm{room}_l$ and
+$\mathrm{room}_r$ of Eq.~\eqref{eq:room}, both $5$ here.
+
+\begin{lstlisting}
+chain          L = 8, XX, U(1), domain wall, 3 steps of dt = 0.05 (t = 0.15)
+state          bond_dims = [2, 4, 6, 7, 6, 4, 2]
+bond           (4, 5) -- chosen as the most expandable, rank r = 7
+U0  (6 x 2 x 7)       left frame   (link_l, site_l, bond)
+S0  (7 x 7)           core
+V0  (7 x 2 x 6)       right frame  (bond, site_r, link_r)
+Theta0 (6 x 2 x 2 x 6)  the two-site block, U0*S0*V0
+bond sectors on U0 leg 3: [-4 => 1,  -2 => 3,  0 => 3]
+left isometry defect  = 1.02e-15   (U0 is an isometry)
+room_l = d*chi_l - r = 6*2 - 7 = 5
+room_r = d*chi_r - r = 2*6 - 7 = 5
+\end{lstlisting}
+
+\noindent
+The left isometry defect confirms $U_0^\dagger U_0 = \mathbb{1}$ to machine precision, which is
+what makes the direct sum in Stage~6 an isometry rather than merely a wider matrix. The bond leg
+carries several $U(1)$ charge sectors; the probe in Stage~2 has to respect that decomposition,
+which is the whole reason for a \emph{sector-graded} sketch.
+
+\section{Stage 1 --- the budget}
+
+The two schedules are evaluated side by side on the same bond, which is the cleanest possible
+statement of what the session's default change did.
+
+\begin{lstlisting}
+growth = 1.1 :  dmax = 7 -> budget = ceil(1.1*7) - 7 = 1    npre = 2
+growth = 2.0 :  dmax = 7 -> budget = ceil(2.0*7) - 7 = 7    npre = 9
+
+using growth = 2.0:  budget = 7, clipped per side to (dex_l, dex_r) = (5, 5)
+probe width npre = ceil(1.2*budget) = 9      (the 1.2 is the RSVD oversampling)
+\end{lstlisting}
+
+\noindent
+Read the two rows against each other: at the same $d_{\max}$, the reference's DMRG ratchet and
+the new default differ by roughly an order of magnitude in the number of directions the bond is
+permitted to propose. The probe width $\Dpre = \lceil 1.2 \Dex\rceil$ follows the budget, so the
+schedule sets not only what is admitted but how wide a net is cast to find it --- which is why a
+starved schedule cannot be compensated for downstream.
+
+\section{Stage 2 --- the random probe (the R in RSVD)}
+
+\begin{lstlisting}
+Omega_R (10 x 2 x 6)      a stand-in RIGHT frame with 10 columns instead of r = 7
+its columns are drawn PER CHARGE SECTOR: [-2 => 2,  0 => 4,  2 => 3,  4 => 1]
+half the columns are random-then-projected-OUT of V0 (the complement half),
+half are random-then-projected-IN  (the isometry half, comp_ratio = 0.5).
+\end{lstlisting}
+
+\noindent
+$\Om$ is a \emph{stand-in} for the right frame: same leg structure, a different number of
+columns. Its per-sector counts are the point --- a probe drawn without regard to charge would
+leave whole sectors unsampled, and a sector currently empty but reachable by $\Hb$ is exactly
+where the new physics lives.
+
+Note that $\Om$ has $10$ columns where $\Dpre = 9$ was asked for. That is not an error: the
+allocator takes $\lceil\,\cdot\,\rceil$ per sector, so that a sector entitled to a fractional
+share still receives a whole column, and the total can exceed the request by less than the number
+of sectors. Also note the probe's charge sectors ($-2,0,2,4$) differ from the bond's
+($-4,-2,0$): the probe lives in the \emph{fused} local space of the right half, which is a
+larger set of charges than the current bond carries --- and reaching those is the mechanism by
+which a new sector can enter the state at all.
+
+\section{Stage 3 --- one application of $\Hb$, sketched}
+
+\begin{lstlisting}
+Y   (6 x 2 x 10)      the left image of the gate's action, 10 columns wide
+check: sketch with Omega = V0 equals contracting the formed H*Theta:  2.58e-22
+H*Theta itself is rank 4 (6 x 2 x 2 x 6) and IS NEVER FORMED in the method;
+it is built here only to check the sketch. Omega is folded into the gate first.
+\end{lstlisting}
+
+\noindent
+Two things to note. First, the check: sketching with $\Om = V_0$ reproduces the result of forming
+$\Hb\Theb$ and contracting it, to machine precision --- so the sketch is the exact object,
+merely evaluated in an order that never materialises the rank-4 tensor. Second, that rank-4
+tensor is built \emph{here and only here}, to perform that check; the method itself never
+allocates it.
+
+\section{Stage 4 --- preselection}
+
+The candidate directions are the part of the sketched action lying outside the current frame.
+
+\begin{lstlisting}
+||Y|| = 1.017861e+00     ||P_perp Y|| = 7.945719e-06   ->  ratio 7.806e-06
+Q_L (6 x 2 x 4)       4 orthonormal candidate directions, all orthogonal to U0
+weight the preselection SVD discarded: err_pre = 1.696e-12
+Q_L is orthogonal to U0 to 3.77e-17  (the RepairOrtho second pass earns this)
+\end{lstlisting}
+
+\noindent
+\textbf{The most instructive number in the whole walkthrough is
+$\|\Pperp Y\|/\|Y\| \approx 8\times10^{-6}$.} The part of the gate's action lying outside the
+current frame is a \emph{millionth} of the action's norm --- and that tiny sliver is exactly the
+new physics, the thing the basis update exists to capture. It is small for a structural reason:
+the frame was built by the previous step, so it already spans almost everything $\Hb$ does to
+the block; what is new is $O(\tau)$ and, here, $O(\tau^2)$-ish in norm.
+
+Two consequences follow, and both are visible in the implementation.
+
+\begin{itemize}[leftmargin=1.2em]
+\item \textbf{The preselection must normalise before its SVD.} Telum's cutoff is relative to the
+largest singular value of the matrix it is given. Handing it $\Pperp Y$ unnormalised, with a
+tolerance meaningful on the scale of $\|Y\|$, would discard the entire complement as numerical
+noise. \code{\_preselect\_left} therefore divides by $\|\Pperp Y\|$ first, so the tolerance is
+relative to the new directions' \emph{own} scale.
+\item \textbf{Absolute thresholds anywhere in this path are a bug.} A cutoff of, say, $10^{-8}$
+applied to the action would delete every candidate at this bond.
+\end{itemize}
+
+\noindent
+The last line of the block is the \code{RepairOrtho} pass earning its place: the candidates are
+orthogonal to $U_0$ to $4\times10^{-17}$, without which the direct sum would not be an isometry
+and the norm would drift.
+
+\section{Stage 5 --- the ranking}
+
+\begin{lstlisting}
+UMU (4 x 4)          = Q_L^dag (H Theta) Q_R   -- a SMALL matrix, 4 x 4
+singular values KEPT  (4): 3.039e-11  2.291e-12  4.951e-13  2.790e-15
+singular values CUT   (0): -- none --
+These singular values ARE the weights: this is the ranking the K/L augmentation
+cannot do, since it admits every direction it finds regardless of weight.
+\end{lstlisting}
+
+\noindent
+This is the step the $K$/$L$ augmentation cannot perform. The singular values of
+$M = Q_L^\dagger (\Hb\Theb) Q_R$ \emph{are} the weights of candidate pairs in the two-site
+action, so keeping the top $\Dex$ is a principled choice rather than an arbitrary cut. Note the
+size of $M$: $4\times4$, and its SVD is the cheapest part of the whole procedure.
+
+Their absolute magnitudes ($10^{-11}$ down to $10^{-15}$) are again the $O(\tau)$ smallness of
+Stage~4, not a sign that the candidates are worthless; what matters is their \emph{ordering} and
+their spread --- four orders of magnitude between the first and the last, so the ranking is
+carrying real information about which directions to prefer.
+
+Nothing is cut here, and it is worth being precise about why: there are $4$ candidates and the
+budget permits $5$, so the cap does not bind at this bond. This is the \code{err\_fnl}$\,=0$
+condition of Table~\ref{tab:decide} --- the healthy case. Under the old $\text{growth} = 1.1$
+schedule the budget would have been $1$ (Stage~1), three of these four directions would have been
+discarded, and \code{err\_fnl} would have reported the loss.
+
+\paragraph{A caveat this transcript makes easy to misread.} The ranking is \emph{computed and
+printed} above, but at this bond it is \emph{not} what builds the appended block. Following
+\S\ref{sec:clcr}: $\Dex^{(l)} = 5$ while $\Djoint = \min(5,5,4,4) = 4$, so the guard
+$\Dex^{(l)} \le \Djoint$ is $5 \le 4$, which is false --- \emph{both} sides take the fallback
+branch, and since each $Q$ has $4$ columns against a budget of $5$, the trim returns them
+untouched. So here
+\begin{equation}
+  C_L = Q_L, \qquad C_R = Q_R \qquad\text{(no rotation by } U_M, V_M^\dagger\text{)},
+\end{equation}
+and the joint SVD's only effect is to report \code{err\_fnl}$\,=0$. The column count cannot
+distinguish the two branches --- both would yield $4$ --- so this is visible from the branch
+condition alone, not from the output. The ranked branch fires when a bond is
+\emph{candidate-rich relative to its budget}, which is the regime a tighter \code{growth} or a
+wider bond puts you in; it is exactly the regime the old $1.1$ schedule lived in, and where the
+$62\%$ discarded weight of \S\ref{sec:budget} was being thrown away.
+
+\section{Stage 6 --- the expansion, and its losslessness}
+
+\begin{lstlisting}
+U_ex (6 x 2 x 11)       r = 7 -> 11   (+4 new left directions)
+V_ex (11 x 2 x 6)       r = 7 -> 11   (+4 new right directions)
+err_pre = 5.322e-12   err_fnl = 0.000e+00   (err_fnl = 0 means nothing ranked out)
+LOSSLESS: ||U_ex S_hat0 V_ex - Theta0|| = 1.58e-17     ||S_hat0|| - ||Theta0|| = 0.00e+00
+So the expansion changes NO amplitude -- it only widens the space the step may use.
+This is also why an expansion alone cannot raise the Schmidt rank.
+
+left residual ||HT - U U^dag HT|| / ||HT||:  before 7.785e-06  ->  after 2.493e-16
+That is the whole point of the selection: the frame now spans the gate's image.
+\end{lstlisting}
+
+\noindent
+The two zeros on the losslessness line are the heart of the design. $\Uex \hat S_0 \Vex$
+reproduces $\Theb$ exactly and $\|\hat S_0\| = \|\Theb\|$, so nothing has been added to the
+state --- only to the space the state is allowed to move in. It also explains why an expansion
+alone cannot raise the Schmidt rank, and hence why the evolution has to happen before the
+truncation.
+
+The residual line is the discriminating measurement of the whole method: the fraction of the
+gate's action on the block that the frame cannot represent, before and after. It falls
+\textbf{ten orders of magnitude}, $7.8\times10^{-6} \to 2.5\times10^{-16}$ --- from ``the frame
+misses a millionth of the action'' to ``the frame spans it to machine precision''. Driving this
+to zero is the strongest thing an expansion at this bond can achieve, and it is exactly the
+criterion the two selection defects of Sec.~\ref{sec:retraction} were failing: they left
+residuals of $0.19$ and $9.97\times10^{-3}$ untouched \emph{with room to spare}, which is why the
+diagnostic is printed as a number rather than asserted as a pass.
+
+Both sides gained four directions ($7 \to 11$) here, and the symmetry is a consequence of the
+per-side selection rather than an imposed constraint --- each side spent its own budget against
+its own candidates.
+
+\section{Stage 7 --- the $S$-step}
+
+\begin{lstlisting}
+S_hat0 (11 x 11)       ->  S1 (11 x 11)        in 14 Lanczos iterations
+||S1|| = 1.0000000000   ||S_hat0|| = 1.0000000000    (unitary step: equal)
+S1 singular values: 9.950e-01  9.978e-02  5.736e-05  5.752e-06  4.946e-09  4.957e-10  2.852e-13  2.025e-13
+kept rank 10 of the expanded 11; discarded weight 2.41e-17
+The rank SURVIVES here and only here: S1 is dense on the new directions, so the
+truncation keeps them. Without this step they would collapse at the next gauge move.
+\end{lstlisting}
+
+\noindent
+The norm is preserved to ten digits because the step is a unitary exponential in the expanded
+basis. The spectrum of $\hat S_1$ is now \emph{dense on the new directions} --- this is the
+moment the expansion turns into rank --- and the truncation therefore keeps them rather than
+discarding them as it would have discarded the identically-zero block of $\hat S_0$.
+
+Read the spectrum as the story of the step: two large values ($0.995$, $0.0998$) are the physics
+the bond already carried, and the tail from $5.7\times10^{-5}$ down to $2\times10^{-13}$ is what
+the expansion just made available. Ten of the eleven directions survive the cutoff, at a
+discarded weight of $2.4\times10^{-17}$.
+
+\paragraph{The net effect of one bond update.} Rank $7 \to 11$ by expansion (lossless, no
+amplitude changed), then $11 \to 10$ by truncation after the evolution: the bond ends at rank
+$\mathbf{10}$, having grown by three. The $14$ Lanczos iterations are the only exponential
+anywhere in the update --- there is no $K$-ODE and no $L$-ODE.
+
+\section{Stages 8 and 9 --- the public entry point, and $\tau = 0$}
+
+\begin{lstlisting}
+left_core (6 x 2 x 10)     right_core (10 x 2 x 6)    
+aug_k = 11  aug_l = 11  keep = 10  n_matvec = 14  discarded = 2.41e-17
+err_pre = 5.322e-12  err_fnl = 0.000e+00
+
+||Theta(tau=0) - Theta0|| = 3.95e-15
+\end{lstlisting}
+
+\noindent
+The entry point reproduces the hand-assembled sequence, and $\tau = 0$ returns the state
+unchanged to machine precision --- the sanity check that the expansion has not perturbed
+anything, stated as an equation the code must satisfy rather than as an argument.
+
+
+\end{document}
