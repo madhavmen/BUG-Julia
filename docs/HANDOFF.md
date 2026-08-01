@@ -174,8 +174,8 @@ cost real time and each is easy to repeat.
 
 ## 9. Environment notes
 
-- `feature/cbe-bug` (41 commits) is **merged into `main`** as of 2026-07-31, merge commit
-  `92fc033`, no conflicts. **`main` is NOT pushed** — `origin/main` is still at `bdb29d1`.
+- `feature/cbe-bug` (41 commits) is **merged into `main`** (merge `92fc033`, no conflicts) and
+  **both branches are pushed** — `origin/main` at `6f664c1` or later.
 - ⚠️ **The full suite was not re-run for that merge** — the user interrupted it. The last known
   green runs are per-file (`test_dimer.jl` 69/69, `test_tdvp1_cbe.jl` 21/21) and predate the
   final docs/benchmark commits, which touch no `src`. Run `julia --project=. tests/runtests.jl`

@@ -7,19 +7,61 @@ and non-Abelian symmetric tensors stay block-sparse throughout.
 
 ## Quick start
 
+The bond update is **RSVD controlled bond expansion** (`rsvd_cbe`) — rank grows only from
+directions drawn through the gate, with no random sector seeding anywhere.
+
 ```julia
 using BUGJulia.BondUpdateBUG
+using BUGJulia.RSVDCBEBondUpdate
+using BUGJulia.RSVDCBEBondUpdate: RealTime
 
-psi  = domain_wall_state(6)                       # |up up up down down down>
+set_symmetry!(:U1)                                # :none | :U1 | :SU2 — set it FIRST
+psi   = domain_wall_state(8)                      # |up up up up down down down down>
 gates = bond_gates(psi; J = 1.0, delta = 1.0)     # delta = 0 gives XX
-info = bond_update_bug!(psi, gates; opts = BondUpdateOptions(
-    dt = 0.01, n_steps = 5, order = :strang, maxdim = 8))
 
-[sz_expectation(psi, j) for j in 1:6]             # the evolved profile
-info.max_bond_dims                                 # rank growth, per step
+info = RealTime.evolve!(psi, gates; opts = CBEBugOptions(
+    dt = 0.05, n_steps = 40, maxdim = 32, s_iters = -1, maxiter = 8))
+
+magnetisation(copy(psi))                          # the evolved profile
+bond_dims(psi)                                    # rank growth: 1 -> [2,4,8,16,8,4,2]
+info.max_bond_dims                                # per step
 ```
 
-Real time only: `dt` is real and the driver forms `tau = -im*dt` itself.
+**Two paths, same expansion and same S-step**, differing only in how `H` is applied:
+
+```julia
+RealTime.evolve!(psi, gates; opts)                       # gate-based: Strang over bond gates
+RealTime.evolve_mpo!(psi, xxz_chain(8; delta = 1.0); opts)   # Lubich: MPO envs, no Trotter error
+```
+
+Also `ImaginaryTime.evolve!` / `cool!` and `GroundState.rsvd_cbe_dmrg!` — same engine, the mode
+only fixes `tau` and what is recorded.
+
+📖 **[docs/USAGE.md](docs/USAGE.md)** — the full guide: symmetry switching, both paths, the
+three modes, which options matter and why, how to read the diagnostics, and the gotchas.
+
+▶️ **[examples/heisenberg_domain_wall.jl](examples/heisenberg_domain_wall.jl)** — runnable L=8
+Heisenberg domain wall in `:none` and `:U1`, both paths, checked against an exact
+sparse-Krylov reference:
+
+```bash
+julia --project=. examples/heisenberg_domain_wall.jl
+```
+```
+── symmetry = :none ──          ── symmetry = :U1 ──
+   bond dims : [2,4,8,16,8,4,2]    bond dims : [2,4,8,16,8,4,2]
+   max |error vs exact| = 9.901e-05
+
+SAME PHYSICS CHECK  max |<Sz>_none - <Sz>_U1| = 4.746e-15
+```
+
+### The earlier KLS bond update
+
+`bond_update_bug!` with `BondUpdateOptions` is the original K/L/S kernel, described below. It
+is **superseded** by the RSVD-CBE path above and is no longer the default: its rank growth
+under U(1) comes entirely from `missing_fill` — a random column seeded into an empty charge
+sector — and it cannot grow rank at all under `:none`, where there is no empty sector to seed.
+RSVD-CBE needs no such thing and grows in every mode.
 
 ## The algorithm
 
