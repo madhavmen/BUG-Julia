@@ -137,6 +137,17 @@ const TIME_ARMS = [
 ]
 const GROUND_ARMS = ["dmrg_cbe", "dmrg_cbe_rsvd"]
 
+# ARMS was documented at the top of this file as a way to narrow the grid but was never
+# implemented -- TIME_ARMS was a hardcoded const. It matters for a knob scan: without it every
+# comp_ratio or s_iters setting re-runs all seven arms, including the ones the knobs cannot
+# affect (tdvp2 has no CBE in it at all), which is most of the cost for none of the signal.
+const ARMS = let a = get(ENV, "ARMS", "")
+    isempty(a) ? TIME_ARMS : [String(strip(x)) for x in split(a, ",")]
+end
+for a in ARMS
+    a in TIME_ARMS || error("unknown arm \"$a\"; known: $(join(TIME_ARMS, ", "))")
+end
+
 function make_advance(arm::String, h, gates, maxdim::Int, cutoff::Float64)
     # `n_steps` lives INSIDE CBEBugOptions for the gate driver -- it is not a keyword on
     # `cbe_gate_evolve!` -- so the options object is rebuilt per chunk rather than hoisted.
@@ -373,7 +384,7 @@ for mode in MODES, sym in SYMS, md in MAXDIMS, ct in CUTOFFS
             run_ground_arm(sym, arm, md, ct)
         end
     else
-        for arm in TIME_ARMS
+        for arm in ARMS
             run_time_arm(mode, sym, arm, md, ct)
         end
     end
