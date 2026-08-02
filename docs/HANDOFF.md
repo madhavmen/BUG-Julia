@@ -182,10 +182,16 @@ cost real time and each is easy to repeat.
   symmetry modes. It had been red since `50662c7`, i.e. **`main` was already failing when this
   branch was merged**, because the suite was not re-run for that merge. Fixed by inverting the
   assertion; SU(2) testset now **29/29**.
-- ⚠️ `tests/runtests.jl` (the *outer* suite, covering `BondUpdateBUG` too) has still not been
-  run end to end in this campaign. The module suite above is the strongest evidence there is.
-- The module suite takes **~45 min**; the SU(2) testset alone is ~17 min. Budget for that
-  rather than assuming a hang.
+- **`tests/runtests.jl` (the outer suite) is GREEN**: `BondUpdateBUG` 651, `references` 33,
+  `validation` 27, `crosscheck` 11 — **722/722**, exit 0. This matters because the campaign did
+  modify `BondUpdateBUG` (`sweep.jl`, `symmetric_mps.jl`, `gates.jl`, `observables.jl`) and the
+  module suite does not cover that module at all. The `crosscheck` testset ran for real rather
+  than skipping, so `tests/crosscheck/reference_l6_heisenberg.json` is present.
+- **Both suites are disjoint — run both.** `tests/runtests.jl` covers `BondUpdateBUG`;
+  `tests/RSVDCBEBondUpdate/runtests.jl` covers the CBE module. Neither implies the other, which
+  is precisely how a red `test_su2.jl` survived a merge.
+- Runtimes: module suite **~45 min** (SU(2) testset alone ~17 min), outer suite **~15 min**.
+  Budget for that rather than assuming a hang.
 - Laptop: 14 logical cores, 31 GB, MKL with a 12-thread pool.
 - A Julia process (PID 31952) has been resident since **2026-07-27** holding ~700 MB. It was
   flagged to the user twice and left alone — it may be their REPL. Not the agent's to kill.
