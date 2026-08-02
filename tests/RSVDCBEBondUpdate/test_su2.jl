@@ -62,8 +62,18 @@ end
         @test_throws ArgumentError dimer_state(5)      # odd L has no dimer covering
         @test_throws ArgumentError dimer_state(0)
         set_symmetry!(:U1)
-        # Refuses outside :SU2 rather than silently building something else.
-        @test_throws ArgumentError dimer_state(4)
+        # THE CONTRACT CHANGED DELIBERATELY, and this test used to encode the old one. It once
+        # demanded that `dimer_state` REFUSE outside `:SU2`; it is now available in every mode,
+        # built by projection under `:none`/`:U1` (`sweep.jl::_dimer_state_projected`). The
+        # reason is that an SU(2)-vs-abelian comparison only means something if both sides
+        # evolve the SAME state -- the claim under test is that symmetry changes the COST and
+        # not the physics, and no shared state existed before (`product_state`/`neel_state` are
+        # guarded off under `:SU2`). So the assertion here is the new contract, not an error.
+        d = dimer_state(4)
+        @test norm(d) ≈ 1.0 atol = 1e-12
+        @test length(d) == 4
+        # Still refuses what has no dimer covering, in every mode.
+        @test_throws ArgumentError dimer_state(5)
     end
 
     @testset "product_state refuses under :SU2 instead of returning nonsense" begin
