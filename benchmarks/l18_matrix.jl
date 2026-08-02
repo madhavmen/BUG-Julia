@@ -257,7 +257,19 @@ results = isfile(OUT) ? JSON.parsefile(OUT) : Dict{String, Any}()
 # maxiter=8 (~1150 s) with nothing on either to say which is which. The errors would still be
 # comparable (the depths agree to 2e-13) but the TIMINGS would not, and timing is the point.
 # Including it means a depth change recomputes instead of silently mixing.
-key(mode, sym, arm, md, ct) = "$(INIT)|$(mode)|$(sym)|$(arm)|$(md)|$(ct)|mi$(MAXITER)"
+# EVERY KNOB THAT CHANGES A NUMBER BELONGS IN THE KEY. `mi$(MAXITER)` was added for exactly
+# this reason; `comp_ratio`, `s_iters` and `growth` change the result just as much, and without
+# them a scan over those axes would find the row "already present" and SKIP it -- silently
+# reporting the first setting's numbers for every setting. Suffixed only when they differ from
+# the defaults, so keys written before this change still match and are not orphaned.
+function key(mode, sym, arm, md, ct)
+    base = "$(INIT)|$(mode)|$(sym)|$(arm)|$(md)|$(ct)|mi$(MAXITER)"
+    COMP_RATIO == 0.5  || (base *= "|cr$(COMP_RATIO)")
+    S_ITERS    == -1   || (base *= "|si$(S_ITERS)")
+    GROWTH     == 2.0  || (base *= "|g$(GROWTH)")
+    DELTA      == 1.0  || (base *= "|d$(DELTA)")
+    return base
+end
 
 # The reference goes in the file too, not just the errors computed from it. Without it the
 # plots can show how far each arm is from the truth but never what the truth LOOKS like, and
