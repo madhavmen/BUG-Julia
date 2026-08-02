@@ -270,7 +270,13 @@ let snaps = sort(collect(keys(ref_real)))
         "obs_real" => [ref_real[s] for s in snaps],
         "obs_imag" => isempty(ref_imag) ? nothing :
                       [ref_imag[s] for s in sort(collect(keys(ref_imag)))],
-        "E0" => jsonsafe(E0), "sector" => length(STATES))
+        "E0" => jsonsafe(E0),
+        # `nothing` on the analytic path: there is no Hilbert-space sector, which is the
+        # entire reason that path exists. Recorded as null rather than 0, so a reader cannot
+        # mistake "not applicable" for "empty".
+        "sector" => ANALYTIC ? nothing : length(STATES),
+        "reference" => ANALYTIC ? "analytic_free_fermion" : "sparse_krylov",
+        "delta" => DELTA)
 end
 save() = open(OUT, "w") do io
     JSON.print(io, results)
