@@ -106,6 +106,42 @@ For a single sweep rather than a driver loop: `cbe_lubich_sweep(psi, h, tau; max
 which is the gate path's splitting error and expected physics. Both are checked against the
 exact reference, which is what settles correctness. Do not use one as the other's oracle.
 
+## 3a. The TDVP integrators, and where they live
+
+Beside the two BUG paths there are two TDVP integrators, each in its own directory under
+`src/RSVDCBEBondUpdate/`:
+
+```
+src/RSVDCBEBondUpdate/
+  tdvp2/tdvp2_baseline.jl      2-site TDVP — the accuracy/memory baseline
+  tdvp1_cbe/tdvp1_cbe.jl       1-site TDVP + CBE — the step
+  tdvp1_cbe/variants.jl        its two selection rules, named
+```
+
+```julia
+tdvp2_step!(psi, h, tau; maxdim = 32, trunc_thresh = 0.0, maxiter = 8)
+
+tdvp1_rsvd_cbe_step!(psi, h, tau; maxdim = 32, maxiter = 8)   # the RSVD extension — the method
+tdvp1_cbe_exact_step!(psi, h, tau; maxdim = 32, maxiter = 8)  # plain CBE — the A/B reference
+tdvp1_cbe_step!(psi, h, tau; exact = false, ...)              # the general entry point
+```
+
+**2-site TDVP has no CBE, and that is the point.** A two-site block supplies its own rank —
+the SVD that splits it is free to return more singular values than went in — so it adapts
+without an expansion. That is what makes it the baseline the CBE arms are measured against.
+
+**1-site TDVP + CBE needs the expansion; it is not optional.** A one-site sweep moves the
+centre through tensors of fixed shape, so it *cannot* change the bond dimension by itself.
+Without CBE the rank is frozen at whatever the initial state had — start from a product state
+and it stays at χ=1 forever. CBE is what makes a 1-site sweep rank-adaptive at all.
+
+**The two variants are one implementation, not two.** `tdvp1_rsvd_cbe_step!` and
+`tdvp1_cbe_exact_step!` both call the same step with `exact = false` / `true`; the flag reaches
+`cbe_expand_bond` and chooses a Gaussian sketch of `H·Θ` or the complete fused basis. They are
+deliberately not separate implementations — the A/B only means something if the two paths are
+otherwise bit-for-bit identical code, so any difference in output comes from the selection rule
+and nothing else.
+
 ## 4. The three modes
 
 Same engine; the mode fixes `τ` and what gets recorded. Nothing else differs — there is no
