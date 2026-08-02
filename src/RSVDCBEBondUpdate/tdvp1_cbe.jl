@@ -53,7 +53,7 @@ the next bond of the same sweep needs -- pushed through the tensor just written,
 """
 function _tdvp1_cbe_bond!(psi::SymMPS, h::XXZChain, i::Int, tau::ComplexF64, dir::Symbol,
                           lch::ChannelSet, rch::ChannelSet;
-                          exkw, maxdim, trunc_thresh, maxiter, tol, acc)
+                          exkw, maxdim, trunc_thresh, maxiter, tol, reorth = false, acc)
     nmv = 0
 
     # ---- CBE: widen the bond before anything is evolved --------------------------------
@@ -77,7 +77,7 @@ function _tdvp1_cbe_bond!(psi::SymMPS, h::XXZChain, i::Int, tau::ComplexF64, dir
 
         # ---- forward: one-site at site i, +tau ----
         M = expv(x -> (nmv += 1; apply_one_site(one_site_h(h, i, lch, rch1), x)),
-                 tau, psi[i]; hermitian = true, maxiter = maxiter, tol = tol)
+                 tau, psi[i]; hermitian = true, maxiter = maxiter, tol = tol, reorth = reorth)
 
         res = svd(M, (1, 2); cutoff = max(trunc_thresh, 1e-14), Nkeep = maxdim,
                   get_lists = true)
@@ -101,7 +101,7 @@ function _tdvp1_cbe_bond!(psi::SymMPS, h::XXZChain, i::Int, tau::ComplexF64, dir
         # site tensors itself, which is why `rch` (not `rch1`) goes in here.
         H0 = zero_site_h(h, i, lch, rch, psi[i], psi[i + 1])
         C = expv(x -> (nmv += 1; apply_zero_site(H0, x)), -tau, C;
-                 hermitian = true, maxiter = maxiter, tol = tol)
+                 hermitian = true, maxiter = maxiter, tol = tol, reorth = reorth)
 
         # Absorb, then rename BOTH ends of the bond to `tag` in the same breath. Each result is
         # rank-3 with only one leg wanting `tag`, so neither construction sees a duplicate.
@@ -123,7 +123,7 @@ function _tdvp1_cbe_bond!(psi::SymMPS, h::XXZChain, i::Int, tau::ComplexF64, dir
 
         # ---- forward: one-site at site i+1, +tau ----
         M = expv(x -> (nmv += 1; apply_one_site(one_site_h(h, i + 1, lch1, rch), x)),
-                 tau, psi[i + 1]; hermitian = true, maxiter = maxiter, tol = tol)
+                 tau, psi[i + 1]; hermitian = true, maxiter = maxiter, tol = tol, reorth = reorth)
 
         res = svd(M, (1,); cutoff = max(trunc_thresh, 1e-14), Nkeep = maxdim,
                   get_lists = true)
@@ -136,7 +136,7 @@ function _tdvp1_cbe_bond!(psi::SymMPS, h::XXZChain, i::Int, tau::ComplexF64, dir
         # ---- backward: zero-site, -tau ----
         H0 = zero_site_h(h, i, lch, rch, psi[i], psi[i + 1])
         C = expv(x -> (nmv += 1; apply_zero_site(H0, x)), -tau, C;
-                 hermitian = true, maxiter = maxiter, tol = tol)
+                 hermitian = true, maxiter = maxiter, tol = tol, reorth = reorth)
 
         psi[i] = to_concrete(setitag(
             to_concrete(contract(psi[i], (3,), C, (1,))), 3, tag))
@@ -179,6 +179,20 @@ function tdvp1_cbe_step!(psi::SymMPS, h::XXZChain, tau::ComplexF64;
                          trunc_thresh::Float64 = 1e-12,
                          maxiter::Int = 30,
                          tol::Float64 = 1e-15,
+                         # REORTHOGONALISATION IS ON BY DEFAULT HERE, and it is a correctness
+                         # fix rather than a tuning choice. Without it the Lanczos does not
+                         # converge at `maxiter = 30` on the `exact = true` arm, and the failure
+                         # is silent in the worst way: MEASURED at L=8, XX, dt=0.02, 20 steps,
+                         # the state lost 4.6e-3 of its norm (real-time TDVP is unitary, so any
+                         # loss is error), the exact and sketched arms diverged by 2.03e-02
+                         # where they must agree, and the unconverged arm carried a SPURIOUS
+                         # extra bond -- maxbd 12 against the sketch's 10 -- so it looked like
+                         # richer physics rather than a broken solve. With `reorth = true`, at
+                         # the same `maxiter`: norm error 1.3e-13, arms agree to 1.06e-12, and
+                         # both sit at maxbd 10. `maxiter = 200` fixes it too, at ~6x the
+                         # matvecs; turning truncation off also masks it, which is why the
+                         # cause was initially mis-attributed to the SVD.
+                         reorth::Bool = true,
                          rng::AbstractRNG = MersenneTwister(0x5EED))
     L = length(psi)
     L >= 2 || throw(ArgumentError("tdvp1_cbe_step! needs at least two sites"))
@@ -217,7 +231,7 @@ function tdvp1_cbe_step!(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     onesite!(j, lc, rc) = begin
         acc[6] += 1
         psi[j] = expv(x -> apply_one_site(one_site_h(h, j, lc, rc), x), half, psi[j];
-                      hermitian = true, maxiter = maxiter, tol = tol)
+                      hermitian = true, maxiter = maxiter, tol = tol, reorth = reorth)
         psi.center = j
     end
 
@@ -227,7 +241,7 @@ function tdvp1_cbe_step!(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     for i in 1:(L - 1)
         lch = _tdvp1_cbe_bond!(psi, h, i, half, :right,
                                lch, right_channels(rstack, i + 2);
-                               exkw, maxdim, trunc_thresh, maxiter, tol, acc)
+                               exkw, maxdim, trunc_thresh, maxiter, tol, reorth, acc)
     end
     # Site L. `lch` is now the channels on link L, carried through the whole pass; to its right
     # is the chain end, so the right environment is the boundary.
@@ -240,7 +254,7 @@ function tdvp1_cbe_step!(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     for i in (L - 1):-1:1
         rch = _tdvp1_cbe_bond!(psi, h, i, half, :left,
                                left_channels(lstack, i), rch;
-                               exkw, maxdim, trunc_thresh, maxiter, tol, acc)
+                               exkw, maxdim, trunc_thresh, maxiter, tol, reorth, acc)
     end
     # Site 1, the mirror.
     onesite!(1, boundary_channels(h), rch)
