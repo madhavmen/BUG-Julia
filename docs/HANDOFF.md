@@ -176,10 +176,16 @@ cost real time and each is easy to repeat.
 
 - `feature/cbe-bug` (41 commits) is **merged into `main`** (merge `92fc033`, no conflicts) and
   **both branches are pushed** — `origin/main` at `6f664c1` or later.
-- ⚠️ **The full suite was not re-run for that merge** — the user interrupted it. The last known
-  green runs are per-file (`test_dimer.jl` 69/69, `test_tdvp1_cbe.jl` 21/21) and predate the
-  final docs/benchmark commits, which touch no `src`. Run `julia --project=. tests/runtests.jl`
-  before pushing or building on this.
+- **Test status, measured.** `tests/RSVDCBEBondUpdate/runtests.jl` ran **1161/1162** (45 min).
+  The single failure was `test_su2.jl` asserting that `dimer_state` refuses outside `:SU2` — a
+  guard removed on purpose when the L=18 benchmark needed one state constructible in all three
+  symmetry modes. It had been red since `50662c7`, i.e. **`main` was already failing when this
+  branch was merged**, because the suite was not re-run for that merge. Fixed by inverting the
+  assertion; SU(2) testset now **29/29**.
+- ⚠️ `tests/runtests.jl` (the *outer* suite, covering `BondUpdateBUG` too) has still not been
+  run end to end in this campaign. The module suite above is the strongest evidence there is.
+- The module suite takes **~45 min**; the SU(2) testset alone is ~17 min. Budget for that
+  rather than assuming a hang.
 - Laptop: 14 logical cores, 31 GB, MKL with a 12-thread pool.
 - A Julia process (PID 31952) has been resident since **2026-07-27** holding ~700 MB. It was
   flagged to the user twice and left alone — it may be their REPL. Not the agent's to kill.
