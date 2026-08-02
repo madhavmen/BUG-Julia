@@ -33,6 +33,7 @@ using BUGJulia.RSVDCBEBondUpdate
 using BUGJulia.RSVDCBEBondUpdate: RealTime, ImaginaryTime, GroundState
 using LinearAlgebra, Printf, JSON, Telum
 include(joinpath(@__DIR__, "exact_sparse.jl"))
+include(joinpath(@__DIR__, "..", "tests", "common", "free_fermion.jl"))
 
 # ── configuration ────────────────────────────────────────────────────────────────────
 const L       = parse(Int, get(ENV, "L", "18"))
@@ -103,6 +104,22 @@ INIT in (:dimer, :domainwall) || error("INIT must be dimer or domainwall, got $I
 const MODES   = [String(s) for s in split(get(ENV, "MODES", "real,imag,ground"), ",")]
 const OUT     = get(ENV, "OUT", joinpath(@__DIR__, "l18_results.json"))
 const SMOKE   = get(ENV, "SMOKE", "0") != "0"
+# DELTA = 0 IS THE XX CHAIN, AND IT CHANGES WHAT THE REFERENCE COSTS. A domain wall under XX is
+# a free-fermion problem by Jordan-Wigner, so <Sz_j(t)> is known in CLOSED FORM from an L x L
+# single-particle matrix exponential -- O(L^3), independent of the Hilbert space. The sparse
+# Krylov reference is only needed for delta != 0.
+#
+# The difference is not marginal. The Sz=0 sector is C(L, L/2):
+#
+#   L=18   48,620 states     H as COO triplets  0.0 GB    <- sparse reference is free
+#   L=30  155,117,520        H as COO triplets 69.3 GB    <- ~150 GB with the CSC, plus
+#                                                            2.31 GB per Krylov vector
+#
+# So at L=30 the sparse path is what breaks, NOT the arms -- they are O(L*chi^3) and do not
+# care. Running XX gives an exact reference at any L for free. Symmetry is orthogonal to this:
+# :none / :U1 / :SU2 are the same physics and only change the solver cost.
+const DELTA    = parse(Float64, get(ENV, "DELTA", "1.0"))
+const ANALYTIC = (DELTA == 0.0 && INIT === :domainwall)
 
 const NSTEP  = round(Int, TMAX / DT)
 const NBETA  = round(Int, BETA / DT)
@@ -157,10 +174,20 @@ function make_advance(arm::String, h, gates, maxdim::Int, cutoff::Float64)
 end
 
 # ── reference, computed once and shared by both symmetries ───────────────────────────
-println("building the exact reference (sparse Krylov, Sz=0 sector)...")
+if ANALYTIC
+    ("imag" in MODES || "ground" in MODES) && error(
+        "DELTA=0 uses the analytic free-fermion reference, which gives <Sz_j(t)> for REAL " *
+        "time only. Use MODES=real, or DELTA!=0 to get the sparse reference back.")
+    :SU2 in SYMS && error("DELTA=0 is anisotropic; xxz_chain refuses under :SU2. Use SYMS=none,U1.")
+    println("reference: ANALYTIC free-fermion (XX, delta=0) -- exact, O(L^3), no Hilbert space")
+else
+    println("building the exact reference (sparse Krylov, Sz=0 sector)...")
+end
 flush(stdout)
-const A, STATES, IDX = heisenberg_sparse(L)
-const V0 = INIT === :dimer ? dimer_vector(L, STATES, IDX) :
+const A, STATES, IDX = ANALYTIC ? (nothing, nothing, nothing) :
+                                  heisenberg_sparse(L; delta = DELTA)
+const V0 = ANALYTIC ? nothing :
+           INIT === :dimer ? dimer_vector(L, STATES, IDX) :
                              domain_wall_vector(L, STATES, IDX)
 # The observable is chosen WITH the state, on both sides of the comparison, so the MPS and the
 # dense reference are always measuring the same operator.
@@ -169,7 +196,7 @@ obs_dense(v) = INIT === :dimer ? bond_energies_dense(v, L, STATES, IDX) :
 obs_mps(psi, gates) = INIT === :dimer ? bond_energies(psi, gates) :
                                         magnetisation(copy(psi))
 const OBSNAME = INIT === :dimer ? "<S_j.S_{j+1}>" : "<Sz_j>"
-@printf("  sector = %d states, nnz(H) = %d\n", length(STATES), nnz(A))
+ANALYTIC || @printf("  sector = %d states, nnz(H) = %d\n", length(STATES), nnz(A))
 @printf("  init = %s, observable = %s\n", INIT, OBSNAME)
 if INIT === :domainwall && :SU2 in SYMS
     error("INIT=domainwall cannot run under :SU2 -- the state is unrepresentable there and " *
@@ -180,10 +207,19 @@ flush(stdout)
 
 const SNAP_T = [k * EVERY * DT for k in 1:(NSTEP ÷ EVERY)]
 ref_real = Dict{Int, Vector{Float64}}()
-let step = 0
-    propagate!(A, V0, ComplexF64(-im * DT), NSTEP, (s, v) -> begin
-        s % EVERY == 0 && (ref_real[s] = obs_dense(v))
-    end)
+if ANALYTIC
+    # Closed form, evaluated straight onto the snapshot grid. `xx_free_fermion_sz` defaults to
+    # `occupied = 1:(L/2)`, which IS `domain_wall_state(L)`, so both sides start from the same
+    # state -- the thing that makes a reference a reference.
+    for k in 1:(NSTEP ÷ EVERY)
+        ref_real[k * EVERY] = xx_free_fermion_sz(L, k * EVERY * DT)
+    end
+else
+    let step = 0
+        propagate!(A, V0, ComplexF64(-im * DT), NSTEP, (s, v) -> begin
+            s % EVERY == 0 && (ref_real[s] = obs_dense(v))
+        end)
+    end
 end
 println("  real-time reference done ($(length(ref_real)) snapshots)")
 flush(stdout)
@@ -255,8 +291,8 @@ function run_time_arm(mode, sym, arm, md, ct)
     ref = imag_mode ? ref_imag : ref_real
 
     psi = start_state(sym)
-    gates = bond_gates(psi; delta = 1.0)
-    h = sym === :SU2 ? heisenberg_su2_chain(L) : xxz_chain(L; delta = 1.0)
+    gates = bond_gates(psi; delta = DELTA)
+    h = sym === :SU2 ? heisenberg_su2_chain(L) : xxz_chain(L; delta = DELTA)
     adv = make_advance(arm, h, gates, md, ct)
 
     ts, errs, bds, obs = Float64[], Float64[], Int[], Vector{Float64}[]
@@ -290,7 +326,7 @@ function run_ground_arm(sym, arm, md, ct)
     k = key("ground", sym, arm, md, ct)
     haskey(results, k) && return false
     psi = start_state(sym)
-    h = sym === :SU2 ? heisenberg_su2_chain(L) : xxz_chain(L; delta = 1.0)
+    h = sym === :SU2 ? heisenberg_su2_chain(L) : xxz_chain(L; delta = DELTA)
     f = arm == "dmrg_cbe" ? GroundState.cbe_dmrg! : GroundState.rsvd_cbe_dmrg!
     t0 = time()
     info = f(psi, h; opts = CBEBugOptions(maxdim = md, trunc_thresh = ct),
