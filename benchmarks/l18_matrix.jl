@@ -73,6 +73,18 @@ const CUTOFFS = [parse(Float64, s) for s in split(get(ENV, "CUTOFFS", "0.0,1e-12
 # GROUND-STATE ARMS DELIBERATELY EXCLUDED: their `maxiter` drives a Lanczos EIGENSOLVER, not
 # an exponential, and nothing above measures that. They keep the library default.
 const MAXITER = parse(Int, get(ENV, "MAXITER", "8"))
+# COMP_RATIO and S_ITERS are the two knobs the CBE arms are actually tuned on, so they are
+# reachable from the environment rather than frozen at the option defaults.
+#
+# `S_ITERS` selects the S-step scheme and its SIGN matters: <= 0 is the expanding-basis
+# Lanczos (-1 was hardcoded here before), 1 is one expansion then a plain Lanczos, > 1 is the
+# iterated expansion that re-sketches each pass from the basis the previous pass expanded.
+# NOTE the iterated scheme is INERT at the default growth = 2.0 -- the first pass already
+# saturates the local space -- so scanning S_ITERS without also lowering GROWTH measures the
+# saturation and not the scheme. Measured at L=8/L=10: growth 1.25 + s_iters 2 is where it pays.
+const COMP_RATIO = parse(Float64, get(ENV, "COMP_RATIO", "0.5"))
+const S_ITERS    = parse(Int,     get(ENV, "S_ITERS", "-1"))
+const GROWTH     = parse(Float64, get(ENV, "GROWTH", "2.0"))
 const SYMS    = [Symbol(s) for s in split(get(ENV, "SYMS", "none,SU2"), ",")]
 # INITIAL STATE AND OBSERVABLE ARE ONE CHOICE, NOT TWO -- each state has the observable that
 # actually shows its light cone, and each pairing has a different symmetry reach:
@@ -119,8 +131,8 @@ function make_advance(arm::String, h, gates, maxdim::Int, cutoff::Float64)
     # (measured: 66 for tdvp2, 1 for a lubich sweep), so a per-arm depth would confound
     # "does less Krylov work" with "was given a smaller budget".
     o(exact, n) = CBEBugOptions(; dt = DT, n_steps = n, maxdim = maxdim, trunc_thresh = cutoff,
-                                s_iters = -1, exact = exact, normalize = false,
-                                maxiter = MAXITER)
+                                s_iters = S_ITERS, exact = exact, normalize = false,
+                                maxiter = MAXITER, comp_ratio = COMP_RATIO, growth = GROWTH)
     if arm == "tdvp2"
         return (psi, tau, n) -> for _ in 1:n
             tdvp2_step!(psi, h, tau; maxdim = maxdim, trunc_thresh = cutoff, maxiter = MAXITER)
