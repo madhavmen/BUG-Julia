@@ -283,7 +283,7 @@ struct CBEBugInfo
 end
 
 "Total stored elements of every tensor in the state -- block-sparse, so the honest size.
-(`tensor_elements` lives in tdvp2_baseline.jl; both callers resolve it at run time.)"
+(`tensor_elements` lives in tdvp2/tdvp2_baseline.jl; both callers resolve it at run time.)"
 _state_stored(psi::SymMPS) = sum(tensor_elements(psi[i]) for i in 1:length(psi); init = 0)
 
 """

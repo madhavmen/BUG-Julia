@@ -62,8 +62,21 @@ using ..BondUpdateBUG: SymMPS, canonical!, bond_dims, leg_dim, local_space,
 include("henv.jl")
 include("cbe_core.jl")
 include("cbe_lubich.jl")
-include("tdvp2_baseline.jl")
-include("tdvp1_cbe.jl")
+
+# The two TDVP integrators live in their own directories. They are FILES of this module, not
+# submodules: both are built on `henv.jl` (environments) and `cbe_core.jl` (the expansion)
+# above, so splitting them into modules would only add import ceremony around code that has
+# to see the same internals anyway.
+#
+#   tdvp2/       2-site TDVP, the accuracy/memory baseline. No CBE -- the two-site block
+#                supplies its own rank, which is exactly what makes it the baseline.
+#   tdvp1_cbe/   1-site TDVP + CBE, where CBE is MANDATORY rather than optional: a 1-site
+#                sweep cannot change the bond dimension by itself, so without the expansion
+#                the rank is frozen at whatever it started as. `variants.jl` names the two
+#                selection rules (plain CBE and the RSVD extension) over one implementation.
+include("tdvp2/tdvp2_baseline.jl")
+include("tdvp1_cbe/tdvp1_cbe.jl")
+include("tdvp1_cbe/variants.jl")
 
 # The modes come last: each imports from the parent, so everything they name must already be
 # defined. They are submodules rather than files so `RealTime.evolve!` and
@@ -89,6 +102,7 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        RealTime, ImaginaryTime, GroundState,
        ZeroSiteH, zero_site_h, apply_zero_site,
        OneSiteH, one_site_h, apply_one_site, TDVP2Info, tdvp2_step!, tensor_elements,
-       TDVP1CBEInfo, tdvp1_cbe_step!
+       TDVP1CBEInfo, tdvp1_cbe_step!,
+       tdvp1_rsvd_cbe_step!, tdvp1_cbe_exact_step!
 
 end # module

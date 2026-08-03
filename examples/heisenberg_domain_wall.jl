@@ -230,3 +230,52 @@ println("""
    The two paths need NOT agree to round-off: the gate path carries a Trotter splitting
    error the Lubich path does not have, so a gap of order dt^2 here is expected physics,
    not a bug. Both are checked against the exact reference above, which is what settles it.""")
+
+# ── A DIFFERENT MODEL AND A DIFFERENT SYMMETRY: TFIM with Z2 ────────────────────────
+#
+#     H = -J Σ_i Z_i Z_{i+1} - h Σ_i X_i
+#
+# The symmetry here is the global spin flip `P = Π_i X_i`, NOT a spin rotation -- so it is
+# Z2, not U(1), and `set_symmetry!(:U1)` would be simply wrong for this model (Z_i Z_{i+1}
+# does not conserve Sz). The switch is the same one call; only the value changes.
+#
+# THE BASIS IS THE TRICK. In the usual sigma^z basis P is off-diagonal and nothing is block
+# sparse. In the sigma^x eigenbasis, |+> is Z2 charge 0 and |-> is charge 1, so X is diagonal
+# and Z flips the charge by 1 -- and the ZZ bond term changes it by 1+1 = 0 mod 2. H conserves
+# the charge exactly, which is what makes the tensors block-sparse.
+#
+# `<Z_j>` is identically ZERO in any Z2-symmetric state (Z changes the charge, so it has no
+# diagonal element at all), so the observable here is `<X_j>` -- the transverse magnetisation.
+println("\n" * "="^72)
+println("TRANSVERSE-FIELD ISING, Z2 vs no symmetry   H = -J ZZ - h X")
+println("="^72)
+
+function run_tfim(sym::Symbol; J = 1.0, h = 1.0)
+    set_symmetry!(sym)                                   # :Z2 or :none
+    psi   = ising_kink_state(L)                          # |+...+ -...->, chi = 1
+    gates = ising_bond_gates(psi; J = J, h = h)
+    opts  = CBEBugOptions(; dt = DT, n_steps = NSTEP, maxdim = CHI,
+                          s_iters = -1, maxiter = 8, exact = false)
+    info = RealTime.evolve!(psi, gates; opts = opts)
+    return x_profile(psi), bond_dims(psi), info
+end
+
+tfim = Dict{Symbol, Vector{Float64}}()
+for sym in (:Z2, :none)
+    mag, chis, info = run_tfim(sym)
+    tfim[sym] = mag
+    @printf("\n── symmetry = :%-4s ─────────────────────────────────────────────\n", sym)
+    @printf("   bond dims : %s   (started all 1)\n", chis)
+    @printf("   norm      : %.12f\n", info.norms[end])
+    @printf("   %-4s %-10s %s\n", "site", "<X_j>", "")
+    for j in 1:L
+        @printf("   %-4d %+10.5f  %s\n", j, mag[j], bar(mag[j] / 2))
+    end
+end
+
+d = maximum(abs.(tfim[:Z2] - tfim[:none]))
+@printf("\nSAME PHYSICS CHECK   max |<X>_Z2 - <X>_none| = %.3e  %s\n",
+        d, d < 1e-10 ? "OK — Z2 changed the storage, not the state" : "!! DIVERGED")
+println("""
+Note the Z2 bond dimensions count states per charge sector, so they ARE comparable with
+:none here (unlike SU(2), where a bond dimension counts multiplets).""")

@@ -58,8 +58,8 @@ Consequences worth knowing before switching a benchmark over:
     digit-for-digit with `:U1` numbers; a multiplet stands for `2S+1` states.
 """
 function set_symmetry!(sym::Symbol)
-    sym in (:SU2, :U1, :none) || throw(ArgumentError(
-        "symmetry must be :SU2, :U1 or :none, got $sym"))
+    sym in (:SU2, :U1, :Z2, :none) || throw(ArgumentError(
+        "symmetry must be :SU2, :U1, :Z2 or :none, got $sym"))
     _SYMMETRY[] = sym
     return sym
 end
@@ -76,6 +76,14 @@ charge), under `:none` they are rank-2 plain matrices. See
 """
 function local_space(sym::Symbol = symmetry_mode())
     haskey(_LOCAL_SPACES, sym) && return _LOCAL_SPACES[sym]
+    # `:Z2` IS NOT A SPIN LOCAL SPACE. It is the transverse-field Ising space, in the sigma^x
+    # basis, with the Z2 spin-flip parity as its charge -- a different local space with
+    # different operators (`I, X, Z`, no `Sp/Sz/Sm`). Asking for it here is asking for a
+    # Heisenberg-style space that does not exist under Z2, so it refuses rather than returning
+    # something spin-like. See `ising_local_space` in z2_ising.jl.
+    sym === :Z2 && throw(ArgumentError(
+        "local_space is the spin-1/2 (Heisenberg) space and has no :Z2 form -- the TFIM has " *
+        "no U(1)/SU(2) spin symmetry. Use ising_local_space() for the Z2 Ising space."))
     opts = sym === :SU2  ? SpinOptions(:SU2, 1)    :
            sym === :U1   ? SpinOptions(:U1, 1)     :
            sym === :none ? SpinOptions(nothing, 1) :

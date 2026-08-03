@@ -22,6 +22,9 @@ Random.seed!(42)          # the integrator seeds its own RNG from BondUpdateOpti
     include("BondUpdateBUG/test_sectors.jl")
     include("BondUpdateBUG/test_augment.jl")
     include("BondUpdateBUG/test_gates.jl")
+    # Z2 / transverse-field Ising: a DIFFERENT local space (sigma^x basis, Z2 parity charge)
+    # built below Telum's IROP layer, so this is also the tripwire for that private API.
+    include("BondUpdateBUG/test_z2_ising.jl")
     include("BondUpdateBUG/test_kls_step.jl")
     include("BondUpdateBUG/test_sweep.jl")
     include("BondUpdateBUG/test_driver.jl")

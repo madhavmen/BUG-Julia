@@ -61,19 +61,25 @@ end
         end
         @test_throws ArgumentError dimer_state(5)      # odd L has no dimer covering
         @test_throws ArgumentError dimer_state(0)
+        # `dimer_state` USED TO REFUSE outside `:SU2`, and this line asserted that. It no
+        # longer does, deliberately: the L=18 benchmark needs one state constructible in ALL
+        # THREE symmetry modes, because "symmetry changes the cost, not the physics" cannot be
+        # tested at all without a common starting state. `product_state`/`neel_state` are
+        # guarded off under `:SU2`, so the dimer covering is the only candidate, and it is now
+        # built by `_dimer_state_projected` in the abelian modes.
+        #
+        # The assertion is therefore inverted rather than deleted: it now pins that the state
+        # IS available everywhere, which is the property the benchmark depends on. The stronger
+        # claim -- that all three modes agree on the observable -- lives in `test_dimer.jl`,
+        # which measures 2.2e-16 between `:none` and `:SU2`.
+        for sym in (:none, :U1)
+            set_symmetry!(sym)
+            d = dimer_state(4)
+            @test norm(d) ≈ 1.0 atol = 1e-12
+            # chi = 2 on the dimerised bonds, where SU(2) stores one multiplet.
+            @test bond_dims(d) == [2, 1, 2]
+        end
         set_symmetry!(:U1)
-        # THE CONTRACT CHANGED DELIBERATELY, and this test used to encode the old one. It once
-        # demanded that `dimer_state` REFUSE outside `:SU2`; it is now available in every mode,
-        # built by projection under `:none`/`:U1` (`sweep.jl::_dimer_state_projected`). The
-        # reason is that an SU(2)-vs-abelian comparison only means something if both sides
-        # evolve the SAME state -- the claim under test is that symmetry changes the COST and
-        # not the physics, and no shared state existed before (`product_state`/`neel_state` are
-        # guarded off under `:SU2`). So the assertion here is the new contract, not an error.
-        d = dimer_state(4)
-        @test norm(d) ≈ 1.0 atol = 1e-12
-        @test length(d) == 4
-        # Still refuses what has no dimer covering, in every mode.
-        @test_throws ArgumentError dimer_state(5)
     end
 
     @testset "product_state refuses under :SU2 instead of returning nonsense" begin
