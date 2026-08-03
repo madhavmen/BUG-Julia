@@ -17,6 +17,7 @@ include("expv.jl")
 include("sectors.jl")
 include("augment.jl")
 include("gates.jl")
+include("z2_ising.jl")
 include("kls_step.jl")
 include("sweep.jl")
 include("observables.jl")
@@ -43,6 +44,8 @@ export SymMPS, canonical!, move_left!, move_right!, bond_dims, leg_dim,
        heisenberg_bond_gate, xx_bond_gate, magnetisation_gate, apply_gate,
        kls_bond_update, pairable_charges,
        parity_bonds, bond_gates, parity_sweep!, energy, bond_energies,
-       BondUpdateOptions, BondUpdateInfo, bond_update_bug!, SUPPORTED_ORDERS
+       BondUpdateOptions, BondUpdateInfo, bond_update_bug!, SUPPORTED_ORDERS,
+       ising_local_space, ising_bond_gate, ising_bond_gates, ising_product_state,
+       ising_polarised_state, ising_kink_state, x_profile
 
 end # module

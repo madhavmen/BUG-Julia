@@ -26,8 +26,15 @@
 # `Itag` is a SORTED TAG SET, so the leg written as "S,1" reads back as "1,S"
 # and a raw `Itag == String` comparison would reject the very tag that built it.
 _site_tag(x::TLIndex) = x.itags
-_site_tag(x::AbstractString) = to_concrete(setitag(local_space().I, 1, x)).inds[1].itags
+_site_tag(x::AbstractString) = to_concrete(setitag(_tagging_identity(), 1, x)).inds[1].itags
 _site_tag(x) = x
+
+# ANY identity with a site leg will do here -- it is used only to normalise a string into an
+# `Itag`, never for its values. It must follow the SYMMETRY MODE, though: under `:Z2` the local
+# space is the Ising one (`I, X, Z` in the sigma^x basis) and `local_space()` deliberately
+# refuses, since there is no spin-1/2 Heisenberg space under Z2. Hard-coding `local_space()`
+# here made every Z2 gate application fail inside `apply_gate`.
+_tagging_identity() = symmetry_mode() === :Z2 ? ising_local_space().I : local_space().I
 
 "Retag both physical legs of a local operator, leaving any operator leg alone."
 _retag_site(O, tag) = to_concrete(setitag(setitag(O, 1, tag), 2, tag))

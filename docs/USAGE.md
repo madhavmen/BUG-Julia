@@ -41,8 +41,18 @@ One global call, before you build any tensors:
 set_symmetry!(:none)    # no symmetry — one dense block per bond
 set_symmetry!(:U1)      # Sz conservation — separate charge sectors  (default)
 set_symmetry!(:SU2)     # total spin — multiplets
+set_symmetry!(:Z2)      # spin-flip parity — the TRANSVERSE-FIELD ISING model
 symmetry_mode()         # what is currently set
 ```
+
+**`:Z2` is a different MODEL, not just a different symmetry.** The other three are spin-½
+Heisenberg/XXZ spaces sharing `local_space()`; `:Z2` is the TFIM
+`H = -J Σ Z_i Z_{i+1} - h Σ X_i`, whose symmetry is the global flip `P = Π_i X_i`. It has its
+own local space (`ising_local_space()` → `I, X, Z`, no `Sp/Sz/Sm`), its own gates
+(`ising_bond_gates`) and its own states (`ising_polarised_state`, `ising_kink_state`).
+`local_space(:Z2)` deliberately **throws** rather than returning something spin-like, and
+`set_symmetry!(:U1)` would be plainly wrong for the TFIM — `Z_i Z_{i+1}` does not conserve `Sz`.
+See §3b.
 
 **It must come before state construction**, because it decides how every tensor is laid out.
 Switching mid-run leaves you with tensors from two different worlds.
@@ -105,6 +115,53 @@ For a single sweep rather than a driver loop: `cbe_lubich_sweep(psi, h, tau; max
 **The two paths need not agree to round-off** — the example measures a 3.4e-05 gap at dt=0.05,
 which is the gate path's splitting error and expected physics. Both are checked against the
 exact reference, which is what settles correctness. Do not use one as the other's oracle.
+
+## 3b. The transverse-field Ising model under Z2
+
+```julia
+set_symmetry!(:Z2)                                   # or :none, same basis, same results
+psi   = ising_kink_state(8)                          # |+...+ -...->, chi = 1
+gates = ising_bond_gates(psi; J = 1.0, h = 1.0)      # H = -J ZZ - h X
+RealTime.evolve!(psi, gates; opts = CBEBugOptions(dt = 0.05, n_steps = 40, maxdim = 32))
+x_profile(psi)                                       # <X_j>, the light-cone observable
+```
+
+**Everything is in the σ^x eigenbasis, and that is what makes Z2 useful.** In the conventional
+σ^z basis the flip `P = Π X_i` is entirely off-diagonal, so nothing is block-sparse and the
+symmetry buys nothing. In the σ^x basis `|+⟩` is Z2 charge 0 and `|−⟩` is charge 1, so `X` is
+diagonal and `Z` flips the charge — and `Z_i Z_{i+1}` changes it by `1+1 = 0 (mod 2)`. H
+conserves the charge exactly, and the tensors go block-sparse.
+
+The operator *names* refer to the operators, which are basis-independent: `x_profile` is the
+genuine transverse magnetisation. Only the matrix representations are rotated.
+
+**`⟨Z_j⟩` is identically zero in any Z2-symmetric state** — `Z` changes the charge, so it has no
+diagonal matrix element at all. That is the symmetry, not a missing feature: the order parameter
+must be probed with the correlator `⟨Z_i Z_j⟩`, never a single site. This is the Z2 analogue of
+`⟨Sz_j⟩` vanishing under SU(2).
+
+Bond dimensions under `:Z2` count **states** per charge sector, so unlike SU(2) they *are*
+directly comparable with `:none`.
+
+| | supported |
+|---|---|
+| gate path (`RealTime.evolve!`, `cbe_gate_evolve!`) | ✅ the transverse field is folded into the bond gates |
+| Lubich / MPO path (`evolve_mpo!`, `cbe_lubich_sweep`) | ❌ **not yet** — `XXZChain` carries only two-site terms and the `henv.jl` channels have no on-site slot |
+
+The field distribution over bonds is not uniform and is easy to get wrong: an interior site
+touches two bonds and takes `h/2` from each, while sites `1` and `L` touch one bond and must
+take the **full** `h` there. Halving every site's field instead would quietly evolve a chain
+with weakened boundary fields — a different Hamiltonian whose error *shrinks* with `L`, so
+small-size tests would miss it. `tests/BondUpdateBUG/test_z2_ising.jl` pins it against a dense
+`H` built independently of the tensor code.
+
+⚠️ **The Z2 local space rests on Telum-private API.** `getLocalSpace` cannot build it: LurCGT
+derives an operator's charge from a Lie-algebra commutator `[Q,O] = q·O`, and the Z2 flip admits
+no such `q` (it needs `+1` and `−1` at once — the same charge mod 2, opposite as integers). The
+blocks are therefore built directly via `Telum._localspace_cgt_fields`. Every such call lives in
+`src/BondUpdateBUG/z2_ising.jl` and nowhere else, so a Telum upgrade breaks one file, and the
+tests fail loudly if the private contract changes. If LurCGT ever grows a `Z{N}`-aware
+`getweight_irop`, delete `_z2_local_space` and call `getLocalSpace` — nothing else changes.
 
 ## 3a. The TDVP integrators, and where they live
 

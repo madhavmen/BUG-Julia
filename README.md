@@ -37,6 +37,27 @@ RealTime.evolve_mpo!(psi, xxz_chain(8; delta = 1.0); opts)   # Lubich: MPO envs,
 Also `ImaginaryTime.evolve!` / `cool!` and `GroundState.rsvd_cbe_dmrg!` — same engine, the mode
 only fixes `tau` and what is recorded.
 
+**Symmetries** — one call, before building any tensors:
+
+| mode | model | charge | notes |
+|---|---|---|---|
+| `:none` | XXZ / Heisenberg | — | one dense block |
+| `:U1` | XXZ / Heisenberg | `Sz` | the default |
+| `:SU2` | Heisenberg (isotropic) | total spin | χ counts **multiplets**, not states |
+| `:Z2` | **transverse-field Ising** | spin-flip parity | its own local space, gates and states |
+
+```julia
+set_symmetry!(:Z2)                                # H = -J Σ ZZ - h Σ X
+psi   = ising_kink_state(8)
+gates = ising_bond_gates(psi; J = 1.0, h = 1.0)
+RealTime.evolve!(psi, gates; opts = CBEBugOptions(dt = 0.05, n_steps = 40, maxdim = 32))
+x_profile(psi)                                    # <X_j>; <Z_j> is identically zero by symmetry
+```
+
+Z2 works in the **σ^x basis**, where the flip `P = Π X_i` becomes a charge and the tensors go
+block-sparse (in the usual σ^z basis it is off-diagonal and buys nothing). Gate path only so
+far — see [docs/USAGE.md §3b](docs/USAGE.md).
+
 📖 **[docs/USAGE.md](docs/USAGE.md)** — the full guide: symmetry switching, both paths, the
 three modes, which options matter and why, how to read the diagnostics, and the gotchas.
 
