@@ -1,18 +1,28 @@
-# RSVD-CBE BUG in 40 lines: an L=8 Heisenberg domain wall, with and without symmetry.
+# RSVD-CBE BUG in 40 lines: an L=8 XXZ domain wall, with and without symmetry.
 #
 #   julia --project=. examples/heisenberg_domain_wall.jl
 #   L=10 TMAX=3 SYMS=none,U1 julia --project=. examples/heisenberg_domain_wall.jl
+#   L=18 TMAX=20 CHI=64 DELTA=0 julia --project=. examples/heisenberg_domain_wall.jl
 #
 # WHAT THIS SHOWS
 #
 #   1. how to switch symmetry           -- one call, `set_symmetry!(:none | :U1 | :SU2)`
 #   2. how to run the default method    -- `RealTime.evolve!(psi, gates; opts)`
 #   3. that symmetry changes the STORAGE, not the physics
-#   4. that the answer is right         -- checked against an exact sparse-Krylov reference
+#   4. that the answer is right         -- checked against the CLOSED-FORM solution
 #
-# THE PHYSICS. A domain wall |↑↑↑↑↓↓↓↓> is not an eigenstate of the Heisenberg chain, so it
-# melts: <Sz_j> spreads from the interface outward at a finite velocity. That spreading front
-# is the light cone, and it is what the printout below draws.
+# THE PHYSICS. A domain wall |↑↑↑↑↓↓↓↓> is not an eigenstate of the XXZ chain, so it melts:
+# <Sz_j> spreads from the interface outward at a finite velocity. That spreading front is the
+# light cone, and it is what the printout below draws.
+#
+# WHY `DELTA` DEFAULTS TO 0 (XX) AND NOT 1 (HEISENBERG). The reference. At `delta = 0` the chain
+# is free-fermion integrable, so `<Sz_j(t)>` is known in CLOSED FORM -- an L x L matrix
+# exponential, `xx_free_fermion_sz`, exact at ANY `L` and ANY `t` with no convergence parameter
+# to get wrong. At `delta != 0` there is no such formula for this observable, so the only
+# reference available is numerical (sparse Krylov in the Sz=0 sector), which is bounded by
+# `L <~ 20` and, being iterative, can itself be under-converged. Running Heisenberg is one env
+# var away and still checked -- but the DEFAULT is the case where the yardstick cannot lie,
+# because a wrong reference is reported as an error in the method.
 #
 # WHY THE DOMAIN WALL AND NOT A NÉEL STATE. It starts at chi=1 -- a product state. A method
 # that cannot GROW the bond dimension is frozen there forever and will report a wall that
@@ -34,8 +44,12 @@ const L     = parse(Int,     get(ENV, "L",     "8"))
 const DT    = parse(Float64, get(ENV, "DT",    "0.05"))
 const TMAX  = parse(Float64, get(ENV, "TMAX",  "2.0"))
 const CHI   = parse(Int,     get(ENV, "CHI",   "32"))
+const DELTA = parse(Float64, get(ENV, "DELTA", "0.0"))   # 0 = XX (closed form), 1 = Heisenberg
 const SYMS  = [Symbol(s) for s in split(get(ENV, "SYMS", "none,U1"), ",")]
 const NSTEP = round(Int, TMAX / DT)
+
+# Which reference is even available is a property of `DELTA`, not a choice -- see the header.
+const ANALYTIC = (DELTA == 0.0)
 
 # ── the run ──────────────────────────────────────────────────────────────────────────
 """
@@ -48,7 +62,7 @@ function run_domain_wall(sym::Symbol; path::Symbol = :gate)
     set_symmetry!(sym)                                   # <-- THE SYMMETRY SWITCH
 
     psi   = domain_wall_state(L)                         # |↑↑↑↑↓↓↓↓>, chi = 1
-    gates = bond_gates(psi; J = 1.0, delta = 1.0)        # Heisenberg; delta = 0 would be XX
+    gates = bond_gates(psi; J = 1.0, delta = DELTA)      # delta = 0 is XX, delta = 1 Heisenberg
 
     opts = CBEBugOptions(;
         dt      = DT,
@@ -66,36 +80,80 @@ function run_domain_wall(sym::Symbol; path::Symbol = :gate)
     info = if path === :gate
         RealTime.evolve!(psi, gates; opts = opts)
     else
-        RealTime.evolve_mpo!(psi, xxz_chain(L; delta = 1.0); opts = opts)
+        RealTime.evolve_mpo!(psi, xxz_chain(L; delta = DELTA); opts = opts)
     end
     return magnetisation(copy(psi)), bond_dims(psi), info
 end
 
 # ── an exact reference, because "it ran" is not "it is right" ────────────────────────
-# At L=8 the Sz=0 sector is tiny, so exp(-iHt)|psi> is available exactly by sparse Krylov.
-# Without this the script could print a beautiful, wrong light cone and look convincing.
-include(joinpath(@__DIR__, "..", "benchmarks", "exact_sparse.jl"))
+# Without this the script could print a beautiful, wrong light cone and look entirely
+# convincing: a melting domain wall is smooth and antisymmetric about the interface whether or
+# not the numbers are right, so the eye cannot referee it.
+#
+# THE CLOSED FORM (delta = 0). Jordan-Wigner maps the XX chain to free fermions, so the whole
+# problem collapses to the L x L single-particle hopping matrix:
+#
+#     <Sz_j(t)> = sum_{k occupied} |[exp(-i h t)]_{jk}|^2 - 1/2,     h_{j,j+1} = J/2
+#
+# That is O(L^3) and EXACT -- no Krylov space, no time step, no tolerance, nothing that can be
+# set too loose. It is valid at any L and any t, which is what makes the L=18/t=20 regime
+# checkable at all.
+#
+# THE FALLBACK (delta != 0). No closed form for <Sz_j(t)>, so the reference is sparse Krylov in
+# the Sz=0 sector -- correct but bounded by C(L, L/2), and iterative, so it has convergence
+# parameters of its own. `expv_sparse` substeps from ||H||_inf and checks a Saad residual
+# precisely so that it cannot quietly return an under-converged vector; a reference that cannot
+# detect its own failure is worse than no reference, because its error is charged to the method.
+include(joinpath(@__DIR__, "..", "tests", "common", "free_fermion.jl"))
+ANALYTIC || include(joinpath(@__DIR__, "..", "benchmarks", "exact_sparse.jl"))
 
 function exact_reference()
-    A, states, idx = heisenberg_sparse(L)
-    v = domain_wall_vector(L, states, idx)
-    v = expv_sparse(A, -im * TMAX, v)
-    return magnetisation_dense(v, L, states)
+    # `xx_free_fermion_sz` defaults to `occupied = 1:(L÷2)`, which IS `domain_wall_state(L)`.
+    # Closed form: nothing to converge, so nothing to check.
+    ANALYTIC && return xx_free_fermion_sz(L, TMAX; J = 1.0)
+
+    A, states, idx = heisenberg_sparse(L; delta = DELTA)
+    v0 = domain_wall_vector(L, states, idx)
+
+    # SELF-CHECK, because this path is iterative and its failure mode is silent. Walk the same
+    # interval on two different substep schedules: one call, and 400 steps. Both are exact if
+    # converged, so a disagreement means the reference is NOT converged -- and an under-converged
+    # reference is reported as method error, which is exactly how this example once turned a
+    # 1.08e-04 result into a 7.21e-02 one. Refuse to hand back a number we cannot vouch for.
+    one = magnetisation_dense(expv_sparse(A, -im * TMAX, v0), L, states)
+    walked = magnetisation_dense(
+        propagate!(A, v0, ComplexF64(-im * TMAX / 400), 400, (s, v) -> nothing), L, states)
+    d = maximum(abs.(one - walked))
+    d < 1e-9 || error("""
+        sparse reference is NOT converged: two substep schedules disagree by $d.
+        Do not trust any error reported against it. Raise `m` or lower the substep size in
+        `expv_sparse` (benchmarks/exact_sparse.jl).""")
+    return one
 end
 
 # ── report ───────────────────────────────────────────────────────────────────────────
 bar(x) = (n = clamp(round(Int, (x + 0.5) * 20), 0, 20); "|" * repeat("#", n) * repeat(".", 20 - n))
 
-@printf("Heisenberg domain wall — L=%d, dt=%.3f, t=%.1f (%d steps), chi cap %d\n",
-        L, DT, TMAX, NSTEP, CHI)
-println("method: RSVD-CBE bond-update BUG (gate path, Strang, expanding-basis S-step)\n")
+@printf("%s domain wall — L=%d, delta=%.2f, dt=%.3f, t=%.1f (%d steps), chi cap %d\n",
+        ANALYTIC ? "XX" : "XXZ", L, DELTA, DT, TMAX, NSTEP, CHI)
+println("method:    RSVD-CBE bond-update BUG (gate path, Strang, expanding-basis S-step)")
+println(ANALYTIC ?
+        "reference: xx_free_fermion_sz — CLOSED FORM, exact at any L and t" :
+        "reference: sparse Krylov in the Sz=0 sector — no closed form exists at delta != 0\n" *
+        "           (substepped and residual-checked; needs C(L,L/2) memory, so L <~ 20)")
+println()
 
 exact = exact_reference()
 results = Dict{Symbol, Any}()
 
+capped = Dict{Symbol, Bool}()
+errs   = Dict{Symbol, Float64}()
+
 for sym in SYMS
     mag, chis, info = run_domain_wall(sym)
     results[sym] = mag
+    capped[sym] = maximum(info.max_bond_dims) >= CHI
+    errs[sym]   = maximum(abs.(mag - exact))
     @printf("── symmetry = :%-4s ─────────────────────────────────────────────\n", sym)
     @printf("   bond dims : %s   (started all 1)\n", chis)
     @printf("   max chi   : %d over the run\n", maximum(info.max_bond_dims))
@@ -105,17 +163,56 @@ for sym in SYMS
     for j in 1:L
         @printf("   %-4d %+9.5f %+9.5f  %s\n", j, mag[j], exact[j], bar(mag[j]))
     end
-    @printf("   max |error vs exact| = %.3e\n\n", maximum(abs.(mag - exact)))
+    # Say WHICH error this is. Once the bond saturates `CHI` the number is dominated by discarded
+    # Schmidt weight, so it is a statement about the budget and not about the integrator -- and
+    # raising CHI is the response, not a bug hunt.
+    @printf("   max |error vs exact| = %.3e   %s\n\n", errs[sym],
+            capped[sym] ? "<- TRUNCATION-LIMITED (bond pinned at the cap $CHI): this is the \
+                           rank budget, not the method. Raise CHI." :
+                          "(bond never hit the cap, so this is the method's own error)")
 end
 
 # ── the cross-symmetry check ─────────────────────────────────────────────────────────
 # THE POINT OF THE WHOLE SCRIPT. :none stores one dense block per bond; :U1 stores separate
-# charge sectors. Different storage, different code paths, SAME STATE -- so these profiles
-# must agree to round-off. A visible difference is a bug, not a finding.
+# charge sectors. Different storage, different code paths, SAME STATE.
+#
+# WHY THIS IS NOT A ROUND-OFF CHECK, THOUGH. "Same state" holds for the EXACT states, and neither
+# run computes the exact state. Both are approximations, and the two approximate DIFFERENTLY:
+#
+#   - while the rank is growing, `:none` selects expansion directions from one dense block and
+#     `:U1` from a block-diagonal one per charge sector, so they span different subspaces;
+#   - once the rank saturates `maxdim`, `:none` truncates by one dense SVD per bond and `:U1`
+#     per charge sector, so they discard different directions.
+#
+# Neither is a defect, and neither is switched off by `maxdim` failing to bind -- the state starts
+# at chi=1, so what limits its rank mid-run is the growth schedule and the selection, not the cap.
+# An earlier version asserted `< 1e-10` whenever the cap did not bind and duly fired on a healthy
+# L=8 run; measurement (verify_symmetry_gap.jl) showed the gap falling as O(dt) in lockstep with
+# both runs' own errors, i.e. approximation error, converging to zero. So the criterion below is
+# RELATIVE to the accuracy the two runs actually achieved, which is the only thing the triangle
+# inequality lets us assert.
 if length(SYMS) > 1 && all(haskey(results, s) for s in (:none, :U1))
-    d = maximum(abs.(results[:none] - results[:U1]))
-    @printf("SAME PHYSICS CHECK   max |<Sz>_none - <Sz>_U1| = %.3e  %s\n",
-            d, d < 1e-10 ? "OK — symmetry changed the storage, not the state" : "!! DIVERGED")
+    d  = maximum(abs.(results[:none] - results[:U1]))
+    e  = max(errs[:none], errs[:U1])
+    @printf("SAME PHYSICS CHECK   max |<Sz>_none - <Sz>_U1| = %.3e\n", d)
+    @printf("                     each run's own error      = %.3e (none), %.3e (U1)\n",
+            errs[:none], errs[:U1])
+    # THE CRITERION. Two approximations of the same state, each off by ~e, may differ from EACH
+    # OTHER by up to ~2e without either being wrong -- that is the triangle inequality, not a
+    # defect. So the gap is only evidence of a storage bug when it EXCEEDS what the two runs'
+    # own accuracy already allows. A fixed threshold cannot express that, which is why the old
+    # `< 1e-10` fired on a perfectly healthy L=8 run.
+    if d <= 3 * e
+        @printf("                     => CONSISTENT: the gap is within the runs' own accuracy \
+                 (%.1fx e). Symmetry\n                        changed the storage, not the \
+                 state. Refine dt and all three shrink together.\n", d / max(e, eps()))
+    else
+        @printf("                     => !! SUSPECT: the gap (%.1fx e) is larger than either \
+                 run's error, so it\n                        cannot be explained by their \
+                 accuracy. Investigate.\n", d / max(e, eps()))
+    end
+    # The gap being ~e says the two are mutually consistent; it does NOT say either is accurate.
+    # That is what the per-symmetry `error vs exact` lines above are for.
 end
 
 # ── the other path: Lubich sweep (MPO environments, no Trotter splitting) ────────────

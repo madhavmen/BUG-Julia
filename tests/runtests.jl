@@ -28,8 +28,12 @@ Random.seed!(42)          # the integrator seeds its own RNG from BondUpdateOpti
 end
 
 @testset "references" begin
-    # the two independent references, each validated before being relied on
+    # the independent references, each validated before being relied on
     include("common/test_dense_reference.jl")
+    # the sparse-Krylov reference the L=18 benchmarks and the domain-wall example measure
+    # against. Was uncovered, and shipped a one-shot `expv_sparse` that was silently wrong
+    # for |t|*||H|| >> m -- reported as method error. Checked against a dense exp() here.
+    include("common/test_exact_sparse.jl")
 end
 
 @testset "validation" begin

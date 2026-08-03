@@ -103,20 +103,22 @@ function magnetisation_dense(v::Vector{ComplexF64}, L::Int, states::Vector{Int})
 end
 
 """
-`exp(t*A)*v` by Lanczos, `A` symmetric sparse and `t` either imaginary (`-im*dt`, real time) or
-real negative (`-dt`, imaginary time). Restarted in substeps so the Krylov space stays small and
-the result stays accurate for large `|t|`.
+ONE Lanczos projection of `exp(t*A)*v`, plus an a-posteriori error estimate.
 
-`m` is the Krylov dimension per substep; the residual estimate `beta*|coef[end]|` decides
-convergence, and a substep that does not converge is halved.
+Returns `(out, err)`. `err` is the standard Saad residual estimate
+`beta0 * beta_next * |coef[end]|`: the weight the projected exponential puts on the LAST Krylov
+vector, times the norm of the residual direction the space had to drop. It is what tells the
+caller whether `|t|` was small enough for this `m` -- without it the routine cannot know it is
+wrong, which is exactly the failure this file used to ship (see `expv_sparse`).
+
+`err == 0` means the Krylov space closed on an invariant subspace, i.e. the answer is exact.
 """
-function expv_sparse(A, t::ComplexF64, v::Vector{ComplexF64};
-                     m::Int = 30, tol::Float64 = 1e-12)
+function _lanczos_expv(A, t::ComplexF64, v::Vector{ComplexF64}, m::Int, tol::Float64)
     beta0 = norm(v)
-    beta0 == 0 && return copy(v)
     V = Vector{Vector{ComplexF64}}(undef, m + 1)
     alpha, beta = Float64[], Float64[]
     V[1] = v / beta0
+    closed = false
     for j in 1:m
         w = A * V[j]
         a = real(dot(V[j], w)); push!(alpha, a)
@@ -131,7 +133,7 @@ function expv_sparse(A, t::ComplexF64, v::Vector{ComplexF64};
         # by a numerically zero `b`. Relative to `beta0` so `tol` means the same thing whatever
         # the vector norm is.
         if b < max(tol * beta0, 1e-14)
-            V = V[1:j]; break
+            V = V[1:j]; closed = true; break
         end
         push!(beta, b)
         V[j + 1] = w / b
@@ -146,7 +148,61 @@ function expv_sparse(A, t::ComplexF64, v::Vector{ComplexF64};
     for i in 1:k
         out .+= (beta0 * coef[i]) .* V[i]
     end
-    return out
+    # beta[k] is the leftover coupling to V[k+1], the direction the projection discarded. It
+    # exists only when the space did NOT close, in which case there is nothing discarded.
+    err = (closed || length(beta) < k) ? 0.0 : beta0 * beta[k] * abs(coef[k])
+    return out, err
+end
+
+"""
+`exp(t*A)*v` by Lanczos, `A` symmetric sparse and `t` either imaginary (`-im*dt`, real time) or
+real negative (`-dt`, imaginary time). Restarted in substeps so the Krylov space stays small and
+the result stays accurate for large `|t|`.
+
+`m` is the Krylov dimension per substep; the residual estimate `beta*|coef[end]|` decides
+convergence, and a substep that does not converge is halved.
+
+WHY THE SUBSTEPPING IS NOT OPTIONAL. A degree-`m` Krylov approximation to `exp(t*A)` is only
+accurate while `|t| * ||A|| <~ m`; past that it does not degrade gracefully, it returns a
+confidently wrong vector. It also stays in the symmetry sector and keeps whatever spatial
+symmetry the initial condition had, so the wrong answer looks entirely plausible -- an L=18
+Heisenberg domain wall at `t=20` (`||A||*|t| ~ 160`) came back with a smooth, correctly
+antisymmetric `<Sz_j>` profile that was off by 7e-02, which reads as a truncation error in the
+METHOD being benchmarked rather than a defect in the reference. So the substep count is chosen
+up front from `||A||`, and the residual estimate is then checked and the step halved if the
+estimate says the choice was optimistic. A reference that cannot detect its own failure is worse
+than no reference.
+"""
+function expv_sparse(A, t::ComplexF64, v::Vector{ComplexF64};
+                     m::Int = 30, tol::Float64 = 1e-12)
+    beta0 = norm(v)
+    (beta0 == 0 || t == 0) && return copy(v)
+
+    total = abs(t)
+    dir   = t / total          # unit direction: -im for real time, -1 for imaginary time
+
+    # Cheap DETERMINISTIC upper bound on the spectral radius: for symmetric `A`,
+    # rho(A) <= ||A||_inf = max row sum of |A_ij|. Over-estimating only costs substeps;
+    # under-estimating would silently reintroduce the bug, so a bound beats an estimate.
+    nrmA = opnorm(A, Inf)
+    # Keep |t|*||A|| per substep at ~m/4: comfortably inside the radius where a degree-m
+    # Krylov space converges, so the halving branch below is a safety net and not the norm.
+    step = nrmA > 0 ? min(total, 0.25 * m / nrmA) : total
+
+    w    = copy(v)
+    done = 0.0
+    while done < total * (1 - 1e-12)
+        h = min(step, total - done)
+        out, err = _lanczos_expv(A, dir * h, w, m, tol)
+        # A substep that does not converge is halved -- and retried, not accepted.
+        if err > tol * beta0 && h > 1e-10 * total
+            step = h / 2
+            continue
+        end
+        w = out
+        done += h
+    end
+    return w
 end
 
 "Repeatedly apply `expv_sparse` in steps of `dt`, calling `obs(step, vector)` after each."
