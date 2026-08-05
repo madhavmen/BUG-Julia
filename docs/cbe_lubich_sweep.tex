@@ -1,0 +1,1110 @@
+% The RSVD-CBE Lubich (BUG) sweep, explained bond by bond.
+%
+% Written to be read the way a lecture derives 1-site TDVP: state the manifold, state the
+% projector, then walk the sweep one bond at a time and say what each line does and why.
+%
+% Companion to:
+%   src/RSVDCBEBondUpdate/cbe_lubich.jl   -- the sweep this document explains, line by line
+%   src/RSVDCBEBondUpdate/cbe_core.jl     -- the expansion (selection) it calls
+%   src/RSVDCBEBondUpdate/henv.jl         -- the MPO-as-channels environments (Part III)
+%   docs/rsvd_cbe_writeup.tex             -- the CBE selection in its own right
+%
+% Compile:  pdflatex cbe_lubich_sweep.tex   (twice, for references)
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{enumitem}
+\usepackage{longtable}
+
+\definecolor{codebg}{gray}{0.96}
+\definecolor{keep}{rgb}{0.10,0.45,0.20}
+\definecolor{drop}{rgb}{0.65,0.10,0.10}
+\definecolor{note}{rgb}{0.15,0.30,0.60}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  framerule=0pt,
+  columns=fullflexible,
+  keepspaces=true,
+  breaklines=true,
+  postbreak=\mbox{\textcolor{drop}{$\hookrightarrow$}\space},
+  showstringspaces=false,
+  xleftmargin=0.4em,
+  aboveskip=0.8em,
+  belowskip=0.8em,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+}
+
+\newcommand{\code}[1]{\texttt{\small #1}}
+\newcommand{\Uex}{U_{\mathrm{ex}}}
+\newcommand{\Vex}{V_{\mathrm{ex}}}
+\newcommand{\Dex}{D_{\mathrm{ex}}}
+\newcommand{\Dpre}{D_{\mathrm{pre}}}
+\newcommand{\Pperp}{P_{\perp}}
+\newcommand{\dd}{\mathrm{d}}
+
+\title{\bf The RSVD--CBE Lubich sweep, bond by bond\\[2pt]
+\large A lecture-style walkthrough of \code{cbe\_lubich\_sweep}}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-2.2em}
+
+\begin{abstract}
+\noindent
+This note explains what \code{cbe\_lubich\_sweep} does, at the level of detail at which 1-site
+TDVP is normally taught: what manifold we are on, what the local problem at each bond is, what
+is evolved and what is merely re-based, and why the sweep is ordered the way it is.
+Part~\ref{part:setup} sets up notation and contrasts the sweep with 1-site TDVP.
+Part~\ref{part:sweep} walks the sweep line by line. Part~\ref{part:env} is a self-contained
+treatment of the Hamiltonian representation and the environments --- how the MPO is stored, why
+it is stored that way, and how a channel is carried, opened and closed. Part~\ref{part:cbe}
+does the same for the expansion. Part~\ref{part:valid} states the provenance of each piece and
+the four places we deliberately differ from the CBE reference. Part~\ref{part:tree} explains
+the tree case, of which the chain is a degenerate instance.
+\end{abstract}
+
+\tableofcontents
+
+\section*{Provenance, stated up front}
+\addcontentsline{toc}{section}{Provenance, stated up front}
+
+Three separate things are combined here, and confusing them makes the code hard to read.
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{3.5cm}p{5.0cm}p{6.4cm}@{}}
+\toprule
+\textbf{piece} & \textbf{origin} & \textbf{reference implementation} \\
+\midrule
+The BUG sweep &
+Ceruti--Kusch--Lubich; Sulz thesis Alg.\ 1, 5--7 &
+\emph{Julia:} \code{qtci\_time\_integrators/exploratory\_bug/} \code{src/BUG/discarded\_bug.jl}
+--- our own port, mirroring the validated Python \code{alice/algorithm/.../sweep.py} \\[2pt]
+The CBE / RSVD expansion &
+Gleis--Li--von Delft (controlled bond expansion) &
+\emph{MATLAB:} QSMPSLib \code{RSVDpreBE0SiQS.m}, \code{CBE1SiQS.m} \\[2pt]
+\textbf{Joining the two} &
+\textbf{ours} &
+\textbf{\code{BUG-Julia/src/RSVDCBEBondUpdate/cbe\_lubich.jl}} --- the file this document explains \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The CBE reference uses bond expansion to \emph{rescue} 1-site TDVP, keeping the
+projector-splitting structure. It has no BUG in it. The BUG references solve the K/L basis
+ODEs to get their augmented bases, and have no CBE in them. The contribution here is the
+substitution:
+
+\begin{quote}
+\color{note}
+\textbf{The K/L ODEs are never solved.} In Sulz Algorithm 6 the augmented left basis comes from
+integrating $\dot K = -i H_{\text{eff}}(K)$ with the right frame held fixed and then taking
+$\mathrm{range}\big([\,K(t_1)\mid U_0\,]\big)$. Here \code{cbe\_expand} supplies those
+directions directly --- one \emph{sketched} application of $H$ --- and the centre \code{expv}
+builds its Krylov basis on the already-expanded bond. No frozen projector, no discarded
+projector, no one-site \code{expv}.
+\end{quote}
+
+% ==================================================================================
+\part{Setup: what problem this solves}
+\label{part:setup}
+% ==================================================================================
+
+\section{Notation}
+
+The state is an MPS on $L$ sites,
+\[
+  |\psi\rangle \;=\; \sum_{\{s\}} A_1^{s_1} A_2^{s_2}\cdots A_L^{s_L}\,|s_1\dots s_L\rangle ,
+\]
+with $A_i$ a rank-3 tensor with legs $(\ell_{i-1},\, s_i,\, \ell_i)$ --- left link, physical
+site, right link. Write $\chi_i$ for $\dim \ell_i$, and call the link between sites $i$ and
+$i+1$ \emph{bond $i$}; there are $L-1$ bonds. Throughout $\tau = -i\,\dd t$.
+
+\section{The manifold, and the two ways to move on it}
+
+Fix a bond dimension $\chi$. The MPS of bond dimension $\le\chi$ form a smooth manifold
+$\mathcal{M}_\chi$ (away from rank-deficient points). Exact evolution $\dot\psi = -iH\psi$
+leaves it immediately, so every method here is a rule for staying on it.
+
+\paragraph{The Dirac--Frenkel answer (TDVP).} Project the vector field onto the tangent space,
+$\dot\psi = -i P_{T_\psi}H\psi$. For an MPS the tangent projector telescopes,
+\[
+  P_{T_\psi} \;=\; \sum_{i=1}^{L} P^{(i)}_{1\text{-site}} \;-\; \sum_{i=1}^{L-1} P^{(i)}_{0\text{-site}},
+\]
+and Lie--Trotter splitting of \emph{that sum} is a 1-site TDVP sweep:
+
+\begin{quote}
+\emph{1-site TDVP, as taught.} Sweep left to right. At site $i$: evolve $A_i$ forward by
+$+\tau$ under $H^{(i)}_{1\text{-site}}$; split $A_i = QC$ by QR; evolve the bond tensor $C$
+\emph{backward} by $-\tau$ under $H^{(i)}_{0\text{-site}}$; absorb $C$ into $A_{i+1}$; continue.
+\end{quote}
+
+The backward $-\tau$ step \emph{is} the $-\sum P^{(i)}_{0\text{-site}}$ term: without it the
+bond contribution is double counted. And because $P_{T_\psi}$ projects onto the tangent space
+at the \emph{current} rank, 1-site TDVP \textbf{cannot change the rank at all}. Start at
+$\chi=1$ and you stay there forever.
+
+\paragraph{The BUG answer.} Do not project the field and split the projector. Instead:
+\begin{enumerate}[nosep,leftmargin=1.6em]
+  \item build a \emph{larger} basis on each bond, already containing the directions the
+        evolution is about to need (\textbf{B}asis \textbf{U}pdate), then
+  \item solve a \emph{single} \textbf{G}alerkin problem in that enlarged basis.
+\end{enumerate}
+No projector to split, hence \textbf{no backward substep}; and since the basis is enlarged
+before the evolution, the rank can grow. The three questions this leaves are:
+
+\begin{enumerate}[nosep,leftmargin=1.6em]
+  \item[(Q1)] \emph{Which} new directions? --- CBE, Part~\ref{part:cbe}.
+  \item[(Q2)] How do you build a consistent basis on \emph{every} bond without evolving
+        anything yet? --- the two basis sweeps, \S\ref{sec:ksweep}--\S\ref{sec:lsweep}.
+  \item[(Q3)] What is the single Galerkin problem, and where does it live? --- the 0-site step
+        at the centre bond, \S\ref{sec:galerkin}.
+\end{enumerate}
+
+\section{Bond frames: the object every step manipulates}
+\label{sec:frame}
+
+At bond $i$ the two-site block is $\Theta_i = A_i A_{i+1}$, with legs
+$(\ell_{i-1}, s_i, s_{i+1}, \ell_{i+1})$. A \code{BondFrame} is a factorisation of it,
+\begin{equation}
+  \boxed{\;\Theta_i \;=\; U_0 \, S_0 \, V_0\;}
+  \label{eq:frame}
+\end{equation}
+with $U_0$ of legs $(\ell_{i-1}, s_i, b)$ a left isometry ($U_0^\dagger U_0 = I$), $V_0$ of
+legs $(b, s_{i+1}, \ell_{i+1})$ a right isometry ($V_0V_0^\dagger = I$), and $S_0$ the $r\times
+r$ core carrying all the amplitude.
+
+$U_0$ and $V_0$ are the \textbf{frames}: orthonormal bases for the $r$-dimensional subspaces of
+the left and right local spaces the state currently uses. \emph{Everything CBE does is enlarge
+those two subspaces; everything the Galerkin step does is evolve $S_0$ inside them.}
+
+\begin{lstlisting}[language=Julia,firstnumber=102]
+function _frame_from(left, right)
+    res_l = svd(left,  (1, 2), "bU,L", "bU,R"; cutoff = 0.0)
+    res_r = svd(right, (1,),   "bV,L", "bV,R"; cutoff = 0.0)
+    U0 = to_concrete(res_l.U)
+    V0 = to_concrete(res_r.Vd)
+    S0 = to_concrete(to_concrete(res_l.S * res_l.Vd) * to_concrete(res_r.U * res_r.S))
+\end{lstlisting}
+
+Two SVDs, one from each side; $S_0$ collects the two leftover middles. \code{cutoff = 0.0} is
+essential --- this is a change of basis, not an approximation.
+
+\paragraph{Why \code{\_frame\_from} and not the library's \code{bond\_frame}.} Because of the
+single most important structural fact about this sweep:
+
+\begin{quote}\bf The basis sweeps must not touch the state.\end{quote}
+
+\noindent
+So the tensor whose frame we want is not $\psi[i]$ but a \emph{carry} --- the left block already
+re-expressed in the bases built at bonds $1\dots i-1$. \code{bond\_frame} insists the
+orthogonality centre sit on site $i$ and reads $\psi$ directly; \code{\_frame\_from} takes both
+tensors as arguments. Correctness rests on exactly one of \code{left}/\code{right} carrying the
+amplitude while the other is an isometry --- guaranteed by the sweep's gauge.
+
+% ==================================================================================
+\part{The sweep, line by line}
+\label{part:sweep}
+% ==================================================================================
+
+\section{The shape of one step}
+
+\begin{center}
+\begin{tabular}{@{}rlp{8.6cm}@{}}
+\toprule
+1. & \textbf{K-sweep} $\;1 \to c$   & build augmented \emph{left} frames $W_1 \dots W_c$ \\
+2. & \textbf{L-sweep} $\;L-1 \to c$ & build augmented \emph{right} frames $Z_c \dots Z_{L-1}$ \\
+3. & \textbf{Galerkin} at bond $c$  & seed $S_0=\langle W,Z|\psi\rangle$, evolve by $\tau$ ---
+                                      \emph{the only time evolution in the step} \\
+4. & \textbf{Truncate}              & Sulz Algorithm 1, one compression pass \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+$c = \max(1,\min(L-1,\lfloor L/2\rfloor))$ is the centre bond (line 332). Steps 1--2 are pure
+re-basing: no time advances and $\psi$ is not modified. Step 3 is the entire time step.
+
+\begin{quote}
+\color{note}
+\textbf{One sentence.} The two sweeps decide \emph{where} the state is allowed to go; the single
+centre step decides \emph{how far along} it goes. Separating those questions is what removes the
+backward substep.
+\end{quote}
+
+\section{The K-sweep: augmented left frames}
+\label{sec:ksweep}
+
+\begin{lstlisting}[language=Julia,firstnumber=383]
+canonical!(psi, 1)
+rstack = right_env_stack(psi, h; downto = 3)
+lch = boundary_channels(h)
+C = nothing
+for i in 1:c
+    K = C === nothing ? psi[i] : to_concrete(contract(C, (2,), psi[i], (1,)))
+    f = _frame_from(K, psi[i + 1])
+    ex = record!(cbe_expand(f, h, i, lch, right_channels(rstack, i + 2); exkw...))
+    W[i] = ex.U_ex
+    C = to_concrete(contract(ex.U_ex', (1, 2), K, (1, 2)))    # (b_{i+1}, link_{i+1})
+    lch = push_left_channels(lch, h, ex.U_ex, i)
+end
+\end{lstlisting}
+
+\paragraph{\code{canonical!(psi,1)} (383).} Centre on site 1, so sites $2\dots L$ are
+\emph{right} isometries and all amplitude sits at the left end. This is what makes
+\code{\_frame\_from(K, psi[i+1])} correct: $\psi[i+1]$ is an isometry, \code{res\_r.S == 1},
+and the whole amplitude of $\Theta_i$ rides in the first argument.
+
+\paragraph{\code{rstack = right\_env\_stack(...)} (384).} Precompute all \emph{right}
+environments once. The sweep runs left to right, so at bond $i$ it needs everything right of
+site $i+1$ --- and this sweep will not touch that part of $\psi$, so one prebuild serves every
+bond.
+
+\paragraph{\code{lch = boundary\_channels(h)} (385) --- carried, not prebuilt.} The
+\emph{left} environment is advanced one bond at a time (line 400). It \emph{must} be carried,
+because it has to be expressed in the \emph{new} frames $W_1\dots W_{i-1}$ this sweep is in the
+middle of creating. A prebuilt left stack would be written in the old bases and be silently
+wrong. Part~\ref{part:env} is about exactly this object.
+
+\paragraph{\code{K = contract(C, (2,), psi[i], (1,))} (389) --- \emph{the carry}.} $C$ has legs
+$(b_i,\ell_i)$ and maps the old link into the augmented bond built at the previous bond, so
+\[
+  K \;=\; C\cdot A_i,\qquad \text{legs } (b_i,\, s_i,\, \ell_{i+1})
+\]
+is the left block $A_1\cdots A_i$ \emph{already written in the expanded basis}. This is the
+line that makes the frames \textbf{chain}. Building the frame from $\psi[i]$ instead would give
+a frame whose left leg is the \emph{old} link $\ell_{i-1}$; such frames cannot be composed into
+a state at all.
+
+\paragraph{\code{ex = cbe\_expand(f, h, i, lch, right\_channels(rstack, i+2))} (392--394).}
+The one call answering (Q1). Returns
+\[
+  \Uex = \big[\,U_0 \mid C_L\,\big],\qquad
+  \Vex = \begin{bmatrix}V_0\\ C_R\end{bmatrix},
+\]
+orthonormal, $C_L\perp U_0$, $C_R\perp V_0$. Note which environment comes from where:
+\emph{carried} on the left, \emph{read from the prebuilt stack} on the right at link $i+2$.
+
+\paragraph{\code{W[i] = ex.U\_ex} (395) --- accumulate, do not write back.} $\psi$ is untouched.
+The file header records what happens otherwise (\code{\_absorb\_left!} exists, and is used
+elsewhere): the zero-padded remainder lands in $\psi[i+1]$, the next frame is re-derived from
+that padded tensor with \code{svd(cutoff=0.0)}, and the padding collapses --- propagating the
+collapse back into the bond just expanded. Measured symptom: $L=18$ pinned at \code{maxbond 2}
+with an error \emph{independent of $\dd t$}. That independence is the diagnostic: an error that
+does not respond to the time step is not a time-integration error.
+
+\paragraph{\code{C = contract(ex.U\_ex', (1,2), K, (1,2))} (399).} The new carry,
+$C_{\text{new}} = \Uex^\dagger K$, legs $(b_{i+1},\ell_{i+1})$.
+
+\paragraph{\code{lch = push\_left\_channels(lch, h, ex.U\_ex, i)} (400).} Advance the
+environment through the \emph{augmented} frame so it stays in step with the basis
+(\S\ref{sec:push}).
+
+\begin{quote}
+\color{note}
+\textbf{Why the rank actually grows.} A common misreading is that bond $i$ ends the step at
+$\code{leg\_dim}(\Uex,3)$ because $\Uex$ is wide. It does not --- $\Uex^\dagger\psi[i]$ is still
+zero-padded here, and a \code{canonical!} would collapse it straight back. The rank grows
+because (i) the centre core is \emph{evolved} and comes out \emph{dense}, and (ii) the frames
+are \emph{retained}: $S(t_1)$ propagates outward through $W_{i+1}\dots W_c$, so every bond ends
+up genuinely carrying $r+\Dex$. Expansion alone is lossless and cannot change a Schmidt rank;
+only evolution in the widened space can.
+\end{quote}
+
+\section{The L-sweep: augmented right frames}
+\label{sec:lsweep}
+
+\begin{lstlisting}[language=Julia,firstnumber=408]
+canonical!(psi, L)
+lstack = left_env_stack(psi, h; upto = L - 2)
+rch = boundary_channels(h)
+D = nothing
+for j in (L - 1):-1:c
+    B = D === nothing ? psi[j + 1] : to_concrete(contract(psi[j + 1], (3,), D, (1,)))
+    f = _frame_from(psi[j], B)
+    ex = ... cbe_expand(f, h, j, left_channels(lstack, j), rch; exkw...) ...
+    Z[j] = ex.V_ex
+    D = to_concrete(contract(B, (2, 3), ex.V_ex', (2, 3)))    # (link_{j+1}, b)
+    rch = push_right_channels(rch, h, ex.V_ex, j + 1)
+end
+\end{lstlisting}
+
+The exact mirror, with one point worth pausing on.
+
+\paragraph{\code{canonical!(psi,L)} (408) --- the gauge is flipped on purpose.} The K-sweep
+needed the amplitude at the left end; the L-sweep needs it at the right, so $\psi[j]$ is a
+\emph{left} isometry and the amplitude rides in the carry $D$. Re-gauging does not change the
+state, so the $W$'s stay valid --- and the seed below is a \emph{complete contraction}, hence
+gauge independent. That is why two incompatible gauges can coexist in one step.
+
+\paragraph{Ordering is load-bearing (docstring 307--312).} \code{canonical!} rewrites tensors,
+so a stack built before it is stale. Each sweep therefore canonicalises to its far end
+\emph{before} building the stack it will read, and the sweep direction is chosen so any
+write-back only touches sites that stack does not depend on. Getting this backwards reads a
+stale environment, which does not throw --- it silently evolves with the wrong Hamiltonian.
+
+\section{The seed: $S_0=\langle W,Z|\psi\rangle$}
+\label{sec:seed}
+
+\begin{lstlisting}[language=Julia,firstnumber=434]
+AL = nothing
+for i in 1:c
+    T = AL === nothing ? psi[i] : to_concrete(contract(AL, (2,), psi[i], (1,)))
+    AL = to_concrete(contract(W[i]', (1, 2), T, (1, 2)))       # (b_L, link_{i+1})
+end
+AR = nothing
+for j in (L - 1):-1:c
+    T = AR === nothing ? psi[j + 1] : to_concrete(contract(psi[j + 1], (3,), AR, (1,)))
+    AR = to_concrete(contract(T, (2, 3), Z[j]', (2, 3)))       # (link_{j+1}, b_R)
+end
+S0 = to_concrete(contract(AL, (2,), AR, (1,)))                 # (b_L, b_R)
+\end{lstlisting}
+
+We have two enlarged bases and need the current state's coordinates in them:
+\[
+  S_0 \;=\; \big(W_1\cdots W_c\big)^\dagger\,|\psi\rangle\,\big(Z_c\cdots Z_{L-1}\big)^\dagger .
+\]
+Two deliberate properties:
+\begin{itemize}[nosep,leftmargin=1.6em]
+  \item \textbf{No overlap matrices.} Textbook BUG forms $M=\hat U^\dagger U$, $N=\hat
+        V^\dagger V$ and seeds $\hat S = MSN^\dagger$. Here the seed is a direct contraction of
+        the state against the frames --- no $M$, no $N$, and \textbf{no inverse anywhere in the
+        step}. This is the inverse-free property that makes BUG robust to small singular
+        values, the failure mode that forces TDVP implementations to regularise.
+  \item \textbf{No gauge requirement}, since a complete contraction does not care what canonical
+        form the L-sweep left behind.
+\end{itemize}
+
+\section{The Galerkin step: 0-site, at one bond only}
+\label{sec:galerkin}
+
+\begin{lstlisting}[language=Julia,firstnumber=451]
+H0 = zero_site_h(h, c, lenv_c, renv_c, W[c], Z[c])
+S1 = expv(x -> (nmv[] += 1; apply_zero_site(H0, x)), tau, S0;
+          hermitian = true, maxiter = maxiter, tol = tol)
+res = svd(S1, (1,); cutoff = max(trunc_thresh, 1e-14), Nkeep = maxdim, get_lists = true)
+\end{lstlisting}
+
+The whole time step is
+\begin{equation}
+  S_1 \;=\; \exp\!\big(\tau\,H^{(0)}_{\mathrm{eff}}\big)\,S_0,\qquad \tau=-i\,\dd t .
+  \label{eq:galerkin}
+\end{equation}
+
+\paragraph{Why exactly one.} The temptation --- and an earlier version did this --- is a
+Galerkin step at \emph{every} bond, since every bond just got a new basis. It is wrong and
+measurably so: it applies the global $H$ $L-1$ times per sweep, over-counting $\tau$, and
+full-rank exactness degrades to $2.24\times10^{-2}$. In the gauge
+$W_1\cdots W_c\,S\,Z_c\cdots Z_{L-1}$ there is exactly \textbf{one connection tensor}, namely
+$S$; the $W$'s and $Z$'s are basis matrices, not degrees of freedom. Algorithm 7 fires once per
+connection tensor, and a chain in this gauge has one. (Part~\ref{part:tree} is where this stops
+being trivial.)
+
+\paragraph{Why 0-site --- and why that is the whole point of expanding.} $S$ has legs
+$(b_L,b_R)$: two bond indices, \textbf{no physical index}. So the operator application never
+touches a site tensor. Compare the two-site apply 2-site TDVP must perform, whose operand
+carries two physical indices as well: the operand here is smaller by $d^2$. That is the bargain
+CBE offers ---
+
+\begin{quote}\emph{pay once, up front, to widen the bond; then do the update at 0-site cost.}\end{quote}
+
+\noindent
+It is exactly what the CBE reference's \code{RSVDpreBE0SiQS} returns \code{VLex, VRex} for: the
+expanded environments exist so the subsequent update can be 0-site. \S\ref{sec:h0} writes
+$H^{(0)}_{\mathrm{eff}}$ out.
+
+\paragraph{\code{nmv}.} Incremented once per operator application, giving the Lanczos dimension.
+Reported so ``more work per step'' can be told from ``more steps of work'' when comparing
+expansion budgets.
+
+\section{Reassembly and truncation}
+
+\begin{lstlisting}[language=Julia,firstnumber=466]
+for i in 1:(c - 1)
+    psi[i] = relink(W[i], psi[i].inds[1].itags, psi[i].inds[3].itags)
+end
+psi[c]     = relink(to_concrete(W[c] * res.U), t1c, t3c)
+psi[c + 1] = relink(to_concrete((res.S * res.Vd) * Z[c]), t3c, t3r)
+for j in (c + 1):(L - 1)
+    psi[j + 1] = relink(Z[j], psi[j + 1].inds[1].itags, psi[j + 1].inds[3].itags)
+end
+\end{lstlisting}
+
+\[
+  |\psi(t_1)\rangle \;=\; W_1\cdots W_{c-1}\,(W_cU)\,(SV^\dagger Z_c)\,Z_{c+1}\cdots Z_{L-1},
+\]
+with $USV^\dagger$ the truncated SVD of the evolved core --- which simultaneously restores the
+orthogonality centre and trims the centre bond.
+
+\code{relink} retags \emph{both} bond legs of every frame. Not cosmetic: frames carry
+\code{\_frame\_from}/\code{cbe\_expand} tags (\code{"bU,L"} and friends), adjacent tensors in a
+\code{SymMPS} must agree on the shared link tag, and retagging one side only leaves
+\code{psi[i].inds[3] != psi[i+1].inds[1]}, which \code{contract} rejects on the next sweep.
+
+\paragraph{\code{truncate\_sweep!} (484) --- Sulz Algorithm 1.} One left-to-right pass of
+truncating SVDs, then one right-to-left. Not housekeeping: without it the rank ratchets up by
+$\Dex$ every step whether or not the dynamics wanted the room.
+
+The \emph{timing} is the subtle part: safe only \textbf{after} the Galerkin step. Run before,
+it removes directions that are merely \emph{not-yet-populated} rather than unwanted --- and
+since the whole point of the expansion is to add directions carrying no weight \emph{yet},
+truncating first deletes exactly what was just bought. That is what pinned the rank at 2 in the
+single-centre-step version.
+
+% ==================================================================================
+\part{The Hamiltonian and the environments}
+\label{part:env}
+% ==================================================================================
+
+\section{The MPO, stored in factored form}
+
+This is \textbf{the MPO path}, and the codebase names it that throughout: the entry point is
+\code{evolve\_mpo!}, \code{ising\_chain}'s docstring calls it ``the MPO/Lubich path'', and the
+mode table in \code{RSVDCBEBondUpdate.jl} lists \code{GroundState} as \code{MPO}-only. The
+Hamiltonian \emph{is} an MPO, and it is how the effective operators are applied during the basis
+updates --- in contrast to the \emph{gate} path, whose environments are the identity by
+canonical form.
+
+What follows is about the MPO's \textbf{storage layout}, which is a choice \emph{within} the MPO
+representation and not an alternative to it. Rather than materialising an explicit rank-4
+$W_i$ with a fused virtual index, the code keeps the MPO \emph{factored}: a list of the local
+operator pairs, plus one environment block per virtual-index state. Those are the same object;
+the second form simply never allocates the zeros.
+
+\begin{lstlisting}[language=Julia,firstnumber=54]
+struct XXZTerm
+    left::Any
+    right::Any
+    coeff::Float64
+end
+struct XXZChain
+    L::Int
+    terms::Vector{XXZTerm}
+    J::Float64
+    delta::Float64
+end
+\end{lstlisting}
+
+\noindent
+So
+\begin{equation}
+  H \;=\; \sum_{i=1}^{L-1}\sum_t c_t\; O_t^{\mathrm{L}}(i)\, O_t^{\mathrm{R}}(i+1),
+  \label{eq:terms}
+\end{equation}
+with the same two operators repeated on every bond. For XXZ under \code{:U1}:
+$t\in\{\code{Sp/Sp'},\ \code{Sm/Sm'},\ \code{Sz/Sz}\}$; under \code{:SU2} there is a
+\emph{single} term $\mathbf{S}\cdot\mathbf{S}$, because none of $S^+,S^z,S^-$ is an SU(2)
+tensor on its own --- only the full vector is.
+
+\paragraph{Why factored rather than an explicit $W_i$, and why not gates.} Three reasons, in
+increasing order of importance.
+\begin{enumerate}[nosep,leftmargin=1.6em]
+  \item The MPO for \eqref{eq:terms} has virtual dimension $w = 2+n_{\text{terms}}$ and is
+        mostly zeros and identities. For Heisenberg under \code{:U1}, $w=5$: of the $25$ blocks
+        of $W$, eight are non-zero. A dense virtual index contracts all $25$; the factored form
+        contracts the eight, and skips even those while a channel is still \code{ZERO} near the
+        boundaries.
+  \item Gates (the Trotter path's representation) fuse the two halves of a bond term into one
+        rank-4 object. That is fine for applying $e^{-i\dd t\,h_i}$, but useless here.
+  \item \textbf{The expansion must \emph{split} a bond term across the two halves of the
+        sketch} (\S\ref{sec:sketch}, case (e)). A fused gate has already joined them, and a
+        fused virtual index would have to be cut mid-block to recover the split. Keeping the
+        operator pairs separate makes it free.
+\end{enumerate}
+
+\paragraph{What the factored form costs, and it is not nothing.} Generality. \eqref{eq:terms}
+hardcodes a \emph{nearest-neighbour, uniform} Hamiltonian: the same two operators on every bond.
+\code{xxz\_chain} and \code{heisenberg\_su2\_chain} are the only constructors that exist.
+Long-range couplings, site-dependent parameters, or a disordered field cannot be expressed at
+all --- an explicit $W_i$ per site would express any of them immediately. If that generality is
+wanted, the three functions that need to change are \code{sketch\_h\_left}/\code{\_right} and
+\code{zero\_site\_h}; nothing in the selection code knows how $H$ is stored.
+
+\section{Environments as a finite-state automaton}
+
+An MPO's virtual index for a nearest-neighbour $H$ has a standard three-block structure:
+\[
+  W \;=\;
+  \begin{pmatrix}
+    I & O_1^{\mathrm{L}} & \cdots & O_n^{\mathrm{L}} & 0\\
+    0 & 0 & & & c_1 O_1^{\mathrm{R}}\\
+      & & \ddots & & \vdots\\
+    0 & & & 0 & c_n O_n^{\mathrm{R}}\\
+    0 & 0 & \cdots & 0 & I
+  \end{pmatrix}.
+\]
+Reading the virtual index as the state of an automaton scanning the chain left to right:
+
+\begin{center}
+\begin{tabular}{@{}llp{7.6cm}@{}}
+\toprule
+\textbf{state} & \textbf{code} & \textbf{meaning} \\
+\midrule
+``before'' & \code{id} & nothing has happened yet; the identity has been transported \\
+``mid-term $t$'' & \code{open[t]} & term $t$ placed its \emph{left} operator; waiting for its partner on the next site \\
+``after'' & \code{done} & one complete term lies entirely behind us \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\code{henv.jl} stores one tensor per automaton state, on one link:
+
+\begin{lstlisting}[language=Julia,firstnumber=181]
+struct ChannelSet
+    id::Any            # (bra_link, ket_link);  `nothing` = chain boundary
+    done::Any          # (bra_link, ket_link);  ZERO = no completed terms yet
+    open::Vector{Any}  # open[t] = (bra_link, ket_link, op)  or ZERO
+end
+boundary_channels(h) = ChannelSet(nothing, ZERO, Any[ZERO for _ in h.terms])
+\end{lstlisting}
+
+This is an MPO environment with the MPO's internal index \emph{made explicit and given names}.
+Nothing is approximated; it is a bookkeeping choice that pays off in \S\ref{sec:h0}, where the
+0-site Hamiltonian falls out as three cheap pieces instead of one opaque contraction.
+
+\paragraph{\code{ZERO} is not \code{nothing}.} A channel with no contribution yet is \emph{not}
+the boundary identity. \code{done} starts at \code{ZERO} (no completed terms); \code{id} starts
+at \code{nothing}, which \code{\_left\_step} reads as ``contract the bra and ket links directly''.
+Conflating them is a silent factor-of-one bug --- the run completes and the energy is wrong.
+
+\paragraph{The \code{op} leg.} \code{open[t]} carries a third leg when the term's operators do.
+Under \code{:U1}, \code{Sp}/\code{Sp'} are rank-3 and that leg carries the $\pm2$ charge which is
+exactly what makes the pair symmetry-allowed; contracting it between the two halves is what
+enforces charge conservation. Under \code{:none} the operators are plain matrices and the leg is
+absent. Both halves of a term carry an op-leg or neither does, so a single rank test covers both
+cases everywhere downstream.
+
+\section{Carrying a channel: open, transport, close}
+\label{sec:push}
+
+\begin{lstlisting}[language=Julia,firstnumber=198]
+function push_left_channels(cs::ChannelSet, h::XXZChain, A, i::Int; open_next::Bool = true)
+    terms = h.terms
+    acc = cs.done === ZERO ? ZERO : _left_step(cs.done, A, nothing, i)
+    for (t, term) in enumerate(terms)
+        cs.open[t] === ZERO && continue
+        acc = _accum(acc, to_concrete(term.coeff * _left_step(cs.open[t], A, term.right, i)))
+    end
+    nxt = Any[open_next ? _left_step(cs.id, A, terms[t].left, i) : ZERO
+              for t in eachindex(terms)]
+    return ChannelSet(_left_step(cs.id, A, nothing, i), acc, nxt)
+end
+\end{lstlisting}
+
+This is the MPO transfer matrix applied to the environment vector, written out row by row.
+Reading it as the automaton:
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{new state} & \textbf{built from} & \textbf{automaton move} \\
+\midrule
+\code{id} & \code{id} through $A$, no operator & \textsc{transport} \\
+\code{done} & \code{done} through $A$, no operator & \textsc{transport} \\
+          & $+\;\sum_t c_t\,$\code{open[t]} through $A$ \emph{with} \code{term.right} & \textsc{close} \\
+\code{open[t]} & \code{id} through $A$ with \code{term.left} & \textsc{open} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Each of the three moves appears exactly once, and the coefficient $c_t$ is applied at the
+moment of closing --- once per term, never twice.
+
+\paragraph{\code{\_left\_step(E, A, O, i)}.} The primitive: sandwich $E$ between $A$ and $A^*$,
+optionally with site operator $O$ inserted, producing the environment on the next link. Its
+one subtlety is inside \code{\_apply\_site\_op}:
+\begin{quote}\ttfamily\footnotesize
+The ket-facing leg of `O` is found by ARROW, not position: a plain operator has it at leg 1,
+an adjoint (`Sp'`) at leg 2 [...] so hard-coding leg 1 breaks on exactly the adjoint half of
+every XY term.
+\end{quote}
+
+\paragraph{The mirror is not symmetric.} \code{push\_right\_channels} \textbf{opens} with
+\code{term.right} and \textbf{closes} with \code{term.left} --- the reverse of the left sweep,
+because the automaton is now scanning right to left. Getting this backwards produces a
+Hermitian-looking but wrong $H$.
+
+\paragraph{\code{open\_next = false}.} At the last site of a chain, suppress opening new
+half-terms: a term opened there would never be closed, and would contribute a dangling leg.
+
+\paragraph{Cost.} Pushing is $O(1)$ per bond; rebuilding a stack is $O(L)$. Carrying is what
+makes one sweep $O(L)$ rather than $O(L^2)$. The price is the ordering constraint of
+\S\ref{sec:lsweep}: a carried environment must be advanced through the \emph{same} tensors the
+sweep is using, which is why \code{lch} is pushed through $\Uex$ (line 400) and not through
+$\psi[i]$.
+
+\section{Assembling the 0-site Hamiltonian}
+\label{sec:h0}
+
+\begin{lstlisting}[language=Julia,firstnumber=144]
+function zero_site_h(h::XXZChain, i::Int, lch::ChannelSet, rch::ChannelSet, U_ex, V_ex)
+    dl = lch.done === ZERO ? ZERO : _left_step(lch.done, U_ex, nothing, i)
+    for t in 1:nt
+        lch.open[t] === ZERO && continue
+        c = _left_step(lch.open[t], U_ex, terms[t].right, i)
+        dl = _accum(dl, to_concrete(terms[t].coeff * c))
+    end
+    ol = Any[_left_step(lch.id, U_ex, terms[t].left, i) for t in 1:nt]
+    ...  # mirror for dr, or
+    return ZeroSiteH(dl, dr, ol, or, [t.coeff for t in terms])
+end
+\end{lstlisting}
+
+Two observations make this line up with everything above.
+
+\paragraph{It is one more automaton step --- through the \emph{expanded} frame.} \code{dl} and
+\code{ol} are built by exactly the moves of \S\ref{sec:push}, but pushed through $\Uex$ rather
+than a state tensor. That works unchanged because $\Uex$ has an MPS tensor's layout,
+$(\ell_{\mathrm{l}}, s_{\mathrm{l}}, b)$, and $\Vex$ has $(b, s_{\mathrm{r}}, \ell_{\mathrm{r}})$.
+This is the step that pushes both environments \emph{onto the centre bond}, and it is why
+nothing further has to be rebuilt: the carried left channels already sit on link $c$ and the
+prebuilt right stack already holds link $c+2$.
+
+\paragraph{\code{ol[t]} is deliberately left \emph{open}.} The left half of a term that
+straddles the centre bond has placed \code{term.left} and is waiting. Its partner is in
+\code{or[t]} on the other side. They are joined only when the operator is applied:
+
+\begin{lstlisting}[language=Julia,firstnumber=182]
+function apply_zero_site(H0::ZeroSiteH, S)
+    if H0.done_l !== ZERO
+        add!(_unprime(to_concrete(contract(H0.done_l, (2,), S, (1,))), 1))
+    end
+    if H0.done_r !== ZERO
+        out = contract(S, (2,), H0.done_r, (2,))       # (bond_l, bra_r)
+        add!(_unprime(to_concrete(out), 2))
+    end
+    for t in eachindex(H0.open_l)
+        ol, or = H0.open_l[t], H0.open_r[t]
+        left = contract(ol, (2,), S, (1,))             # (bra_l, [op,] bond_r)
+        out = if length(ol.inds) == 3
+            contract(left, (2, 3), or, (3, 2))         # close the op-leg too
+        else
+            contract(left, (2,), or, (2,))
+        end
+        add!(to_concrete(H0.coeffs[t] * _unprime(_unprime(to_concrete(out), 1), 2)))
+    end
+\end{lstlisting}
+
+\begin{equation}
+  \boxed{\;
+  H^{(0)}_{\mathrm{eff}}S \;=\;
+  \underbrace{\mathrm{done}_L\, S}_{\text{$H$ entirely left}}
+  \;+\; \underbrace{S\,\mathrm{done}_R^{\!\top}}_{\text{$H$ entirely right}}
+  \;+\; \underbrace{\sum_t c_t\, \mathrm{open}_L[t]\; S\; \mathrm{open}_R[t]}_{\text{terms straddling the centre}}\;}
+  \label{eq:h0}
+\end{equation}
+
+Every term of \eqref{eq:terms} is accounted for exactly once, sorted by \emph{where it sits
+relative to the centre bond}: entirely left, entirely right, or straddling. The three-way split
+is the automaton's three states, evaluated at the centre.
+
+\paragraph{Priming.} An environment's bra leg is primed while both bra and ket are open, to keep
+them distinct. Once it replaces a link leg it must carry that link's original prime level again
+--- hence \code{\_unprime} on each contribution. Skipping it produces a tensor that will not
+contract against the next one.
+
+\paragraph{Cost.} Each contribution is a product of \emph{bond-sized} matrices; no physical
+index appears anywhere in \eqref{eq:h0}. This is the concrete payoff of expanding the bond first:
+the update is 0-site, and its operand is smaller than 2-site TDVP's by $d^2$.
+
+% ==================================================================================
+\part{Inside \code{cbe\_expand}: which directions, and why}
+\label{part:cbe}
+% ==================================================================================
+
+\section{The question}
+
+At bond $i$ the frames span $r$-dimensional subspaces. To first order,
+$|\psi(\dd t)\rangle \approx |\psi\rangle - i\,\dd t\,H|\psi\rangle$, so the directions that
+matter are those in $H\Theta$ \emph{orthogonal} to what the frames already span:
+\begin{equation}
+  \Pperp^{L}\,(H\Theta),\qquad \Pperp^{L}=I-U_0U_0^\dagger,
+  \label{eq:perp}
+\end{equation}
+and its mirror. CBE finds the $\Dex$ leading such directions \emph{without ever forming the
+rank-4 object $H\Theta$}.
+
+\section{The budget (621--637)}
+
+\begin{lstlisting}[language=Julia,firstnumber=621]
+dmax = max(leg_dim(U0, 1), r, leg_dim(V0, 3))
+budget = dex <= 0 ? max(ceil(Int, growth * dmax) - r, 1) : dex
+rm = rmax > 0 ? rmax : r
+sulz_cap && (budget = min(budget, max(2 * rm - r, 0)))
+dex_l, dex_r = min(budget, room_l), min(budget, room_r)
+\end{lstlisting}
+
+\paragraph{Neighbourhood coupling.} \code{dmax} is the largest of the \emph{three} bonds around
+the block, as in the reference (\code{RSVDpreBE0SiQS.m:67}). The coupling is the point: a wide
+bond pulls its narrow neighbours up. A purely local $\code{budget}=r$ lets a bond at $r=1$
+propose one direction, so growth crawls and stalls --- measured at $L=8$, \code{bond\_dims}
+froze at $[1,1,2,4,2,1,1]$ against 2-site TDVP's $[2,4,6,8,6,4,2]$, and the centre then hit
+$\code{room\_l}=0$ and could not expand at all.
+
+\paragraph{\code{room} is asked for, not computed as a product (585--587).}
+\begin{lstlisting}[language=Julia,firstnumber=585]
+fused_dim(t, a, b) = sum(d for (_, d) in reachable_sectors(t, a, b); init = 0)
+room_l = fused_dim(U0, 1, 2) - r
+\end{lstlisting}
+Writing $\code{leg\_dim}(U_0,1)\cdot\code{leg\_dim}(U_0,2)$ is correct only for abelian charges.
+Under SU(2) a spin-$\tfrac12$ site is \emph{one multiplet}, so the product reads $\chi\cdot 1$,
+giving $\code{room}\approx0$ --- CBE would decline to expand and the state would freeze at
+$\chi=1$, with the same signature as a zero budget. In truth each bond multiplet $S_a$ fuses to
+$S_a\pm\tfrac12$, so the fused space carries $\approx2\chi$ multiplets. Going through
+\code{reachable\_sectors} lets Telum apply whichever symmetry the tensors carry, and reduces
+exactly to the product in the abelian case.
+
+\section{Preselection: the randomized range finder (697--714)}
+\label{sec:sketch}
+
+\begin{lstlisting}[language=Julia,firstnumber=697]
+probe(frame, side) = exact ? full_local_basis(frame, side) :
+                     sector_graded_sketch(frame, side, npre; comp_ratio = comp_ratio, rng = rng)
+QL, err_l = if dex_l > 0
+    OmR = probe(V0, :right)
+    OmR === nothing ? (nothing, 0.0) : _preselect_left(U0, skl(OmR), stol_pre)
+...
+err_pre = sqrt(err_l^2 + err_r^2)
+\end{lstlisting}
+
+A textbook randomized range finder with two twists. Draw $\Omega$ with
+$\Dpre=\lceil1.2\Dex\rceil$ columns in $V_0$'s layout, form $Y=(H\Theta)\Omega^\dagger$ with
+legs $(\ell_{i-1},s_i,g)$, project off the frame (\eqref{eq:perp}) and orthonormalise. The
+returned $Q_L$ is orthonormal, $\perp U_0$, and its singular values are the candidates' weights
+in the sketched action --- so it arrives \textbf{already weight-ordered}, which the fallback in
+\S\ref{sec:final} relies on.
+
+\paragraph{Twist 1 --- $H\Theta$ is never formed.} \code{sketch\_h\_left}
+(\code{cbe\_core.jl:63--116}) folds $\Omega$ in \emph{before} the halves are joined, walking the
+same three-way classification as \eqref{eq:h0} but now relative to \emph{the block}:
+\begin{center}
+\small
+\begin{tabular}{@{}clp{8.2cm}@{}}
+\toprule
+(a) & \code{lch.done} & term entirely left of the block \\
+(b) & \code{rch.done} & entirely right; operator sits on $\ell_r$, pushed onto $V_0$ first \\
+(c) & \code{lch.open[t]} & straddles link $i$; closed by \code{term.right} on $s_i$ \\
+(d) & \code{rch.open[t]} & straddles link $i+2$; both legs on the right half \\
+(e) & \code{term.left/right} & \textbf{the block's own bond term}, one half on each side, sharing the op-leg \\
+\bottomrule
+\end{tabular}
+\end{center}
+Case (e) is why the Hamiltonian is a term list: a fused gate has already joined the two halves,
+and there would be nothing to split across the sketch.
+
+\paragraph{Twist 2 --- the sketch is \emph{sector-graded}.} Under a symmetry a plain Gaussian is
+wrong; columns must be allocated per charge sector. \code{sector\_graded\_sketch} splits
+$\Dpre$ between the orthogonal complement and the isometry space in the ratio
+\code{comp\_ratio} --- the reference's \code{CompRatio}, default $0.5$ in both. The reference is
+explicit about why both parts are kept (\code{RSVDpreBE0SiQS.m:337}):
+\begin{quote}\ttfamily\footnotesize
+\% do not project into complement space\\
+\% 1-site components are also important for bond update
+\end{quote}
+
+\paragraph{\code{exact = true}} swaps the thin Gaussian for the complete fused basis, turning
+RSVD-CBE into plain CBE: \code{skl(F)} is then the exact $H\Theta$. Nothing downstream changes.
+This is the A/B showing the sketch costs no accuracy.
+
+\section{Final selection: per side, not jointly (741--772)}
+\label{sec:final}
+
+\begin{lstlisting}[language=Julia,firstnumber=744]
+joint, resj, err_fnl = 0, nothing, 0.0
+if !preselect_only && njl > 0 && njr > 0
+    UMU = to_concrete(permutedims(contract(skl(QR), (1, 2), QL', (1, 2)), (2, 1)))
+    if length(UMU.qlabels) > 0 && norm(UMU) >= 1e-11
+        joint = min(dex_l, dex_r, njl, njr)
+        resj = svd(UMU, (1,); Nkeep = joint, cutoff = stol_fnl, get_lists = true)
+    end
+end
+TLC = njl == 0 ? nothing :
+      (resj !== nothing && dex_l <= joint) ? contract(QL, (3,), resj.U, (1,)) :
+      _trim_total(QL, 3, dex_l)
+\end{lstlisting}
+
+Preselection returns more candidates than the budget, so they must be ranked. The natural
+object is $M = Q_L^\dagger(H\Theta)Q_R$, whose SVD ranks candidate \emph{pairs}. But it must be
+used carefully --- \textbf{the two defects fixed here are the ones that caused the rank stall}:
+
+\begin{enumerate}[leftmargin=1.6em]
+  \item \textbf{\code{Nkeep = min(dex\_l, dex\_r)} throttles each side to the \emph{other}
+        side's headroom.} Measured on an $L=8$ warm state at $\code{dex}=64$: bond 6 has
+        $\code{room\_r}=2\cdot2-3=1$, so the left was capped at one direction and its residual
+        stayed at $9.97\times10^{-3}$ while the right reached $7.5\times10^{-20}$.
+  \item \textbf{The \code{Empty} verdict was global.} At bond 3 the left frame already spanned
+        the whole left image (residual $8.4\times10^{-12}$), so $Q_L$ was numerical noise and
+        $\|M\|<10^{-11}$ --- returning \emph{nothing on either side} and abandoning a right
+        residual of $0.19$. A negligible $M$ means no candidate \emph{pair} carries weight with
+        both sides at once; it says nothing about the one-sided components, which are exactly
+        the ``1-site'' contributions the reference insists matter.
+\end{enumerate}
+
+The resolution: use the joint SVD only where it can serve a side's \emph{whole} budget
+($\code{dex\_l}\le\code{joint}$); otherwise that side falls back to its own preselected
+candidates, already weight-ordered. \textbf{Each side decides independently, and either may come
+back empty without silencing the other.}
+
+\emph{Why the reference does not need this.} Its CBE is \emph{directional} ---
+\code{CBE1SiQS(..., direction)} expands one side per call --- so its $M$ only ever ranks the one
+side being expanded, and the coupling never arises. Reusing a single joint $M$ for both sides
+imports a constraint that is not in the reference.
+
+\section{Assembly}
+
+\begin{lstlisting}[language=Julia,firstnumber=786]
+U_ex = oplus([U0, setitag(TLC, 3, ltag)], (3,))
+V_ex = oplus([V0, setitag(TRC, 1, rtag)], (1,))
+\end{lstlisting}
+
+Direct sums, so $\Uex=[\,U_0\mid C_L\,]$. Beforehand \code{\_reortho\_left/right} re-establish
+orthonormality and orthogonality to the frame. This is insurance rather than repair --- both
+hold by construction --- but \textbf{the ordering inside it is the substance}: the frame is
+projected out \emph{first}. Orthonormalising alone would fix the block's internal Gram matrix
+while leaving any component along $U_0$ untouched, and that component is what breaks the direct
+sum's isometry.
+
+There is deliberately \textbf{no rotation}. An earlier version rotated the expanded frame into
+the singular basis of $\hat S_0+\tau H_0\hat S_0$, on the theory that the gauge move was
+deleting the expansion. It was not: an expansion is lossless, so it cannot change a Schmidt
+rank, and \code{canonical!} collapsing a widened bond is correct reporting rather than deletion.
+
+% ==================================================================================
+\part{Validation}
+\label{part:valid}
+% ==================================================================================
+
+\section{Line-for-line correspondence with \code{RSVDpreBE0SiQS.m}}
+
+% NOT wrapped in `center`: longtable does its own page breaking and centring, and nesting it
+% inside a centring environment defeats both. `\small` before it applies to the table body.
+\small
+\begin{longtable}{@{}p{5.9cm}p{1.0cm}p{6.0cm}p{1.0cm}@{}}
+\toprule
+\textbf{Reference (MATLAB)} & \textbf{line} & \textbf{Ours (\code{cbe\_core.jl})} & \textbf{line} \\
+\midrule
+\endhead
+\code{Dmax = max([MDB0(1),MDB1(1),MDB2(1)])} & 67 &
+\code{dmax = max(leg\_dim(U0,1), r, leg\_dim(V0,3))} & 621 \\
+\code{Dex = ceil(1.1*Dmax) - MDB1(1)} & 72 &
+\code{budget = max(ceil(growth*dmax) - r, 1)} & 622 \\
+\code{Dex = min(Dex, ceil(2*MDB1(1)))} & 77 &
+\code{sulz\_cap \&\& budget = min(budget, 2rm - r)} & 636 \\
+\code{Dpre = ceil(1.2*Dex)} / \code{Dex+Dover} & 151 &
+\code{npre = ceil(1.2*budget)} / \code{budget+dover} & 640 \\
+\code{Dfull = min([MDB0(2)*MDsL(2), ...])} & 78 &
+\code{room\_l/room\_r} via \code{reachable\_sectors} & 585 \\
+\code{GaussRandMat(..., Dpre, CompRatio,'G')} & 336 &
+\code{sector\_graded\_sketch(V0,:right,npre)} & 698 \\
+\code{orthoQS(MOmega,3,'<<','stol',1e-10)} & 369 &
+\code{\_preselect\_left(U0, skl(OmR), 1e-10)} & 703 \\
+\code{err\_pre = sqrt(err\_pre1\^{}2+err\_pre2\^{}2)} & 414 &
+\code{err\_pre = sqrt(err\_l\^{}2 + err\_r\^{}2)} & 714 \\
+\code{Empty} if \code{normQS(UMU) < 1e-11} & 462 &
+\code{norm(UMU) >= 1e-11} guard & 750 \\
+\code{svdQS(UMU,2,'Nkeep',Dex,'stol',1e-13)} & 486 &
+\code{svd(UMU,(1,); Nkeep=joint, cutoff=1e-13)} & 753 \\
+returns \code{VLex, VRex} (expanded envs) & sig. &
+\code{zero\_site\_h(h,c,lenv\_c,renv\_c,W[c],Z[c])} & lub.\ 451 \\
+\bottomrule
+\end{longtable}
+\normalsize
+
+\noindent
+Both tolerances ($10^{-10}$ preselection, $10^{-13}$ final), the $1.2\times$ oversampling and
+the \code{CompRatio} default are taken from the reference unchanged.
+
+\section{The four deliberate divergences}
+
+\begin{enumerate}[leftmargin=1.6em]
+\item \textbf{\code{growth = 2.0}, not $1.1$.} The reference is DMRG, where each sweep
+  re-converges the \emph{same} state, so a 10\% ratchet compounds over sweeps and costs only
+  iterations. A time integrator gets \emph{one shot per step}: a direction it needs and does not
+  admit is not deferred, it is gone. Measured (XX, $L=10$, $\dd t=0.02$, $t=0.5$, \code{maxdim}=64):
+  \begin{center}\small
+  \begin{tabular}{@{}lccc@{}}
+  \toprule & err & \code{err\_fnl} & time \\ \midrule
+  1.1 schedule (budget $=2$ at $r=13$) & $1.43\times10^{-4}$ & $6.2\times10^{-1}$ & 22.4\,s \\
+  \code{dex}$=8$ & $1.17\times10^{-6}$ & 0 & 4.7\,s \\
+  \code{dex}$=16,64$ & $1.17\times10^{-6}$ & 0 & 4.5\,s \\
+  \bottomrule
+  \end{tabular}\end{center}
+  $\code{err\_fnl}=0.62$ is the schedule \emph{discarding 62\% of the ranked candidate weight}
+  for want of budget --- the cap, not the selection, was the accuracy limiter.
+
+\item \textbf{The $2r$ bound is off by default.} It belongs to the \emph{rank-adaptive} BUG,
+  where the augmentation is $[\,K(t_1)\mid U_0\,]$ --- rank $r$ beside rank $r$ --- so $2r$ is a
+  theorem, not a choice. Here the rank is set by CBE's selection, so the bound has nothing to
+  enforce and only throttles. Growth is limited instead by \code{room} (hard, from the local
+  space) and by \code{maxdim} at the truncation, which is where a rank ceiling belongs.
+
+\item \textbf{Per-side final selection} rather than a single joint ranking (\S\ref{sec:final}).
+
+\item \textbf{Fused dimensions via \code{reachable\_sectors}}, so the code is correct under SU(2).
+\end{enumerate}
+
+\section{The structural difference: what wraps the expansion}
+
+\begin{center}
+\begin{tabular}{@{}p{4.1cm}p{5.4cm}p{5.4cm}@{}}
+\toprule
+& \textbf{CBE ref.\ \code{TDVPSweepCBE1Si.m}} & \textbf{Ours \code{cbe\_lubich\_sweep}} \\
+\midrule
+outer algorithm & 1-site TDVP & BUG (Sulz Alg.\ 5--7) \\
+per bond & expand, evolve site $+\tau$, evolve bond $-\tau$ & expand only; \emph{no} evolution \\
+backward substep & \textbf{yes} & \textbf{none} \\
+time evolution happens & at every site and every bond & \textbf{once}, at the centre bond \\
+inverses & projector needs care at small $\sigma$ & none anywhere \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{What has been checked numerically}
+
+\begin{itemize}[nosep,leftmargin=1.6em]
+  \item \textbf{Gate path $\equiv$ Lubich path.} The same \code{cbe\_expand} is called from
+        \code{cbe\_lubich.jl:393/418} and from the validated gate-based Trotter sweep, only the
+        sketch closures differing. After the two defects of \S\ref{sec:final} were fixed, the
+        Lubich sweep reached $[2,4,8,12,8,4,2]$ --- \emph{identical to the gate path}, with no
+        change of its own. The sweep itself was never at fault.
+  \item \textbf{Per-bond residuals reach machine zero}: $0.19\to4.8\times10^{-12}$;
+        $9.97\times10^{-3}\to3.1\times10^{-16}$; $3.1\times10^{-4}\to2.7\times10^{-19}$.
+  \item \textbf{\code{exact} $\equiv$ \code{rsvd}} at $L=30$ to 3--4 digits on every arm.
+  \item \textbf{Against the closed form}: at $L=18$, $t=20$, $\chi=64$ the Lubich path reaches
+        $1.29\times10^{-4}$ (XX free-fermion reference) against the gate path's
+        $5.2\times10^{-3}$ --- as expected, since it carries no Trotter splitting error.
+  \item \textbf{Energy consistency}: \code{env\_energy} (channels) and
+        \code{energy(psi, bond\_gates(psi))} (gates) agree to machine precision, which is what
+        pins the term list's normalisation against the gate path's.
+\end{itemize}
+
+% ==================================================================================
+\part{Trees}
+\label{part:tree}
+% ==================================================================================
+
+\section{Why the chain looked so simple}
+
+Everything above is the \emph{degenerate} case. Sulz's Algorithms 5--7 are stated for tree
+tensor networks; the chain is the tree in which every node has degree $\le2$. Two features of
+the chain hid the general structure:
+
+\begin{enumerate}[nosep,leftmargin=1.6em]
+  \item \textbf{A path has two ends}, so ``sweep in from both sides'' is a complete traversal.
+        On a tree you must recurse over branches.
+  \item \textbf{In the gauge $W\cdots W\,S\,Z\cdots Z$ a chain has exactly one connection
+        tensor.} A tree has one per internal node --- so Algorithm 7 fires at each, and ``one
+        Galerkin step'' becomes ``one per internal node''.
+\end{enumerate}
+
+\section{The recursive structure}
+
+The tree implementation (\code{qtci\_time\_integrators/exploratory\_bug/src/TTN/}
+\code{operations/integrators/ttn\_bug.jl}) follows Sulz \S4.3. Every subtree solves its
+\emph{own} reduced ODE (Definition 4.1),
+\[
+  F_{\tau,i} \;=\; \pi^\dagger_{\tau,i}\circ F_\tau\circ\pi_{\tau,i},
+\]
+and the algorithm is a pair of recursions:
+
+\begin{center}
+\begin{tabular}{@{}llp{7.4cm}@{}}
+\toprule
+\textbf{Alg.} & \textbf{name} & \textbf{what it does} \\
+\midrule
+6 & subflow $\Phi^{(i)}$ & update \& augment a basis; recurses \textbf{leaves $\to$ root} \\
+7 & subflow $\Psi_\tau$ & augment \& update the \emph{connection tensor}; \textbf{root $\to$ leaves} \\
+5 & rank-augmenting step & the outer step composing the two \\
+1 & truncation & the final compression, once \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Mapping back to the chain: the leaves-to-root recursion of Algorithm 6 \emph{is} the K-sweep and
+L-sweep (a path has two leaves, so the recursion has two arms), and the root-to-leaves
+Algorithm 7 recursion terminates immediately because the path's only connection tensor sits at
+the root --- which we place at the centre bond $c$.
+
+\paragraph{Environments do not survive the generalisation.} This is the part most relevant to
+Part~\ref{part:env}. In Sulz's formulation, and in his MATLAB, the right-hand side $F$ is passed
+\emph{down the recursion as a plain function} --- Lemma 4.2's ``$O(d)$ evaluations of $F$'' ---
+and is \textbf{not} carried as an environment. On a chain the two formulations coincide and
+environments are the efficient choice, which is why \code{henv.jl} exists and why
+\eqref{eq:h0} is written as three environment pieces. On a tree, carrying environments through a
+branching recursion is where implementations typically go wrong: a node of degree $k$ needs
+$k$ directed-edge environments, each excluding a different branch, and the automaton of
+\S\ref{sec:push} has to be run once per outgoing direction rather than once per sweep.
+
+\paragraph{Cross-check.} The tree port is checked against Sulz's own MATLAB (public in
+\code{JonasKu/Publication-Parallel-BUG-for-TTNs},
+\code{Section5.1/parallel\_TTN\_integrator/}): \code{prolongation.m}, \code{restriction.m},
+\code{Ytau\_i.m}, \code{Mat0Mat0.m}.
+
+\section{Order: a caution in both directions}
+
+Theorem 4.3, $\|Y^k-A(t_k)\|\le c_0\delta+c_1\varepsilon+c_2h$, is a \emph{worst-case upper
+bound} whose purpose is \textbf{robustness} --- constants independent of the singular values of
+the matricizations --- not a statement of order. It guarantees \emph{at least} first order; it
+does not forbid better. The tree port measures a clean second order ($2.0009$, XX $N=5$ against
+exact diagonalisation). An earlier version of that code's documentation asserted ``BUG is first
+order by design''; that was simply wrong, and an observed ratio of 4 should not be ``fixed''
+back to 2.
+
+The converse caution applies to the chain code here: at $L=8$, $t=2$, with the growth budget
+saturated, the observed \emph{observable} error falls as $O(\dd t)$, while a dedicated $\dd t$
+scan at $L=30$ gives clean ratios of $4.00$. The small-$L$ result is selection-limited, not a
+statement about the integrator's order. Do not generalise an order claim from one system size.
+
+% ==================================================================================
+\part*{Appendix: the step at a glance}
+% ==================================================================================
+\addcontentsline{toc}{part}{Appendix: the step at a glance}
+
+\begin{center}
+\small
+\begin{tabular}{@{}rlll@{}}
+\toprule
+\textbf{stage} & \textbf{lines} & \textbf{touches $\psi$?} & \textbf{advances time?} \\
+\midrule
+\code{canonical!(psi,1)}; build \code{rstack} & 383--384 & gauge only & no \\
+K-sweep: $W_1\dots W_c$ & 388--401 & \textbf{no} & no \\
+\code{canonical!(psi,L)}; build \code{lstack} & 408--409 & gauge only & no \\
+L-sweep: $Z_c\dots Z_{L-1}$ & 413--428 & \textbf{no} & no \\
+seed $S_0=\langle W,Z|\psi\rangle$ & 434--445 & reads only & no \\
+\textbf{Galerkin} $S_1=e^{\tau H^{(0)}}S_0$ & 451--456 & --- & \textbf{yes} \\
+reassemble & 466--477 & \textbf{writes} & no \\
+\code{truncate\_sweep!} (Alg.\ 1) & 484 & \textbf{writes} & no \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\vspace{0.6em}
+\noindent
+\textbf{Three invariants to hold onto:}
+\begin{enumerate}[nosep,leftmargin=1.6em]
+  \item The basis sweeps never modify $\psi$; frames accumulate in \code{W}/\code{Z}.
+  \item There is exactly one time evolution per step, at one bond.
+  \item Truncation comes strictly \emph{after} that evolution, never before.
+\end{enumerate}
+
+\noindent
+Violating (1) collapses the rank to 2 with a $\dd t$-independent error; violating (2)
+over-counts $\tau$ and breaks full-rank exactness to $2\times10^{-2}$; violating (3) deletes the
+directions the expansion just bought. \textbf{All three failures are silent.}
+
+\end{document}

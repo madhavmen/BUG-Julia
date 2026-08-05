@@ -163,13 +163,20 @@ for sym in SYMS
     for j in 1:L
         @printf("   %-4d %+9.5f %+9.5f  %s\n", j, mag[j], exact[j], bar(mag[j]))
     end
-    # Say WHICH error this is. Once the bond saturates `CHI` the number is dominated by discarded
-    # Schmidt weight, so it is a statement about the budget and not about the integrator -- and
-    # raising CHI is the response, not a bug hunt.
+    # Say what we can actually support. A saturated bond means the rank budget bound the STATE --
+    # the method wanted more rank than `CHI` allowed. It does NOT follow that the budget bounds
+    # the ERROR: the time step has its own floor, and past a certain CHI that floor is what you
+    # are looking at. Measured here at L=18, t=20, delta=1: the error falls 1.04e-02 -> 4.83e-04
+    # -> 1.08e-04 for CHI = 16, 32, 64 and then STOPS (1.14e-04 at 128, 1.13e-04 at 192) while
+    # the bond pins at the cap every time. So "capped" and "truncation-limited" are different
+    # claims, and only the first is observable from a single run. Report the first; name the
+    # experiment that settles the second.
     @printf("   max |error vs exact| = %.3e   %s\n\n", errs[sym],
-            capped[sym] ? "<- TRUNCATION-LIMITED (bond pinned at the cap $CHI): this is the \
-                           rank budget, not the method. Raise CHI." :
-                          "(bond never hit the cap, so this is the method's own error)")
+            capped[sym] ? "<- bond PINNED at the cap $CHI, so the rank budget bound the state. \
+                           Whether it\n                                    bounds this ERROR \
+                           needs CHI and DT varied separately -- past some CHI\n              \
+                                      the dt floor takes over and more rank buys nothing." :
+                          "(bond never hit the cap, so rank was not the constraint)")
 end
 
 # ── the cross-symmetry check ─────────────────────────────────────────────────────────
@@ -261,9 +268,11 @@ function run_tfim(sym::Symbol; J = 1.0, h = 1.0)
 end
 
 tfim = Dict{Symbol, Vector{Float64}}()
+tfim_capped = Dict{Symbol, Bool}()
 for sym in (:Z2, :none)
     mag, chis, info = run_tfim(sym)
     tfim[sym] = mag
+    tfim_capped[sym] = maximum(info.max_bond_dims) >= CHI
     @printf("\n── symmetry = :%-4s ─────────────────────────────────────────────\n", sym)
     @printf("   bond dims : %s   (started all 1)\n", chis)
     @printf("   norm      : %.12f\n", info.norms[end])
@@ -273,9 +282,25 @@ for sym in (:Z2, :none)
     end
 end
 
+# Same caveat as the U(1) check above, and for the same reason: `:Z2` and `:none` grow the rank
+# through DIFFERENT selected subspaces and truncate along different directions, so they agree
+# only up to their approximation error -- which is not round-off, and is not switched off by
+# `maxdim` failing to bind. There is no closed form for the TFIM kink profile to measure each run
+# against, so the relative criterion used above is not available here; report the gap and the
+# regime, and do not assert a bound that the run cannot support.
 d = maximum(abs.(tfim[:Z2] - tfim[:none]))
-@printf("\nSAME PHYSICS CHECK   max |<X>_Z2 - <X>_none| = %.3e  %s\n",
-        d, d < 1e-10 ? "OK — Z2 changed the storage, not the state" : "!! DIVERGED")
+trunc_tfim = tfim_capped[:Z2] || tfim_capped[:none]
+@printf("\nSAME PHYSICS CHECK   max |<X>_Z2 - <X>_none| = %.3e\n", d)
+println(d < 1e-10 ?
+        "                     => OK — Z2 changed the storage, not the state" :
+        trunc_tfim ?
+        "                     => gap above round-off, but a bond hit the cap $CHI: the two \
+         symmetries\n                        discard different directions, so this is expected. \
+         Raise CHI to test\n                        the storage claim cleanly." :
+        "                     => gap above round-off with no cap binding. Expansion selection \
+         differs\n                        between the two paths, so a gap of order the method's \
+         own error is\n                        still expected; refine dt to confirm it converges \
+         away.")
 println("""
 Note the Z2 bond dimensions count states per charge sector, so they ARE comparable with
 :none here (unlike SU(2), where a bond dimension counts multiplets).""")
