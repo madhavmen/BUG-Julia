@@ -788,7 +788,16 @@ returned $Q_L$ is orthonormal, $\perp U_0$, and its singular values are the cand
 in the sketched action --- so it arrives \textbf{already weight-ordered}, which the fallback in
 \S\ref{sec:final} relies on.
 
-\paragraph{Twist 1 --- $H\Theta$ is never formed.} \code{sketch\_h\_left}
+\paragraph{Twist 1 --- the sketch probes the \emph{projector}.} Since 2026-08-06 the
+sketch is \emph{project-first}: it forms $P_\perp(H\Theta)$ and folds $\Omega$ in
+afterwards, where $P_\perp = I - U_0U_0^\dagger$. Because $P_\perp$ acts on
+$(\ell_{i-1},s_i)$ and $\Omega$ on $(s_{i+1},\ell_{i+1})$ --- disjoint legs --- the two
+commute, so
+$P_\perp\big((H\Theta)\Omega^\dagger\big) = \big(P_\perp(H\Theta)\big)\Omega^\dagger$
+exactly and \textbf{no number changes}. What changes is cost: the rank-4 $H\Theta$ is now
+formed once per bond, and $H$ is applied to $d\chi_r$ columns rather than $\Omega$'s
+$D_{\mathrm{pre}}$. The earlier fold-$\Omega$-first path has been removed. The description
+below of \code{sketch\_h\_left}
 (\code{cbe\_core.jl:63--116}) folds $\Omega$ in \emph{before} the halves are joined, walking the
 same three-way classification as \eqref{eq:h0} but now relative to \emph{the block}:
 \begin{center}

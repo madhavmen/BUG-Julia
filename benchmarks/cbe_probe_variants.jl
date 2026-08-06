@@ -58,7 +58,7 @@ function evolve(dt, nsteps; kwargs...)
 end
 
 const VARIANTS = [
-    ("V1 project-first  (rank-4)", (; project_first = true, comp_ratio = 0.5)),
+    ("V1 project-first  (rank-4)", (; comp_ratio = 0.5)),
     ("V2 two gaussians  cr=0.5",   (; comp_ratio = 0.5)),
     ("V3 plain gaussian cr=none",  (; comp_ratio = nothing)),
     ("V4 two-sided (proj sketched)", (; two_sided = true)),

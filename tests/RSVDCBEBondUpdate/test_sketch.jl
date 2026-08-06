@@ -69,7 +69,8 @@ end
                 f = bond_frame(psi, i)
                 lenv = left_env_stack(psi, h; upto = i - 1)
                 renv = right_env_stack(psi, h; downto = i + 2)
-                hth = apply_h_two_site(frame_theta(f), h, i, lenv, renv)
+                hth = to_concrete(perp_component(
+                    f.U0, apply_h_two_site(frame_theta(f), h, i, lenv, renv)))
 
                 for Om in (f.V0, random_right_sketch(f, rng; ncol = 2),
                            random_right_sketch(f, rng; ncol = 1))
@@ -93,7 +94,8 @@ end
                 f = bond_frame(psi, i)
                 lenv = left_env_stack(psi, h; upto = i - 1)
                 renv = right_env_stack(psi, h; downto = i + 2)
-                hth = apply_h_two_site(frame_theta(f), h, i, lenv, renv)
+                hth = to_concrete(perp_component_right(
+                    f.V0, apply_h_two_site(frame_theta(f), h, i, lenv, renv)))
 
                 for Om in (f.U0, random_left_sketch(f, rng; ncol = 2),
                            random_left_sketch(f, rng; ncol = 1))
@@ -106,10 +108,16 @@ end
         end
     end
 
-    @testset "sketch with Om = the frame reproduces the projected action" begin
-        # With Om = V0 the sketch is (H Theta) V0', whose contraction with U0 is the
-        # Galerkin matrix element -- the same energy the environments report. An
-        # independent scalar handle on both sketches at once.
+    @testset "the sketch is orthogonal to the frame, and the energy still checks out" begin
+        # THE PROJECT-FIRST SIGNATURE. `K0 = U0 S0` lies entirely in the KEPT space, and the
+        # sketch returns `P_perp (H Theta) Om'`, so their overlap must vanish identically --
+        # for ANY probe. That is the property project-first buys by construction, and it is
+        # the sharpest single check that the projection is really happening first.
+        #
+        # The energy handle that used to live here has moved onto `apply_h_two_site`, which
+        # still forms the unprojected action: <K0| H Theta> is the Galerkin matrix element
+        # and must equal what the environments report. Splitting the two keeps an
+        # independent scalar check on the operator while testing the projector separately.
         set_symmetry!(:U1)
         L = 6
         h = xxz_chain(L)
@@ -120,10 +128,16 @@ end
             f = bond_frame(psi, i)
             lenv = left_env_stack(psi, h; upto = i - 1)
             renv = right_env_stack(psi, h; downto = i + 2)
+            K0 = to_concrete(f.U0 * f.S0)
+            L0 = to_concrete(f.S0 * f.V0)
+
             YL = sketch_h_left(f, h, i, lenv, renv, f.V0)      # (link_l, site_l, bond)
-            @test abs(tensor_inner(to_concrete(f.U0 * f.S0), YL) - want) < 1e-10
+            @test abs(tensor_inner(K0, YL)) < 1e-10
             YR = sketch_h_right(f, h, i, lenv, renv, f.U0)     # (bond, site_r, link_r)
-            @test abs(tensor_inner(to_concrete(f.S0 * f.V0), YR) - want) < 1e-10
+            @test abs(tensor_inner(L0, YR)) < 1e-10
+
+            hth = apply_h_two_site(frame_theta(f), h, i, lenv, renv)
+            @test abs(tensor_inner(frame_theta(f), hth) - want) < 1e-10
         end
     end
 
@@ -142,15 +156,17 @@ end
                 lenv = left_env_stack(psi, h; upto = i - 1)
                 renv = right_env_stack(psi, h; downto = i + 2)
                 hth = apply_h_two_site(frame_theta(f), h, i, lenv, renv)
+                hthL = to_concrete(perp_component(f.U0, hth))
+                hthR = to_concrete(perp_component_right(f.V0, hth))
 
                 Om = random_right_sketch(f, rng; ncol = 2)
                 got = sketch_h_left(f, h, i, lenv, renv, Om)
-                want = to_concrete(contract(hth, (3, 4), Om', (2, 3)))
+                want = to_concrete(contract(hthL, (3, 4), Om', (2, 3)))
                 @test norm(to_concrete(got - want)) < 1e-10 * max(1.0, norm(want))
 
                 OmL = random_left_sketch(f, rng; ncol = 2)
                 got2 = sketch_h_right(f, h, i, lenv, renv, OmL)
-                want2 = to_concrete(contract(OmL', (1, 2), hth, (1, 2)))
+                want2 = to_concrete(contract(OmL', (1, 2), hthR, (1, 2)))
                 @test norm(to_concrete(got2 - want2)) < 1e-10 * max(1.0, norm(want2))
             end
         finally

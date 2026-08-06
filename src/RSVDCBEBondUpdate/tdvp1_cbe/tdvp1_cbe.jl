@@ -1,28 +1,5 @@
 # ONE-SITE TDVP WITH CONTROLLED BOND EXPANSION.
 #
-# Structure follows QSMPSLib `TDVPSweepCBE1Si.m`: per bond, CBE first, then a FORWARD one-site
-# update at `+tau`, then a BACKWARD zero-site update at `-tau`, then absorb the bond tensor
-# into the next site. Two half-sweeps at `tau/2` each, so the step is second order -- the same
-# composition `tdvp2_step!` uses.
-#
-# WHY CBE IS NOT OPTIONAL HERE, unlike in the BUG path where it is one basis update among
-# several. BARE ONE-SITE TDVP IS FIXED-RANK: splitting a `(chi_l, d, chi_r)` site tensor can
-# never produce a bond wider than `chi_r`, because the bond tensor has to contract back into a
-# neighbour whose leg is `chi_r`. So 1-site TDVP cannot grow entanglement AT ALL, and started
-# from a product state it stays a product state forever. CBE is what supplies the rank: it
-# widens the bond BEFORE the update, by padding the neighbour with complement directions and
-# the current site with matching zeros, and the one-site evolution then fills them.
-#
-# THAT IS THE WHOLE APPEAL over 2-site TDVP. Two-site TDVP grows rank by evolving the rank-4
-# block, at `O(d^2 chi^3)` per bond and with a projection error from the two-site truncation.
-# One-site TDVP + CBE gets rank adaptivity while every evolution stays one-site (`O(d chi^3)`)
-# or zero-site (`O(chi^2)`), and the rank-4 object is never formed -- provided the expansion
-# itself is sketched, which is exactly what `exact = false` buys. With `exact = true` the
-# preselection DOES form it, which is why that arm is the reference and not the default.
-#
-# THE ZERO-SITE BACK-STEP IS NOT OPTIONAL EITHER. Evolving site `i` and then site `i+1` counts
-# the bond between them twice; the `-tau` zero-site step on the shared bond removes exactly
-# that double count. Dropping it does not degrade the order, it makes the scheme wrong.
 
 """
     TDVP1CBEInfo
@@ -71,8 +48,7 @@ function _tdvp1_cbe_bond!(psi::SymMPS, h::XXZChain, i::Int, tau::ComplexF64, dir
         _absorb_right!(psi, i, ex.V_ex)              # psi[i+1] = V_ex, centre stays at i
         tag = psi[i].inds[3].itags
 
-        # Right environment at link i+1: the prebuilt stack is at link i+2 and psi[i+1] has
-        # just been REPLACED by the expanded frame, so this push is mandatory, not a shortcut.
+
         rch1 = push_right_channels(rch, h, psi[i + 1], i + 1)
 
         # ---- forward: one-site at site i, +tau ----
@@ -82,23 +58,10 @@ function _tdvp1_cbe_bond!(psi::SymMPS, h::XXZChain, i::Int, tau::ComplexF64, dir
         res = svd(M, (1, 2); cutoff = max(trunc_thresh, 1e-14), Nkeep = maxdim,
                   get_lists = true)
         acc[3] = max(acc[3], _trunc_weight(res))
-        # THE TWO BOND LEGS MUST STAY DISTINCTLY TAGGED UNTIL THE VERY END, and that constraint
-        # is what dictates the whole ordering below. `C` is `(new, bond_ex)`: two DIFFERENT
-        # spaces, so Telum forbids giving them the same itag -- yet `bond_ex` already carries
-        # `tag` from `_absorb_right!`. And `contract` DOES verify itags, not just arrows, so
-        # leaving `C` untagged instead makes `apply_zero_site` reject it against the environment
-        # built from `psi[i]`.
-        #
-        # So `psi[i]` keeps the SVD's own tag on its bond leg for now, `C` inherits it, `H0` is
-        # built from that pair and matches, and only after the absorption are BOTH ends renamed
-        # to `tag` together. Same discipline as `cbe_lubich_sweep`, where `U_ex` and `V_ex` carry
-        # different bond tags right up to the write-back.
+
         psi[i] = res.U
         C = to_concrete(res.S * res.Vd)
 
-        # ---- backward: zero-site on the shared bond, -tau ----
-        # `zero_site_h` wants the channels at links i and i+2 and pushes them through the two
-        # site tensors itself, which is why `rch` (not `rch1`) goes in here.
         H0 = zero_site_h(h, i, lch, rch, psi[i], psi[i + 1])
         C = expv(x -> (nmv += 1; apply_zero_site(H0, x)), -tau, C;
                  hermitian = true, maxiter = maxiter, tol = tol, reorth = reorth)
@@ -110,9 +73,6 @@ function _tdvp1_cbe_bond!(psi::SymMPS, h::XXZChain, i::Int, tau::ComplexF64, dir
         psi[i] = to_concrete(setitag(psi[i], 3, tag))
         psi.center = i + 1
 
-        # AFTER the retag, not before: these channels are what bond `i+1` will contract its own
-        # tensors against, so they have to be pushed through the FINAL `psi[i]`. Built from the
-        # SVD-tagged version they would carry a tag nothing downstream still uses.
         lnext = push_left_channels(lch, h, psi[i], i)
         acc[6] += nmv
         return lnext
@@ -157,8 +117,10 @@ One symmetric one-site-TDVP-with-CBE step of `tau`, in place. Second order.
 `tau = -im*dt` is real time and `tau = -dt` imaginary time; nothing here cares which, exactly
 as for the BUG path. The caller renormalises -- for imaginary time that is load-bearing.
 
-`exact = false` (default) is **1site_tdvp_cbe_rsvd**: the expansion is sketched, so no rank-4
-object is ever formed and the whole step is one-site or cheaper.
+`exact = false` (default) is **1site_tdvp_cbe_rsvd**: the expansion is sketched, so the SELECTION
+costs `npre` columns rather than the full fused space. Since 2026-08-06 the sketch projects
+first, so the rank-4 two-site object IS formed once per bond; the sketch still controls how
+wide the candidate set is, not whether H*Theta exists.
 `exact = true` is **1site_tdvp_cbe**: the expansion uses the complete fused basis, which is
 the reference the sketch approximates and DOES form the rank-4 object.
 
@@ -209,25 +171,7 @@ function tdvp1_cbe_step!(psi::SymMPS, h::XXZChain, tau::ComplexF64;
             sulz_cap = sulz_cap, rmax = maximum(bond_dims(psi); init = 0),
             preselect_only = preselect_only, exact = exact, rng = rng)
 
-    # THE END-SITE UPDATES ARE NOT OPTIONAL BOOKKEEPING -- they are half the time step at the
-    # two boundary sites, and leaving them out is a silent O(1) error.
-    #
-    # Count the sites each loop touches. The rightward loop runs over BONDS 1..L-1 and evolves
-    # the bond's LEFT site, so it covers sites 1..L-1 and never site L. The leftward loop
-    # evolves each bond's RIGHT site, covering L..2 and never site 1. Without a closing update
-    # at the far end of each pass, sites 1 and L receive tau/2 where every interior site
-    # receives tau -- so the boundary is integrated at half the rate of the bulk.
-    #
-    # MEASURED, and this is why it was not caught earlier: at L=8 XX from a DOMAIN WALL the
-    # error is invisible (2.09e-06, matching the analytic answer) because the edges of a domain
-    # wall are frozen and never carry any amplitude to get wrong. At L=12 Heisenberg from a
-    # NEEL state, where every site is active, the same code gave 5.73e-02 against 2-site TDVP's
-    # 6.99e-09 -- seven orders out, while carrying MORE bond dimension, which is the signature
-    # of a wrong scheme rather than a starved basis.
-    #
-    # `TDVPSweepCBE1Si.m` closes each pass with `Update1Si(..., 'vv')`, the flag meaning "final
-    # site, no bond update after it". There is no back-step here precisely because there is no
-    # shared bond beyond the chain end to double-count.
+
     onesite!(j, lc, rc) = begin
         acc[6] += 1
         psi[j] = expv(x -> apply_one_site(one_site_h(h, j, lc, rc), x), half, psi[j];

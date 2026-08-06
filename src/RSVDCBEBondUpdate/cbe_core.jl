@@ -1,32 +1,3 @@
-# The sketched H-action: `(H Theta) Omega` without ever forming `H Theta`.
-#
-# WHY IT MUST BE SKETCHED, NOT SKETCHED-AFTER-THE-FACT. The randomized range finder of
-# `RSVDpreBE0SiQS.m` earns its keep only if the rank-4 two-site object is never built:
-# with `H Theta` in hand you would take its exact left SVD and beat any sketch of it, in
-# both accuracy and cost. So `Omega` has to be folded in DURING the contraction --
-# `contractHPsi_R2L` (`RSVDpreBE0SiQS.m:826`) orders its network exactly so, putting the
-# sketch next to the right environment first. Building `H Theta` and contracting `Omega`
-# onto it afterwards would be a strawman that could never show the cost win.
-#
-# THE DECOMPOSITION THAT MAKES IT UNIFORM. Every one of the five contributions to `H` at
-# a bond (see `apply_h_two_site`) is a product of something acting on the LEFT legs and
-# something acting on the RIGHT legs, optionally sharing one op-leg:
-#
-#     Y[link_l, site_l, g]  =  Σ_bond,op  Kpart[link_l, site_l, bond, op]
-#                                        · Vpart[bond, g, op]
-#
-#   Kpart : the left operator applied to  K0 = U0 S0     (link_l, site_l, bond [, op])
-#   Vpart : the right operator applied to V0, then contracted with `Omega`
-#                                                          (bond, g [, op])
-#
-# Nothing bigger than `K0` or `V0` is ever formed, and the sketch dimension `g = Dpre`
-# replaces `site_r ⊗ link_r` at the first opportunity. `K0` and `V0` both carry their site
-# leg at position 2, the same layout an MPS tensor has, so `_apply_site_op` applies to
-# them unchanged.
-#
-# The guard is `sketch_h_left(..., Om) == contract(apply_h_two_site(Theta, ...), Om')`
-# for arbitrary `Om`, against the stage-1 code that is itself pinned to the dense matrix
-# element. Nothing here is trusted on inspection.
 
 """
     _unprime(t, leg) -> TLArray
@@ -70,127 +41,62 @@ function _env_on_link(T, E, leg::Int)
     throw(ArgumentError("_env_on_link: leg must be 1 or 3, got $leg"))
 end
 
-# ── the two halves of every contribution ─────────────────────────────────────
-
-"`Vpart` for a right operator that is the identity: `V0` contracted with the sketch."
-_vpart_plain(V0, Om) = to_concrete(contract(V0, (2, 3), Om', (2, 3)))       # (bond, g)
-
-"`Kpart` for the right sketch: `K0` contracted with a left-side sketch."
-_kpart_sketched(K0, Om) = to_concrete(contract(Om', (1, 2), K0, (1, 2)))    # (g, bond)
+# ── PROJECT-FIRST SKETCHES: the sketch probes the PROJECTOR, not H*Theta ──────
+#
+# `Y = (P_perp (H Theta)) Om'`, with `P_perp = I - U0 U0'` applied BEFORE the probe is
+# folded in. This is the only sketching path; the fold-Omega-first variant was removed
+# on 2026-08-06 at the user's explicit instruction.
+#
+# THE TWO ORDERINGS AGREE EXACTLY. `P_perp` acts on `(link_l, site_l)` and `Om` acts on
+# `(site_r, link_r)` -- disjoint legs, so the operators commute and
+#
+#     P_perp((H Theta) Om')  ==  (P_perp (H Theta)) Om'
+#
+# is an identity, not an approximation. So this change moves no numbers; what it changes
+# is cost, and only upward. `H Theta` has `d*chi_r` columns against `Om`'s `npre`, so
+# projecting first forces the rank-4 two-site object into existence and applies `H` to
+# all of it, where folding `Om` in first applied `H` to `npre` columns. That cost was
+# raised and the instruction was reaffirmed; it is recorded here so the next reader does
+# not rediscover it as a bug.
+#
+# `_preselect_left/right` still apply `P_perp` to what comes back. That is now redundant
+# rather than load-bearing -- `P_perp` is idempotent, so the second application is a
+# no-op on an already-projected `Y` -- and it is kept because it also orthonormalises and
+# returns the residual the selection needs.
 
 """
     sketch_h_left(f, h, i, lenv, renv, Om) -> TLArray
 
-`Y = (H Theta) Om†` with the right legs contracted against `Om`, legs
-`(link_l, site_l, g)` -- the left matricization of `H Theta` sketched from the right.
-This is the candidate space the left frame is expanded into.
+`Y = (P_perp (H Theta)) Om†`, legs `(link_l, site_l, g)` -- the left matricization of the
+DISCARDED-space component of `H Theta`, sketched from the right. This is the candidate
+space the left frame is expanded into.
 
 `Om` carries `V0`'s layout `(g, site_r, link_r)`: it IS a candidate right frame, with
 `g = Dpre` columns instead of `r`. `Om = f.V0` recovers the exact left factor of
-`H Theta` projected on the current right frame.
+`P_perp (H Theta)` projected on the current right frame.
 """
 function sketch_h_left(f::BondFrame, h::XXZChain, i::Int,
                        lch::ChannelSet, rch::ChannelSet, Om)
-    K0 = to_concrete(f.U0 * f.S0)          # (link_l, site_l, bond)
-    V0 = f.V0                              # (bond, site_r, link_r)
-    plainV = _vpart_plain(V0, Om)          # (bond, g)
-
-    acc = nothing
-    add!(x) = (acc = acc === nothing ? to_concrete(x) : to_concrete(acc + x))
-    join2(K, V) = contract(K, (3,), V, (1,))          # (link_l, site_l, g)
-    join3(K, V) = contract(K, (3, 4), V, (1, 3))      # ditto, op-leg shared
-
-    # (a) terms entirely to the left of the block.
-    lch.done === ZERO ||
-        add!(join2(_env_on_link(K0, lch.done, 1), plainV))
-
-    # (b) terms entirely to the right: the operator sits on link_r, which the sketch
-    #     already covers, so it is pushed onto V0 before Om is contracted in.
-    if rch.done !== ZERO
-        Vd = _env_on_link(V0, rch.done, 3)
-        add!(join2(K0, to_concrete(contract(Vd, (2, 3), Om', (2, 3)))))
-    end
-
-    for (t, term) in enumerate(h.terms)
-        # (c) a term straddling link i: closed by term.right at site_l, on the left half.
-        o = lch.open[t]
-        if o !== ZERO
-            K = _env_on_link(_apply_site_op(K0, term.right, i), o, 1)
-            add!(to_concrete(term.coeff * join2(K, plainV)))
-        end
-        # (d) a term straddling link i+2: both of its legs are on the right half.
-        o = rch.open[t]
-        if o !== ZERO
-            Vd = _env_on_link(_apply_site_op(V0, term.left, i + 1), o, 3)
-            add!(to_concrete(term.coeff *
-                 join2(K0, to_concrete(contract(Vd, (2, 3), Om', (2, 3))))))
-        end
-        # (e) the bond's own term: one half on each side, sharing the op-leg. Written
-        #     from the term list rather than from `bond_gate`, because the gate fuses the
-        #     two halves and there would be nothing left to split across the sketch.
-        #     Both halves of a term carry an op-leg or neither does (`:U1` XY vs SzSz and
-        #     the whole `:none` case), so one rank test covers both sides.
-        Ke = _apply_site_op(K0, term.left, i)
-        Ve = _apply_site_op(V0, term.right, i + 1)
-        if length(Ke.inds) == 4
-            Vs = to_concrete(permutedims(contract(Ve, (2, 3), Om', (2, 3)), (1, 3, 2)))
-            add!(to_concrete(term.coeff * join3(Ke, Vs)))       # (bond, g, op)
-        else
-            Vs = to_concrete(contract(Ve, (2, 3), Om', (2, 3))) # (bond, g)
-            add!(to_concrete(term.coeff * join2(Ke, Vs)))
-        end
-    end
-
-    return acc
+    HT = apply_h_two_site(frame_theta(f), h, i, lch, rch)  # (link_l, site_l, site_r, link_r)
+    c  = contract(f.U0', (1, 2), HT, (1, 2))               # (bond, site_r, link_r)
+    A  = to_concrete(HT - to_concrete(contract(f.U0, (3,), c, (1,))))
+    return to_concrete(contract(A, (3, 4), Om', (2, 3)))   # (link_l, site_l, g)
 end
 
 """
     sketch_h_right(f, h, i, lenv, renv, Om) -> TLArray
 
-Mirror of [`sketch_h_left`](@ref): `Om` carries `U0`'s layout `(link_l, site_l, g)` and
-the result is `(g, site_r, link_r)`, the right matricization of `H Theta` sketched from
-the left. `Om = f.U0` recovers the exact right factor.
+Mirror of [`sketch_h_left`](@ref): the right matricization of `(H Theta) P_perp^R` with
+`P_perp^R = I - V0' V0`, sketched from the left. `Om` carries `U0`'s layout
+`(link_l, site_l, g)` and the result is `(g, site_r, link_r)`.
 """
 function sketch_h_right(f::BondFrame, h::XXZChain, i::Int,
                         lch::ChannelSet, rch::ChannelSet, Om)
-    K0 = to_concrete(f.U0 * f.S0)
-    V0 = f.V0
-    plainK = _kpart_sketched(K0, Om)                  # (g, bond)
-
-    acc = nothing
-    add!(x) = (acc = acc === nothing ? to_concrete(x) : to_concrete(acc + x))
-    join2(K, V) = contract(K, (2,), V, (1,))          # (g, site_r, link_r)
-    join3(K, V) = contract(K, (2, 3), V, (1, 4))      # ditto, op-leg shared
-
-    if lch.done !== ZERO
-        K = _env_on_link(K0, lch.done, 1)
-        add!(join2(_kpart_sketched(K, Om), V0))
-    end
-    rch.done === ZERO ||
-        add!(join2(plainK, _env_on_link(V0, rch.done, 3)))
-
-    for (t, term) in enumerate(h.terms)
-        o = lch.open[t]
-        if o !== ZERO
-            K = _env_on_link(_apply_site_op(K0, term.right, i), o, 1)
-            add!(to_concrete(term.coeff * join2(_kpart_sketched(K, Om), V0)))
-        end
-        o = rch.open[t]
-        if o !== ZERO
-            Vd = _env_on_link(_apply_site_op(V0, term.left, i + 1), o, 3)
-            add!(to_concrete(term.coeff * join2(plainK, Vd)))
-        end
-        Ke = _apply_site_op(K0, term.left, i)                  # (link_l, site_l, bond, op)
-        Ve = _apply_site_op(V0, term.right, i + 1)             # (bond, site_r, link_r, op)
-        if length(Ke.inds) == 4
-            Ks = to_concrete(contract(Om', (1, 2), Ke, (1, 2)))    # (g, bond, op)
-            add!(to_concrete(term.coeff * join3(Ks, Ve)))
-        else
-            add!(to_concrete(term.coeff * join2(_kpart_sketched(Ke, Om), Ve)))
-        end
-    end
-
-    return acc
+    HT = apply_h_two_site(frame_theta(f), h, i, lch, rch)
+    c  = contract(HT, (3, 4), f.V0', (2, 3))               # (link_l, site_l, bond)
+    A  = to_concrete(HT - to_concrete(contract(c, (3,), f.V0, (1,))))
+    Y  = contract(A, (1, 2), Om', (1, 2))                  # (site_r, link_r, g)
+    return to_concrete(permutedims(Y, (3, 1, 2)))          # (g, site_r, link_r)
 end
 
 # ── the sector-graded Gaussian sketch ────────────────────────────────────────
@@ -1000,7 +906,6 @@ Base.@kwdef struct CBEBugOptions
     s_reorth::Bool = false
     # Order P_perp against Omega in the sketch. An IDENTITY (disjoint legs), so it
     # cannot change a result; `true` forms the rank-4 H*Theta and costs more. A/B only.
-    project_first::Bool = false
     # Second Gaussian on the PROJECTORS: sample the complement with a thin
     # Gaussian and contract both sides to a small core, so P_perp never touches a
     # chi-sized object. See the two_sided block in `cbe_expand`.
@@ -1189,7 +1094,7 @@ end
 # it. So `Om` is folded into the gate FIRST -- `gate` is `d^4`, `Om` is thin, and the
 # largest intermediate is `O(d^2 * g * r)`.
 #
-# The guard is `sketch_bond_left(f, gate, Om) == contract(apply_gate(gate, Theta), Om')` for
+# The guard is `sketch_bond_left(f, gate, Om) == P_perp(contract(apply_gate(gate, Theta), Om'))` for
 # arbitrary `Om`, against `apply_gate`, which is itself pinned to the analytic Heisenberg
 # block element-for-element (`tests/BondUpdateBUG/test_gates.jl`).
 
@@ -1215,64 +1120,6 @@ KET leg and `link_r` against `V0`, then `K0 = U0 S0`. Nothing rank-4 is built.
 """
 function sketch_bond_left(f::BondFrame, gate, Om)
     _check_gate(f, gate)
-    # gate legs (ket_l '+', ket_r '+', bra_l '-', bra_r '-'); Om' flips Om's arrows.
-    G = contract(gate, (4,), Om', (2,))          # (ket_l, ket_r, bra_l, g, link_r)
-    T = contract(G, (2, 5), f.V0, (2, 3))        # (ket_l, bra_l, g, bond)
-    K0 = to_concrete(f.U0 * f.S0)                # (link_l, site_l, bond)
-    return to_concrete(contract(K0, (2, 3), T, (1, 4)))   # (link_l, site_l, g)
-end
-
-"""
-    sketch_bond_right(f, gate, Om) -> TLArray
-
-Mirror of [`sketch_bond_left`](@ref): `Om` carries `U0`'s layout `(link_l, site_l, g)` and
-the result is `(g, site_r, link_r)`. `Om = f.U0` recovers the exact right factor.
-"""
-function sketch_bond_right(f::BondFrame, gate, Om)
-    _check_gate(f, gate)
-    G = contract(gate, (3,), Om', (2,))          # (ket_l, ket_r, bra_r, link_l, g)
-    T = contract(G, (1, 4), f.U0, (2, 1))        # (ket_r, bra_r, g, bond)
-    L0 = to_concrete(f.S0 * f.V0)                # (bond, site_r, link_r)
-    Y = contract(L0, (1, 2), T, (4, 1))          # (link_r, site_r, g)
-    return to_concrete(permutedims(Y, (3, 2, 1)))         # (g, site_r, link_r)
-end
-
-"""
-    cbe_expand_bond(f, gate; kwargs...) -> CBEExpansion
-
-Controlled bond expansion of the frames at one bond, with the bare two-site gate standing in for
-the environment-dressed effective Hamiltonian. Keywords are [`cbe_expand`](@ref)'s, unchanged -- this is the same
-selection with different sketch closures.
-"""
-cbe_expand_bond(f::BondFrame, gate; project_first::Bool = false, kwargs...) =
-    project_first ?
-        cbe_expand(f,
-                   Om -> sketch_bond_left_pfirst(f, gate, Om),
-                   Om -> sketch_bond_right_pfirst(f, gate, Om); kwargs...) :
-        cbe_expand(f,
-                   Om -> sketch_bond_left(f, gate, Om),
-                   Om -> sketch_bond_right(f, gate, Om); kwargs...)
-
-# ── project-first sketches ────────────────────────────────────────────────────────────
-#
-# THESE COMPUTE EXACTLY THE SAME NUMBERS as `sketch_bond_left/right` followed by the
-# preselection's projection. `P_perp = I - U0 U0'` acts on `(link_l, site_l)` and `Om` acts on
-# `(site_r, link_r)`: DISJOINT LEGS, so the two operators commute and
-#
-#     P_perp((H Theta) Om')  ==  (P_perp (H Theta)) Om'
-#
-# is an identity, not an approximation. Ordering them differently cannot change a result, and
-# `tests/.../test_expand.jl` pins that.
-#
-# WHAT IT DOES CHANGE IS COST, and only for the worse. `H Theta` has `d*chi_r` columns against
-# `Om`'s `npre`, so projecting first forces the rank-4 two-site object into existence -- the one
-# thing the sketch exists to avoid -- and applies the gate to all of it. Folding `Om` in first
-# applies the gate to `npre` columns instead.
-#
-# Provided as `project_first = true` because it was asked for explicitly after that tradeoff was
-# raised, and because having both makes the identity measurable rather than merely argued
-# (`benchmarks/cbe_project_first.jl`). It is not the default and should not become one.
-function sketch_bond_left_pfirst(f::BondFrame, gate, Om)
     tl, tr = f.site_l.itags, f.site_r.itags
     HT = apply_gate(gate, frame_theta(f), tl, tr)       # (link_l, site_l, site_r, link_r)
     c  = contract(f.U0', (1, 2), HT, (1, 2))            # (bond, site_r, link_r)
@@ -1280,7 +1127,14 @@ function sketch_bond_left_pfirst(f::BondFrame, gate, Om)
     return to_concrete(contract(A, (3, 4), Om', (2, 3)))          # (link_l, site_l, g)
 end
 
-function sketch_bond_right_pfirst(f::BondFrame, gate, Om)
+"""
+    sketch_bond_right(f, gate, Om) -> TLArray
+
+Mirror of [`sketch_bond_left`](@ref): `Om` carries `U0`'s layout `(link_l, site_l, g)` and
+the result is `(g, site_r, link_r)`.
+"""
+function sketch_bond_right(f::BondFrame, gate, Om)
+    _check_gate(f, gate)
     tl, tr = f.site_l.itags, f.site_r.itags
     HT = apply_gate(gate, frame_theta(f), tl, tr)
     c  = contract(HT, (3, 4), f.V0', (2, 3))            # (link_l, site_l, bond)
@@ -1288,6 +1142,21 @@ function sketch_bond_right_pfirst(f::BondFrame, gate, Om)
     Y  = contract(A, (1, 2), Om', (1, 2))               # (site_r, link_r, g)
     return to_concrete(permutedims(Y, (3, 1, 2)))       # (g, site_r, link_r)
 end
+
+"""
+    cbe_expand_bond(f, gate; kwargs...) -> CBEExpansion
+
+Controlled bond expansion of the frames at one bond, with the bare two-site gate standing in
+for the environment-dressed effective Hamiltonian. Keywords are [`cbe_expand`](@ref)'s,
+unchanged -- this is the same selection with different sketch closures.
+
+The sketch probes the PROJECTOR (`P_perp (H Theta)`), which is the only path; there is no
+`project_first` switch any more.
+"""
+cbe_expand_bond(f::BondFrame, gate; kwargs...) =
+    cbe_expand(f,
+               Om -> sketch_bond_left(f, gate, Om),
+               Om -> sketch_bond_right(f, gate, Om); kwargs...)
 
 # ── the bond update ──────────────────────────────────────────────────────────
 
@@ -1725,7 +1594,7 @@ function cbe_gate_evolve!(psi::SymMPS, gates, tau_step::ComplexF64;
     kw = (; maxdim = opts.maxdim, trunc_thresh = opts.trunc_thresh,
             maxiter = opts.maxiter, tol = opts.tol, rng = rng,
             s_iters = opts.s_iters, s_reorth = opts.s_reorth,
-            project_first = opts.project_first, two_sided = opts.two_sided, exact = opts.exact,
+            two_sided = opts.two_sided, exact = opts.exact,
             dex = opts.dex, growth = opts.growth,
             dover = opts.dover, comp_ratio = opts.comp_ratio,
             sulz_cap = opts.sulz_cap, preselect_only = opts.preselect_only)

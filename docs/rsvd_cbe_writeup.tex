@@ -456,16 +456,22 @@ statement reliable rather than merely likely.
 
 That is the whole of RSVD as used here, with three specialisations.
 
-\paragraph{(i) $A$ is never formed.} $A\Om$ is computed by folding $\Om$ into the operator
-before contracting. In the bond-update path, $\Om$ is absorbed into the gate's bra leg first, so
-the largest intermediate is $O(d^2 g r)$ and the rank-4 object never exists:
+\paragraph{(i) The sketch probes the projector.} As of 2026-08-06 the sketch is
+\emph{project-first}: $P_\perp = I - U_0U_0^\dagger$ is applied to $\Hb\Theb$ and $\Om$ is
+folded in afterwards,
 \begin{equation}
-  Y = (\Hb\Theb)\,\Om^\dagger,
+  Y = \big(P_\perp \Hb\Theb\big)\,\Om^\dagger,
   \qquad
   \Om \;\text{in the layout of}\; V_0,\;\text{with } g \;\text{columns instead of } r .
 \end{equation}
-Setting $\Om = V_0$ recovers the exact left factor of $\Hb\Theb$, which is how the sketch is
-tested against a formed reference.
+$P_\perp$ acts on $(\ell_{i-1},s_i)$ and $\Om$ on $(s_{i+1},\ell_{i+1})$ --- disjoint legs ---
+so the two commute and $P_\perp\big((\Hb\Theb)\Om^\dagger\big)=\big(P_\perp\Hb\Theb\big)\Om^\dagger$
+identically. \textbf{No result changes.} The cost does: the earlier ordering folded $\Om$ in
+first, keeping the largest intermediate at $O(d^2 g r)$ so the rank-4 object never existed;
+project-first forms it once per bond and applies $\Hb$ to $d\chi_r$ columns instead of $g$.
+That tradeoff was raised and the ordering was chosen deliberately; the fold-first path has been
+removed. Setting $\Om = V_0$ now recovers the exact left factor of $P_\perp\Hb\Theb$, and the
+sharper test is that $\langle U_0S_0 | Y\rangle$ vanishes for \emph{any} probe.
 
 \paragraph{(ii) The probe is drawn per charge sector.} With a $U(1)$ symmetry the bond leg
 carries charge sectors, and a probe drawn without regard to them can miss a sector entirely ---
