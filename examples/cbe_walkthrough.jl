@@ -126,17 +126,20 @@ println("half the columns are random-then-projected-OUT of V0 (the complement ha
 println("half are random-then-projected-IN  (the isometry half, comp_ratio = 0.5).")
 
 # ── 3. one application of H, sketched ────────────────────────────────────────
-hdr("3.  ONE APPLICATION OF H, SKETCHED:  Y = (H Theta) Omega^dag")
+hdr("3.  ONE APPLICATION OF H, SKETCHED:  Y = (P_perp H Theta) Omega^dag")
 Y = sketch_bond_left(f, gate, OmR)
-@printf("Y   %-16s  the left image of the gate's action, %d columns wide\n",
+@printf("Y   %-16s  the DISCARDED-space image of the gate's action, %d columns wide\n",
         shape(Y), leg_dim(Y, 3))
-# The sketch is EXACT when the probe is the frame itself -- the guard the tests use.
+# The sketch probes the PROJECTOR, so the guard is against the explicitly projected
+# action -- and Y is orthogonal to the frame for any probe, which is the sharper check.
 Y_exact = sketch_bond_left(f, gate, f.V0)
 HT = apply_gate(gate, theta0, f.site_l.itags, f.site_r.itags)
-K1 = to_concrete(contract(HT, (3, 4), f.V0', (2, 3)))
-@printf("check: sketch with Omega = V0 equals contracting the formed H*Theta:  %.2e\n",
+K1 = to_concrete(contract(to_concrete(perp_component(f.U0, HT)), (3, 4), f.V0', (2, 3)))
+@printf("check: sketch with Omega = V0 equals P_perp(H*Theta) contracted:      %.2e\n",
         norm(to_concrete(Y_exact - K1)))
-@printf("H*Theta itself is rank %d %-14s and IS NEVER FORMED in the method;\n",
+@printf("check: <U0 S0 | Y> vanishes -- the sketch lives in the complement:    %.2e\n",
+        abs(tensor_inner(to_concrete(f.U0 * f.S0), Y)))
+@printf("H*Theta is rank %d %-14s and IS formed, now that the projector comes first;\n",
         length(HT.inds), shape(HT))
 println("it is built here only to check the sketch. Omega is folded into the gate first.")
 

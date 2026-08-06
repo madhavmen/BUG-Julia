@@ -32,14 +32,19 @@ const TR_TAG(f) = f.site_r.itags
 
 "The rank-4 reference: form `HΘ` explicitly and sketch it AFTERWARDS. This is exactly the
 object the production path refuses to build, which is why it belongs only in a test."
+# The sketch probes the PROJECTOR: `P_perp (H Theta)`, not `H Theta`. The reference
+# therefore forms the rank-4 object, projects it EXPLICITLY with `perp_component`
+# (`BondUpdateBUG`'s, independent of anything under test), and only then folds `Om` in.
 function reference_sketch_left(f, gate, Om)
     HT = apply_gate(gate, frame_theta(f), TL_TAG(f), TR_TAG(f))
-    return to_concrete(contract(HT, (3, 4), Om', (2, 3)))
+    P  = to_concrete(perp_component(f.U0, HT))
+    return to_concrete(contract(P, (3, 4), Om', (2, 3)))
 end
 
 function reference_sketch_right(f, gate, Om)
     HT = apply_gate(gate, frame_theta(f), TL_TAG(f), TR_TAG(f))
-    return to_concrete(permutedims(contract(HT, (1, 2), Om', (1, 2)), (3, 1, 2)))
+    P  = to_concrete(perp_component_right(f.V0, HT))
+    return to_concrete(permutedims(contract(P, (1, 2), Om', (1, 2)), (3, 1, 2)))
 end
 
 "`‖HΘ − U U† HΘ‖ / ‖HΘ‖` -- how much of the gate's action on the block the left frame `U`
@@ -104,7 +109,7 @@ end
     # it. `apply_gate` is itself pinned to the analytic Heisenberg block element-for-element
     # (tests/BondUpdateBUG/test_gates.jl), so this chains onto a validated reference rather
     # than onto a sibling of the code under test.
-    @testset "sketch_gate_* == (gate Θ) Ω†, without forming gate Θ" begin
+    @testset "sketch_gate_* == P_perp(gate Θ) Ω†" begin
         psi = warm_state(8)
         for i in (1, 3, 4, 6)
             f, gate = frame_and_gate(psi, i)
