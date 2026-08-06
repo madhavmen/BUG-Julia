@@ -1,0 +1,411 @@
+# Generated from 01_rsvd_lubich.ipynb by build_notebooks.py
+# Run on a COMPUTE NODE:  sbatch notebooks/submit_notebook.slurm 01_rsvd_lubich
+
+# # RSVD-CBE, notebook 1 of 3: the **Lubich BUG sweep**
+# 
+# `cbe_lubich_sweep` (`src/RSVDCBEBondUpdate/cbe_lubich.jl`).
+# 
+# Two basis sweeps that touch nothing, then **exactly one** time evolution at the
+# centre bond. No backward substep, no inverse anywhere.
+# 
+# This notebook walks the objects the sweep builds — the MPS, the MPO term list,
+# the environments, the bond frame, the projectors, the sketch, the expansion — and
+# then runs the sweep and varies the RSVD knobs.
+# 
+# > **The sketch probes the projector.** Since 2026-08-06 `sketch_h_left/right`
+# > apply $P_\perp$ *before* folding in $\Omega$, and the alternative ordering has
+# > been removed. Section 5 checks both that this is what happens and that it changes
+# > no numbers.
+# 
+# Companion diagrams: `docs/tndiag/out/rsvdcbe.html`.
+
+# # Setup
+# 
+# `BUGJulia` is loaded from the repo root. `set_symmetry!(:U1)` makes every tensor
+# block-sparse in total $S^z$ — which is what makes the sector bookkeeping below
+# visible rather than implicit.
+# 
+# The dense reference in `tests/common/` is test-side only: nothing in `src/` may
+# densify. At $L=6$ the full space is $2^6 = 64$, so every claim on this page can be
+# checked against an exact $64\times64$ matrix.
+
+using Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
+using BUGJulia.BondUpdateBUG
+using BUGJulia.RSVDCBEBondUpdate
+using LinearAlgebra, Random, Printf
+using LurCGT, Telum
+const R = RSVDCBEBondUpdate
+
+include(joinpath(@__DIR__, "..", "tests", "common", "dense_reference.jl"))
+
+set_symmetry!(:U1)
+const L = 6
+const DELTA = 1.0
+println("symmetry = ", symmetry_mode(), "   L = ", L)
+
+# ## 1. The MPS
+# 
+# `domain_wall_state(L)` is $|\uparrow\uparrow\uparrow\downarrow\downarrow\downarrow\rangle$:
+# a product state, so every bond has dimension 1. That is deliberate — it is the
+# hardest possible start for a rank-preserving method, and the reason CBE has to
+# exist.
+# 
+# Each tensor is rank 3 with legs `(link_l, sigma, link_r)`. Under U(1) it is stored
+# as a list of charge blocks, not a dense array.
+
+psi = domain_wall_state(L)
+@printf("bond dimensions: %s\n", string(bond_dims(psi)))
+for i in 1:L
+    T = psi[i]
+    @printf("psi[%d]  legs %-18s  blocks: %d\n", i,
+            string(Tuple(leg_dim(T, k) for k in 1:3)), length(T.qlabels))
+end
+
+# The charge sectors on one bond. A U(1) MPS carries a charge on every link;
+# these labels are what the sketch has to respect.
+canonical!(psi, 3)
+T = psi[3]
+println("psi[3] has ", length(T.qlabels), " charge blocks; sector dims per leg:")
+for leg in 1:3
+    dims = [(q, sector_dim(T, leg, q)) for (q, _) in T.spaces[leg]]
+    @printf("  leg %d: %s\n", leg, string(dims))
+end
+
+# Densify one tensor, purely to look at it. `dense_state` is the test-side helper.
+v = dense_state(psi)
+@printf("state vector: %d amplitudes, norm %.6f, nonzero %d\n",
+        length(v), norm(v), count(!iszero, v))
+@printf("total Sz = %.1f (U(1) pins this for the whole run)\n", total_sz(psi))
+
+# ## 2. The Hamiltonian
+# 
+# The XXZ chain is stored as a **term list**, not as an explicit rank-4 $W$ tensor:
+# 
+# $$H = \sum_i \sum_t c_t\, O^L_t(i)\, O^R_t(i+1)$$
+# 
+# Under U(1) the $S^+/S^-$ halves are rank 3 — the third leg carries the $\pm 2$
+# charge that makes the pair symmetry-allowed. Contracting that leg *is* charge
+# conservation.
+# 
+# The factored form exists because the CBE sketch has to **split a bond term across
+# the two halves of the bond**. A fused gate has already joined them.
+
+h = xxz_chain(L; delta = DELTA)
+@printf("%d terms, J = %.2f, delta = %.2f\n", length(h.terms), h.J, h.delta)
+for (t, term) in enumerate(h.terms)
+    @printf("  term %d: coeff %+.3f   left rank %d   right rank %d\n",
+            t, term.coeff, length(term.left.inds), length(term.right.inds))
+end
+
+# The two-site gate is the SAME terms, fused. One-way: this is why the term list
+# is what gets stored.
+gates = bond_gates(psi)
+g = gates[3]
+@printf("gate on bond 3: rank %d, legs %s\n",
+        length(g.inds), string(Tuple(leg_dim(g, k) for k in 1:length(g.inds))))
+@printf("energy via gates        = %.12f\n", real(energy(psi, gates)))
+@printf("energy via environments = %.12f\n", real(env_energy(psi, h)))
+@printf("  (these agreeing to machine precision is what pins the term list's\n")
+@printf("   normalisation against the validated gate path)\n")
+
+# ## 3. The environments
+# 
+# `henv.jl` stores the MPO's virtual index as **named channels** rather than a fused
+# leg. Reading the virtual index as an automaton scanning the chain:
+# 
+# | state | meaning |
+# |---|---|
+# | `id` | nothing has happened yet; the identity has been transported |
+# | `open[t]` | term `t` placed its LEFT operator, waiting for its partner |
+# | `done` | one complete term lies entirely behind us |
+# 
+# `ZERO` is not `nothing`: `done` starts at `ZERO` (no completed terms), `id` starts
+# at `nothing` (the chain boundary). Conflating them is a silent factor-of-one bug.
+
+psi2 = domain_wall_state(L)
+# warm it up so the bonds are not all 1 -- a product state makes every environment
+# trivial and hides the structure.
+cbe_bond_update_bug!(psi2, bond_gates(psi2);
+                     opts = CBEBugOptions(dt = 0.05, n_steps = 3, maxdim = 16))
+@printf("warmed bond dimensions: %s\n", string(bond_dims(psi2)))
+
+canonical!(psi2, 3)
+lenv = left_env_stack(psi2, h; upto = 2)
+renv = right_env_stack(psi2, h; downto = 5)
+lch = left_channels(lenv, 3)
+rch = right_channels(renv, 5)
+
+println("left channels on link 3:")
+@printf("  id   : %s\n", lch.id === nothing ? "nothing (boundary)" :
+        string(Tuple(leg_dim(lch.id, k) for k in 1:length(lch.id.inds))))
+@printf("  done : %s\n", lch.done === R.ZERO ? "ZERO (no completed terms)" :
+        string(Tuple(leg_dim(lch.done, k) for k in 1:length(lch.done.inds))))
+for (t, o) in enumerate(lch.open)
+    @printf("  open[%d]: %s\n", t, o === R.ZERO ? "ZERO" :
+            string(Tuple(leg_dim(o, k) for k in 1:length(o.inds))))
+end
+
+# What a contraction RESULTS IN: the two-site effective operator, applied to Theta.
+f = bond_frame(psi2, 3)
+theta = frame_theta(f)
+HT = apply_h_two_site(theta, h, 3, lenv, renv)
+@printf("Theta : rank %d  legs %s\n", length(theta.inds),
+        string(Tuple(leg_dim(theta, k) for k in 1:4)))
+@printf("H*Theta: rank %d  legs %s   (same legs -- H maps the block to itself)\n",
+        length(HT.inds), string(Tuple(leg_dim(HT, k) for k in 1:4)))
+@printf("<Theta|H|Theta> = %.12f   vs env_energy = %.12f\n",
+        real(tensor_inner(theta, HT)), real(env_energy(psi2, h)))
+
+# ## 4. The projectors
+# 
+# The bond frame factorises the two-site block, $\Theta = U_0 S_0 V_0$. $U_0$ and
+# $V_0$ are **isometries**: orthonormal bases for the $r$-dimensional subspaces the
+# state currently uses.
+# 
+# The fused local space $(\ell_{i-1}\otimes\sigma_i)$ has dimension $d\cdot\chi$
+# and splits in two:
+# 
+# $$P_K = U_0 U_0^\dagger \quad\text{(kept)}, \qquad
+#   P_D = I - U_0 U_0^\dagger \quad\text{(discarded)}$$
+# 
+# with $P_K + P_D = I$, $P_K^2 = P_K$, $P_K P_D = 0$. **Everything CBE does happens
+# inside $P_D$.**
+
+f = bond_frame(psi2, 3)
+@printf("U0 legs %s   V0 legs %s   S0 legs %s\n",
+        string(Tuple(leg_dim(f.U0, k) for k in 1:3)),
+        string(Tuple(leg_dim(f.V0, k) for k in 1:3)),
+        string(Tuple(leg_dim(f.S0, k) for k in 1:2)))
+@printf("rank r = %d\n", f.old_rank)
+@printf("left  isometry defect ||U0'U0 - I|| = %.2e\n", left_isometry_defect(f.U0))
+@printf("right isometry defect ||V0 V0' - I|| = %.2e\n", right_isometry_defect(f.V0))
+
+# The kept and discarded projectors, applied to the two-site block.
+# perp_component(U0, X) = X - U0 (U0' X)  =  P_D X.
+HT   = apply_h_two_site(frame_theta(f), h, 3, lenv, renv)
+PD_HT = to_concrete(perp_component(f.U0, HT))          # discarded part
+PK_HT = to_concrete(HT - PD_HT)                        # kept part
+
+@printf("||H*Theta||      = %.6e\n", norm(HT))
+@printf("||P_K H*Theta||  = %.6e   (inside the current frame)\n", norm(PK_HT))
+@printf("||P_D H*Theta||  = %.6e   (OUTSIDE it -- what CBE is hunting)\n", norm(PD_HT))
+@printf("completeness ||H*Theta - (P_K + P_D)H*Theta|| = %.2e\n",
+        norm(to_concrete(HT - to_concrete(PK_HT + PD_HT))))
+@printf("idempotence  ||P_D(P_D X) - P_D X||           = %.2e\n",
+        norm(to_concrete(to_concrete(perp_component(f.U0, PD_HT)) - PD_HT)))
+@printf("orthogonality <P_K X | P_D X>                 = %.2e\n",
+        abs(tensor_inner(PK_HT, PD_HT)))
+
+# ### The residual is the whole story
+# 
+# $\|P_D (H\Theta)\| / \|H\Theta\|$ is the fraction of the Hamiltonian's action at
+# this bond that the **current** frame cannot represent. If it is zero the frame is
+# already complete and no expansion can help. If it is large, a rank-preserving
+# method (1-site TDVP without CBE) is throwing that fraction away every step.
+
+for i in 1:(L - 1)
+    canonical!(psi2, i)
+    fi = bond_frame(psi2, i)
+    le = left_env_stack(psi2, h; upto = i - 1)
+    re = right_env_stack(psi2, h; downto = i + 2)
+    Hi = apply_h_two_site(frame_theta(fi), h, i, le, re)
+    resid = norm(to_concrete(perp_component(fi.U0, Hi))) / norm(Hi)
+    @printf("bond %d: r = %2d   ||P_D H*Theta|| / ||H*Theta|| = %.3e\n",
+            i, fi.old_rank, resid)
+end
+
+# ## 5. The sketch — and it probes the PROJECTOR
+# 
+# `sketch_h_left(f, h, i, lch, rch, Om)` returns
+# 
+# $$Y = \big(P_\perp\, H\Theta\big)\,\Omega^\dagger, \qquad
+#   P_\perp = I - U_0U_0^\dagger$$
+# 
+# **The projector is applied first.** This is the only sketching path; the
+# fold-$\Omega$-first variant was removed on 2026-08-06.
+# 
+# The two orderings agree *exactly* — $P_\perp$ acts on $(\ell_{i-1},\sigma_i)$ and
+# $\Omega$ on $(\sigma_{i+1},\ell_{i+1})$, disjoint legs, so they commute. What
+# project-first changes is cost: $H\Theta$ is now formed once per bond.
+# 
+# Its signature is checkable in one line: **$Y$ is orthogonal to the frame for any
+# probe.**
+
+rng = MersenneTwister(0xC0FFEE)
+canonical!(psi2, 3)
+f = bond_frame(psi2, 3)
+lenv = left_env_stack(psi2, h; upto = 2); renv = right_env_stack(psi2, h; downto = 5)
+lch = left_channels(lenv, 3); rch = right_channels(renv, 5)
+
+Om = sector_graded_sketch(f.V0, :right, 6; rng = rng)
+@printf("probe Omega: legs %s\n", string(Tuple(leg_dim(Om, k) for k in 1:3)))
+Y = sketch_h_left(f, h, 3, lch, rch, Om)
+@printf("sketch Y   : legs %s\n", string(Tuple(leg_dim(Y, k) for k in 1:3)))
+
+K0 = to_concrete(f.U0 * f.S0)
+ovl = to_concrete(contract(K0', (1, 2), Y, (1, 2)))     # (bond, g)
+@printf("\nPROJECT-FIRST SIGNATURE  ||<U0 S0 | Y>|| = %.3e   (must vanish)\n", norm(ovl))
+
+# and it equals the explicitly projected action, folded afterwards
+HT = apply_h_two_site(frame_theta(f), h, 3, lenv, renv)
+want = to_concrete(contract(to_concrete(perp_component(f.U0, HT)), (3, 4), Om', (2, 3)))
+@printf("||Y - (P_perp H*Theta) Om'||        = %.3e\n", norm(to_concrete(Y - want)))
+
+# the orderings commute -- the identity that makes this change free of consequence
+want2 = to_concrete(perp_component(f.U0, to_concrete(contract(HT, (3, 4), Om', (2, 3)))))
+@printf("||Y - P_perp((H*Theta) Om')||       = %.3e   <- the commuting identity\n",
+        norm(to_concrete(Y - want2)))
+
+# ### The probe is sector-graded, not Gaussian
+# 
+# Under a symmetry a plain Gaussian is wrong: columns must be allocated **per charge
+# sector**, or most sectors get drawn with zero weight. `comp_ratio` splits the
+# budget between the orthogonal complement and the isometry space (the reference's
+# `CompRatio`, default 0.5).
+# 
+# The reference is explicit about keeping both halves
+# (`RSVDpreBE0SiQS.m:337`): *"do not project into complement space / 1-site
+# components are also important for bond update"*.
+
+for cr in (0.0, 0.5, 1.0, nothing)
+    Om = sector_graded_sketch(f.V0, :right, 6; comp_ratio = cr,
+                              rng = MersenneTwister(7))
+    if Om === nothing
+        @printf("comp_ratio = %-6s -> no probe\n", string(cr))
+        continue
+    end
+    Y = sketch_h_left(f, h, 3, lch, rch, Om)
+    @printf("comp_ratio = %-6s  cols = %d  ||Y|| = %.4e  ||<U0S0|Y>|| = %.1e\n",
+            string(cr), leg_dim(Om, 1), norm(Y),
+            norm(to_concrete(contract(K0', (1, 2), Y, (1, 2)))))
+end
+
+# ## 6. The expansion
+# 
+# `cbe_expand` ranks the candidates and returns
+# 
+# $$U_{ex} = [\,U_0 \mid C_L\,], \qquad V_{ex} = \begin{bmatrix}V_0\\ C_R\end{bmatrix}$$
+# 
+# as **direct sums**, so $U_0$ survives as the first block. The expansion is
+# therefore lossless — and by itself **cannot change a Schmidt rank**. It is a change
+# of basis; a `canonical!` would collapse the widened bond straight back. The rank
+# grows only because the core is then *evolved* in the widened space.
+
+ex = cbe_expand(f, h, 3, lch, rch; growth = 2.0)
+@printf("r = %d  ->  U_ex bond %d,  V_ex bond %d\n",
+        f.old_rank, leg_dim(ex.U_ex, 3), leg_dim(ex.V_ex, 1))
+@printf("new directions: left %d, right %d\n", ex.n_new_l, ex.n_new_r)
+@printf("err_pre = %.3e   (weight the PRESELECTION discarded)\n", ex.err_pre)
+@printf("err_fnl = %.3e   (weight the FINAL ranking discarded)\n", ex.err_fnl)
+@printf("U_ex still an isometry: defect %.2e\n", left_isometry_defect(ex.U_ex))
+
+# Does the expanded frame actually capture more of H*Theta? This is the number
+# that says whether the expansion was worth anything.
+HT = apply_h_two_site(frame_theta(f), h, 3, lenv, renv)
+# `ex.U_ex` carries cbe_expand's own bond tag, which trips contract's itag guard.
+# Renaming leg 3 onto the frame's tag is pure bookkeeping -- no numbers move.
+retag(U, ref) = to_concrete(setitag(U, 3, ref.inds[3].itags))
+before = norm(to_concrete(perp_component(f.U0, HT))) / norm(HT)
+after  = norm(to_concrete(perp_component(retag(ex.U_ex, f.U0), HT))) / norm(HT)
+@printf("residual outside the frame: %.3e  ->  %.3e   (%.1fx smaller)\n",
+        before, after, before / max(after, eps()))
+
+# ## 6b. The sweep itself
+# 
+# The structure, in one cell: canonical at 1, K-sweep building augmented LEFT
+# frames; canonical at L, L-sweep building augmented RIGHT frames; seed
+# $S_0 = \langle W,Z|\psi\rangle$; one 0-site Galerkin step at the centre; reassemble;
+# truncate once.
+# 
+# **The basis sweeps must not touch the state.** Writing an expanded frame back pads
+# the neighbour with zeros, the next frame is re-derived from the padded tensor, and
+# the padding collapses — pinning the rank. The measured symptom was $L=18$ stuck at
+# `maxbond 2` with an error *independent of dt*.
+
+p = domain_wall_state(L)
+@printf("start          : bond_dims %s\n", string(bond_dims(p)))
+for step in 1:6
+    info = cbe_lubich_sweep(p, h, ComplexF64(-im * 0.05); growth = 2.0, maxdim = 32)
+    @printf("after step %d   : bond_dims %-22s centre rank %2d  krylov %2d  err_pre %.1e\n",
+            step, string(bond_dims(p)), info.centre_rank, info.krylov_dim, info.err_pre)
+end
+
+# ### The reference
+# 
+# At $L=6$ the full Hilbert space is 64-dimensional, so the exact propagator is a
+# $64\times64$ matrix exponential. That is a genuinely independent check — it shares
+# no code with the integrator.
+
+function dense_reference(dt, nsteps; delta = DELTA)
+    Hd = sum(dense_bond_term(L, i; delta = delta) for i in 1:(L - 1))
+    v0 = dense_state(domain_wall_state(L))
+    return exp(-im * dt * nsteps * Matrix(Hd)) * v0
+end
+
+err_vs_dense(p, vref) = begin
+    v = dense_state(p)
+    ph = dot(vref, v); ph = abs(ph) > 1e-14 ? ph / abs(ph) : 1.0 + 0im
+    norm(v / ph - vref) / norm(vref)   # global phase is not physical
+end
+
+# ## 7. Playing with the RSVD parameters
+# 
+# The knobs that decide what the expansion looks at:
+# 
+# | knob | what it controls |
+# |---|---|
+# | `growth` | budget $=\lceil \text{growth}\cdot d_{max}\rceil - r$; how many directions to propose |
+# | `dex` | a fixed budget, overriding `growth` when > 0 |
+# | `comp_ratio` | complement / isometry split of the probe (`nothing` = no projector in the probe) |
+# | `exact` | swap the thin random probe for the complete fused basis — plain CBE, the reference the sketch approximates |
+# | `maxdim` | the truncation ceiling, applied *after* the update |
+# 
+# Each row below runs `cbe_lubich_sweep` from the same start state and reports the error
+# against the dense reference.
+
+function run_lubich(; growth, dex, comp_ratio, exact, maxdim = 32,
+                     nsteps = 20, dt = 0.05)
+    p = domain_wall_state(L)
+    info = nothing
+    for _ in 1:nsteps
+        info = cbe_lubich_sweep(p, h, ComplexF64(-im * dt);
+                                growth = growth, dex = dex, comp_ratio = comp_ratio,
+                                exact = exact, maxdim = maxdim)
+    end
+    return p, info
+end
+
+vref = dense_reference(0.05, 20)
+@printf("%-34s  %-9s  %-7s  %s\n", "setting", "err", "maxbond", "err_fnl")
+for (lab, kw) in (
+        ("growth=2.0, comp_ratio=0.5 (default)", (; growth=2.0, dex=0, comp_ratio=0.5, exact=false)),
+        ("growth=1.1  (the DMRG schedule)",      (; growth=1.1, dex=0, comp_ratio=0.5, exact=false)),
+        ("growth=3.0",                           (; growth=3.0, dex=0, comp_ratio=0.5, exact=false)),
+        ("dex=4   (fixed small budget)",         (; growth=2.0, dex=4, comp_ratio=0.5, exact=false)),
+        ("dex=32  (fixed large budget)",         (; growth=2.0, dex=32, comp_ratio=0.5, exact=false)),
+        ("comp_ratio=0.0 (isometry only)",       (; growth=2.0, dex=0, comp_ratio=0.0, exact=false)),
+        ("comp_ratio=1.0 (complement only)",     (; growth=2.0, dex=0, comp_ratio=1.0, exact=false)),
+        ("comp_ratio=nothing (no projector)",    (; growth=2.0, dex=0, comp_ratio=nothing, exact=false)),
+        ("exact=true (full basis, no sketch)",   (; growth=2.0, dex=0, comp_ratio=0.5, exact=true)),
+    )
+    p, info = run_lubich(; kw...)
+    @printf("%-34s  %.3e  %-7d  %.2e\n", lab, err_vs_dense(p, vref),
+            maximum(bond_dims(p)), info.err_fnl)
+end
+
+# ### Reading that table
+# 
+# - **`exact = true` vs the default** is the A/B that says whether the *sketch* costs
+#   accuracy. If they agree, the randomised probe is doing its job and the thin
+#   Gaussian is free.
+# - **`err_fnl` > 0** means the final ranking discarded candidate weight for want of
+#   budget — the cap, not the selection, is the accuracy limiter. Raise `growth` or
+#   `dex`.
+# - **`comp_ratio = 1.0`** is the recorded failure mode: near a chain edge the
+#   opposite frame's complement is 0- or 1-dimensional, so the probe collapses to
+#   0–1 columns and the expansion silently declines *with room to spare*. One blocked
+#   narrow bond then caps every bond inward.
+# - **`growth = 1.1`** is the DMRG schedule. DMRG re-converges the same state every
+#   sweep, so a 10% ratchet only costs iterations; a time integrator gets one shot
+#   per step, and a direction it does not admit is gone rather than deferred.
+
