@@ -1,0 +1,3 @@
+# SLURM run artefacts
+*.log
+*.err
