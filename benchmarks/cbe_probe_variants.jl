@@ -61,7 +61,10 @@ const VARIANTS = [
     ("V1 project-first  (rank-4)", (; comp_ratio = 0.5)),
     ("V2 two gaussians  cr=0.5",   (; comp_ratio = 0.5)),
     ("V3 plain gaussian cr=none",  (; comp_ratio = nothing)),
-    ("V4 two-sided (proj sketched)", (; two_sided = true)),
+    # A fourth arm sketched the PROJECTORS instead of `H Theta` (both Gaussians folded onto
+    # `P_perp`, ranked by the small `M = Q_L'(H Theta)Q_R`). Removed with the option: its `M`
+    # coupled the two sides, so a saturated side vetoed its partner, and on `jan_bug!` that cost
+    # an order of accuracy and froze the rank at chi = 1 off a product state.
 ]
 
 function bench(dt, label, kw)

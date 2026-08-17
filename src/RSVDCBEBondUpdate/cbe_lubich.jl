@@ -311,7 +311,7 @@ so the write-back only ever touches sites that stack does not depend on
 `<= j`; mirror for the other sweep). Getting this backwards reads a stale environment,
 which does not throw -- it silently evolves with the wrong Hamiltonian.
 """
-function cbe_lubich_sweep(psi::SymMPS, h::XXZChain, tau::ComplexF64;
+function cbe_lubich_sweep(psi::SymMPS, h::Union{XXZChain, MPO}, tau::ComplexF64;
                              dex::Int = 0,
                              growth::Float64 = 2.0,
                              dover::Union{Nothing, Int} = nothing,
@@ -320,6 +320,8 @@ function cbe_lubich_sweep(psi::SymMPS, h::XXZChain, tau::ComplexF64;
                              preselect_only::Bool = false,
                              exact::Bool = false,
                              centre_expand::Bool = true,
+                             root::Union{Nothing, Int} = nothing,
+                             grow_iters::Int = 0,
                              maxdim::Int = 200,
                              trunc_thresh::Float64 = 1e-12,
                              maxiter::Int = 30,
@@ -329,7 +331,19 @@ function cbe_lubich_sweep(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     length(h) == L || throw(DimensionMismatch(
         "chain has $(length(h)) sites, state has $L"))
     L >= 2 || throw(ArgumentError("cbe_lubich_sweep needs at least two sites"))
-    c = max(1, min(L - 1, L ÷ 2))                     # the centre bond
+    # THE ROOT BOND. `nothing` is the centre, which is what the scheme is for and the only
+    # value any driver passes. It is a keyword so that the root POSITION can be varied as a
+    # controlled experiment: everything else in this function -- lossless basis sweeps, one
+    # Galerkin step, truncate once -- is then held fixed, which is what makes a comparison
+    # against a boundary-root scheme (`jan_bug.jl`) attribute a difference to the root rather
+    # than to the surrounding machinery. See `benchmarks/root_position.jl`.
+    #
+    # WHY THE ROOT IS NOT A FREE PARAMETER IN PRACTICE: the Galerkin step explores exactly
+    # `b_L x b_R` directions, and at the centre both are the full half-chain dimension while
+    # at bond `L-1` the right factor is a SINGLE SITE, so `b_R <= d`. The variational space
+    # is smaller by `chi/d` there, which is the whole point of rooting at the centre.
+    c = root === nothing ? max(1, min(L - 1, L ÷ 2)) : root
+    1 <= c <= L - 1 || throw(ArgumentError("root must be a bond in 1:$(L - 1), got $c"))
 
     expanded = zeros(Int, L - 1)
     n_new    = zeros(Int, L - 1)
@@ -448,10 +462,50 @@ function cbe_lubich_sweep(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     # vector, and belongs to the validated module): one increment per operator application is
     # the Lanczos dimension. It separates "more work per step" from "more steps of work" when
     # comparing expansion budgets -- see the note in `cbe_bond_update`.
-    H0 = zero_site_h(h, c, lenv_c, renv_c, W[c], Z[c])
     nmv = Ref(0)
-    S1 = expv(x -> (nmv[] += 1; apply_zero_site(H0, x)), tau, S0;
-              hermitian = true, maxiter = maxiter, tol = tol)
+
+    # THE ROOT SOLVE, in one of two subspaces.
+    #
+    # `grow_iters = 0` (default) is the 0-site Galerkin step in the frames the two basis
+    # sweeps left: fixed subspace, `O(chi^2 w)` per matvec, never forms a rank-4 block.
+    #
+    # `grow_iters > 0` runs `_expanding_krylov` instead, which RE-EXPANDS THE FRAMES AROUND
+    # EACH KRYLOV VECTOR before applying `H`. The distinction is not the number of vectors --
+    # `maxiter` already saturates -- but the SUBSPACE they are built in. Measured motivation
+    # (`benchmarks/root_position.jl`, L=6, full rank): at root 4 the sweeps reach `b_L = 8`
+    # against a ceiling of `min(d*chi_3, 2^4) = 16`, and at root 5 they reach 4 against 8. The
+    # Galerkin space is half the size the geometry allows, and a fixed-frame solve cannot
+    # notice -- `v_k` carries `H^k`, so only a probe built from it asks for the directions the
+    # later Krylov vectors need.
+    #
+    # WHAT IT COSTS, stated because it is the whole trade: `_expanding_krylov` forms
+    # `theta = (U v_k) V` every iteration, so the 0-site bargain is gone -- `O(chi^2 d^2)` per
+    # matvec plus one `cbe_expand` per growth pass.
+    #
+    # WHAT IT CANNOT DO: lift a root whose CEILING is already below the space. At root 5 the
+    # ceiling is `8 x 2 = 16` inside a 20-dimensional sector, so growth improves the answer but
+    # exactness is unreachable there at any budget.
+    Wc, Zc, S1 = if grow_iters > 0
+        f_root = BondFrame(W[c], S0, Z[c],
+                           W[c].inds[1], W[c].inds[2], W[c].inds[3],
+                           Z[c].inds[2], Z[c].inds[3],
+                           max(leg_dim(W[c], 3), leg_dim(Z[c], 1)), copy(W[c].spaces[3]))
+        theta0 = to_concrete(to_concrete(W[c] * S0) * Z[c])
+        peak!(theta0)
+        U_aug, V_aug, S_new, _ = _expanding_krylov(
+            f_root,
+            th -> apply_h_two_site(th, h, c, lenv_c, renv_c),
+            fr -> record!(cbe_expand(fr, h, c, lenv_c, renv_c; exkw...)),
+            Propagate(tau), theta0, nmv;
+            maxiter = maxiter, tol = tol, grow_iters = grow_iters)
+        (U_aug, V_aug, S_new)
+    else
+        H0 = zero_site_h(h, c, lenv_c, renv_c, W[c], Z[c])
+        (W[c], Z[c],
+         expv(x -> (nmv[] += 1; apply_zero_site(H0, x)), tau, S0;
+              hermitian = true, maxiter = maxiter, tol = tol))
+    end
+    expanded[c] = leg_dim(Wc, 3)
     res = svd(S1, (1,); cutoff = max(trunc_thresh, 1e-14), Nkeep = maxdim, get_lists = true)
     discarded = _trunc_weight(res)
 
@@ -468,8 +522,8 @@ function cbe_lubich_sweep(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     end
     t1c, t3c = psi[c].inds[1].itags, psi[c].inds[3].itags
     t3r = psi[c + 1].inds[3].itags
-    psi[c]     = relink(to_concrete(W[c] * res.U), t1c, t3c)
-    psi[c + 1] = relink(to_concrete((res.S * res.Vd) * Z[c]), t3c, t3r)
+    psi[c]     = relink(to_concrete(Wc * res.U), t1c, t3c)
+    psi[c + 1] = relink(to_concrete((res.S * res.Vd) * Zc), t3c, t3r)
     for j in (c + 1):(L - 1)
         psi[j + 1] = relink(Z[j], psi[j + 1].inds[1].itags, psi[j + 1].inds[3].itags)
     end
@@ -486,7 +540,7 @@ function cbe_lubich_sweep(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     return CBEBugInfo(expanded, n_new, centre_rank, err_pre, err_fnl, discarded, nmv[], peak)
 end
 
-cbe_lubich_sweep(psi::SymMPS, h::XXZChain, tau::Number; kwargs...) =
+cbe_lubich_sweep(psi::SymMPS, h::Union{XXZChain, MPO}, tau::Number; kwargs...) =
     cbe_lubich_sweep(psi, h, ComplexF64(tau); kwargs...)
 
 # ── driver ───────────────────────────────────────────────────────────────────
@@ -497,10 +551,24 @@ cbe_lubich_sweep(psi::SymMPS, h::XXZChain, tau::Number; kwargs...) =
 
 Evolve `psi` in place for `opts.n_steps` real-time steps of `opts.dt` with CBE-BUG.
 
+A TERM LIST IS CONVERTED TO AN MPO ONCE, HERE, and every step then runs on the genuine
+`W^[i]` of `mpo.jl` -- the representation arXiv:2606.28169 Eq. (1.3) names, with the rank-3
+environments of Eq. (1.8) and `H_eff` as the single contraction of Eq. (1.7). The two
+representations are the same operator (`test_mpo.jl` pins them elementwise and at sweep
+level), so this changes no number; it changes which contraction produces them, and the
+measured consequence is fewer Krylov matvecs at the centre, since a single contraction
+reaches an exact Lanczos breakdown where a sum of separately-rounded channel terms does
+not. Pass an `MPO` to skip the conversion, or call [`cbe_lubich_sweep`](@ref) directly with
+an `XXZChain` when the channel path is wanted as a cross-check.
+
+Building it once outside the loop matters: `mpo_from_terms` is `O(L)` tensor assembly, and
+`H` does not change between steps.
+
 One RNG is threaded through the whole run rather than re-seeded per step, so the sketches
 are reproducible without every step drawing the same directions.
 """
-function cbe_lubich_bug!(psi::SymMPS, h::XXZChain; opts::CBEBugOptions = CBEBugOptions())
+function cbe_lubich_bug!(psi::SymMPS, h::Union{XXZChain, MPO}; opts::CBEBugOptions = CBEBugOptions())
+    mpo = h isa MPO ? h : mpo_from_terms(h)
     rng = MersenneTwister(opts.seed)
     times = Float64[]; norms = Float64[]
     bdims = Vector{Int}[]; maxb = Int[]
@@ -510,7 +578,7 @@ function cbe_lubich_bug!(psi::SymMPS, h::XXZChain; opts::CBEBugOptions = CBEBugO
     kdim = Int[]; maug = Float64[]
 
     for step in 1:opts.n_steps
-        info = cbe_lubich_sweep(psi, h, ComplexF64(-im * opts.dt);
+        info = cbe_lubich_sweep(psi, mpo, ComplexF64(-im * opts.dt);
                                    dex = opts.dex, growth = opts.growth,
                                    dover = opts.dover,
                                    comp_ratio = opts.comp_ratio,

@@ -18,6 +18,14 @@ Contents, in dependency order:
   - `henv.jl`  — channel environments for a nearest-neighbour XXZ chain: `H` globally,
     which neither the CBE selection nor a single centre-bond Galerkin step can do
     without. Replaces the per-bond gate the Trotter sweep uses.
+  - `mpo.jl` — the same `H` as a GENUINE MPO: one rank-4 `W^[i]` per site (Eq. 1.3 of
+    arXiv:2606.28169) and one rank-3 `(bra, mpo, ket)` environment per link (Eq. 1.8), from
+    which the effective Hamiltonians follow as a single contraction (Eq. 1.7). This is the
+    representation the parallel-BUG sweep of that paper is written in, and it is what
+    `cbe_lubich_sweep` runs on; `henv.jl` is kept as the independent witness that the two
+    are one operator (`test_mpo.jl` pins them elementwise). Unlike the factored form it is
+    site-dependent, so it is not restricted to a uniform nearest-neighbour term list.
+
   - `cbe_core.jl` — THE MAIN CODE, and what all three modes share. Part I is the RSVD bond
     expansion (sector-graded sketch, preselection, final selection); Part II drives it from
     a bond frame and solves the local problem in the expanded basis (`_expanding_krylov`),
@@ -61,7 +69,22 @@ using ..BondUpdateBUG: SymMPS, canonical!, bond_dims, leg_dim, local_space,
 
 include("henv.jl")
 include("cbe_core.jl")
+# The Hamiltonian as a genuine MPO (rank-4 `W^[i]`) plus its rank-3 environments, i.e. the
+# objects arXiv:2606.28169 Eqs. (1.3), (1.7) and (1.8) name. It provides a METHOD for every
+# verb `cbe_lubich_sweep` uses -- `boundary_channels`, `left/right_env_stack`,
+# `push_left/right_channels`, `apply_h_two_site`, `sketch_h_*`, `cbe_expand`,
+# `zero_site_h` -- so the sweep runs on either representation unchanged and the channel
+# path in `henv.jl` stays as the independent witness that the two are one operator.
+# After `cbe_core.jl`, since it adds methods to `cbe_expand` and the sketches.
+include("mpo.jl")
 include("cbe_lubich.jl")
+# Jan BUG: the full KLS step at EVERY bond across the whole chain -- CBE for the basis update and
+# the 0-site S step taken as well, then QR'd with `R` discarded so no evolution accumulates -- and
+# at the far bond the S step is KEPT, which is the step. One truncation after the sweep,
+# direction alternating between steps. MPO-only, so a long-range or site-dependent H needs a
+# different `MPO` and nothing else. After `cbe_lubich.jl`, whose `_frame_from` /
+# `_absorb_left!` / `_absorb_right!` it reuses.
+include("jan_bug.jl")
 
 # The two TDVP integrators live in their own directories. They are FILES of this module, not
 # submodules: both are built on `henv.jl` (environments) and `cbe_core.jl` (the expansion)
@@ -86,6 +109,11 @@ include("modes/imaginary_time.jl")
 include("modes/ground_state.jl")
 
 export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bond_gate,
+       MPO, mpo_from_terms, xxz_mpo, heisenberg_su2_mpo, mpo_virtual_dims, mpo_energy,
+       LongRangeTerm, long_range_mpo, long_range_zz_mpo,
+       LongRangeFit, fit_long_range, default_decays, long_range_terms, power_law_zz_mpo,
+       MPOLink, MPOLeftEnvStack, MPORightEnvStack, MPOZeroSiteH, MPOOneSiteH,
+       JanBugInfo, jan_bug_step!, jan_bug!,
        LeftEnvStack, RightEnvStack,
        left_env_stack, right_env_stack, env_energy, env_energy_right,
        ChannelSet, boundary_channels, left_channels, right_channels,

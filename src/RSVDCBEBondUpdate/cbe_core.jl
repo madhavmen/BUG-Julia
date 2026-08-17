@@ -490,7 +490,6 @@ function cbe_expand(f::BondFrame, skl, skr;
                     sulz_cap::Bool = false,
                     rmax::Int = 0,
                     preselect_only::Bool = false,
-                    two_sided::Bool = false,
                     exact::Bool = false,
                     stol_pre::Float64 = 1e-10,
                     stol_fnl::Float64 = 1e-13,
@@ -575,54 +574,26 @@ function cbe_expand(f::BondFrame, skl, skr;
     npre = preselect_only ? max(budget, 1) :
            dover === nothing ? ceil(Int, 1.2 * budget) : budget + dover
 
-    # ── TWO-SIDED: the second Gaussian acts on the PROJECTORS, not on the state ────────
-    #
-    # The shipped path applies `P_perp` to `Y = (H Theta) Om_R'`, an object with `d*chi_l`
-    # rows, and then SVDs it -- `O(d*chi_l * Dpre^2)`, i.e. it grows with the bond dimension.
-    #
-    # Here the projector is applied to a THIN GAUSSIAN instead: draw `Om_L` in the complement
-    # of `U0` (`comp_ratio = 1.0` is exactly "random, then projected out"), orthonormalise it
-    # to `Q_L`, and likewise `Q_R` on the right. Then
-    #
-    #     M = Q_L' (H Theta) Q_R          (Dpre_l x Dpre_r)
-    #
-    # is contracted down with BOTH Gaussians folded into the gate, so neither the rank-4
-    # object nor any `d*chi`-sized projected intermediate is ever formed, and the SVD is on a
-    # matrix whose size does not depend on chi at all.
-    #
-    # WHAT IS GIVEN UP. The candidate space is now a RANDOM `Dpre`-dimensional subspace of the
-    # complement, not the range of `P_perp (H Theta) Om_R'`. That is a weaker object: the
-    # shipped preselection sees where `H` actually points and keeps the largest pieces of it,
-    # while this sees a random slice and asks how much of `H`'s action lands in it. The bet is
-    # that redrawing every growth pass covers the space over iterations -- which is only a bet
-    # worth making WITH the iteration, and is why this is measured at `s_iters < 0`.
-    if two_sided
-        OmL = sector_graded_sketch(U0, :left,  npre; comp_ratio = 1.0, rng = rng)
-        OmR = sector_graded_sketch(V0, :right, npre; comp_ratio = 1.0, rng = rng)
-        QL = dex_l > 0 && OmL !== nothing ? _reortho_left(U0, OmL)  : nothing
-        QR = dex_r > 0 && OmR !== nothing ? _reortho_right(V0, OmR) : nothing
-        (QL === nothing && QR === nothing) && return none()
-
-        TLC, TRC = nothing, nothing
-        if QL !== nothing && QR !== nothing
-            M = to_concrete(contract(skr(QL), (2, 3), QR', (2, 3)))       # (g_l, g_r), SMALL
-            if length(M.qlabels) > 0 && norm(M) >= 1e-11
-                k = min(dex_l, dex_r, leg_dim(QL, 3), leg_dim(QR, 1))
-                if k > 0
-                    res = svd(M, (1,); Nkeep = k, cutoff = stol_fnl, get_lists = true)
-                    err_fnl2 = _trunc_weight(res)
-                    TLC = to_concrete(contract(QL, (3,), res.U, (1,)))
-                    TRC = to_concrete(contract(res.Vd, (2,), QR, (1,)))
-                    TLC = _reortho_left(U0, TLC)
-                    TRC = _reortho_right(V0, TRC)
-                    return _assemble(U0, V0, TLC, TRC, 0.0, err_fnl2)
-                end
-            end
-        end
-        return none()
-    end
-
     # ---- preselection: sketch H from each side, project off the frame ----------
+    #
+    # THE PROBE GOES ON `H Theta`, NOT ON THE PROJECTOR, and that ordering is the method. To
+    # expand the LEFT frame a Gaussian is contracted into the RIGHT leg only,
+    #
+    #     Y = (H Theta) Om_R'      ->      Q_L = orth(P_perp Y)
+    #
+    # so the side being expanded stays EXACT -- `Y` keeps all `d*chi_l` rows and `P_perp` is
+    # applied to the true object -- and `Q_L` estimates the RANGE of `P_perp (H Theta)`, i.e.
+    # the directions `H` actually points in. The SVD is `O(d*chi_l * Dpre^2)`, so it does grow
+    # with the bond dimension.
+    #
+    # A `two_sided` variant that folded BOTH Gaussians onto the projectors instead
+    # (`Q_L = orth(P_perp Om_L)`, ranked by the small `M = Q_L'(H Theta)Q_R`) was implemented
+    # and REMOVED. Its SVD was independent of chi, which is a real property, but the candidate
+    # space was then a random slice of the complement that `H Theta` only SCORED rather than
+    # one it generated, and `M` coupled the two sides so a saturated side vetoed its partner --
+    # fatal at a boundary bond, where `room_r = d - r` reaches zero. Measured on `jan_bug!`
+    # (XXZ, L=4/6): first order instead of second, 2.0e-2 instead of 1.8e-5 over eight steps,
+    # and off a product state the rank never left chi = 1 at all.
     #
     # `exact = true` swaps the thin Gaussian for the COMPLETE fused basis, which turns this
     # from RSVD-CBE into plain CBE: `skl(F)` is then the exact `H*Theta` and the preselection
@@ -786,25 +757,6 @@ function _reortho(C, perp, orth)
 end
 
 
-"""
-    _assemble(U0, V0, TLC, TRC, err_pre, err_fnl) -> CBEExpansion
-
-Append the selected blocks to the frames by direct sum. `oplus` keeps `U0` first, which is
-what makes the expansion lossless and what the embedding in `_expanding_krylov` relies on.
-The new bond leg is retagged to the frame's own tag first: the selections deliberately use
-distinct tags, and Telum rejects a tensor carrying two identical indices.
-"""
-function _assemble(U0, V0, TLC, TRC, err_pre::Float64, err_fnl::Float64)
-    (TLC === nothing && TRC === nothing) &&
-        return CBEExpansion(U0, V0, 0, 0, err_pre, 0.0)
-    ltag, rtag = U0.inds[3].itags, V0.inds[1].itags
-    U_ex, n_l = TLC === nothing ? (U0, 0) :
-        (to_concrete(oplus([U0, to_concrete(setitag(TLC, 3, ltag))], (3,))), leg_dim(TLC, 3))
-    V_ex, n_r = TRC === nothing ? (V0, 0) :
-        (to_concrete(oplus([V0, to_concrete(setitag(TRC, 1, rtag))], (1,))), leg_dim(TRC, 1))
-    return CBEExpansion(U_ex, V_ex, n_l, n_r, err_pre, err_fnl)
-end
-
 "Keep at most `n` columns of `Q` on `leg`, walking sectors in Telum's order."
 function _trim_total(Q, leg::Int, n::Int)
     n <= 0 && return nothing
@@ -904,12 +856,6 @@ Base.@kwdef struct CBEBugOptions
     # yet a default because it has not been checked across a sweep.
     s_iters::Int = 1
     s_reorth::Bool = false
-    # Order P_perp against Omega in the sketch. An IDENTITY (disjoint legs), so it
-    # cannot change a result; `true` forms the rank-4 H*Theta and costs more. A/B only.
-    # Second Gaussian on the PROJECTORS: sample the complement with a thin
-    # Gaussian and contract both sides to a small core, so P_perp never touches a
-    # chi-sized object. See the two_sided block in `cbe_expand`.
-    two_sided::Bool = false
     # PLAIN CBE instead of RSVD-CBE: the complete fused basis replaces the thin Gaussian, so
     # the preselection sees the exact `H*Theta` and its SVD returns the true leading directions
     # rather than an estimate. This FORMS THE RANK-4 OBJECT (cost `d*chi`, not `1.2*budget`),
@@ -1594,7 +1540,7 @@ function cbe_gate_evolve!(psi::SymMPS, gates, tau_step::ComplexF64;
     kw = (; maxdim = opts.maxdim, trunc_thresh = opts.trunc_thresh,
             maxiter = opts.maxiter, tol = opts.tol, rng = rng,
             s_iters = opts.s_iters, s_reorth = opts.s_reorth,
-            two_sided = opts.two_sided, exact = opts.exact,
+            exact = opts.exact,
             dex = opts.dex, growth = opts.growth,
             dover = opts.dover, comp_ratio = opts.comp_ratio,
             sulz_cap = opts.sulz_cap, preselect_only = opts.preselect_only)

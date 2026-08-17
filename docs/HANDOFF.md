@@ -1,5 +1,10 @@
 # Handoff — RSVD-CBE at L = 18, as of 2026-07-31
 
+> **This handoff covers the L=18 benchmark campaign only, and its §6 open work is superseded.**
+> For work after 2026-07-31 — the MPO layer, long-range Hamiltonians, and the three sweep
+> variants (`cbe_lubich`, `jan_bug`, `lossless`) — see `docs/HANDOFF-sweep-variants.md`.
+> §7 (traps) and §8 (hard constraints) below still apply verbatim.
+
 State of the L=18 benchmark campaign, what is proven, what is *not*, and what to do next.
 Written for an agent picking this up cold. Companion to `docs/current_work.md` §7.9 / §7.9.1,
 which hold the full derivations; this file is the operational summary.

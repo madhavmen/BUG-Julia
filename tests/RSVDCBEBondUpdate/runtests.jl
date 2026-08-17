@@ -13,6 +13,10 @@ Random.seed!(42)
 
 @testset "RSVDCBEBondUpdate" begin
     include("test_henv.jl")
+    # The same H as a genuine MPO (Eq. 1.3 of arXiv:2606.28169) with rank-3 environments
+    # (Eq. 1.8). Runs right after the channel environments because it is pinned AGAINST
+    # them, element by element, as well as against the dense reference.
+    include("test_mpo.jl")
     include("test_heff.jl")
     include("test_carry.jl")
     include("test_sketch.jl")
@@ -21,6 +25,10 @@ Random.seed!(42)
     include("test_cbe_bond_update.jl")
     include("test_rank_growth.jl")
     include("test_cbe_lubich.jl")
+    # Jan BUG: the KLS step at every bond (S step taken, then QR'd with `R` discarded), with the
+    # S step KEPT at the far bond. After test_cbe_lubich.jl because it reuses that sweep's frame
+    # and write-back.
+    include("test_jan_bug.jl")
     include("test_tdvp2_baseline.jl")
     include("test_driver.jl")
     include("test_modes.jl")

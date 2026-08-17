@@ -304,7 +304,7 @@ _with_exact(o::CBEBugOptions, e::Bool) = CBEBugOptions(;
     comp_ratio = o.comp_ratio, sulz_cap = o.sulz_cap, preselect_only = o.preselect_only,
     centre_expand = o.centre_expand, maxdim = o.maxdim, trunc_thresh = o.trunc_thresh,
     normalize = o.normalize, maxiter = o.maxiter, tol = o.tol, s_iters = o.s_iters,
-    s_reorth = o.s_reorth, two_sided = o.two_sided,
+    s_reorth = o.s_reorth,
     exact = e, seed = o.seed, record_magnetisation = o.record_magnetisation,
     observe = o.observe)
 

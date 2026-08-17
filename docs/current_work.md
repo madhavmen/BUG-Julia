@@ -1426,3 +1426,265 @@ URL hits a login page).
   pair. **BUG replaces that whole mechanism with the single centre Galerkin — take the
   environment handling from here, explicitly not the forward/backward pair.**
 * `exploratory_bug/src/BUG/discarded_bug.jl:16-31` — the authoritative chain-BUG sweep.
+
+## 11. The Hamiltonian as a genuine MPO — `src/RSVDCBEBondUpdate/mpo.jl`
+
+**Why.** The sweep was running on `henv.jl`'s channel recursion, which is an MPO contraction
+with the virtual index *named* (`id`, `open[t]`, `done`) rather than fused. That is the same
+operator, but it is not the object arXiv:2606.28169 §1–2 writes its equations in, and it
+hard-codes a uniform nearest-neighbour term list. `mpo.jl` builds the paper's objects:
+
+* Eq. (1.3) — one rank-4 `W^[i]` per site, legs `(w_l '+', s_ket '+', s_bra '-', w_r '-')`;
+* Eq. (1.8) — one rank-3 `(bra, mpo, ket)` environment per link, carried or prebuilt;
+* Eq. (1.7) — `H_eff` as a single contraction chain: two-site, and 0-site at the centre bond
+  (`sum_w L[w] S R[w]`), replacing the five-case (a)–(e) sum.
+
+**How the symmetric MPO is assembled, since this is the part that usually needs hand-written
+charge-graded virtual spaces and here does not.** The automaton matrix is written out literally
+and Telum's *matrix* `oplus(mat, (1,4))` direct-sums rows on leg 1 and columns on leg 4,
+inferring zero blocks from the row/column spaces. The virtual sectors *are* the operators'
+op-legs: `Sp`'s op-leg is already `'-'` so it becomes a `w_r`, `Sp'`'s is already `'+'` so it
+becomes a `w_l`, and `id`/`done` are trivial legs from `addSingleton(...; dir=)`. So `w = 5`
+under `:U1` Heisenberg, `4` for XX, `3` multiplets under `:SU2` — no symmetry-specific code.
+Two traps: `empty_tlarray` returns EMPTY space lists and therefore cannot serve as the zero
+block (`0.0 * Iid` can), and `W^[1]`/`W^[L]` are trimmed to the `id` row / `done` column so the
+boundary vectors need not be carried.
+
+**Wiring.** `MPO` has a method for every verb the sweep uses — `boundary_channels`,
+`left/right_env_stack`, `push_left/right_channels`, `apply_h_two_site`, `sketch_h_left/right`,
+`cbe_expand`, `zero_site_h` — so `cbe_lubich_sweep(psi, h, tau)` takes either representation and
+**the sweep body did not change**. The RSVD-CBE selection is untouched: nothing in it knows how
+`H` is stored.
+
+**Both paths stay.** `henv.jl` is now the independent witness: the two share no contraction, so
+a leg/arrow/prime slip in one cannot cancel in the other. `tests/RSVDCBEBondUpdate/test_mpo.jl`
+pins them elementwise (`apply_h_two_site` at every bond, carried vs prebuilt environments, the
+0-site operator vs the two-site route, `mpo_energy == env_energy ==` dense), and at sweep level
+asserts the same state and the same bond dimensions from the same seed.
+
+**Conformance to the paper's sweep** is now written out in `docs/cbe_lubich_sweep.tex`
+§"Conformance to the parallel-BUG sweep of arXiv:2606.28169 §1–2": root at `⌊L/2⌋`, frozen
+start-of-step state, outside-in augmentation, one update of the connecting tensor in the
+enlarged bases, truncation strictly afterwards — with the three knowing differences listed
+(0-site bond root instead of a 1-site site root; growth may exceed the `2r` factor unless
+`sulz_cap`; we do expand the root-adjacent bond, which §2.4 declines to for qubit-count
+reasons).
+
+### 11.1 Measured, and one unexpected result
+
+`tests/RSVDCBEBondUpdate/test_mpo.jl`, run locally (L = 4, 6; `delta` = 1 and 0; `:U1`, `:none`,
+`:SU2`): **243 assertions, all green.** `mpo_energy == env_energy ==` the dense matrix element in
+every symmetry mode, `apply_h_two_site` agrees with the channel path elementwise at every bond,
+the carried environments equal the prebuilt stacks, the 0-site operator equals the two-site route
+sandwiched between the expanded frames, and one MPO-path step at L = 4 with saturated bonds
+reproduces `exp(-iH dt)` to 1e-9. At sweep level the two representations give the same state
+(1e-9 over 3 steps), the same bond dimensions and the same `expanded`.
+
+**The one thing that is NOT equal is the Krylov depth, and the MPO path wins it.** The centre
+solve took **5 matvecs on the MPO path against 30 — the full `maxiter` — on the channel path**,
+for the same answer. `lanczos_expv` exits on breakdown only ([[krylov-depth-and-timing-discipline]]:
+every solve otherwise burns `maxiter`), and `apply_zero_site` on the channel path is a SUM of
+separately-rounded contributions (`done_l`, `done_r`, one per open channel), whose noise keeps
+`beta` off zero so the exact breakdown never registers. The MPO form is one contraction, so it
+breaks down where the Krylov space genuinely closes. The test asserts `krylov_dim_mpo <=
+krylov_dim_channel` rather than equality.
+
+Do not generalise the 6x from L = 4/6 — small bonds close the Krylov space quickly, and this is a
+correctness-scale run, not a timing one. It is worth re-measuring at L = 18 on the cluster,
+where `maxiter` is the dominant cost of the step.
+
+## 12. Three BUG variants, and what actually distinguishes them
+
+All three are BUG in the strict sense — **augment the basis first, then ONE Galerkin solve**, no
+projector splitting, no backward substep. That is what separates them jointly from 1-site and
+2-site TDVP. They differ only in which object carries the update and how the bases are found:
+
+| | connecting tensor | bases from | evolutions per step | file |
+|---|---|---|---|---|
+| **Lubich BUG** | centre **bond** → 0-site | RSVD-CBE, two half-sweeps inward | 1 | `cbe_lubich.jl` |
+| **Mendl BUG** (arXiv:2606.28169 §1) | centre **site** → 1-site | one local ODE per tensor, frozen envs | 1 (+ `L-1` basis solves) | not implemented |
+| **Jan BUG** | any bond → 0-site | RSVD-CBE, one sweep (KLS or lossless) | 1 | `jan_bug.jl` |
+
+### 12.0 WHERE THE ROOT SITS IS THE DOMINANT DESIGN CHOICE — measured
+
+`cbe_lubich_sweep` and `jan_bug_step!` both take a `root`, so the position can be varied with
+everything else held fixed (`benchmarks/root_position.jl`, L=6, long-range H, full rank, one step
+at `dt = 0.01`, `Sz = 0` sector dimension **20**):
+
+| root | `dim` left block | `dim` right block | `b_L` reached | Galerkin space | err |
+|---|---|---|---|---|---|
+| 1 | 2 | 32 | 2 | 16 | 1.745e-5 |
+| 2 | 4 | 16 | 4 | 64 | 1.227e-5 |
+| **3 (centre)** | 8 | 8 | 8 | 64 | **8.469e-16** |
+| 4 | 16 | 4 | 8 | 64 | 1.227e-5 |
+| 5 | 32 | 2 | 4 | 16 | 1.745e-5 |
+
+The single kept evolution is a Galerkin problem in `span(U_ex) (x) span(V_ex)`. Three regimes,
+and the distinction is **not** centre-vs-boundary:
+
+* **centre** — at full rank the state's own frame already spans both halves (`chi_3 = 8 = 2^3`),
+  so the projector is the identity and the step IS `exp(-iH dt)`. Nothing to expand.
+* **off-centre interior (2, 4)** — the ceiling `min(d chi_{c-1}, 2^c) x min(d chi_{c+2}, 2^{L-c})`
+  is 64 ≥ 20, so exactness is *reachable*, but the plain expansion stops at half of it (`b_L = 8`
+  against 16). This is where `grow_iters` earns its keep: **1.227e-5 → 2.049e-8 → 1.8e-15** at
+  `grow_iters = 0 → 2 → 4`.
+* **boundary (1, 5)** — the ceiling is `8 x 2 = 16`, *below* the sector dimension. Exactness is
+  unreachable at any rank and any Krylov budget: with `grow_iters` the rank climbs `4 → 12` and
+  the error is **bit-identical** at 1.227e-5. The missing 4 directions require changing the
+  *frozen* tensors, which no local solve touches.
+
+Two things this rules out as explanations for jan's error, both by direct measurement:
+
+* **Krylov depth.** Flat to seven significant figures from `maxiter = 4` to 60, and unmoved by
+  tightening `tol` six orders. Decisive form: `lubich` at root 3 and root 5 use the *same solver
+  and budget*, and one is machine-exact.
+* **Rank.** `2.935e-4` at `maxdim` 4, 8, 16 and 32 alike, while `cbe_lubich` falls nine orders
+  over the same range.
+
+### 12.1 Jan BUG — `src/RSVDCBEBondUpdate/jan_bug.jl`
+
+### 12.1 Jan BUG — `src/RSVDCBEBondUpdate/jan_bug.jl`
+
+Bond-canonical at the first bond; at **every** bond in turn take the full KLS step — RSVD-CBE
+supplies the K/L basis update, and the **S step is taken as well** — then **QR the evolved bond
+and discard `R`**. The basis moves where the dynamics points; the amplitude is thrown away, and
+the ORIGINAL state re-expressed in the new basis is what travels on, so no time evolution
+accumulates along the sweep. At the **last bond there is no QR**: the S step is kept, and that is
+the step. Then one sweep of SVDs controls the rank. Next step sweeps back and updates bond 1.
+
+Why this grows the rank at every bond: `exp(tau H_eff)` is *not* a left multiplication —
+`H_eff S = L S + S R + sum_t ol_t S or_t` acts from both sides — so it does not preserve the rank
+of `S`, and `S1` is generically of full rank in the expanded frames even though `S0` carries only
+the state's rank `r`. `orth(U_ex S1)` therefore has more columns than `U0` did. Expansion alone
+never could: it is lossless, hence rank-preserving.
+
+What the discarded `R` costs, stated rather than hidden: `range(orth(U_ex S1)) = range(U_ex)`
+whenever `S1` has full row rank, and re-expressing the state in it is then lossless. When the
+evolved core is wider than tall the new basis is a genuine subspace and the re-expression
+projects — that is the K-step's approximation, the same one every BUG makes, and the reason the
+S step is redone in the final basis rather than accumulated.
+
+**Truncation is once per step, after the full sweep** (`_truncate_round_trip!`); every
+factorisation inside the sweep uses a numerical-zero cutoff only. The round trip runs both
+directions and ends at the end the sweep finished at, so the next (opposite) sweep starts there
+with no extra canonicalisation.
+
+**A DISCARD IS ONLY HARMLESS BEFORE THE EVOLUTION.** The kept step *must* be the last bond of the
+sweep, and this is measured rather than assumed. Keeping it at bond `c` and letting the QR-discard
+sweep continue past it means every later bond projects the evolution that step just performed:
+
+| kept step at bond | 5 (far) | 4 | 3 | 2 | 1 |
+|---|---|---|---|---|---|
+| err, 1 step, `dt = 0.01` | 2.122e-5 | 7.66e-4 | 4.97e-3 | 4.97e-3 | 7.35e-4 |
+| err, 24 steps | 2.935e-4 | 6.39e-2 | 1.19e-1 | 6.42e-2 | 1.21e-2 |
+
+and the `dt`-order collapses to **0.00** — the scheme stops being consistent. Before the root a
+discard costs O(τ²) on an un-evolved state; after it, it deletes the step.
+
+### 12.2 The LOSSLESS variant — `lossless = true`
+
+Removing the discard removes that failure mode outright: no S step away from the root, therefore
+no `R`, therefore no projection. The sweep becomes a pure CBE expansion **carried** bond to bond,
+with one KLS step at `root`.
+
+The carry is load-bearing. Writing the raw expanded frame into the state leaves a zero-padded
+remainder in `psi[i+1]` — the new directions have no weight yet — and the next bond's
+`_frame_from` SVDs it away again; §5's header records L=18 freezing at maxbond 2 exactly that way.
+Carrying `C = U_ex'(C psi[i])` means no frame is ever re-derived from a padded tensor.
+
+**Measured** (L=6, long-range H, full rank, alternating direction):
+
+| root | 1 step `grow=0` | 1 step `grow=4` | 24 steps `grow=0` | 24 steps `grow=4` |
+|---|---|---|---|---|
+| 1 | 4.913e-3 | 4.913e-3 | 5.83e-2 | 5.83e-2 |
+| 2 | 1.227e-5 | 3.6e-15 | 2.911e-4 | 2.66e-14 |
+| **3 (centre)** | **7.612e-16** | 1.104e-15 | **1.203e-14** | 1.203e-14 |
+| 4 | 1.227e-5 | 1.8e-15 | 2.911e-4 | 1.26e-14 |
+| 5 | 1.745e-5 | 1.227e-5 | 5.83e-2 | 5.83e-2 |
+
+So `lossless + root = centre` is **machine-exact at full rank** — `1.203e-14` over 24 steps against
+the QR-discard variant's `2.935e-4`, ten orders — and needs no `grow_iters`, because the centre
+frame already spans both halves.
+
+**Why the centre is structurally right here, not merely best.** The forward sweep refreshes the
+left half and the reverse sweep the right half, so an alternating *pair* of steps covers the chain.
+A boundary root cannot: with `root = L-1` the reverse sweep runs over a single bond and the
+alternation degenerates, which is the `5.83e-2` above (its one-step error is still the predicted
+`1.745e-5` — the multi-step failure is the degenerate sweep, a separate cause from the `16 < 20`
+ceiling). Root 1 fails the same way mirrored, in its *forward* sweep.
+
+That is Lubich's K-sweep/L-sweep split arrived at from the opposite direction — with one
+difference: `cbe_lubich_sweep` runs **both** half-sweeps and builds two environment stacks every
+step (`9.081e-15` at 24 steps), while this runs **one** half-sweep and one stack (`1.203e-14`). At
+full rank that looks like the same accuracy for half the basis work.
+
+**IT IS NOT. THE ECONOMY DOES NOT SURVIVE TRUNCATION.** The far half's basis is one step stale, and
+at full rank that costs nothing because the frames span everything anyway. Error at fixed rank is
+the axis where it shows (L=8, long-range H, `T = 0.2`, 20 steps, `dt = 0.01`):
+
+| arm | `chi=4` | `chi=8` | `chi=16` | `chi=32` | `chi=64` |
+|---|---|---|---|---|---|
+| jan QR-discard, far | 2.592e-4 | 2.591e-4 | 2.591e-4 | 2.591e-4 | 2.591e-4 |
+| jan lossless, centre | **9.999e-1** | 6.561e-10 | 3.803e-10 | 3.803e-10 | 3.803e-10 |
+| jan lossless, centre, `grow=4` | **9.999e-1** | 6.561e-10 | 3.803e-10 | 3.803e-10 | 3.803e-10 |
+| `cbe_lubich` (two half-sweeps) | 1.558e-6 | 5.346e-10 | 3.671e-12 | 3.671e-12 | 3.671e-12 |
+
+Three things to read off, and the third is a defect rather than a trade-off:
+
+1. **lossless + centre beats the QR-discard variant by six orders** once there is rank to work
+   with (`3.8e-10` against `2.6e-4`). That part of the L=6 conclusion holds.
+2. **`cbe_lubich` beats it by ~100x** at `chi >= 16` (`3.671e-12` vs `3.803e-10`). The second
+   half-sweep is buying real accuracy, not redundancy. At L=6 full rank the two were
+   indistinguishable; at L=8 they are not, so the L=6 comparison was not measuring the difference.
+3. **At `chi = 4` the lossless variant BREAKS DOWN** — `9.999e-1`, i.e. the state is essentially
+   annihilated (the run is unnormalised, so an error at the norm of the target means no state
+   left), where `cbe_lubich` is still at `1.6e-6`. Not "less accurate": broken. A one-sided sweep
+   under aggressive truncation loses the directions the un-refreshed half needs, and there is no
+   second pass to recover them. UNDIAGNOSED — do not use `lossless` at small `maxdim` until it is.
+
+`grow_iters` changes nothing at the centre at any rank, consistent with the centre frame already
+reaching its ceiling. The QR-discard arm is flat across all five ranks, consistent with its error
+being structural in the root rather than a truncation error.
+
+**The probe goes on `H·Θ`, not on the projector — and the `two_sided` option is gone.** CBE
+contracts a Gaussian into the right leg to expand the left frame, `Y = (HΘ)Ω_R'` then
+`Q_L = orth(P⊥ Y)`, so the side being expanded stays exact and the candidates estimate the
+*range* of `P⊥(HΘ)`. The alternative folded both Gaussians onto the projectors instead
+(`Q_L = orth(P⊥ Ω_L)`, ranked by the small `M = Q_L'(HΘ)Q_R`, size independent of `χ`); it was
+implemented, measured here and **removed**, along with `CBEBugOptions.two_sided` and the
+`cbe_expand` branch. Two structural failures, not tuning:
+
+* `M` couples the two sides, so a saturated side vetoes its partner. At a **boundary bond** the
+  outer side is one site, `room_r = d − r` hits zero at `r = d`, and the branch then declined to
+  expand the bond *at all* — precisely the bond this scheme takes its step on. It hid in the
+  diagnostics because `expanded` reports the bond dim *after* the final SVD, which is capped at
+  `min(b_L,b_R)` either way; the Galerkin subspace was `2×2` where it should have been `8×2`.
+* Off a product state `r = 1` leaves each slice a single random vector and `M` needs both
+  non-negligible at once, so nothing was ever admitted.
+
+Measured (XXZ, L=4/6):
+
+| probe | one-step order | err, 8 steps, L=4 | off a product state |
+|---|---|---|---|
+| on `HΘ` (kept) | **2.00** | **1.8e-5** | χ 1 → `[2,4,7,4,2]` |
+| on `P⊥` (removed) | 1.00 | 2.0e-2 | frozen at χ = 1 |
+
+(`2.0e-2` against a standstill of `2.2e-2` — the step barely moved the state.) The regression
+test asserts `n_new` at the update bond, not `expanded`, for the reason above.
+
+**Order.** A boundary-bond Galerkin step with mirrored sweep directions composes to **second
+order**, `p = 2.00` at both `delta = 1` and `delta = 0` — the open question this variant existed
+to answer. The exponent is now asserted rather than logged.
+
+**What cannot be asserted, and why it is not a defect.** There is no full-rank exactness test:
+the kept S step sits on a boundary bond whose outer space is a single site, so its Galerkin
+problem spans at most `chi*d` directions, not the whole space. The tests pin `tau = 0` being
+exactly the identity (the invariant behind discarding `R`), rank growth off a product state in
+one step, second-order convergence to the exact propagator, norm preservation, expansion at the
+update bond, and that the alternation leaves the centre where the next sweep begins.
+
+**MPO-only, deliberately** — every effective operator comes from `mpo.jl`, so a long-range or
+site-dependent `H` needs a different `MPO` and no change to the sweep. The remaining piece for
+long range is an MPO *constructor*: `mpo_from_terms` currently builds only the uniform
+nearest-neighbour automaton. Exponential decay is a one-block change (a `lambda*I` self-loop on
+the open channel); a power law needs a sum-of-exponentials fit.

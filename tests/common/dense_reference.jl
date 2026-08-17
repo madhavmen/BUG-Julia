@@ -57,6 +57,87 @@ function dense_heisenberg(L::Int; J::Float64 = 1.0, delta::Float64 = 1.0)
 end
 
 """
+    dense_long_range_zz(L; J=1.0, Jz=1.0, lambda=0.5) -> Matrix{ComplexF64}
+
+`J Σ_i (Sx Sx + Sy Sy)_{i,i+1} + Jz Σ_{i<j} lambda^(j-i-1) Sz_i Sz_j`, the model
+`long_range_zz_mpo` builds.
+
+WRITTEN AS AN EXPLICIT DOUBLE LOOP over every pair, with no reference to the MPO's
+automaton, which is the whole point: the self-loop construction claims a geometric tail
+reaching every pair of sites, and the only way to test that claim is to sum the pairs
+independently. `lambda = 0` leaves the `r = 1` pairs only, i.e. the nearest-neighbour
+chain -- the limit that ties this reference to `dense_heisenberg`.
+"""
+function dense_long_range_zz(L::Int; J::Float64 = 1.0, Jz::Float64 = 1.0,
+                             lambda::Float64 = 0.5)
+    H = zeros(ComplexF64, 2^L, 2^L)
+    for i in 1:(L - 1)                                   # nearest-neighbour XY
+        sp1, sm1 = _embed(_SP, i, L), _embed(_SM, i, L)
+        sp2, sm2 = _embed(_SP, i + 1, L), _embed(_SM, i + 1, L)
+        H .+= J * 0.5 * (sp1 * sm2 + sm1 * sp2)
+    end
+    for i in 1:(L - 1), j in (i + 1):L                   # the geometric ZZ tail
+        H .+= (Jz * lambda^(j - i - 1)) * (_embed(_SZ, i, L) * _embed(_SZ, j, L))
+    end
+    return H
+end
+
+"""
+    dense_zz_tail(L, Jr) -> Matrix{ComplexF64}
+
+`Σ_{i<j} Jr[j-i] Sz_i Sz_j` for an ARBITRARY coupling sequence `Jr`, with no XY part.
+
+The general form of the tail: `dense_long_range_zz` is this with `Jr[r] = Jz λ^(r-1)`, a
+power law is this with `Jr[r] = Jz r^-alpha`, and a fitted MPO is this with `Jr[r] =
+Σ_k c_k λ_k^(r-1)`. Having one reference for all three is what lets the fit error be
+measured as a difference of two matrices rather than inferred.
+"""
+function dense_zz_tail(L::Int, Jr::AbstractVector{<:Real})
+    length(Jr) >= L - 1 || throw(ArgumentError(
+        "need couplings out to distance $(L - 1), got $(length(Jr))"))
+    H = zeros(ComplexF64, 2^L, 2^L)
+    for i in 1:(L - 1), j in (i + 1):L
+        H .+= Jr[j - i] * (_embed(_SZ, i, L) * _embed(_SZ, j, L))
+    end
+    return H
+end
+
+"`J Σ_i (Sx Sx + Sy Sy)_{i,i+1}`, the nearest-neighbour hopping shared by the long-range models."
+function dense_xy_chain(L::Int; J::Float64 = 1.0)
+    H = zeros(ComplexF64, 2^L, 2^L)
+    for i in 1:(L - 1)
+        sp1, sm1 = _embed(_SP, i, L), _embed(_SM, i, L)
+        sp2, sm2 = _embed(_SP, i + 1, L), _embed(_SM, i + 1, L)
+        H .+= J * 0.5 * (sp1 * sm2 + sm1 * sp2)
+    end
+    return H
+end
+
+"""
+    dense_long_range_zz(L; J=1.0, Jz=1.0, lambda=0.5) -> Matrix{ComplexF64}
+
+`J Σ_i (Sx Sx + Sy Sy)_{i,i+1} + Jz Σ_{i<j} lambda^(j-i-1) Sz_i Sz_j`, the model
+`long_range_zz_mpo` builds.
+
+WRITTEN AS AN EXPLICIT DOUBLE LOOP over every pair, with no reference to the MPO's
+automaton, which is the whole point: the self-loop construction claims a geometric tail
+reaching every pair of sites, and the only way to test that claim is to sum the pairs
+independently. `lambda = 0` leaves the `r = 1` pairs only, i.e. the nearest-neighbour
+chain -- the limit that ties this reference to `dense_heisenberg`.
+"""
+dense_long_range_zz(L::Int; J::Float64 = 1.0, Jz::Float64 = 1.0, lambda::Float64 = 0.5) =
+    dense_xy_chain(L; J = J) .+ dense_zz_tail(L, [Jz * lambda^(r - 1) for r in 1:(L - 1)])
+
+"""
+    dense_power_law_zz(L; J=1.0, Jz=1.0, alpha=3.0) -> Matrix{ComplexF64}
+
+The same with a power-law tail, `Jz |i-j|^-alpha`. THE TRUE Hamiltonian a fitted MPO
+approximates -- the thing the fit error is an error with respect to.
+"""
+dense_power_law_zz(L::Int; J::Float64 = 1.0, Jz::Float64 = 1.0, alpha::Float64 = 3.0) =
+    dense_xy_chain(L; J = J) .+ dense_zz_tail(L, [Jz * float(r)^(-alpha) for r in 1:(L - 1)])
+
+"""
     dense_parity_hamiltonian(L, parity; J, delta) -> Matrix{ComplexF64}
 
 The sum of one commuting bond group. Its terms act on disjoint site pairs, so

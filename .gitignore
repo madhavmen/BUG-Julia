@@ -6,3 +6,7 @@
 # Julia
 /deps/build.log
 *.cov
+
+# Benchmark result files -- regenerated, never committed
+benchmarks/*.log
+benchmarks/*.json

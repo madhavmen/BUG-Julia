@@ -529,9 +529,101 @@ increasing order of importance.
 hardcodes a \emph{nearest-neighbour, uniform} Hamiltonian: the same two operators on every bond.
 \code{xxz\_chain} and \code{heisenberg\_su2\_chain} are the only constructors that exist.
 Long-range couplings, site-dependent parameters, or a disordered field cannot be expressed at
-all --- an explicit $W_i$ per site would express any of them immediately. If that generality is
-wanted, the three functions that need to change are \code{sketch\_h\_left}/\code{\_right} and
-\code{zero\_site\_h}; nothing in the selection code knows how $H$ is stored.
+all --- an explicit $W_i$ per site would express any of them immediately. That generality is
+\textbf{now available}: \S\ref{sec:mpo} is the explicit-$W_i$ path, and the sweep runs on either.
+Nothing in the selection code knows how $H$ is stored.
+
+% ----------------------------------------------------------------------------------
+\section{The same $H$ as a genuine MPO}
+\label{sec:mpo}
+
+\code{mpo.jl} stores \eqref{eq:terms} the way arXiv:2606.28169 writes it: one rank-4 tensor per
+site with the virtual index \emph{fused into a leg} rather than named,
+\begin{equation}
+  H \;=\; \sum_{w} W^{[1]}_{w_0 s_1 z_1 w_1}\,W^{[2]}_{w_1 s_2 z_2 w_2}\cdots
+                    W^{[L]}_{w_{L-1} s_L z_L w_L},
+  \label{eq:mpo}
+\end{equation}
+with legs ordered $(w_l, s_{\mathrm{ket}}, s_{\mathrm{bra}}, w_r)$ and directions
+$('+','+','-','-')$. The environments are then \emph{one rank-3 tensor per link} instead of
+$2+|\text{terms}|$ of them,
+\begin{equation}
+  L^{[i]}_{v_i w_i \bar v_i} \;=\;
+  \sum L^{[i-1]}_{v_{i-1} w_{i-1} \bar v_{i-1}}\; T^{[i]}_{v_{i-1} s_i v_i}\;
+       W^{[i]}_{w_{i-1} s_i z_i w_i}\; \overline{T^{[i]}_{\bar v_{i-1} z_i \bar v_i}},
+  \qquad L^{[0]} = 1,
+  \label{eq:mpoenv}
+\end{equation}
+and $H^{[i]}_{\mathrm{eff}} = L^{[i-1]} W^{[i]} R^{[i+1]}$ falls out as one contraction chain
+--- with the automaton's three states summed over \emph{inside} the MPO leg rather than
+enumerated as the five cases (a)--(e) of \S\ref{sec:h0}.
+
+\paragraph{The virtual space is assembled out of the operators' own legs.} This is what makes
+the construction symmetry-agnostic and is worth stating precisely, because it is the one place a
+symmetric MPO is usually built by hand. The automaton matrix is written out literally,
+\[
+  W^{[i]} \;=\;
+  \begin{pmatrix}
+    I & O_1^{\mathrm{L}} & \cdots & O_n^{\mathrm{L}} & 0\\
+    0 & 0 & & & c_1 O_1^{\mathrm{R}}\\
+      & & \ddots & & \vdots\\
+    0 & & & 0 & c_n O_n^{\mathrm{R}}\\
+    0 & 0 & \cdots & 0 & I
+  \end{pmatrix},
+\]
+and Telum's matrix \code{oplus(mat, (1,4))} direct-sums the rows on leg 1 and the columns on
+leg 4, inferring the zero blocks from the row/column spaces. The virtual sectors are then
+\emph{exactly} the op-legs: the op-leg of \code{Sp} is already $'-'$ so it \emph{is} a $w_r$,
+the op-leg of \code{Sp'} is already $'+'$ so it \emph{is} a $w_l$, and the \code{id}/\code{done}
+channels are trivial legs added with \code{addSingleton(...; dir=)}. Under \code{:U1} Heisenberg
+that gives $w=5$; under \code{:SU2} the single $\mathbf{S}\cdot\mathbf{S}$ term's $S=1$ op-leg
+gives $w=3$ multiplets. No charge-graded virtual space is written by hand anywhere.
+
+\paragraph{Boundaries are built in.} $W^{[1]}$ keeps only the \code{id} row and $W^{[L]}$ only
+the \code{done} column, so their outer virtual legs are dim-1 and no boundary vector has to be
+carried: a term cannot open before site 1 or stay unclosed past site $L$ because the matrix has
+no path for it. The dim-1 leg is dropped with \code{deleteSingleton}, which doubles as the
+assertion that the trimming really happened.
+
+\paragraph{Both representations are kept, and that is deliberate.} They share no contraction:
+one fuses the virtual index and contracts it, the other keeps a tensor per automaton state and
+enumerates them. So a leg, arrow or prime slip in either cannot cancel in the other.
+\code{test\_mpo.jl} pins them against each other \emph{elementwise} --- \code{apply\_h\_two\_site}
+at every bond of every $L$, the carried environments against the prebuilt stacks, the 0-site
+operator against the two-site route --- and pins both against the dense matrix element via
+\code{mpo\_energy} $=$ \code{env\_energy} $=$ $\langle\psi|H|\psi\rangle$. At the sweep level the
+two produce the \emph{same state}, bond dimension for bond dimension, from the same seed.
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{4.3cm}p{5.1cm}p{5.1cm}@{}}
+\toprule
+& \textbf{\code{henv.jl} (channels)} & \textbf{\code{mpo.jl} (Eq.\ \ref{eq:mpo})} \\
+\midrule
+virtual index & named: \code{id}, \code{open[t]}, \code{done} & fused into a leg \\
+per link & $2+|\text{terms}|$ tensors & \textbf{one} rank-3 $(bra,\,mpo,\,ket)$ \\
+$H^{(0)}_{\mathrm{eff}}S$ & three-way sum \eqref{eq:h0} & $\sum_w L[w]\,S\,R[w]$ \\
+site dependence & none possible & \textbf{arbitrary} $W^{[i]}$ \\
+role now & independent witness & \textbf{what the sweep runs on} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{One measured consequence, and it was not the goal.} The centre \code{expv} takes
+\textbf{5 operator applications on the MPO path against 30 --- the full \code{maxiter} --- on the
+channel path}, for the same state to $10^{-9}$ ($L=4,6$). \code{lanczos\_expv} exits on breakdown
+only, and the channel \code{apply\_zero\_site} is a \emph{sum} of separately-rounded pieces
+(\code{done\_l}, \code{done\_r}, one per open channel) whose noise keeps $\beta$ off zero, so the
+breakdown never registers; \eqref{eq:h0} as a single contraction breaks down where the Krylov
+space actually closes. Small bonds close it quickly, so this factor should not be generalised
+from $L=4,6$ --- but at $L=18$, where \code{maxiter} dominates the step, it is worth measuring.
+
+\noindent
+The sweep itself did not change: \code{boundary\_channels}, \code{left/right\_env\_stack},
+\code{push\_left/right\_channels}, \code{apply\_h\_two\_site}, \code{sketch\_h\_left/right},
+\code{cbe\_expand} and \code{zero\_site\_h} each have a method for \code{MPO}, so
+\code{cbe\_lubich\_sweep} is polymorphic in the representation of $H$ and the RSVD--CBE local
+updates of Part~\ref{part:cbe} are untouched.
 
 \section{Environments as a finite-state automaton}
 
@@ -965,6 +1057,73 @@ the \code{CompRatio} default are taken from the reference unchanged.
 
 \item \textbf{Fused dimensions via \code{reachable\_sectors}}, so the code is correct under SU(2).
 \end{enumerate}
+
+\section{Conformance to the parallel-BUG sweep of arXiv:2606.28169 \S1--2}
+\label{sec:conformance}
+
+That paper's \S1 reviews the parallel BUG for a tensor train and its \S2 applies it around a
+central (there: quantum) tensor, updating the two classical sub-MPSs. Read as a purely classical
+prescription it is the sweep this document describes, and the correspondence is line by line.
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{5.0cm}p{4.6cm}p{5.0cm}@{}}
+\toprule
+\textbf{paper} & \textbf{ours} & \textbf{status} \\
+\midrule
+root at $r=\lfloor L/2\rfloor$ & $c=\lfloor L/2\rfloor$ (line 332) & \textbf{same}, but a
+  \emph{bond} not a site --- see below \\
+canonical w.r.t.\ the root, Eqs.\ (1.4)--(1.5) & \code{canonical!(psi,1)} / \code{(psi,L)}, one
+  gauge per sweep & \textbf{equivalent}: the frame at a bond is built from the
+  amplitude-carrying carry, and the seed is a complete contraction, hence gauge independent \\
+environments frozen at the start of the step (Rem.\ 1.1) & \code{rstack}/\code{lstack} prebuilt;
+  the carried side pushed through $\Uex$ & \textbf{equivalent}: $\Uex\supseteq U_0$ is a lossless
+  re-basing, so the state seen at every bond is the start-of-step state \\
+each tensor updated from a \emph{copy}; $\psi$ untouched until the end & the basis sweeps never
+  write to $\psi$ (\S\ref{sec:ksweep}) & \textbf{same}, and non-negotiable \\
+augment by $\mathrm{QR}([\,T^{[c]}\mid T'^{[c]}\,])$ & $\Uex=[\,U_0\mid C_L\,]$,
+  $\Vex=[V_0;C_R]$ & \textbf{same shape}; $T'$ comes from CBE, not from the local ODE \\
+$M$-matrices propagate the enlarged bond \emph{outside-in} (after Eq.\ 1.9) & K-sweep $1\to c$,
+  L-sweep $L-1\to c$; the carry $C$/$D$ \emph{is} that transport & \textbf{same}, including the
+  direction \\
+root updated once, in the enlarged bases & one 0-site Galerkin step at bond $c$, seeded
+  $\langle W,Z|\psi\rangle$ & \textbf{same}: seed by embedding, then evolve --- and no $M$ or $N$
+  overlap matrix, hence no inverse \\
+recursive truncation afterwards (their [5]) & \code{truncate\_sweep!}, Sulz Alg.\ 1 &
+  \textbf{same}, and strictly after the evolution \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Three places we knowingly differ.} None is an accident and all three are visible in
+the options:
+
+\begin{enumerate}[leftmargin=1.6em]
+\item \textbf{The connection tensor is a bond, not a site.} The paper's root $T^{[r]}$ carries a
+  physical leg, so its Galerkin problem is 1-site; ours is the bond matrix $S$ and the problem is
+  0-site (\S\ref{sec:galerkin}). Both are legitimate gauges --- a degree-2 root with no physical
+  leg is a valid tree --- and the 0-site form is the whole point of expanding first: the operand
+  is smaller by $d^2$, which is what \code{RSVDpreBE0SiQS} returning \code{VLex, VRex} is for.
+  The price is that sites $c$ and $c+1$ enter the step only through their CBE-refreshed frames.
+\item \textbf{The rank may grow by more than a factor 2.} ``The BUG algorithm increases the bond
+  dimension at most by a factor of 2 in any case'' is a theorem about
+  $\mathrm{QR}([\,T\mid T'\,])$ with $T,T'$ both of rank $r$. Here the budget is
+  $\lceil\code{growth}\cdot d_{\max}\rceil - r$ with $d_{\max}$ the largest of the \emph{three}
+  neighbouring bonds, so a narrow bond next to a wide one may more than double. \code{sulz\_cap}
+  restores the $2r$ bound and is off by default, for the reason given as divergence 2 in
+  ``The four deliberate divergences'' above.
+\item \textbf{Augmentation at the root-adjacent bond, and no monotonicity rule.} \S2.4 stops
+  augmenting at the bond touching the root and notes one may not restart closer to the root.
+  That is a qubit-count constraint of the hybrid setting, not a BUG requirement; we expand bond
+  $c$ by default (\code{centre\_expand}, which switches it off) and each bond's budget is decided
+  independently.
+\end{enumerate}
+
+\paragraph{And the substitution that is the contribution.} The paper obtains $T'^{[c]}$ by
+solving the local Schr\"odinger equation (1.6) at every tensor; \code{cbe\_expand} supplies those
+directions from one \emph{sketched} application of $H$ instead. That is the trade stated at the
+top of this document, and \S\ref{sec:mpo} is what puts the $H$ it applies in the same
+representation the paper's equations use.
 
 \section{The structural difference: what wraps the expansion}
 
