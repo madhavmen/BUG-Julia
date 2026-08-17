@@ -68,6 +68,11 @@ using ..BondUpdateBUG: SymMPS, canonical!, bond_dims, leg_dim, local_space,
                        magnetisation, center_bond, parity_bonds
 
 include("henv.jl")
+# Multiplet-vs-state accounting. `leg_dim`, `Nkeep`, `maxdim` and every CBE budget count
+# MULTIPLETS, so under SU(2) they are not comparable with a U(1) number; `state_dim` converts.
+# The weights are already correct (`sum(sigma^2 * degeneracy) == norm^2`, measured) -- this is
+# bookkeeping so a cross-symmetry claim is checkable, not a fix.
+include("multiplets.jl")
 include("cbe_core.jl")
 # The Hamiltonian as a genuine MPO (rank-4 `W^[i]`) plus its rank-3 environments, i.e. the
 # objects arXiv:2606.28169 Eqs. (1.3), (1.7) and (1.8) name. It provides a METHOD for every
@@ -86,6 +91,25 @@ include("cbe_lubich.jl")
 # `_absorb_left!` / `_absorb_right!` it reuses.
 include("jan_bug.jl")
 
+# models/ -- the BENCHMARK HAMILTONIANS, and the MPO machinery Haldane-Shastry needs that
+# `mpo.jl` deliberately refused to write.
+#
+#   models/pair_mpo.jl         an EXACT MPO for an arbitrary two-body coupling matrix
+#                              `J[i,j]`, including CHARGED (rank-3) operators. `long_range_mpo`
+#                              throws on those: a rank-3 operator puts its op-leg on the
+#                              virtual leg, so the channel's self-loop would need the identity
+#                              on a charged space (`mpo.jl:239-247`). This file writes that
+#                              block -- and spends `O(L)` virtual dimension per vertex in
+#                              exchange for being EXACT for any coupling, so no fit error is
+#                              introduced into the Hamiltonian being measured.
+#   models/haldane_shastry.jl  the SU(2) Haldane-Shastry ring of arXiv:2208.10972 and the
+#                              Heisenberg chain/ring, each in whatever symmetry mode is
+#                              active. The number of vertices is the ONLY thing that differs
+#                              between `:U1` (three) and `:SU2` (one), which is a cost
+#                              difference and not a physics one.
+include("models/pair_mpo.jl")
+include("models/haldane_shastry.jl")
+
 # The two TDVP integrators live in their own directories. They are FILES of this module, not
 # submodules: both are built on `henv.jl` (environments) and `cbe_core.jl` (the expansion)
 # above, so splitting them into modules would only add import ceremony around code that has
@@ -100,6 +124,35 @@ include("jan_bug.jl")
 include("tdvp2/tdvp2_baseline.jl")
 include("tdvp1_cbe/tdvp1_cbe.jl")
 include("tdvp1_cbe/variants.jl")
+
+# sweeps/ -- THE STRUCTURED IMPLEMENTATION, all on the MPO path so a long-range or
+# site-dependent `H` (Haldane-Shastry is both) works unchanged.
+#
+#   sweeps/expansion.jl    the per-bond expansion at the reference's own granularity --
+#                          `CBE(TL,TR,VL,VR,HL,HR,dir)` of `RSVDpreBE1SiQS.m` -- so all three
+#                          sweeps below expand through ONE code path and a difference between
+#                          them can never be a difference in how they expanded. Plus
+#                          `lanczos_lowest`, the local eigensolve DMRG needs (same Krylov space
+#                          as `expv`, `LowestEigen` reduction instead of the exponential).
+#   sweeps/dmrg_cbe1s.jl   `DMRGSweepCBE1Si.m`. Expand, 1-site Lanczos eigensolve, truncated
+#                          split, absorb. NO 0-site backward step -- DMRG has no time step to
+#                          over-count, and adding one would not converge to anything.
+#   sweeps/tdvp_cbe1s.jl   `TDVPSweepCBE1Si.m`. Expand, 1-site `+tau/2`, 0-site `-tau/2`,
+#                          absorb. The MPO-path twin of `tdvp1_cbe/`, which is channel-path and
+#                          therefore nearest-neighbour only.
+#   sweeps/cbe_bug.jl      THE FINAL SWEEP: RSVD-CBE expansion + the fixed-rank BUG sweep of
+#                          arXiv:2606.28169 SEC. 1 (not Sec. 2, which is the hybrid
+#                          quantum/classical layer). Left-to-root and right-to-root 1-site
+#                          K-step basis updates with `R` discarded, environments NOT frozen,
+#                          one Galerkin update at the root bond.
+#
+# After `jan_bug.jl` and `cbe_lubich.jl`, whose `_relink`, `_frame_from`, `_absorb_left!`,
+# `_absorb_right!`, `truncate_sweep!` and `_state_stored` they reuse rather than reimplement,
+# and after `tdvp2/` for `tensor_elements`.
+include("sweeps/expansion.jl")
+include("sweeps/dmrg_cbe1s.jl")
+include("sweeps/tdvp_cbe1s.jl")
+include("sweeps/cbe_bug.jl")
 
 # The modes come last: each imports from the parent, so everything they name must already be
 # defined. They are submodules rather than files so `RealTime.evolve!` and
@@ -131,6 +184,21 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        ZeroSiteH, zero_site_h, apply_zero_site,
        OneSiteH, one_site_h, apply_one_site, TDVP2Info, tdvp2_step!, tensor_elements,
        TDVP1CBEInfo, tdvp1_cbe_step!,
-       tdvp1_rsvd_cbe_step!, tdvp1_cbe_exact_step!
+       tdvp1_rsvd_cbe_step!, tdvp1_cbe_exact_step!,
+       # multiplet vs state accounting -- `maxdim` is in MULTIPLETS, so cross-symmetry
+       # comparisons at fixed rank must convert
+       state_dim, state_bond_dims, multiplet_ratio,
+       # models/ -- exact MPOs for arbitrary two-body couplings, and the benchmark models
+       PairVertex, pair_vertices, pair_mpo,
+       nn_coupling_matrix, distance_coupling_matrix,
+       spin_vertices,
+       haldane_shastry_couplings, haldane_shastry_mpo,
+       heisenberg_chain_mpo, heisenberg_ring_couplings, heisenberg_ring_mpo,
+       # sweeps/ -- the structured RSVD-CBE sweeps
+       BondExpansionInfo, expand_bond!, lanczos_lowest,
+       DMRGCBEInfo, DMRGCBERun, dmrg_cbe1s_sweep!, dmrg_cbe1s!,
+       rsvd_cbe_dmrg1s!, exact_cbe_dmrg1s!,
+       TDVPCBEInfo, tdvp_cbe1s_step!,
+       CBEBugSweepInfo, cbe_bug_step!
 
 end # module

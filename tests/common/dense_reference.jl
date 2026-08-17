@@ -102,6 +102,33 @@ function dense_zz_tail(L::Int, Jr::AbstractVector{<:Real})
     return H
 end
 
+"""
+    dense_long_range_pairs(L, J) -> Matrix{ComplexF64}
+
+`Σ_{i<j} J[i,j] S_i·S_j` for an arbitrary `L x L` coupling matrix, by an EXPLICIT PAIR LOOP.
+
+The reference for `pair_mpo`, and the reason it is a reference is that it shares nothing with
+the automaton: no channels, no transport block, no `oplus`, no symmetry bookkeeping. The full
+`S·S` is written out as `½(S⁺S⁻ + S⁻S⁺) + SᶻSᶻ`, so it also pins the relative normalisation of
+the XY and Ising halves, which is exactly what a wrong Clebsch-Gordan factor on the SU(2) path
+would disturb.
+
+Only the STRICT UPPER TRIANGLE is read, matching `pair_mpo`, so passing a symmetric matrix
+gives the same operator rather than twice it.
+"""
+function dense_long_range_pairs(L::Int, J::AbstractMatrix)
+    size(J) == (L, L) || throw(DimensionMismatch(
+        "coupling matrix is $(size(J)), expected ($L, $L)"))
+    H = zeros(ComplexF64, 2^L, 2^L)
+    for i in 1:(L - 1), j in (i + 1):L
+        J[i, j] == 0 && continue
+        H .+= J[i, j] * (0.5 * (_embed(_SP, i, L) * _embed(_SM, j, L) +
+                                _embed(_SM, i, L) * _embed(_SP, j, L)) +
+                         _embed(_SZ, i, L) * _embed(_SZ, j, L))
+    end
+    return H
+end
+
 "`J Σ_i (Sx Sx + Sy Sy)_{i,i+1}`, the nearest-neighbour hopping shared by the long-range models."
 function dense_xy_chain(L::Int; J::Float64 = 1.0)
     H = zeros(ComplexF64, 2^L, 2^L)
