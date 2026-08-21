@@ -157,9 +157,13 @@ achieved rank.
 `kw` is spliced into BOTH schemes identically -- they take the same sketch keywords -- which is
 what makes the grid a fair comparison rather than two separate tunings.
 """
-function run_arm(scheme::String, kw::NamedTuple, seed::UInt32)
+# ⛔ SEED IS `Integer`, NOT `UInt32`, AND THAT IS NOT LOOSENESS. Julia types a hex literal by its
+# DIGIT COUNT: `0x5EED` is four digits, so it is a `UInt16`, while `0x5EED + 977k` promotes to
+# `UInt32`. Annotating `UInt32` therefore accepted the phase-1 seeds and rejected the phase-0
+# one -- with a MethodError rather than a silent conversion, which is the one mercy in it.
+function run_arm(scheme::String, kw::NamedTuple, seed::Integer)
     psi = copy(M.psi0)
-    rng = MersenneTwister(seed)
+    rng = MersenneTwister(UInt32(seed))
     step! = scheme == "cbe_bug" ?
         (p, tau) -> cbe_bug_step!(p, M.mpo, tau; maxdim = MAXDIM, trunc_thresh = 1e-12,
                                   maxiter = MAXITER, rng = rng, kw...) :
