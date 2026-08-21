@@ -46,9 +46,22 @@
 # without moving `krylov`. When the two axes diverge, the sketch itself has become the
 # bottleneck. Both are recorded.
 #
-# ⛔ WALL TIME FROM A LOCAL RUN IS NOT DATA. Use `submit_rsvd_scan.slurm`: one job at a time,
-# single-threaded. Locally this file is for the ERROR columns only, and `phase=0` at a short
-# `t_max` is the part worth running interactively.
+# ⛔ WALL TIME FROM A LOCAL RUN IS NOT DATA, AND THE SIZE OF THAT IS NOW MEASURED. Phase 1 is an
+# accidental control for it: six seeds of `tdvp_cbe1s` on XX returned BIT-IDENTICAL results
+# (err 1.145e-05, chi 24, err_fnl 4.2e-02, krylov 74231-74240 -- a spread of 9 in 74k), so the
+# six runs did the same arithmetic. Their wall times were
+#
+#     274.07  272.50  243.65  106.35  147.03  142.98  seconds
+#
+# a 2.6x spread on identical work. That band is WIDER THAN EVERY EFFECT THIS FILE MEASURES on the
+# seconds axis: the phase-0 sketch-vs-exact ratios (0.95x, 1.13x, 1.26x, 1.74x) all fit inside it,
+# so the reading that "RSVD was slower than the exact SVD on OAT" is ONE DRAW FROM A 2.6x-WIDE
+# DISTRIBUTION and is retracted, not a result. The `krylov` column survives -- it is deterministic
+# to 1e-4 relative across the same six runs -- which is exactly why both axes are recorded.
+#
+# Use `submit_rsvd_scan.slurm`: one job at a time, single-threaded. Locally this file is for the
+# ERROR and KRYLOV columns only, and `phase=0` at a short `t_max` is the part worth running
+# interactively.
 #
 #   julia --project=. benchmarks/rsvd_param_scan.jl phase=0 model=xx
 #   julia --project=. benchmarks/rsvd_param_scan.jl phase=2 model=oat t_max=3.14

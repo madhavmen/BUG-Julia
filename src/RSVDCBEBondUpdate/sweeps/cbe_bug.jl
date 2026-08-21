@@ -48,6 +48,28 @@ One RSVD-CBE + fixed-rank-BUG step of `tau`, in place. `tau = -im*dt` is real ti
 Keywords beyond the [`cbe_expand`](@ref) ones (`dex`, `growth`, `dover`, `comp_ratio`,
 `sulz_cap`, `preselect_only`, `exact`):
 
+  - `growth` -- `1.1` HERE, against `2.0` in both [`cbe_expand`](@ref) and `CBEBugOptions`.
+    The divergence is deliberate, and it is worth being explicit that this sweep ships the
+    REFERENCE'S DMRG RATCHET -- the constant the budget block in `cbe_core.jl` argues against
+    for a time integrator, on the grounds that a direction the step needs and does not admit
+    is not deferred, it is gone.
+
+    IT STANDS HERE BECAUSE CBE IS NOT THE ONLY SOURCE OF NEW DIRECTIONS IN THIS SWEEP. The
+    K-step supplies its own, so the expansion has a narrower job than in `tdvp_cbe1s`, where
+    CBE is the sole source. Two sweeps wanting different constants is that difference, not an
+    oversight.
+
+    MEASURED (`benchmarks/rsvd_param_scan.jl`, XX L=16, maxdim=24, t=6): the final error is
+    invariant to the budget at 5.0e-8 relative -- 4.59041166e-05 to 4.59041397e-05 across the
+    whole `dex`/`growth` grid -- while `err_fnl`, the fraction of ranked candidate weight
+    DISCARDED for want of budget, spans 0.0 to 0.59. Raising `growth` buys nothing on that
+    model and costs sketch work.
+
+    ⛔ EVERY NUMBER ABOVE IS FROM A CAP-BOUND RUN, which is the regime where the budget CANNOT
+    matter: `maxdim` throws away what the expansion admits. The argument for `2.0` bites only
+    where the cap is slack, and the one slack run measured -- OAT at full rank, above the
+    exact rank 9 -- is already machine-exact at `1.1`. So nothing yet argues for changing it,
+    and the test that could is a slack-cap model, not a wider grid on these two.
   - `root` -- the bond that keeps the Galerkin step. `nothing` is `floor(L/2)`, the paper's
     root, and it is not a free parameter in practice: the root solve explores exactly
     `b_L x b_R` directions, and at the CENTRE both factors are a full half-chain while at bond
