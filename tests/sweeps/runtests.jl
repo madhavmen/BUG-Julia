@@ -42,6 +42,15 @@ include(joinpath(@__DIR__, "..", "common", "analytic_reference.jl"))
     include("test_sweeps.jl")
     include("test_symmetry_parity.jl")
     include("test_physics.jl")
+    # 6  one-axis twisting     the arXiv:2208.10972 Fig. 2 benchmark, at L = 10. LAST because it
+    #                          is the strongest test and the most specific: OAT's `H` is diagonal
+    #                          in the computational basis, so the evolved state, its Schmidt
+    #                          spectrum and its entropy are ALL closed forms -- no magnon sector,
+    #                          no free-fermion profile, no sparse propagation. It runs under
+    #                          `:none` (the observable `S^x_tot` is charge-raising, so a U(1) run
+    #                          would report a silent zero), which is also why it sits after the
+    #                          symmetry-parity file rather than inside it.
+    include("test_oat.jl")
 end
 
 # The symmetry mode is a GLOBAL, and several files above change it. Restore the package default

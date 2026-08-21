@@ -18,6 +18,34 @@
 using LinearAlgebra, SparseArrays
 
 """
+    sparse_to_dense_index(b, L) -> Int
+
+Translate a bit pattern of THIS file into a `dense_state` (tests/common/dense_reference.jl) index.
+
+⛔ THE TWO FILES USE MIRRORED BIT CONVENTIONS. Both are documented, both internally consistent,
+and comparing them without this conversion is silently wrong:
+
+  - HERE (`sz0_basis`): site `j` sits at bit `j-1` — site 1 is the LEAST significant bit — and a
+    SET bit means UP.
+  - `dense_state`: *"Site 1 is the MOST significant index and local index 1 is spin up"*, so site
+    `j` sits at bit `L-j` and a SET bit means DOWN (up is local index 0, contributing nothing).
+
+    L=6, `↑↓↑↑↓↓`:  here  = up{1,3,4}   = 0b001101 = 13
+                    dense = down{2,5,6} = 0b010011 = 19      ← MEASURED: `dense_state` gives 19
+
+⛔ WHY THIS HID FOR SO LONG, AND WHY IT MATTERS. The conventions differ by REVERSING the sites and
+FLIPPING up↔down. That composition is a symmetry of the open Heisenberg chain, and the Néel state,
+the domain wall and the dimer are each INVARIANT under it — so every state used until now was a
+fixed point of the exact transformation that distinguishes the two, and the comparison came out
+right by accident (MEASURED: 0.0 error for all three either way). On an ASYMMETRIC product state
+the unconverted comparison gives 1.414, i.e. the two vectors are orthogonal. The first real
+casualty was `S^z_{j0}|GS⟩`, which read in the wrong convention becomes `−S^z` at the MIRROR site:
+overlap 0.9146 instead of 1. It would also silently MIRROR every site-resolved observable.
+"""
+sparse_to_dense_index(b::Int, L::Int) =
+    sum(((b >> (j - 1)) & 1) == 0 ? (1 << (L - j)) : 0 for j in 1:L; init = 0)
+
+"""
 Basis of the `Sz = 0` sector as bit patterns, plus the index lookup.
 Bit `j-1` set means site `j` is up.
 """
@@ -49,6 +77,59 @@ function heisenberg_sparse(L::Int; J::Float64 = 1.0, delta::Float64 = 1.0)
 end
 
 """
+    pairs_sparse(L, Jm) -> (H, states, idx)
+
+`H = Σ_{i<j} Jm[i,j] S_i·S_j` in the `Sz = 0` sector, for an ARBITRARY coupling matrix -- so
+Haldane-Shastry and the periodic ring get an EXACT reference, not just the open chain that
+`heisenberg_sparse` covers. `Jm` need only be filled on the strict upper triangle.
+
+At `L = 16` the sector is `C(16,8) = 12870` states, so this is cheap and `expv_sparse` on it is
+exact to Krylov tolerance -- which is what makes it a legitimate reference for a real-time run
+rather than a second approximation.
+"""
+function pairs_sparse(L::Int, Jm::AbstractMatrix{Float64})
+    states, idx = sz0_basis(L)
+    n = length(states)
+    I, Jd, V = Int[], Int[], Float64[]
+    bit(b, j) = (b >> (j - 1)) & 1
+    for (k, b) in enumerate(states)
+        diag = 0.0
+        for i in 1:(L - 1), j in (i + 1):L
+            Jij = Jm[i, j]
+            Jij == 0.0 && continue
+            si, sj = bit(b, i), bit(b, j)
+            diag += Jij * (si == sj ? 0.25 : -0.25)
+            if si != sj
+                bb = b ⊻ (1 << (i - 1)) ⊻ (1 << (j - 1))
+                push!(I, idx[bb]); push!(Jd, k); push!(V, Jij / 2)
+            end
+        end
+        push!(I, k); push!(Jd, k); push!(V, diag)
+    end
+    return sparse(I, Jd, V, n, n), states, idx
+end
+
+"Coupling matrix of the PERIODIC nearest-neighbour ring, matching `heisenberg_ring_mpo`."
+function ring_coupling_matrix(L::Int; J::Float64 = 1.0)
+    Jm = zeros(Float64, L, L)
+    for i in 1:(L - 1)
+        Jm[i, i + 1] = J
+    end
+    Jm[1, L] += J
+    return Jm
+end
+
+"Coupling matrix of Haldane-Shastry on a ring, matching `haldane_shastry_mpo`."
+function hs_coupling_matrix(L::Int; J::Float64 = 1.0)
+    Jm = zeros(Float64, L, L)
+    for i in 1:(L - 1), j in (i + 1):L
+        r = j - i
+        Jm[i, j] = J * pi^2 / (L^2 * sin(pi * r / L)^2)
+    end
+    return Jm
+end
+
+"""
 The dimer covering `⊗_k |singlet>_{2k-1,2k}` as a dense vector in the `Sz = 0` sector.
 
 Built combinatorially rather than by projection: each pair contributes `(|up,down> -
@@ -75,6 +156,35 @@ function dimer_vector(L::Int, states::Vector{Int}, idx::Dict{Int, Int})
         v[idx[b]] += sign * amp
     end
     return v
+end
+
+"""
+The Néel state `|↑↓↑↓…⟩` as a vector in the `Sz = 0` sector — a single basis state, so it is a
+unit column and needs only a lookup. Matches `neel_state(L)` on the MPS side.
+
+`Sz = 0` for even `L`, so it lives in the same sector as the dimer and shares this file's
+machinery. ⚠ It is NOT `:SU2`-representable (a definite-`Sz` product state is a superposition of
+total-spin sectors), so a Néel start is an abelian-only experiment.
+"""
+function neel_vector(L::Int, idx::Dict{Int, Int})
+    v = zeros(ComplexF64, length(idx))
+    b = sum(1 << (j - 1) for j in 1:2:L)     # odd sites up, matching `neel_state`
+    v[idx[b]] = 1.0
+    return v
+end
+
+"""
+`S^z_{j0} |v⟩`, NOT normalised. `S^z` is DIAGONAL in the bit basis, so this is a rescaling of the
+amplitudes and — crucially — is CHARGE-NEUTRAL, keeping the state inside `Sz = 0`.
+
+This is the Haldane-Shastry initial state of arXiv:2208.10972. The paper evolves the full
+`C(x,t) = ⟨Ψ₀| **S**_x(t)·**S**_0(0) |Ψ₀⟩`; SU(2) symmetry of the ground state makes the three
+components equal, `C = 3⟨Ψ₀|S^z_x(t) S^z_0|Ψ₀⟩`, so the vector that must be propagated is
+`S^z_{j0}|Ψ₀⟩`. Taking the `z` component rather than `S^-` is what keeps the run in ONE symmetry
+sector and lets the same `pairs_sparse` reference serve it.
+"""
+function sz_on(v::Vector{ComplexF64}, states::Vector{Int}, j0::Int)
+    return ComplexF64[v[k] * ((((states[k] >> (j0 - 1)) & 1) - 0.5)) for k in eachindex(states)]
 end
 
 """

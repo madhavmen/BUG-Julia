@@ -234,7 +234,13 @@ function pair_mpo(L::Int, J::AbstractMatrix, vertices::Vector{PairVertex})
             "pair_mpo: vertex $k joins a rank-$nl to a rank-$nr operator -- the two halves " *
             "must both carry an op-leg or neither"))
     end
-    Iloc = symmetry_mode() === :SU2 ? local_space(:SU2).I : local_space().I
+    # The transported identity has to come from the mode's OWN local space. `local_space()`
+    # deliberately refuses `:Z2` -- LurCGT cannot derive a mod-2 charge from a commutator, so the
+    # Ising space is built below the IROP layer instead (see `z2_ising.jl`) -- and hard-coding
+    # `local_space()` here is what previously made every Z2 model unreachable through `pair_mpo`
+    # even though `_charged_transport` handles charged channels perfectly well.
+    Iloc = symmetry_mode() === :SU2 ? local_space(:SU2).I :
+           symmetry_mode() === :Z2  ? ising_local_space(:Z2).I : local_space().I
 
     # `coupling(o, j)` is the weight of the pair, read from the strict upper triangle only.
     coupling(o, j) = o < j ? J[o, j] : 0.0
@@ -265,8 +271,22 @@ function pair_mpo(L::Int, J::AbstractMatrix, vertices::Vector{PairVertex})
         nrow, ncol = 2 + n * length(prev), 2 + n * length(cur)
         mat = Matrix{Any}(nothing, nrow, ncol)
 
-        # `id -> id`: nothing has opened yet, and something still may.
-        !isempty(cur) && (mat[1, 1] = Iid)
+        # `id -> id`: nothing has opened yet. The guard is `i < L` -- exactly `mpo_from_terms`'s
+        # -- and NOT `!isempty(cur)`.
+        #
+        # ⛔ Guarding on `cur` looks right (why carry `id` across a link where nothing is open?)
+        # and is wrong twice over. `cur` is the set of channels open ON THIS LINK; a term that
+        # opens at a LATER site still needs `id` to reach it, so dropping the block SEVERS the
+        # automaton. And because column 1 is then entirely `nothing`, `oplus` has no source for
+        # the outgoing space of that column's zero blocks and throws
+        #   "cannot infer zero TLArray at (1, 1): missing space information on leg 4"
+        # (or leg 1, when row 1 empties too -- same cause, whichever leg Telum checks first).
+        #
+        # `alive(i)` is empty at an interior link exactly when the coupling graph is DISCONNECTED
+        # across that bond. Nearest-neighbour and Haldane-Shastry are connected everywhere, which
+        # is why nothing in the suite reached it. Carrying `id` where no term follows costs one
+        # virtual dimension and changes no matrix element: `id` can only leave via an opening.
+        i < L && (mat[1, 1] = Iid)
         # `done -> done`: a complete pair already lies behind us.
         i > 1 && (mat[nrow, ncol] = Iid)
         # `id -> (i,t)`: OPEN a channel at site `i`.

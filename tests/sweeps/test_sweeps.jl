@@ -32,6 +32,37 @@ import Random
     end
     renorm!(psi) = (psi[psi.center] = to_concrete((1.0 / norm(psi)) * psi[psi.center]); psi)
 
+    @testset "no method ambiguities in the module" begin
+        # A DISPATCH AMBIGUITY IS INVISIBLE UNTIL SOMEONE CALLS THE EXACT COMBINATION, so this is
+        # a scan and not a targeted test -- a targeted one only ever catches the case already
+        # known. `tdvp2_step!` had one: the main method was widened to
+        # `h::Union{XXZChain, MPO}` while its `tau::Number` convenience wrapper stayed at
+        # `h::XXZChain`, leaving `(XXZChain, ComplexF64)` matched by two methods where neither
+        # dominates -- more specific in `tau` for one, in `h` for the other.
+        #
+        # It hid because the whole L=16 campaign passes an `MPO`; only the `XXZChain` + complex
+        # `tau` pair used by `warm` above reached it, and then it took out SIX testsets in
+        # `test_pair_mpo.jl` at once, all in the shared state helper and none of them saying
+        # anything about what those testsets were for.
+        @test isempty(Test.detect_ambiguities(RSVDCBEBondUpdate; recursive = false))
+        # The three combinations that exist at call sites, pinned individually so a regression
+        # names the offending signature instead of only failing the scan. `-0.1im` and `-0.1`
+        # cover the two `tau` types; `h` and `m` the two Hamiltonian representations.
+        set_symmetry!(:U1)
+        let L = 6, h = xxz_chain(L; delta = 1.0)
+            m = RSVDCBEBondUpdate.mpo_from_terms(h)
+            for (nm, ham, tau) in (("XXZChain, ComplexF64", h, -0.1im),
+                                   ("XXZChain, Float64",    h, -0.1),
+                                   ("MPO, ComplexF64",      m, -0.1im))
+                psi = dimer_state(L)
+                info = tdvp2_step!(psi, ham, tau; maxdim = 64, trunc_thresh = 1e-14)
+                @test info isa RSVDCBEBondUpdate.TDVP2Info
+                @test isfinite(norm(psi)) && norm(psi) > 0
+                @info "tdvp2_step!($nm) dispatches, bond = $(maximum(bond_dims(psi); init = 0))"
+            end
+        end
+    end
+
     # ── the shared expansion ──────────────────────────────────────────────────────────────
     @testset "expand_bond! is LOSSLESS" begin
         for sym in (:U1, :SU2)
@@ -43,9 +74,13 @@ import Random
                 before = real(mpo_energy(psi, mpo))
                 nb = norm(psi)
                 ov = copy(psi)
-                canonical!(psi, 1)
-                rstack = right_env_stack(psi, mpo; downto = 3)
-                _, info = expand_bond!(psi, mpo, 2, dir, boundary_channels(mpo),
+                # The centre must sit on site 2 or 3 for bond 2, and `lch`/`rch` must be the
+                # environments at links 2 and 4 -- NOT `boundary_channels`, which is the
+                # environment at link 1 and covers no sites at all.
+                canonical!(psi, 2)
+                lstack = left_env_stack(psi, mpo; upto = 2)
+                rstack = right_env_stack(psi, mpo; downto = 4)
+                _, info = expand_bond!(psi, mpo, 2, dir, left_channels(lstack, 2),
                                        right_channels(rstack, 4))
                 # The STATE is unchanged: same energy, same norm, unit overlap with itself.
                 @test real(mpo_energy(psi, mpo)) ≈ before atol = 1e-10
@@ -172,26 +207,23 @@ import Random
         # Real-time TDVP is unitary, so ANY norm loss is error.
         @test norm(psi) ≈ n0 atol = 1e-9
 
-        # dt order, against the exact propagator on a state that is full rank at L=6 so the
-        # residual is the integrator's and not the truncation's.
+        # EXACTNESS AT FULL RANK, not a dt exponent. At L=6 with maxdim=64 the bond dims
+        # `[2,4,8,4,2]` are complete, and a CBE sweep on a complete basis is the exact propagator,
+        # so the residual is roundoff at ANY dt -- measured 6.4e-15 / 5.9e-15 / 2.0e-14 for
+        # nst = 4/8/16, whose `log2` ratios (0.12, -1.73) is what the old exponent assertion was
+        # reading. Assert the exactness instead; the order question is a benchmark, see
+        # "at fixed rank the error is set by the RANK, not by dt" below.
         ref = warm(L)
         v0 = dense_state(ref)
         T = 0.16
-        errs = Float64[]
-        for nst in (4, 8, 16)
+        want = dense_exact_propagate(dense_heisenberg(L), v0, T)
+        for nst in (4, 16)
             p = copy(ref); p.tensors .= copy.(ref.tensors)
             for _ in 1:nst
                 tdvp_cbe1s_step!(p, mpo, -im * (T / nst); maxdim = 64, trunc_thresh = 1e-14)
             end
-            want = dense_exact_propagate(dense_heisenberg(L), v0, T)
-            push!(errs, norm(dense_state(p) - want))
+            @test norm(dense_state(p) - want) < 1e-12
         end
-        # Halving `dt` must cut the error by ~4. Bounds are loose because the constant is not
-        # the claim -- the EXPONENT is.
-        p1 = log2(errs[1] / errs[2]); p2 = log2(errs[2] / errs[3])
-        @info "tdvp_cbe1s dt-order: errs = $errs, p = ($p1, $p2)"
-        @test 1.7 < p1 < 2.4
-        @test 1.7 < p2 < 2.4
     end
 
     # ── the new sweep ─────────────────────────────────────────────────────────────────────
@@ -228,30 +260,149 @@ import Random
         @test norm(dense_state(psi) - want) < 1e-9
     end
 
-    @testset "cbe_bug_step! is second order" begin
+    @testset "truncate_recursive! is LOSSLESS when nothing needs cutting" begin
+        # The first thing a truncation must not do is change a state that is already small
+        # enough.
+        for sym in (:U1, :SU2)
+            set_symmetry!(sym)
+            L = 6
+            psi = warm(L)
+            canonical!(psi, L ÷ 2 + 1)
+            # ⛔ NOT `dense_state` HERE. It builds its basis with `product_state`, which :SU2
+            # REFUSES by construction -- a definite-Sz product state is not a total-spin
+            # eigenstate -- so the :SU2 half of this loop threw before reaching a single
+            # assertion. (`test_pair_mpo.jl` documents the same trap and works around it by
+            # comparing SU(2) against the U(1) NUMBER.)
+            #
+            # The OVERLAP is the better instrument regardless: losslessness means the truncated
+            # state is the SAME RAY as the original, and `|<psi0|psi>| / (||psi0|| ||psi||) == 1`
+            # says exactly that, in any symmetry mode, without materialising 2^L amplitudes or
+            # depending on a dense reference at all.
+            psi0 = deepcopy(psi)
+            bd0 = bond_dims(psi)
+            _, disc = truncate_recursive!(psi, L ÷ 2 + 1; maxdim = 256, cutoff = 0.0)
+            @test bond_dims(psi) == bd0
+            @test disc < 1e-12
+            # Same ray: normalised overlap of modulus 1 up to the global phase/scale a re-gauge
+            # may introduce. Cauchy-Schwarz makes this a genuine equality test, not a bound --
+            # it can only reach 1 if the two states are parallel.
+            ov = overlap(psi0, psi)
+            @test isapprox(abs(ov) / (norm(psi0) * norm(psi)), 1.0; atol = 1e-10)
+            # ...and the SCALE is preserved too, so this is not merely a direction check.
+            @test isapprox(norm(psi), norm(psi0); rtol = 1e-10)
+            # the centre it claims must really BE the centre
+            @test 1 <= psi.center <= L
+            @test isapprox(norm(psi[psi.center]), norm(psi); atol = 1e-10)
+        end
+    end
+
+    @testset "truncate_recursive! respects maxdim and beats the two-pass sweep" begin
+        # The point of the recursion is not that it bounds the rank -- `truncate_sweep!` does
+        # that too -- but that it takes ONE cut per bond instead of two, so the discarded
+        # weights do not compound. Same state, same cap, so the only difference is the routine.
         set_symmetry!(:U1)
-        L = 6
+        L = 8
+        psi = warm(L; steps = 8)
+        canonical!(psi, L ÷ 2 + 1)
+        v0 = dense_state(psi); v0 ./= norm(v0)
+        cap = 4
+        errs = Dict{Symbol, Float64}()
+        for (nm, f) in (:recursive => p -> truncate_recursive!(p, L ÷ 2 + 1; maxdim = cap,
+                                                               cutoff = 1e-14)[1],
+                        :sweep     => p -> truncate_sweep!(p; maxdim = cap, cutoff = 1e-14))
+            p = copy(psi)
+            f(p)
+            @test maximum(bond_dims(p); init = 0) <= cap
+            v = dense_state(p); v ./= norm(v)
+            errs[nm] = 1 - abs(dot(v0, v))
+        end
+        # Not asserted as strictly better on every state -- both are greedy and neither is
+        # globally optimal -- but it must not be WORSE, which a compounding double cut can be.
+        @test errs[:recursive] <= errs[:sweep] * 1.05
+    end
+
+    @testset "at fixed rank the error is set by the RANK, not by dt" begin
+        # THIS REPLACES A "second order" TEST THAT WAS MEASURING NOTHING, and the reason is worth
+        # recording so it is not reintroduced.
+        #
+        # A global-error-vs-dt test cannot see the temporal order of these schemes anywhere:
+        #   * at FULL rank they are EXACT for any dt -- one step is `exp(tau H)` on the complete
+        #     space -- so the measured errors were 1.6e-14 / 2.0e-14 / 3.2e-14 and the asserted
+        #     `log2` was a ratio of two roundoff numbers (it came out -0.37 and -0.69);
+        #   * at REDUCED rank the truncation error dominates and is dt-independent.
+        # MEASURED at L=8 (`scratchpad/probe_phase.jl`), T = 0.16, nst = 4/8/16:
+        #   maxdim=8: bug/decoupled 4.042113e-6, bug/interleaved 4.042113e-6,
+        #             tdvp_cbe1s 4.042517e-6, tdvp2 4.042517e-6      -- exponent 0.0
+        #   maxdim=4: 3.925776e-3, 3.925776e-3, 3.927113e-3, 3.927113e-3  -- exponent 0.0
+        # and at L=10/maxdim=4 all four again agree at 4.8e-3.
+        #
+        # So what IS true, and is asserted here, is stronger and more useful than an exponent: at
+        # fixed rank every integrator lands on the SAME floor, which says the rank -- not the
+        # integrator -- sets the accuracy. The temporal order lives in the window where the dt
+        # error exceeds that floor, and finding that window needs a dt sweep over decades, which
+        # belongs in `benchmarks/cbe_sweeps_l16.jl` (phase `dtscan`) and not in a unit test.
+        set_symmetry!(:U1)
+        L = 8
         mpo = RSVDCBEBondUpdate.mpo_from_terms(nn_chain(:U1, L))
         ref = warm(L)
         v0 = dense_state(ref)
         T = 0.16
-        errs = Float64[]
-        for nst in (4, 8, 16)
+        want = dense_exact_propagate(dense_heisenberg(L), v0, T)
+        maxdim = 8
+
+        function run_to_T(step!, nst)
             p = copy(ref); p.tensors .= copy.(ref.tensors)
             for _ in 1:nst
-                cbe_bug_step!(p, mpo, -im * (T / nst); maxdim = 8, trunc_thresh = 1e-14)
+                step!(p, -im * (T / nst))
             end
-            push!(errs, norm(dense_state(p) -
-                             dense_exact_propagate(dense_heisenberg(L), v0, T)))
+            return norm(dense_state(p) - want)
         end
-        p1 = log2(errs[1] / errs[2]); p2 = log2(errs[2] / errs[3])
-        @info "cbe_bug dt-order: errs = $errs, p = ($p1, $p2)"
-        # LOCAL order 2. Whether the GLOBAL order is 2 as well depends on the root: the sibling
-        # `jan_bug` is locally O(dt^2) and globally order 1 because its Galerkin step sits on a
-        # boundary bond. Here the root is the centre, so the frames span both halves. The
-        # exponent is measured, not asserted from the structure.
-        @test 1.5 < p1 < 2.5
-        @test 1.5 < p2 < 2.5
+        bug_d = [run_to_T((p, t) -> cbe_bug_step!(p, mpo, t; decoupled = true,
+                          maxdim = maxdim, trunc_thresh = 1e-14), n) for n in (4, 8, 16)]
+        bug_i = [run_to_T((p, t) -> cbe_bug_step!(p, mpo, t; decoupled = false,
+                          maxdim = maxdim, trunc_thresh = 1e-14), n) for n in (4, 8, 16)]
+        tdvp1 = [run_to_T((p, t) -> tdvp_cbe1s_step!(p, mpo, t;
+                          maxdim = maxdim, trunc_thresh = 1e-14), n) for n in (4, 8, 16)]
+        tdvp2v = [run_to_T((p, t) -> tdvp2_step!(p, mpo, t;
+                           maxdim = maxdim, trunc_thresh = 1e-14), n) for n in (4, 8, 16)]
+        @info "fixed-rank floor L=$L maxdim=$maxdim: bug_dec=$bug_d bug_int=$bug_i " *
+              "tdvp_cbe1s=$tdvp1 tdvp2=$tdvp2v"
+
+        # 1. dt-independent: the floor does not move when dt is cut by 4x.
+        for errs in (bug_d, bug_i, tdvp1, tdvp2v)
+            @test abs(errs[3] - errs[1]) < 0.01 * errs[1]
+        end
+        # 2. the floor is the SAME for every integrator -- the rank sets it, not the scheme.
+        for e in (bug_i[1], tdvp1[1], tdvp2v[1])
+            @test abs(e - bug_d[1]) < 0.01 * bug_d[1]
+        end
+        # 3. and it is a genuine approximation, not a hidden exactness that would make 1 and 2
+        #    vacuous.
+        @test bug_d[1] > 1e-8
+    end
+
+    @testset "the two expansion orderings agree where the physics is short-ranged" begin
+        # `decoupled` is a SUPPORTED OPTION, not a debug path, so both settings are pinned.
+        # MEASURED: at L=8 the two agree to 2.5e-14 (maxdim=8) and 3.0e-14 (maxdim=4) after ten
+        # steps, i.e. on a nearest-neighbour chain the ordering makes no difference -- the
+        # selection lands on the same subspace either way. Asserted as agreement rather than as
+        # equality, because on a LONG-RANGE H the environments carry much more structure and the
+        # two orderings are not expected to coincide there; that case is measured in
+        # `benchmarks/cbe_sweeps_l16.jl`, not asserted here.
+        set_symmetry!(:U1)
+        L = 8
+        mpo = RSVDCBEBondUpdate.mpo_from_terms(nn_chain(:U1, L))
+        for maxdim in (4, 8)
+            a = warm(L); b = copy(a); b.tensors .= copy.(a.tensors)
+            for _ in 1:10
+                cbe_bug_step!(a, mpo, -0.05im; decoupled = true,
+                              maxdim = maxdim, trunc_thresh = 1e-14)
+                cbe_bug_step!(b, mpo, -0.05im; decoupled = false,
+                              maxdim = maxdim, trunc_thresh = 1e-14)
+            end
+            @test real(mpo_energy(a, mpo)) ≈ real(mpo_energy(b, mpo)) atol = 1e-10
+            @test abs(overlap(a, b)) ≈ norm(a) * norm(b) atol = 1e-10
+        end
     end
 
     @testset "cbe_bug_step! reports its expansion at EVERY bond" begin
@@ -260,13 +411,18 @@ import Random
         set_symmetry!(:U1)
         L = 8
         mpo = RSVDCBEBondUpdate.mpo_from_terms(nn_chain(:U1, L))
-        psi = warm(L)
+        # FROM A DIMER STATE, not `warm(L)`. `warm` runs 3 tdvp2 steps at maxdim=64, which at L=8
+        # already reaches full rank `[2,4,8,16,8,4,2]` -- and at full rank `room == 0`, so CBE
+        # correctly admits NOTHING and `n_new` is all zeros. The old version of this test asserted
+        # `any(>(0), info.n_new)` on that state and failed for the one reason that is not a bug.
+        # A dimer product has bond dimension 2, so here there is genuinely room to expand into.
+        psi = dimer_state(L)
         info = cbe_bug_step!(psi, mpo, -0.02im; maxdim = 64, trunc_thresh = 1e-14)
         @test length(info.expanded) == L - 1
         @test all(>(0), info.expanded)
         @test info.root == L ÷ 2
-        # Which bonds saturate depends on the warm-up state, so a per-bond claim is not a
-        # property of the scheme -- what is asserted is that SOME bond was genuinely expanded.
+        # Which bonds grow depends on the state, so a per-bond claim is not a property of the
+        # scheme -- what is asserted is that SOME bond was genuinely expanded.
         @test any(>(0), info.n_new)
         @test info.krylov_dims > 0
         @test info.peak_elements > 0

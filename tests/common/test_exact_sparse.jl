@@ -81,4 +81,32 @@ include(joinpath(@__DIR__, "..", "..", "benchmarks", "exact_sparse.jl"))
             @test norm(expv_sparse(A, ComplexF64(-im * 20.0), v0; m = m) - exact) < 1e-8
         end
     end
+
+    # ── the bridge to `dense_state` ───────────────────────────────────────────────────────────
+    #
+    # THIS FILE AND `dense_reference.jl` USE MIRRORED BIT CONVENTIONS (here site 1 is the LEAST
+    # significant bit and a set bit is UP; there site 1 is the MOST significant and a set bit is
+    # DOWN). `sparse_to_dense_index` is the only sanctioned way across, and comparing without it
+    # is silently wrong.
+    #
+    # ⛔ THE STATES MUST BE ASYMMETRIC. The conventions differ by reversal-composed-with-spin-flip,
+    # and Neel, the domain wall and the dimer are all FIXED POINTS of that -- they pass with or
+    # without the conversion, which is exactly how the bug survived. Anything tested here that is
+    # symmetric proves nothing.
+    @testset "sparse_to_dense_index bridges the two bit conventions" begin
+        for Lb in (4, 6, 8)
+            st, _ = sz0_basis(Lb)
+            # a bijection onto the same sector, so nothing is dropped or doubled
+            mapped = [sparse_to_dense_index(b, Lb) for b in st]
+            @test length(unique(mapped)) == length(st)
+            @test sort(mapped) == sort(st)      # Sz=0 sector maps onto itself
+        end
+        # the worked example from the docstring, and its mirror-symmetric neighbours
+        @test sparse_to_dense_index(0b001101, 6) == 0b010011   # up{1,3,4} -> down{2,5,6}
+        @test sparse_to_dense_index(0b000111, 6) == 0b000111   # domain wall: a FIXED POINT
+        @test sparse_to_dense_index(0b010101, 6) == 0b010101   # Neel: also a FIXED POINT
+        # an all-up pattern has no down sites, so the dense index is 0
+        @test sparse_to_dense_index(0b1111, 4) == 0
+        @test sparse_to_dense_index(0b0000, 4) == 0b1111
+    end
 end

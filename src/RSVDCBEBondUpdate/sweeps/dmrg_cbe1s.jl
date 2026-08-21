@@ -92,6 +92,7 @@ function dmrg_cbe1s_sweep!(psi::SymMPS, mpo::MPO;
                            trunc_thresh::Float64 = 1e-12,
                            maxiter::Int = 30,
                            restol::Float64 = 1e-10,
+                           seed_expanded::Bool = false,
                            rng::AbstractRNG = MersenneTwister(0x5EED))
     L = length(psi)
     length(mpo) == L || throw(DimensionMismatch(
@@ -116,11 +117,49 @@ function dmrg_cbe1s_sweep!(psi::SymMPS, mpo::MPO;
         efnl = max(efnl, info.err_fnl)
     end
 
-    "The one-site eigensolve at site `j`, in the environments given."
-    function solve1(j, lch, rch)
+    """
+    The one-site eigensolve at site `j`, in the environments given.
+
+    `seed_expanded` changes ONLY the Lanczos START VECTOR, never the operator or the space, so
+    the Ritz value stays a variational upper bound either way (see [`lanczos_lowest`](@ref)).
+
+    WHY A DIFFERENT START HELPS. `expand_bond!` widens the bond "leaving the state unchanged" --
+    the admitted directions are appended with ZERO amplitude. So the default start `psi[j]` is
+    the old vector zero-padded, and it has no component along precisely the directions the
+    expansion just paid to find. Lanczos still reaches them, but only through the operator: they
+    first appear in `H v`, i.e. from the SECOND Krylov vector, and the Ritz vector needs further
+    iterations to weight them properly. Seeding with `v + eta * P_new(H v)` puts them in the
+    space from the FIRST vector.
+
+    ⚠ It is not free: the seed costs ONE extra operator application per solve, counted in `nmv`
+    below like any other, so a fair reading of the result is applications-to-accuracy and not
+    sweeps alone. `eta` is small and the seed is renormalised, so the start stays dominated by
+    the current state -- this is a perturbation of the start direction, not a different ansatz.
+    """
+    function solve1(j, lch, rch; expanded::Bool = false)
         H1 = one_site_h(mpo, j, lch, rch)
-        A, e, kd = lanczos_lowest(x -> apply_one_site(H1, x), psi[j];
-                                 maxiter = maxiter, restol = restol)
+        apply = x -> apply_one_site(H1, x)
+        x0 = psi[j]
+        if expanded && seed_expanded
+            w = apply(x0)                      # the one extra application, counted below
+            nmv += 1
+            # Project out the current direction: what remains is exactly the content H mixes in
+            # from OUTSIDE the old frame, which is where the new bond directions live.
+            #
+            # ⛔ THE DENOMINATOR MUST BE REAL. `tensor_inner` returns `ComplexF64` even for a
+            # self-overlap whose imaginary part is zero by construction, and `max(::Float64,
+            # ::ComplexF64)` is a MethodError, not a promotion -- complex numbers have no total
+            # order. `norm(x0)^2` is the same quantity, real by type rather than by accident.
+            ip = tensor_inner(x0, w) / max(norm(x0)^2, eps())
+            r = to_concrete(w + (-ip) * x0)
+            nr = norm(r)
+            if nr > 1e-14
+                # 0.1 of the current norm: enough to enter the Krylov space at iteration 1,
+                # small enough that the start is still essentially the current state.
+                x0 = to_concrete(x0 + (0.1 * norm(x0) / nr) * r)
+            end
+        end
+        A, e, kd = lanczos_lowest(apply, x0; maxiter = maxiter, restol = restol)
         nmv += kd
         push!(energies, e)
         return A
@@ -140,7 +179,7 @@ function dmrg_cbe1s_sweep!(psi::SymMPS, mpo::MPO;
                                   right_channels(rstack, i + 2); exkw...)
         record!(info)
 
-        A = solve1(i, lch, rch1)
+        A = solve1(i, lch, rch1; expanded = true)
         # Split with the amplitude moving RIGHT, truncating: this is the only place rank is
         # removed, and `Nkeep` is in MULTIPLETS under a non-abelian symmetry.
         res = svd(A, (1, 2); cutoff = cut, Nkeep = maxdim, get_lists = true)
@@ -168,7 +207,7 @@ function dmrg_cbe1s_sweep!(psi::SymMPS, mpo::MPO;
                                   left_channels(lstack, i), rch; exkw...)
         record!(info)
 
-        A = solve1(i + 1, lch1, rch)
+        A = solve1(i + 1, lch1, rch; expanded = true)
         res = svd(A, (1,); cutoff = cut, Nkeep = maxdim, get_lists = true)
         disc = max(disc, _trunc_weight(res))
         tag = psi[i].inds[3].itags
@@ -204,6 +243,14 @@ struct DMRGCBERun
     sweep_spread::Vector{Float64}
     bond_dims::Vector{Vector{Int}}
     max_bond_dims::Vector{Int}
+    # Under SU(2) `bond_dims` counts MULTIPLETS, so a reader comparing ranks across symmetry
+    # modes needs the state count too -- recorded per sweep, because taking it from the final
+    # `psi` afterwards reports one number for the whole history and hides the growth.
+    state_bond_dims::Vector{Vector{Int}}
+    max_state_bond_dims::Vector{Int}
+    # Wall-clock seconds for each sweep on its own. The FIRST entry of a fresh session carries
+    # Julia's compilation of the whole sweep stack (order 10^2 s here) and is NOT a cost datum.
+    sweep_seconds::Vector{Float64}
     max_expanded::Vector{Int}
     err_pre::Vector{Float64}
     err_fnl::Vector{Float64}
@@ -244,15 +291,21 @@ function dmrg_cbe1s!(psi::SymMPS, h::Union{XXZChain, MPO};
                      n_sweeps::Int = 20, etol::Float64 = 1e-10, kwargs...)
     mpo = h isa MPO ? h : mpo_from_terms(h)
     es = Float64[]; spread = Float64[]; bds = Vector{Int}[]; maxbd = Int[]
+    sbds = Vector{Int}[]; maxsbd = Int[]; secs = Float64[]
     maxexp = Int[]; epre = Float64[]; efnl = Float64[]; disc = Float64[]; kd = Int[]
     converged = false
     prev = Inf
 
     for _ in 1:n_sweeps
+        tsw = time()
         info = dmrg_cbe1s_sweep!(psi, mpo; kwargs...)
+        push!(secs, time() - tsw)
         push!(es, info.energy)
         push!(spread, _spread(info.energies))
         push!(bds, info.bond_dims); push!(maxbd, maximum(info.bond_dims; init = 0))
+        # `psi` is the state THIS sweep produced, so this is a per-sweep reading.
+        sbd = state_bond_dims(psi)
+        push!(sbds, sbd); push!(maxsbd, maximum(sbd; init = 0))
         push!(maxexp, info.max_expanded)
         push!(epre, info.err_pre); push!(efnl, info.err_fnl)
         push!(disc, info.discarded); push!(kd, info.krylov_dims)
@@ -262,7 +315,8 @@ function dmrg_cbe1s!(psi::SymMPS, h::Union{XXZChain, MPO};
         end
         prev = info.energy
     end
-    return DMRGCBERun(es, spread, bds, maxbd, maxexp, epre, efnl, disc, kd, converged)
+    return DMRGCBERun(es, spread, bds, maxbd, sbds, maxsbd, secs, maxexp, epre, efnl, disc,
+                      kd, converged)
 end
 
 """
@@ -284,3 +338,24 @@ reference arm, not a better default and not a fallback.
 """
 exact_cbe_dmrg1s!(psi::SymMPS, h::Union{XXZChain, MPO}; kwargs...) =
     dmrg_cbe1s!(psi, h; exact = true, kwargs...)
+
+"""
+    rsvd_cbe_dmrg1s_seeded!(psi, h; kwargs...) -> DMRGCBERun
+
+CBE-DMRG with the RSVD selection **and the local eigensolve started from the EXPANDED basis**
+rather than from the zero-padded current tensor (`seed_expanded = true`).
+
+The distinction it isolates: `expand_bond!` widens the bond leaving the state unchanged, so the
+admitted directions arrive with zero amplitude and the default Lanczos start cannot see them
+until the operator has been applied once. This arm gives the start a small component along them
+up front. Everything else -- the selection, the operator, the truncation, the sweep order -- is
+identical to [`rsvd_cbe_dmrg1s!`](@ref), so a difference between the two is attributable to the
+start vector alone.
+
+⚠ It buys the earlier basis at the price of ONE extra operator application per local solve, and
+that application is counted in `krylov_dims` like any other. Read the comparison as
+applications-to-accuracy, not sweeps-to-accuracy: fewer sweeps at a higher per-sweep cost is not
+automatically a win, and which way it lands is a measurement, not a prediction.
+"""
+rsvd_cbe_dmrg1s_seeded!(psi::SymMPS, h::Union{XXZChain, MPO}; kwargs...) =
+    dmrg_cbe1s!(psi, h; exact = false, seed_expanded = true, kwargs...)

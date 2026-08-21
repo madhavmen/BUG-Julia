@@ -10,3 +10,12 @@
 # Benchmark result files -- regenerated, never committed
 benchmarks/*.log
 benchmarks/*.json
+
+# Python bytecode from the plotting scripts
+__pycache__/
+*.pyc
+
+# Generated campaign output. The SCRIPTS are tracked (benchmarks/*.jl, plot_*.py, *.slurm) so
+# every figure here is reproducible from them; the CSVs and PNGs themselves are not, since they
+# are multi-megabyte and regenerated on every run.
+benchmarks/results/

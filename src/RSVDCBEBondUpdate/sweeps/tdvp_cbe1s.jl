@@ -53,6 +53,7 @@ struct TDVPCBEInfo
     err_fnl::Float64
     discarded::Float64
     krylov_dims::Int
+    peak_elements::Int
 end
 
 """
@@ -106,6 +107,14 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             sulz_cap = sulz_cap, rmax = maximum(bond_dims(psi); init = 0),
             preselect_only = preselect_only, exact = exact, rng = rng)
 
+    # Working set at this instant: the state as it stands plus the transients still alive. SAME
+    # DEFINITION as `CBEBugSweepInfo.peak_elements` and `TDVP2Info.peak_elements`, which is the
+    # only reason the three are comparable -- a memory claim measured three different ways is not
+    # a claim. It was missing here, so the campaign's `peak` column read 0 for this sweep.
+    peak = 0
+    peak!(ts...) = (peak = max(peak, _state_stored(psi) +
+                               sum(tensor_elements(t) for t in ts; init = 0)))
+
     function record!(info)
         maxexp = max(maxexp, info.dim_out)
         n_new[info.bond] += info.n_new
@@ -135,6 +144,7 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         M = expv(x -> (nmv += 1; apply_one_site(H1, x)), half, psi[i];
                  hermitian = true, maxiter = maxiter, tol = tol, reorth = reorth)
 
+        peak!(M)
         res = svd(M, (1, 2); cutoff = cut, Nkeep = maxdim, get_lists = true)
         disc = max(disc, _trunc_weight(res))
         tag = psi[i].inds[3].itags
@@ -193,7 +203,7 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     onesite!(1, boundary_channels(mpo), rch)
 
     return TDVPCBEInfo(maximum(bond_dims(psi); init = 0), maxexp, n_new,
-                       epre, efnl, disc, nmv)
+                       epre, efnl, disc, nmv, peak)
 end
 
 tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::Number; kwargs...) =

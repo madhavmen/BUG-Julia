@@ -103,6 +103,46 @@ import Random
         end
     end
 
+    @testset "B3. DISCONNECTED coupling graphs" begin
+        # REGRESSION. `id -> id` used to be guarded by `!isempty(cur)` -- "is any channel open on
+        # this link" -- which is not the question. A term opening at a LATER site still needs the
+        # `id` channel to reach it, so on a coupling graph that is disconnected across some
+        # interior bond the guard severed the automaton, and because column 1 of the matrix was
+        # then entirely `nothing`, `oplus` threw
+        #   "cannot infer zero TLArray at (1, 1): missing space information on leg 4"
+        # (leg 1 when row 1 emptied as well -- one cause, two messages).
+        #
+        # Every connected coupling in this file -- nearest neighbour, each single distance,
+        # Haldane-Shastry, the ring -- has `alive(i)` non-empty at every interior link, which is
+        # why the whole suite passed with the bug in place. These are the cases that do not.
+        #
+        # Comparing against the dense pair sum rather than merely asserting it BUILDS is the
+        # point: silencing the throw with a zero block would also "build".
+        set_symmetry!(:U1)
+        L = 6
+        psi = test_state(L)
+        v = dense_state(psi)
+
+        Jsplit = zeros(L, L)                       # 1:3 and 4:6 decoupled -- link 3 is dead
+        for (o, j) in ((1, 2), (2, 3), (4, 5), (5, 6))
+            Jsplit[o, j] = 1.0
+        end
+        Jfirst = zeros(L, L); Jfirst[1, 2]     = 1.0    # links 2..5 dead
+        Jlast  = zeros(L, L); Jlast[L - 1, L]  = 1.0    # links 1..4 dead
+        Jfar   = zeros(L, L); Jfar[1, 2]       = 1.0    # both ends live, the middle is not
+        Jfar[L - 1, L] = 1.0
+
+        for (nm, J) in (("split 1:3 | 4:6", Jsplit), ("only J[1,2]", Jfirst),
+                        ("only J[L-1,L]", Jlast), ("both ends, dead middle", Jfar),
+                        ("all-zero J (the zero Hamiltonian)", zeros(L, L)))
+            m = pair_mpo(L, J, spin_vertices(L))
+            got = real(mpo_energy(psi, m))
+            want = real(dot(v, dense_long_range_pairs(L, J) * v))
+            @test got ≈ want atol = 1e-10
+            @info "$nm: E = $got, virtual dims = $(mpo_virtual_dims(m))"
+        end
+    end
+
     @testset "C. Haldane-Shastry and the Heisenberg ring == dense" begin
         for sym in (:none, :U1)
             set_symmetry!(sym)

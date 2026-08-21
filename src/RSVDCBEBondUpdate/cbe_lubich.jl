@@ -248,6 +248,59 @@ function truncate_sweep!(psi::SymMPS; maxdim::Int = 200, cutoff::Float64 = 1e-12
     return psi
 end
 
+"""
+    truncate_recursive!(psi, root; maxdim, cutoff) -> (psi, discarded)
+
+`Θ_τ` — the **recursive root-to-leaves rank truncation** of the rank-adaptive tree integrator
+(Ceruti, Lubich & Sulz, *Rank-adaptive time integration of tree tensor networks*,
+arXiv:2201.10291 §4.2, Algorithm 7), specialised to the chain. Returns the largest relative
+weight any single bond threw away.
+
+The paper's sentence is the specification: *"For the truncation of a tree tensor network we
+perform a recursive root-to-leaves SVD-based truncation with a given tolerance ϑ."* At each node
+it takes `Mat_i(Ĉ_τ) = P̂_{τ_i} Σ̂_{τ_i} Q̂*_{τ_i}`, keeps the smallest rank satisfying
+`(Σ_{k>r} σ_k²)^{1/2} ≤ ϑ`, pushes the isometry into the subtree (`U_l = Û_l P_l` at a leaf,
+`C̃_{τ_i} = Ĉ_{τ_i} ×₀ P_{τ_i}^⊤` below one) and then RECURSES into that subtree.
+
+"""
+function truncate_recursive!(psi::SymMPS, root::Int; maxdim::Int = 200,
+                             cutoff::Float64 = 1e-12)
+    L = length(psi)
+    1 <= root <= L || throw(ArgumentError("root $root outside 1:$L"))
+    worst = 0.0
+
+    # ── left subtree, root-to-leaf: bonds root-1, root-2, … 1 ──
+    for i in root:-1:2
+        res = svd(psi[i], (1,); cutoff = cutoff, Nkeep = maxdim, get_lists = true)
+        worst = max(worst, _trunc_weight(res))
+        tag = psi[i - 1].inds[3].itags
+        # `A = U S Vd`: keep `Vd` here and hand `U S` outward, so the child receives the weight
+        # and its own SVD is a genuine Schmidt decomposition.
+        psi[i]     = to_concrete(setitag(res.Vd, 1, tag))
+        psi[i - 1] = to_concrete(setitag(
+            contract(psi[i - 1], (3,), to_concrete(res.U * res.S), (1,)), 3, tag))
+        psi.center = i - 1
+    end
+
+    # With the weight carried out to site 1 the centre has to come back before the other subtree
+    # can be cut. LOSSLESS: every bond crossed was just cut, and cutting it again is exactly the
+    # compounding this routine exists to avoid.
+    canonical!(psi, root)
+
+    # ── right subtree, root-to-leaf: bonds root, root+1, … L-1 ──
+    for i in root:(L - 1)
+        res = svd(psi[i], (1, 2); cutoff = cutoff, Nkeep = maxdim, get_lists = true)
+        worst = max(worst, _trunc_weight(res))
+        tag = psi[i].inds[3].itags
+        psi[i]     = to_concrete(setitag(res.U, 3, tag))
+        psi[i + 1] = to_concrete(setitag(
+            contract(to_concrete(res.S * res.Vd), (2,), psi[i + 1], (1,)), 1, tag))
+        psi.center = i + 1
+    end
+
+    return psi, worst
+end
+
 # ── the step ─────────────────────────────────────────────────────────────────
 
 """

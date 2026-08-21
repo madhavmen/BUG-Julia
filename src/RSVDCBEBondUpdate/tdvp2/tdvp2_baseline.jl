@@ -1,20 +1,3 @@
-# Two-site TDVP -- the BASELINE, not part of the method.
-#
-# The second design goal (docs/cbe_bug.md §2b) is that CBE-BUG expands a bond more cheaply
-# than 2-site TDVP does. That claim needs a real competitor in the same stack, with the
-# same Hamiltonian and the same environment code, or the comparison measures the stack
-# rather than the method. A proxy would not do: "cheaper than 2-site TDVP" has to be
-# measured at MATCHED ACCURACY, so the baseline has to be a correct integrator.
-#
-# It is also the thing CBE-BUG is contrasted with structurally. The forward half-step here
-# builds `Theta = psi[i] psi[i+1]` explicitly, rank 4 and O(chi^2 d^2), and EVOLVES it --
-# that object is unavoidable in 2-site TDVP and is exactly what CBE-BUG never allocates.
-# The bond also grows to the full `d*chi` before the truncating SVD, whereas CBE-BUG
-# expands to `r + Dex` with `Dex` a knob.
-#
-# Scheme: the standard symmetric sweep. Left to right, each bond forward by tau/2 and each
-# intermediate site backward by tau/2; then right to left with the same halves. Second
-# order in tau.
 
 """
     OneSiteH
@@ -85,12 +68,21 @@ relative weight a bond truncation threw away.
 `state + transients alive at that moment`. Here the transient is `Theta`, and it is alive
 *alongside* `psi[i]` and `psi[i+1]` -- the two-site block duplicates them rather than
 replacing them, which is the cost CBE-BUG avoids by never forming one.
+
+`krylov_dims` counts OPERATOR APPLICATIONS over the whole step, the same field name and the same
+counting rule `CBEBugSweepInfo` uses, so a cost comparison between the two is reading one number
+rather than two conventions. ⚠ It counts APPLICATIONS, NOT FLOPS, and the applications are not
+the same size on both sides: this sweep applies a TWO-site `H_eff` plus a one-site backward
+update per bond, while `cbe_bug_step!` applies `L` one-site operators and one zero-site operator.
+So a ratio of these counts understates the two-site sweep's per-application cost, and the wall
+clock is the honest arbiter -- the count is here to say WHERE the time goes.
 """
 struct TDVP2Info
     max_bond::Int
     theta_elements::Int
     discarded::Float64
     peak_elements::Int
+    krylov_dims::Int
 end
 
 "Total stored elements of a TLArray -- the honest size of the object, block-sparse."
@@ -103,13 +95,15 @@ links it uses so the caller can CARRY them; `acc` collects the diagnostics.
 Returns the channels the NEXT bond of the sweep needs on this sweep's own side: pushed
 through the freshly written tensor, which is the O(1) alternative to rebuilding a stack.
 """
-function _tdvp2_bond!(psi::SymMPS, h::XXZChain, i::Int, tau::ComplexF64, dir::Symbol,
-                      lch::ChannelSet, rch::ChannelSet;
+function _tdvp2_bond!(psi::SymMPS, h::Union{XXZChain, MPO}, i::Int, tau::ComplexF64,
+                      dir::Symbol, lch, rch;
                       maxdim, trunc_thresh, maxiter, tol, acc)
     Theta = to_concrete(psi[i] * psi[i + 1])        # rank 4 -- the object being compared
     acc[2] = max(acc[2], tensor_elements(Theta))
     acc[4] = max(acc[4], _state_stored(psi) + tensor_elements(Theta))
-    Theta = expv(x -> apply_h_two_site(x, h, i, lch, rch), tau, Theta;
+    # `acc[1]` is the operator-application counter -- see `TDVP2Info.krylov_dims`. It was an
+    # unused slot before, so nothing else reads it.
+    Theta = expv(x -> (acc[1] += 1; apply_h_two_site(x, h, i, lch, rch)), tau, Theta;
                  hermitian = true, maxiter = maxiter, tol = tol)
 
     res = svd(Theta, (1, 2); cutoff = max(trunc_thresh, 1e-14), Nkeep = maxdim,
@@ -124,8 +118,8 @@ function _tdvp2_bond!(psi::SymMPS, h::XXZChain, i::Int, tau::ComplexF64, dir::Sy
         lnext = push_left_channels(lch, h, psi[i], i)
         M = to_concrete(setitag(to_concrete(res.S * res.Vd), 1, tag))
         if i < length(psi) - 1
-            M = expv(x -> apply_one_site(one_site_h(h, i + 1, lnext, rch), x), -tau, M;
-                     hermitian = true, maxiter = maxiter, tol = tol)
+            M = expv(x -> (acc[1] += 1; apply_one_site(one_site_h(h, i + 1, lnext, rch), x)),
+                     -tau, M; hermitian = true, maxiter = maxiter, tol = tol)
         end
         psi[i + 1] = M
         psi.center = i + 1
@@ -135,8 +129,8 @@ function _tdvp2_bond!(psi::SymMPS, h::XXZChain, i::Int, tau::ComplexF64, dir::Sy
         rnext = push_right_channels(rch, h, psi[i + 1], i + 1)
         M = to_concrete(setitag(to_concrete(res.U * res.S), 3, tag))
         if i > 1
-            M = expv(x -> apply_one_site(one_site_h(h, i, lch, rnext), x), -tau, M;
-                     hermitian = true, maxiter = maxiter, tol = tol)
+            M = expv(x -> (acc[1] += 1; apply_one_site(one_site_h(h, i, lch, rnext), x)),
+                     -tau, M; hermitian = true, maxiter = maxiter, tol = tol)
         end
         psi[i] = M
         psi.center = i
@@ -153,8 +147,19 @@ Present as the memory/accuracy baseline for CBE-BUG; it is not part of the CBE s
 nothing in `cbe_lubich.jl` calls it. Like `cbe_lubich_sweep`, it carries its channel
 environments along each half-sweep, so environment work is `O(L)` per step and a wall-time
 comparison between the two is not distorted by one of them rebuilding.
+
+TAKES EITHER AN `XXZChain` OR AN `MPO`, and the body is the same either way -- every helper it
+calls (`apply_h_two_site`, `one_site_h`, `push_*_channels`, `boundary_channels`, the env stacks)
+already has a method for both representations, so admitting the MPO was a matter of widening this
+signature and nothing else. The `XXZChain` path is bit-identical to before.
+
+WHY THAT MATTERS: the channel form cannot express a long-range or site-dependent `H` at all
+(`henv.jl`'s `_left_step` refuses to carry an open channel past a site), so with the old
+`h::XXZChain` annotation the 2-site TDVP BASELINE could not run on Haldane-Shastry or on a
+periodic ring -- i.e. it could not run on the models the CBE sweeps are being judged on, which
+would have left the comparison with no baseline exactly where one is most wanted.
 """
-function tdvp2_step!(psi::SymMPS, h::XXZChain, tau::ComplexF64;
+function tdvp2_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::ComplexF64;
                      maxdim::Int = 200,
                      trunc_thresh::Float64 = 1e-12,
                      maxiter::Int = 30,
@@ -188,8 +193,14 @@ function tdvp2_step!(psi::SymMPS, h::XXZChain, tau::ComplexF64;
                            maxdim, trunc_thresh, maxiter, tol, acc)
     end
 
-    return TDVP2Info(maximum(bond_dims(psi); init = 0), acc[2], acc[3], acc[4])
+    return TDVP2Info(maximum(bond_dims(psi); init = 0), acc[2], acc[3], acc[4], acc[1])
 end
 
-tdvp2_step!(psi::SymMPS, h::XXZChain, tau::Number; kwargs...) =
+# ⛔ `h` MUST be the same `Union` as the method above. When the main method was widened from
+# `h::XXZChain` to `h::Union{XXZChain, MPO}` and this wrapper was left at `XXZChain`, the pair
+# became AMBIGUOUS for `(XXZChain, ComplexF64)`: the main method is more specific in `tau`
+# (`ComplexF64` < `Number`) while this one is more specific in `h` (`XXZChain` < the Union), so
+# neither dominates and Julia refuses the call. It stayed hidden because the campaign always
+# passes an `MPO` -- only the `XXZChain` + complex-`tau` combination the tests use hits it.
+tdvp2_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::Number; kwargs...) =
     tdvp2_step!(psi, h, ComplexF64(tau); kwargs...)

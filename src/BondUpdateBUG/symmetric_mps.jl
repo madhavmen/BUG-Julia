@@ -490,6 +490,41 @@ sz_expectation(psi::SymMPS, j::Int) = real(site_expval(psi, j, local_space().Sz)
 total_sz(psi::SymMPS) = sum(sz_expectation(psi, j) for j in 1:length(psi))
 
 """
+    apply_sz!(psi, j) -> psi
+
+`S^z_j |ψ⟩` in place, NOT renormalised, by SECTOR PROJECTION rather than by contracting the
+operator onto the site leg.
+
+⛔ THE OBVIOUS ROUTE IS WRONG AND IT FAILS SILENTLY. Contracting `local_space().Sz` onto the site
+leg returns a correctly SHAPED rank-3 tensor whose site leg has had its charge sectors RE-SORTED
+by `contract`, so the state it encodes is not `S^z_j|ψ⟩`. MEASURED against the dense elementwise
+`S^z`: residual 2.02e-1 on a state of norm 0.5, and not a sign flip -- there is a genuinely
+orthogonal component. [`site_expval`](@ref) uses that same contraction and is fine only because it
+closes the loop with the SAME tensor, so the re-sort cancels; producing a NEW MPS tensor is where
+it bites. Same class of bug as the augmenter's QR re-sorting bond sectors.
+
+`S^z = ½P↑ − ½P↓`, and `getsub(...; preserve_space = true)` keeps the FULL site space on each
+projection -- the flag `product_state` uses for exactly this reason -- so the two halves stay
+addable and the site leg comes back with its original sector order.
+
+Lives here rather than in a benchmark because more than one benchmark needs it
+(`cbe_sweeps_l16.jl` for the `S^z|GS⟩` real-time start, `hs_structure_factor.jl` for the Li et al.
+correlator) and duplicating a function whose whole point is a silent-failure trap invites exactly
+one copy being fixed.
+"""
+function apply_sz!(psi::SymMPS, j::Int)
+    canonical!(psi, j)
+    A = psi[j]
+    up = to_concrete(getsub(A, 2, s -> s == SECTOR_UP   ? Colon() : nothing;
+                            preserve_space = true))
+    dn = to_concrete(getsub(A, 2, s -> s == SECTOR_DOWN ? Colon() : nothing;
+                            preserve_space = true))
+    psi[j] = to_concrete(to_concrete(0.5 * up) + to_concrete(-0.5 * dn))
+    canonical!(psi, 1)
+    return psi
+end
+
+"""
     left_gram(A) -> TLArray
 
 `A†A` traced over `(link_l, site)`, leaving the two `link_r` legs open. `A` is

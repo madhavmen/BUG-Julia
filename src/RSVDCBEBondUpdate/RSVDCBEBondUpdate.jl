@@ -65,7 +65,17 @@ using ..BondUpdateBUG: SymMPS, canonical!, bond_dims, leg_dim, local_space,
                        fusion_basis, reachable_sectors, sector_dim, dual_charge,
                        align_charge, left_isometry_defect, right_isometry_defect,
                        energy, bond_gates, apply_gate, heisenberg_bond_gate,
-                       magnetisation, center_bond, parity_bonds
+                       magnetisation, center_bond, parity_bonds,
+                       # models/oat.jl: the x-polarised start is assembled from two
+                       # `product_state`s (same leg spaces under `:none`, so they add tensor by
+                       # tensor) and `S^x_tot` is read out with `site_expval`.
+                       product_state, site_expval,
+                       # models/oat.jl under `:Z2` -- the symmetry arXiv:2208.10972 Fig. 2
+                       # actually uses. The sigma^x basis of `z2_ising.jl` is what makes it work:
+                       # `S^x` is DIAGONAL there (hence measurable) and the x-polarised start is
+                       # a single charge-0 sector. `local_space()` cannot build a Z2 space at
+                       # all, so every Z2 tensor has to come from here.
+                       ising_local_space, ising_polarised_state
 
 include("henv.jl")
 # Multiplet-vs-state accounting. `leg_dim`, `Nkeep`, `maxdim` and every CBE budget count
@@ -107,8 +117,16 @@ include("jan_bug.jl")
 #                              active. The number of vertices is the ONLY thing that differs
 #                              between `:U1` (three) and `:SU2` (one), which is a cost
 #                              difference and not a physics one.
+#   models/oat.jl              the ONE-AXIS TWISTING model of arXiv:2208.10972 Fig. 2, the
+#                              paper's second benchmark. Uniform all-to-all `S^z S^z`, which is
+#                              the `lambda = 1` DEGENERATE case of `long_range_mpo`'s geometric
+#                              self-loop -- so its exact MPO has virtual dimension 3 whatever
+#                              `L` is, against Haldane-Shastry's `O(L)`. Also the initial state
+#                              `⊗|→⟩` and the observable `S^x_tot`, both `:none`-only because
+#                              `S^x` is charge-raising and a U(1) run would report a silent zero.
 include("models/pair_mpo.jl")
 include("models/haldane_shastry.jl")
+include("models/oat.jl")
 
 # The two TDVP integrators live in their own directories. They are FILES of this module, not
 # submodules: both are built on `henv.jl` (environments) and `cbe_core.jl` (the expansion)
@@ -175,7 +193,7 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        sketch_h_left, sketch_h_right,
        sector_graded_sketch, full_local_basis,
        CBEExpansion, cbe_expand,
-       CBEBugInfo, cbe_lubich_sweep, truncate_sweep!,
+       CBEBugInfo, cbe_lubich_sweep, truncate_sweep!, truncate_recursive!,
        CBEBugOptions, CBEBugRunInfo, cbe_lubich_bug!,
        sketch_bond_left, sketch_bond_right, cbe_expand_bond,
        cbe_bond_update, cbe_bond_update_sweep!, cbe_bond_update_bug!,
@@ -194,10 +212,15 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        spin_vertices,
        haldane_shastry_couplings, haldane_shastry_mpo,
        heisenberg_chain_mpo, heisenberg_ring_couplings, heisenberg_ring_mpo,
+       # models/oat.jl -- one-axis twisting (arXiv:2208.10972 Fig. 2). `x_polarized_state`,
+       # `sx_operator`, `sx_profile` and `total_sx` are :none-only BY PHYSICS: S^x is
+       # charge-raising, so a U(1) run reports zero rather than the revival signal.
+       oat_couplings, oat_energy_shift, oat_mpo, oat_mpo_pairs,
+       x_polarized_state, sx_operator, sx_profile, total_sx,
        # sweeps/ -- the structured RSVD-CBE sweeps
        BondExpansionInfo, expand_bond!, lanczos_lowest,
        DMRGCBEInfo, DMRGCBERun, dmrg_cbe1s_sweep!, dmrg_cbe1s!,
-       rsvd_cbe_dmrg1s!, exact_cbe_dmrg1s!,
+       rsvd_cbe_dmrg1s!, exact_cbe_dmrg1s!, rsvd_cbe_dmrg1s_seeded!,
        TDVPCBEInfo, tdvp_cbe1s_step!,
        CBEBugSweepInfo, cbe_bug_step!
 

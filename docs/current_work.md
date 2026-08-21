@@ -1688,3 +1688,482 @@ site-dependent `H` needs a different `MPO` and no change to the sweep. The remai
 long range is an MPO *constructor*: `mpo_from_terms` currently builds only the uniform
 nearest-neighbour automaton. Exponential decay is a one-block change (a `lambda*I` self-loop on
 the open channel); a power law needs a sum-of-exponentials fit.
+
+---
+
+## 2026-08-18 — the rank-adaptive L=16 campaign, and four bugs it surfaced
+
+The campaign was rebuilt around **analytic references only** and around **tolerance-driven rank**
+rather than a pinned `maxdim`; the earlier capped-rank CSV is kept as `*_SUPERSEDED.csv`. What
+follows is what the run measured and what it broke on the way.
+
+### The GSE result
+
+Open Heisenberg chain, L=16, SU(2), against the Bethe reference `-6.91173714557510`:
+
+| sweep | E | err | χ (multiplets) | states | centre bond |
+|---|---|---|---|---|---|
+| 1 | -6.9079430808 | 3.79e-3 | 3 | 8 | 2 |
+| 2 | -6.9117361744 | 9.71e-7 | 10 | 32 | 6 |
+| 3 | -6.9117371456 | 9.31e-12 | 20 | 64 | 20 |
+| 4 | -6.9117371456 | **7.11e-15** | 26 | 80 | 26 |
+
+`dmrg_cbe_exact` reproduces every row (3.55e-15 at sweep 4) with **identical Krylov counts**
+63/172/138/59 ⇒ **the RSVD selection costs nothing in accuracy against the exact selection it
+exists to replace**, and the whole cost difference is the selection step, not the eigensolves.
+At tol 1e-10 the converged rank rises to 36 multiplets / 112 states — tolerance-driven, against a
+256 cap that is never approached.
+
+### ⛔ A per-sweep column must be read from `run.*[sw]`, never from `psi`
+
+`maxbond_states`, `centrebond` and `elapsed` were read off the FINAL `psi` after the sweep loop
+and stamped onto every row, so they printed flat `80 / 26 / 409` beside a `maxbond` that was
+visibly growing 3→26. In the figure that is precisely the "all the ranks are fixed" artefact the
+campaign was rebuilt to remove. `DMRGCBERun` now carries `state_bond_dims`,
+`max_state_bond_dims` and `sweep_seconds`; `elapsed` is their cumulative sum, so the column reads
+as "cost to reach THIS accuracy". ITE/RTE/dtscan were always correct — they read `psi` at the
+moment the row is written; only GSE replays a history afterwards.
+
+### ⛔ `pair_mpo` severed the `id` channel on disconnected coupling graphs
+
+`id -> id` was guarded by `!isempty(cur)` — "is any channel open on THIS link". Wrong question: a
+term opening at a LATER site still needs `id` to reach it. On a coupling graph disconnected
+across an interior bond the guard dropped the block, column 1 of the automaton went entirely
+`nothing`, and `oplus` had no source for its outgoing space:
+
+    cannot infer zero TLArray at (1, 1): missing space information on leg 4
+
+(leg 1 when row 1 empties too — one cause, two messages). The fix is `i < L &&`, exactly what the
+already-validated `mpo_from_terms` uses; carrying `id` where no term follows costs one virtual
+dimension and changes no matrix element, because `id` can only be left via an opening. It is a
+**no-op on every connected coupling** — for nearest neighbour and Haldane-Shastry, `alive(i)` is
+non-empty for all `i < L` and empty at `i = L`, so both guards select identically, which is why
+the entire suite passed with the bug in place.
+
+`B3. DISCONNECTED coupling graphs` in `tests/sweeps/test_pair_mpo.jl` covers five patterns, each
+against the dense pair sum rather than merely asserted to build. The virtual dimensions are the
+structural evidence:
+
+| coupling | w |
+|---|---|
+| nn (connected, control) | `[1, 5, 5, 5, 5, 5, 1]` |
+| split 1:3 \| 4:6 | `[1, 5, 5, 2, 5, 5, 1]`  ← 2 at the dead link |
+| all-zero J | `[1, 2, 2, 2, 2, 2, 1]` |
+| only J[1,2] | `[1, 5, 2, 2, 2, 2, 1]` |
+| only J[L-1,L] | `[1, 2, 2, 2, 2, 5, 1]` |
+
+`w = 2` on exactly the dead links — the surviving pair being `id` and `done`, which is what must
+persist to carry the automaton across a bond no term spans.
+
+### Two silent-failure traps in the plotting
+
+* The glob was `cbe_sweeps_l16_T5.0*.csv`, but ITE runs to `beta = 20` and so writes `T20.0` —
+  the whole ITE panel would have been dropped with no error. An empty subplot reads as "the run
+  failed", not "the file was never opened". Now `T*`.
+* `fig.suptitle` neither wraps nor shrinks, and `tight_layout` reserves no room for it, so a long
+  caption is clipped at both ends in the saved PNG while looking fine in the source. Figures are
+  5.4 in wide whenever a phase has one model, which is the common case. `_suptitle` wraps to the
+  figure's own width (~131/fontsize characters per inch — 190 still clipped) and reserves a top
+  margin scaled to the resulting line count.
+
+### Operational
+
+`local = small sizes only` still holds and there is **no slurm on the laptop**, so
+`submit_cbe_sweeps_l16.slurm` can only go in from the cluster; the local route is a strictly
+serial `gse -> rte -> ite -> plots`. Running a second Julia job beside a timing run does corrupt
+`elapsed` — one RSVD sweep read 94.5 s against the exact arm's 2.87 s for identical work (same
+135 Krylov applications, same rank). Accuracy and rank columns are immune to contention; wall
+clock has to come off the cluster.
+
+⚠ Julia BLOCK-BUFFERS stdout to a file, and a suite wrapped in one top-level `@testset` emits
+nothing until it finishes — 80 minutes of a zero-byte log with no way to tell slow from hung.
+Every diagnostic print needs `flush(stdout)`, and long suites should be included file by file
+with per-file timing.
+
+## 2026-08-18 (later) — the Haldane-Shastry `S(k,ω)` arm, and a phase bug that hides in plain sight
+
+The HS real-time arm was **stopped as degenerate**, not merely slow. `S^z_{j0}|0⟩` at L=16 starts
+with a centre bond of **247 against a 256 cap**, i.e. essentially full rank before the first step,
+so nothing is ever truncated and the arm's only grade — energy conservation — is satisfied by
+construction (measured 2.66e-15). A test that cannot fail is not evidence. Salvaged from the ~5.5 h
+it cost: the HS ground state matches the closed form `−π²(L²+5)/(24L)` to **2.22e-14** at L=16,
+which validates `pair_mpo`'s long-range path, the U(1) mode and DMRG-CBE together.
+
+The replacement grades against the Li et al. (arXiv:2208.10972) Fig. 3 observable, which is *not*
+conserved and therefore does discriminate:
+
+    C(d, t) = e^{i E₀ t} ⟨0| S^z_{j0+d} e^{-iHt} S^z_{j0} |0⟩
+    S(k, ω) = Σ_d ∫ dt e^{i(ωt − kd)} C(d, t) W(t)
+
+`benchmarks/hs_structure_factor.jl` + `run_hs_structure_factor.jl` + `plot_hs_skw.py`. No ED and no
+sparse propagation anywhere: the finite-L checks are **sum rules and symmetry identities**, exact at
+any L and free.
+
+### ⛔ The bug: the spatial transform never re-centred on `j0`
+
+`sz_correlation` returned `C` indexed by SITE (`x = 1:L`) while `structure_factor` transformed with
+`e^{-ik(x-1)}`. The true correlator is a function of the displacement `d = x − j0`, so what came out
+was
+
+    C_k(t) = e^{-ik(j0-1)} · (the correct transform)
+
+a constant complex phase. **It is time-independent, which is exactly what makes it invisible.** No
+single-time diagnostic can see it; the equal-time correlator is still real, the on-site value is
+still ¼, the state is still normalised. But `structure_factor` closes with `2·real(...)` — legitimate
+only because `C_k(−t) = conj(C_k(t))` — and a constant phase rotates the series so that `real` returns
+a *mixture* of the true real and imaginary parts. `S(k,ω)` comes out neither positive nor
+band-limited, and the failure presents as a broken integrator rather than a mislabelled axis.
+
+Fixed by re-centring at the source: `C[d+1, n]` for `d = 0:L-1` with `x = mod1(j0+d, L)`. Doing it
+there rather than in the transform keeps `j0` out of `structure_factor`'s signature and leaves the
+row index meaning exactly one thing. Two further corrections in the same pass:
+
+* **the sum rule was missing its `2π`.** `S` is the plain `∫dt`, so the identity is
+  `Σ_k ∫dω S(k,ω) / (2π L) = ⟨(S^z)²⟩ = ¼`. Without the `2π` the check reports `1.571` against a
+  target of `0.25` and reads as a broken normalisation in the integrator. (The Hann window does not
+  spoil it: `w(0) = 1`, and the `dω` integral of the smeared spectrum returns `w(0)·C_k(0)`.)
+* **the ring reflection `C(−d,t) = C(d,t)` was documented and relied on but never measured.** The
+  one-sided `2 Re` time integral is only valid because of it. It is now checked, and it is also the
+  sharpest available test of the re-centring — a mislabelled first index breaks the pairing at once.
+  ⚠ This rests on the ring; on an OPEN chain the shortcut is wrong. HS is the only ring here.
+
+The five identities are now **enforced** (`error()`), and enforced *after* the CSV is written — a
+violation is a pipeline bug, so the run must not pass quietly, but the data is what makes it
+diagnosable. `negw` gets the loose tolerance (5e-2) because a finite windowed record genuinely leaks
+a little weight below ω=0; the other four are algebraic and hold to roundoff.
+
+`sz_correlation` also builds its `L` bras **once** instead of per time step. `apply_sz!` runs two
+full `canonical!` sweeps and `psi0` never changes, so the old loop paid `L·nt` canonicalisations for
+`L` distinct states. `overlap` retags an internal copy rather than mutating the bra, so reuse is safe.
+
+**Convention check, since the band overlay depends on it.** `haldane_shastry_couplings` builds
+`J_ij = J π² / (L² sin²(π(i−j)/L))` — the genuine chord form, normalised so the nearest-neighbour
+coupling → 1 as L → ∞. That is the convention whose spinon dispersion is `ε(p) = ½p(π−p)`, hence
+`ω₋ = k(π−k)/2` and `ω₊ = k(2π−k)/4`; the ground-state match to 2.22e-14 corroborates it. The two
+curves bound the SAME two-spinon continuum (one spinon carrying all of `k`, versus two sharing it)
+— labelling them "one spinon" and "two spinons" as if they were separate branches was wrong and is
+fixed in the plot legend.
+
+### L=16 ITE, β=20 — both BUG orderings
+
+| scheme | E(β=20) | err vs Bethe | χ | krylov |
+|---|---|---|---|---|
+| bug_decoupled | −6.9116773060 | 5.983956e-05 | 64 | 67,240 |
+| bug_interleaved | −6.9116772960 | 5.984953e-05 | 64 | 67,240 |
+
+The orderings **reconverge to 1e-9 in the energy** by β=20 despite diverging transiently while the
+rank grows (2.4e-4 apart at β=0.5, 1.7e-5 by β=3.25) — so the earlier "identical on open chains"
+claim was too strong, and "identical once converged" is the accurate one. Rank plateaus at 64 from
+β≈12 against a 256 cap, i.e. tolerance-driven. ⚠ ITE lands **eleven orders short of DMRG-CBE's
+7.11e-15**; the arm demonstrates integrator correctness, not that imaginary time competes for
+ground states.
+
+### Sparse dependency removed from the campaign driver
+
+Per the directive that exactly solvable models are graded analytically, `cbe_sweeps_l16.jl` no
+longer includes `exact_sparse.jl` or `dense_reference.jl` and no longer imports `SparseArrays`.
+`model()` returns the MPO alone; it used to return `(mpo, coupling_matrix)` and all three call sites
+wrote `mpo, _ = model(...)`, computing `hs_coupling_matrix(L)` only to discard it — which was the
+sole remaining reason the sparse file was included. The RTE console summary also printed `err=NaN`
+on every row because it recomputed an energy error, meaningless in real time; it now reports the
+metric the CSV already holds.
+
+⚠ **`tests/runtests.jl`'s `include("common/test_exact_sparse.jl")` is NOT dead and must stay.**
+`benchmarks/exact_sparse.jl` is still used by `l18_matrix.jl`, `validate_analytic_ref.jl`,
+`examples/heisenberg_domain_wall.jl` and two files in `scripts/`, and the test guards a real past
+bug — a one-shot `expv_sparse` that was silently wrong for `|t|·‖H‖ ≫ m`, returning a smooth,
+correctly antisymmetric, confidently wrong vector. It is L=8 (a 70×70 dense exponential), i.e.
+cheap; the 20 minutes once observed were JIT plus machine contention, not the test.
+
+### HS `S(k,ω)` — the gate PASSES, L=8, T=32, `bug_decoupled`
+
+Ground state −3.546889081641 against the closed form −3.546889081641, **4.00e-15**, χ=16 (full rank
+at L=8). 640 steps of dt=0.05, correlator built in 503 s. All six identities:
+
+| identity | measured | target |
+|---|---|---|
+| `max\|Im C(d,0)\|` | 3.514e-17 | 0 |
+| `C(0,0) = ⟨(S^z)²⟩` | 0.250000 | 0.25 |
+| total weight `Σ S dω / (2π L)` | 0.250002 | 0.25 |
+| `max\|S(k,ω<0)\| / max\|S\|` | 1.183e-03 | 0 |
+| ring reflection `\|C(d) − C(−d)\|` | 1.886e-14 | 0 |
+| `k=0` channel `max_t \|Σ_d C\|` | 2.013e-16 | 0 |
+
+The weight landing on 0.250002 rather than 1.571 confirms the `2π`; the `k=0` channel at 2.013e-16
+confirms the re-centring and the `mod1` ring wrap, and is the identity the phase bug would have
+violated most loudly. `negw = 1.18e-03` is finite-window leakage — three orders under the enforced
+threshold, and visible in the figure as faint sub-zero fringes beside the strong peak.
+
+**The physics matches Li Fig. 3 structurally, which is the only claim available at L=8.** The
+`k=0` column is exactly black (`S^z_tot|0⟩ = 0`), the spectrum is symmetric about `k=π`, the weight
+sits inside `[ω₋, ω₊]`, and at `k=π` the cut is TWO peaks — ω≈0.6 carrying S≈23 and ω≈2.15 carrying
+S≈3.4 — both strictly inside `[0, 2.47]` with the dominant weight at the LOWER edge. That is the
+finite-ring signature of the square-root edge divergence: at L=8 the exact spectrum is a handful of
+deltas, not a continuum, so a small number of peaks piled low is exactly right and a smooth band
+would have been wrong.
+
+⚠ **L=8 is the correctness gate, NOT the paper comparison.** The identities are exact at any L and
+fully decide the pipeline, but eight ring momenta cannot be held against a thermodynamic-limit
+figure. `benchmarks/submit_hs_structure_factor.slurm` runs L ∈ {8, 12, 16} on the cluster (L=8
+duplicated deliberately, as the cheap task that proves the environment reproduces the gate before
+the expensive ones are believed). Budget for it: `S^z_{j0}|0⟩` is near full rank from the first
+step, so nothing truncates and L=16 is hours, not minutes.
+
+Two figure fixes worth keeping: the ω axis is cropped to `1.45 × max(ω₊)` (the default `wmax = 6`
+left more than half the frame empty and squashed the band into the bottom third, while the
+negative-ω strip is KEPT because its emptiness is part of the assertion), and `k` is ticked in
+units of π so the zone boundary is findable. The two band curves were also relabelled: they bound
+the SAME two-spinon continuum, and calling them "one spinon" and "two spinons" implied two separate
+branches.
+
+⚠ **A test file under `tests/sweeps/` cannot be run standalone**, and the way it fails is
+misleading. Those files carry no `using` block — `tests/sweeps/runtests.jl` supplies the imports and
+the two reference includes. Running one with a bare `using Test` reports `8 errored / 8 total` in
+3.4 s having evaluated ZERO assertions, which reads as eight broken tests and is one missing import.
+
+### ⛔ RETRACTION: the L=16 ITE `elapsed` column is contaminated, and it was my doing
+
+The ITE run carries an internal control that condemns its own wall-clock column. The two CBE-BUG
+orderings do IDENTICAL work — same Krylov count to the digit, same rank, same energy to 1e-9:
+
+| scheme | β | err | χ | krylov | elapsed |
+|---|---|---|---|---|---|
+| bug_decoupled | 5 | 3.686718e-02 | 49 | 41,500 | 581 s |
+| bug_interleaved | 5 | 3.687275e-02 | 49 | 41,500 | 595 s |
+| bug_decoupled | 20 | 5.983956e-05 | 64 | 168,100 | 2307 s |
+| bug_interleaved | 20 | 5.984953e-05 | 64 | 168,100 | **4358 s** |
+
+At β=5 the two wall clocks agree to **2.4 %**. At β=20 they differ by **89 %** on identical work.
+Identical work cannot take 1.9× longer for an algorithmic reason. The cause is that the HS
+structure-factor job, `test_pair_mpo.jl` and `test_symmetric_mps.jl` were run CONCURRENTLY with a
+timing campaign — the precise thing this document already warned against, with a previously
+measured instance of one sweep reading 94.5 s against 2.87 s for identical work. The β=5 rows
+predate those jobs; the β=20 rows overlap them.
+
+⇒ **Every `elapsed` number in `cbe_sweeps_l16_T20.0_ite_*.csv` is void.** Accuracy, rank, and
+operator-application columns are immune and stand. Wall clock must come from
+`submit_cbe_sweeps_l16.slurm`, which already isolates one scheme per array task for this reason.
+The rule is not "avoid contention when convenient" — a contaminated timing column is worse than a
+missing one, because it looks like data.
+
+**What the contention-immune columns actually say.** Operator applications, L=16 ITE:
+
+| comparison | ratio |
+|---|---|
+| CBE-BUG 83,700 vs tdvp2 347,703 (β=10) | **4.15× fewer** |
+| CBE-BUG 168,100 vs tdvp_cbe1s 572,205 (β=20) | **3.40× fewer** |
+| tdvp_cbe1s 285,005 vs tdvp2 347,703 (β=10) | **82 %**, i.e. 1.22× fewer |
+
+That last row is the cleanest validation of the CBE machinery in the whole campaign:
+`tdvp_cbe1s` and `tdvp2` agree to EVERY PRINTED DIGIT (4.730600e-03 at χ=52 for β=10, 3.706010e-02
+at χ=44 for β=5) while measurably doing less work. The 1-site-plus-expansion subspace is
+reproducing the 2-site subspace faithfully — exactly the claim of arXiv:2208.10972 — and it is
+demonstrated here against an analytic reference rather than against a 2-site run alone.
+
+⚠ And a second correction to an earlier claim: **CBE-BUG is not more rank-efficient than TDVP-CBE.**
+At β=20, `tdvp_cbe1s` reached 6.018194e-05 at χ=**56** against CBE-BUG's 5.983956e-05 at χ=**64** —
+the same accuracy at eight FEWER states. Combined with the fixed-rank finding that every integrator
+shares one error floor, CBE-BUG's case rests on operator applications alone: not accuracy at fixed
+rank, and not rank at fixed accuracy.
+
+### OBSERVATION: in this arm the tighter cutoff bought rank but not accuracy
+
+`bug_decoupled`, L=16 ITE, tol 1e-08 against tol 1e-10, both vs Bethe:
+
+| β | tol 1e-08 | tol 1e-10 | ratio | rank |
+|---|---|---|---|---|
+| 5 | 3.686718e-02 | 3.701209e-02 | 1.00393 | 49 → 81 |
+| 10 | 4.704216e-03 | 4.723985e-03 | 1.00420 | 61 → 94 |
+| 15 | 5.350048e-04 | 5.372936e-04 | 1.00428 | 64 → 94 |
+| 20 | 5.983956e-05 | 6.009611e-05 | 1.00429 | 64 → 94 |
+
+The tighter tolerance is **worse at every β**, at ~47 % more rank. ⚠ This is NOT noise: the ratio is
+stable to three digits across four decades of error and converging to ≈1.0043, and noise would
+change sign. The arm is **β-limited, not rank-limited** — the error measures how far imaginary time
+still is from the ground state, and keeping more Schmidt states does not advance β.
+
+A plausible mechanism, offered as a HYPOTHESIS and not as a result: imaginary time is a filter that
+suppresses excited-state contamination, and truncation is a second filter acting the same way. A
+looser cutoff discards more of precisely the small-weight, high-energy components that ITE is itself
+removing, so it helps slightly at finite β. Both arms must reach the same β→∞ limit, so the penalty
+has to vanish eventually; confirming that means pushing β well past 20 and has not been done.
+
+⇒ **The two curves lie on top of each other at visibly different ranks.** Unexplained, that reads as
+the cutoff parameter being ignored. It is the same phenomenon already measured in the RTE scan
+(rank 33→52, errors differing in the 5th digit) and it is the reason the figures now draw coincident
+curves NESTED rather than overpainted.
+
+### `test_sweeps.jl` 93/93, after a real pre-existing bug
+
+Was 87 passed / 1 errored. The `truncate_recursive! is LOSSLESS` testset loops over `(:U1, :SU2)`
+but called `dense_state`, which builds its basis from `product_state` — and `:SU2` REFUSES that by
+construction, since a definite-Sz product state is not a total-spin eigenstate. The U(1) half passed
+its six assertions and the SU(2) half threw before reaching one. (`test_pair_mpo.jl` documents the
+same trap in its header and works around it; this test did not.) The previous 52-minute run never
+reported at all, which is why the failure had never been seen.
+
+Replaced with a normalised-overlap ray test: losslessness means the truncated state is the SAME RAY,
+and `|<psi0|psi>| / (||psi0|| ||psi||) == 1` says exactly that. Cauchy-Schwarz makes it an EQUALITY
+test rather than a bound — it can only reach 1 if the states are parallel — it holds in every
+symmetry mode, needs no 2^L amplitudes, and removes another dense dependency. A separate norm check
+keeps the scale under test, so this is not merely a direction check. The count rose 88 → 93 because
+the SU(2) iteration now actually reaches its assertions.
+
+Also confirmed by this suite: `no method ambiguities in the module` (7 assertions — the dispatch fix
+holds), and `at fixed rank the error is set by the RANK, not by dt`, which printed all four
+integrators landing on **4.0425e-06** at L=8/χ=8 across three dt values, agreeing to six digits.
+That is the one-error-floor result reproduced inside the test suite rather than only in the campaign.
+
+### jan-BUG excluded from the figures
+
+By request. Done as a PRESENTATION FILTER (`DROP_SCHEMES` in `plot_cbe_sweeps_l16.py`) applied once
+at load, not by deleting rows or code: the CSVs and the scheme implementation are untouched, so
+nothing measured is lost and re-including it is a one-line edit. The exclusion prints its count
+(80 rows: `jan_bug/rte`, `jan_bug_centre/rte`) rather than dropping them silently — a scheme
+vanishing from a figure with no trace in the log is indistinguishable from a run that never happened.
+
+### OBSERVATION: the RTE and ITE arms do not tell the same story about cost
+
+Recorded together, because quoting either half alone would mislead. These are measurements from a
+single L=16 run at tol 1e-08, not a settled conclusion about the methods:
+
+**Real time (XX chain, free-fermion reference, t=5):**
+
+| scheme | err | χ | krylov |
+|---|---|---|---|
+| bug_decoupled | 8.788593e-05 | 33 | 34,918 |
+| tdvp_cbe1s | 2.186973e-05 | 31 | 105,575 |
+| tdvp2 | 1.878791e-05 | 31 | 159,148 |
+
+CBE-BUG is **4.68× LESS ACCURATE** than 2-site TDVP, at 4.56× fewer applications and *slightly more*
+rank (33 vs 31). ⛔ "4.5× cheaper" is NOT a defensible reading of this: it compares at matched
+TOLERANCE while the accuracies differ fivefold, which is not a cost comparison. To make a cost claim
+in real time the arms must first be brought to matched accuracy — CBE-BUG would need a smaller `dt`,
+and its application count would rise accordingly.
+
+**Imaginary time (Heisenberg chain, Bethe reference, β=20):**
+
+| scheme | err | χ | krylov |
+|---|---|---|---|
+| bug_decoupled | 5.983956e-05 | 64 | 168,100 |
+| tdvp_cbe1s | 6.018194e-05 | 56 | 572,205 |
+| tdvp2 | 6.018194e-05 | 56 | 695,703 |
+
+Here the accuracies MATCH to 0.6 %, so 4.14× fewer applications IS a like-for-like win — with the
+caveat that it costs 8 extra states.
+
+⇒ What can be said from these two runs, and no more: in the ITE arm the accuracies happened to
+match, and there CBE-BUG used about a quarter of the operator applications; in the RTE arm they did
+not match, so no cost statement is available from it without first equalising accuracy. Whether
+either pattern survives other models, other L, or other dt is untested.
+
+Two further readings from the same table. The tolerance again buys rank rather than accuracy
+(1e-10 moves the RTE error 8.789e-05 → 8.778e-05 while rank goes 33 → 52), matching the ITE finding.
+And `jan_bug` (3.76e-02) and `jan_bug_centre` (8.01e-01) sit three and five orders above everything
+else, which independently supports their exclusion from the figures.
+
+### Two more figure defects fixed
+
+The RTE figure carried an **empty Haldane-Shastry column** — one stale row at t=0.25 from the arm
+stopped as degenerate, drawing axes and a legend with no curve. That is the "empty subplot reads as
+a failed run" trap this document already warns about, so `(rte, hs)` is now an explicitly documented
+`DROP_ARMS` entry rather than a silent gap; HS real time is reported by `hs_skw_*.png` instead.
+And subplot titles are now wrapped: matplotlib does not shrink or wrap them either, so at 5.4 in the
+caveat that makes a panel readable ("-- drift is error") was the half falling off the edge.
+
+## 2026-08-19 — the tolerance ladder was measuring the wrong thing, in two places at once
+
+### OBSERVATION: the ITE error at β=20 is β-limited, so the cutoff never entered the picture
+
+The L=16 ITE arm was run at cutoffs 1e-8 and 1e-10 and the two produced the same answer. The reason
+is not that the integrators agree — it is that **neither cutoff was the binding constraint.** The
+tail decay rate, measured over the last three intervals for every scheme at both cutoffs:
+
+| scheme | tol=1e-08 | tol=1e-10 | err(β=20) | χ (states) |
+|---|---|---|---|---|
+| bug_interleaved | 0.4384 | 0.4384 | 5.985e-05 / 6.009e-05 | 64 / 94 |
+| tdvp_cbe1s | 0.4384 | 0.4384 | 6.018e-05 / 6.018e-05 | 56 / 92 |
+| tdvp2 | 0.4384 | 0.4384 | 6.018e-05 / 6.018e-05 | 56 / 92 |
+
+Identical to four digits, constant across intervals, **not flattening**. The error is residual
+excited-state contamination from the Néel start, `0.385·exp(-0.4384·β)`. At β=20 that is ~6000×
+above the 1e-8 cutoff; extrapolating the fit, 1e-8 would not bind until β≈40 and 1e-10 until β≈50.
+The run stopped at less than half the β either tolerance needs.
+
+This **corrects an earlier entry in this document**, which recorded that the tighter cutoff was
+consistently ~0.4% worse and hypothesised that truncation was acting as a second excited-state
+filter. It is not: the decay *rates* are identical to four digits and only the prefactor shifts. A
+filter would have changed the rate. What the ladder actually shows is that tol=1e-10 costs ~47%
+more rank and buys nothing — on this run 1e-8 strictly dominates.
+
+### The consequence that matters: it was also hiding the integrator comparison
+
+Re-running at cutoffs that **straddle** the 6e-5 floor puts the run back in the truncation-limited
+regime, and the schemes separate for the first time on this arm:
+
+| cutoff | bug_interleaved | tdvp_cbe1s | tdvp2 | note |
+|---|---|---|---|---|
+| 1e-3 | 1.600e-03 (bd=8) | 2.830e-03 (bd=8) | 2.830e-03 (bd=8) | **matched rank**, CBE-BUG 1.77× better |
+| 1e-4 | 7.200e-05 (bd=16) | 1.197e-04 (bd=12) | 1.197e-04 (bd=12) | not matched rank |
+| 1e-5 | 5.989e-05 (bd=20) | 6.056e-05 (bd=20) | 6.056e-05 (bd=20) | back on the β curve |
+| 1e-8 / 1e-10 | 5.985e-05 / 6.009e-05 | 6.018e-05 | 6.018e-05 | β-limited, all schemes coincide |
+
+Only the 1e-3 row is like-for-like (all three at bd=8). The crossover sits between 1e-4 and 1e-5,
+exactly where the fitted floor predicts. **At 1e-8/1e-10 the arm cannot distinguish the
+integrators at all** — that is a property of the measurement, not of the integrators.
+`CUTOFFS` is now `ARGS[7]` with the ladder in the filename, so neither variant needs a source edit.
+
+### OBSERVATION: `comp_ratio` is inert here, and the reason is in our own sketch
+
+Scanned at six values (0, 0.25, 0.5, 0.75, 1.0, `nothing`) × two arms × three rank regimes:
+
+| maxdim | result |
+|---|---|
+| 256 (never binds, χ=26) | spread 1.00× per sweep; finals 5.3e-15..2.0e-14, i.e. roundoff |
+| 12 (binds, 38 states) | err 1.189e-10 for all six, krylov 60 |
+| 8 (binds hard, 22 states) | **bit-identical** err *and* krylov (270 / 490) |
+
+It is genuinely plumbed through — at maxdim=256 sweep 3 shows a monotone trend across the values,
+and at maxdim=12 the seeded arm's krylov wobbles by 1 — it simply changes nothing. The likely cause
+is `sector_graded_sketch`'s **shortfall redistribution** (`cbe_core.jl:265-281`), which keeps the
+probe `npre` wide however the split is set. That was added to fix edge blockage (at
+`comp_ratio=1.0, dex=64` the probe used to collapse to 0-1 columns near a chain edge and freeze the
+staircase), and removing the `comp_ratio` sensitivity is a side effect. **maxdim=8 is the opposite
+failure to full rank**: the cap binds at every bond, so `expand_bond!` cannot expand and the
+parameter is never consulted — which is what bit-identical krylov counts mean.
+
+### OBSERVATION: the seeded eigensolve does not reduce sweeps on this problem
+
+`rsvd_cbe_dmrg1s_seeded!` starts Lanczos from `v + η·P⊥(Hv)` instead of the zero-padded tensor.
+The variational bound holds (L=8: `min(E) - E_Bethe` = +8.9e-16 and +2.7e-15), so the
+implementation is sound. But at L=16 all three GSE arms take **4 sweeps with identical errors**
+(3.794e-03, 9.712e-07, 9.30e-12), and the seeded arm costs **1444 applications against 432 — 3.3×**.
+Its Krylov depth *rises* with sweep (93→305→515→531) while the default's falls (63→172→138→59):
+the seed re-perturbs every solve, so it never gets the cheap exit a converged solve would take.
+The docstring's "one extra application per solve" understates this — the effect compounds with rank.
+
+Combined with the `comp_ratio` null result, there is currently no measured advantage for the seed
+on this problem. That is a statement about this model and this sketch, not a general one.
+
+### Five bugs, all of the silent-failure kind
+
+1. **`gse_comp_ratio_scan.jl` had never run.** `bethe_xxx_open_energy` returns
+   `(energy, lambdas, residual)`; the script bound the whole tuple to `eref` and died on its first
+   `@printf`. Now `eref, _, eres` with the residual asserted, matching `ground_reference`.
+2. **`krylov` is PER-SWEEP, not cumulative** — 63, 172, 138, **59**; it *decreases* as solves
+   converge. Both GSE plot scripts were plotting error against it directly, which draws a zig-zag
+   on a non-monotonic axis that looks like a curve. They now accumulate.
+3. **The comp_ratio CSVs had no `maxdim` column** while the plot globbed all of them, so three
+   different experiments would have merged into one curve. Now a column, faceted per cap, with a
+   `_chiNN` filename fallback for the older files.
+4. **A ratio test reported "spread 2.83×" on pure roundoff.** Guarded: any arm whose worst error is
+   below 1e-12 is flat by definition, whatever the ratio says.
+5. **`⚠` in a `print` crashed on the cp1252 Windows console** — *after* the figure was written, so
+   the run looked successful while losing the one line saying the result was null. Console output
+   is ASCII now.
+
+Plus a sixth of the same family, fixed in the loader rather than the data: `tdvp2` at cutoff 1e-5
+was killed at step 17 of 80 and rerun into its own CSV, and the figures are of the UNION of every
+matching file — so a truncated series would have been drawn over the complete one in the same
+colour, reading as an integrator that stopped early. `_dedupe_arms` keeps the longest series per
+`(suite, scheme, model, sym, cutoff, dt)` and prints what it ignored.

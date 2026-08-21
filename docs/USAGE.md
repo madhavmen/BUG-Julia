@@ -163,6 +163,95 @@ blocks are therefore built directly via `Telum._localspace_cgt_fields`. Every su
 tests fail loudly if the private contract changes. If LurCGT ever grows a `Z{N}`-aware
 `getweight_irop`, delete `_z2_local_space` and call `getLocalSpace` — nothing else changes.
 
+## 3c. One-axis twisting — the arXiv:2208.10972 Fig. 2 benchmark
+
+```julia
+set_symmetry!(:Z2)                         # the paper's own symmetry -- see below
+psi = x_polarized_state(10)                # |Psi(0)> = (x)|->, ONE sector, bond dims all 1
+mpo = oat_mpo(10)                          # H = sum_{l<l'} Sz_l Sz_l'
+for k in 1:251
+    tdvp_cbe1s_step!(psi, mpo, -im * 0.05; maxdim = 16, trunc_thresh = 1e-14)
+end
+total_sx(copy(psi))                        # the observable: S^x_tot(t)
+```
+
+`H_OAT = (Σ_ℓ S^z_ℓ)²/2`. Expanding the square and using `(S^z)² = I/4` exactly on spin-½ gives
+`Σ_{ℓ<ℓ'} S^z_ℓ S^z_ℓ' + (L/8)·I` — a **uniform all-to-all Ising coupling** plus a c-number.
+`oat_mpo` builds the first part; `oat_energy_shift(L)` is the second, which is a global phase and
+cancels from every expectation value and from `δE(t) = E(t) − E(0)`.
+
+**Under `:none` the MPO has virtual dimension 3 for every `L`, and it is exact.** A constant
+coupling is the `λ = 1` degenerate case of the geometric tail that `long_range_mpo` carries on one
+self-loop channel — there is no fit and nothing truncated. Contrast Haldane-Shastry, whose `1/sin²`
+has no finite-dimensional MPO and costs `O(L)` through `pair_mpo` to stay exact. `oat_mpo_pairs`
+builds the same operator the `O(L)` way; `test_oat.jl` pins the two against each other, which is
+the only test in the suite that exercises `λ = 1` at all.
+
+**`:Z2` is the paper's own choice**, stated in the Fig. 2 caption: *"computed using δ=0.01 and Z2
+spin symmetry"*. The conserved quantity is **not** `S^z_tot` — it is the global spin flip
+`P = Π_ℓ 2 S^x_ℓ`, because `H_OAT` is *even* in `S^z`. In the σˣ basis of `z2_ising.jl` that flip
+is diagonal, and the whole difficulty inverts: `S^x` becomes the diagonal, charge-neutral operator
+(so it can be measured at all) and `⊗|→⟩` becomes a single charge-0 sector at `χ = 1` — the paper's
+"an MPS with `D = 1`", literally.
+
+⚠️ **`:Z2` costs `O(L)` virtual dimension, not 3, and that is structural.** In the σˣ basis `S^z`
+is the charge-1 *flip*, hence rank 3, so its channel needs a charged transport block.
+`long_range_mpo` refuses rank-3 terms outright (a self-loop cannot carry a charged channel), so
+`:Z2` routes through `pair_mpo`, which builds charged transport. Exact either way; at `L = 10` the
+cost is nothing, and at the paper's `L = 100` the symmetry is why they could run it at all. One
+consequence worth knowing: under `:Z2`, `oat_mpo` *is* `oat_mpo_pairs`, so comparing them there is
+a tautology rather than a cross-check.
+
+⚠️ **The Z2 pair term is an adjoint pair `Z`/`Z'`, never `Z`/`Z`.** This is the same convention
+`XXZTerm` documents for `Sp`/`Sp'`, and getting it wrong fails in a thoroughly misleading way: an
+op leg is created with direction `'-'`, so `Z`/`Z` gives the opening block's outgoing virtual leg
+and the closing block's incoming one the *same* direction, Telum refuses to contract two `'-'`
+legs, and the symptom is `_charged_transport` reporting that no transport block satisfies its three
+tests. That reads like a missing mod-2 capability and is actually a malformed vertex — the mod-2
+charge itself is fine (`1 + 1 = 0`, so the flip is its own partner, where U(1) needs `+2` and `-2`).
+
+**`:U1` is refused, and the reason is physics, not convenience.** `H_OAT` conserves `S^z_tot`, so
+the *operator* is fine there — but the *initial state* `⊗|→⟩` has weight in every total-`S^z`
+sector, and the *observable* `S^x_tot` is charge-raising. On a `SymMPS` of definite total charge
+`⟨S^x_tot⟩` is not small, it is **exactly zero by symmetry**: a U(1) run returns a clean flat line
+instead of the collapse-and-revival signal. `x_polarized_state` and `sx_operator` therefore throw
+outside `:none`/`:Z2` rather than return it.
+
+**`:none` is the dense control**, in the σᶻ basis. It is a *different basis* for the same physics,
+so every observable must agree with `:Z2` digit for digit — measured over a 40-step run at
+`maxdim = 6`, `max|Z2 − none|` on `S^x_tot(t)` is `1.6e-12` (`tdvp_cbe1s`), `5.4e-13` (`tdvp2`),
+`1.5e-13` (`cbe_bug`), with `E(0)`, `S^x_tot(0)` and the norm bit-identical. `test_oat.jl` asserts
+it, and it is the only check that would catch a wrong dualisation in the Z2 term.
+
+**Everything about this benchmark is closed form**, which is why it is the sharpest test here.
+`H` is diagonal in the computational basis, so `tests/common/analytic_reference.jl` supplies
+
+| reference | what it gives |
+|---|---|
+| `oat_total_sx(L, t)` | `(L/2)cos^{L-1}(t/2)` — the paper's Fig. 2(a) curve |
+| `oat_schmidt_values(L, n, t)` | the exact Schmidt spectrum across the cut after site `n` |
+| `oat_entropy(L, n, t)` | exact von Neumann entropy (natural log, the paper's base) |
+| `oat_rank(L, n, t)` | the exact bond dimension |
+
+No diagonalisation and no propagation anywhere — these are formulas, and they share no code with
+`src/`.
+
+⚠️ **The rank ceiling is hard, and it sets every sensible `maxdim`.** The only entangling factor
+is `exp(-i t a b)` in the two block magnetisations `a`, `b`, so the exact Schmidt rank across the
+cut after site `n` is `min(n, L−n) + 1` **for all time** — 6 at the centre for `L = 10`, and it is
+*saturated*. So `maxdim ≥ 6` is full rank (where a projector-splitting sweep is exact and the only
+error left is the Krylov tolerance) and `maxdim < 6` is a genuine truncation. A run reporting
+`D > 6` at `L = 10` is reporting noise, not physics. Choose caps on both sides of it or the
+comparison measures only one regime.
+
+The revival period is `4π`; `t = 2π` is the *negative* revival (`S^x_tot = −L/2`, and the state is
+a product state again there, rank 1). The paper's `t = 12π` is three cycles.
+
+```
+julia --project=. benchmarks/oat_l10.jl 10 0.05 12.566 all 2,3,4,6,16
+python3 benchmarks/plot_oat.py
+```
+
 ## 3a. The TDVP integrators, and where they live
 
 Beside the two BUG paths there are two TDVP integrators, each in its own directory under
@@ -294,9 +383,112 @@ the expansion — do not add seeding. The proof the growth is not seed-driven: i
 then `maxdim`, `growth` and `trunc_thresh` changed nothing and any comparison across them is
 measuring noise. This has produced several wrong conclusions in this repo — check it first.
 
+## 6b. `cbe_bug`'s basis update discards CBE's expansion — fixed by `kaug`, now the default
+
+**The half-sweep basis update *replaces* the frame CBE just built instead of *adding* to it.**
+That is a defect in `cbe_bug`, it affects every model tested, and `kaug` fixes it.
+
+> **`kaug = true` is the DEFAULT** as of the measurement below. `kaug = false` reproduces the old
+> behaviour and is kept only as the A/B that exhibits the defect.
+>
+> ⛔ **It is INTERLEAVED-ONLY, and is forced off under `decoupled = true`.** The union needs
+> `U_ex` and `svd(K1).U` to be two bases of the *same* space. Interleaved gives that — both are
+> built from the same `K` in the same loop iteration, so both sit on `W[i-1]`'s bond. Decoupled
+> does not: its phase A runs a separate frame chain (`C = U_ex' * K`), so `U_ex` sits on
+> `U_ex[i-1]`'s bond while phase B's `Wk` sits on `W[i-1]`'s. Attempting the union there raised
+> `AssertionError: Contracted legs must have matching itags: 'L,bU' vs '1,cbeW'`, which reads
+> like a tagging slip and is not one — forcing the tags to agree would direct-sum vectors from two
+> different bases and return silently wrong numbers instead of stopping. **Read `info.kaug`, not
+> the argument you passed**, when attributing a result.
+
+The assembly writes `psi[i] = W[i]` and `psi[j+1] = Z[j]`, so **the bases are the state**: a
+direction absent from `W`/`Z` cannot reach the state at all. But each half-sweep keeps the CBE
+frame on the *opposite* side from the basis it is building — `Vwide[i] = ex.V_ex` while building
+`W[i]`, `Uwide[j] = ex.U_ex` while building `Z[j]` — and the frame that would *become* the state
+was not even stored (`Wcbe` was allocated with length 0 when `kstep = true`). The basis then comes
+entirely from `svd(K1,(1,2)).U`, the column space of the evolved tensor. CBE's directions were
+computed and dropped.
+
+The signature is `n_new` versus `expanded`, and it is **identical in every model** — measured at
+L = 10, step 1, from a product state:
+
+| model | `expanded`, basis update on | with `kstep = false` | dE on | dE off |
+|---|---|---|---|---|
+| Heisenberg (nearest neighbour) | `[2,2,2,…]` | `[2,3,3,3,…]` | 4.9e-07 → 3.7e-06 | ~1e-15 |
+| Haldane-Shastry (`1/sin²`) | `[2,2,2,…]` | `[2,3,3,3,…]` | 1.5e-03 | ~1e-15 |
+| OAT (all-to-all) | `[2,2,2,…]` | `[2,3,3,3,…]` | 1.565e-03 | ~1e-16 |
+
+`n_new = [1,2,2,2,2,2,2,2,1]` in **both** columns — CBE admits the same directions either way and
+one per interior bond is thrown away. The damage is ordered by the Hamiltonian's range, which is
+why it went unnoticed on nearest-neighbour benchmarks: 1e-6 reads as zero next to their other
+errors, and the drift was never plotted.
+
+**`kaug = true` unions the two instead of letting one overwrite the other** —
+`W[i] = orth([U_ex | svd(K1).U])`, and the mirror for `Z[j]`. Nothing else changes: CBE still
+expands one bond per site, the site evolution is untouched, and `psi` is still frozen during the
+half-sweeps, so BUG's parallelisable structure is intact.
+
+Measured on OAT, L = 10, `dt = 0.05`, 20 steps, **infidelity against the exact state**
+(`H_OAT` is diagonal in the `Sᶻ` basis, so the reference is a phase per basis vector — no
+diagonalisation, no second integrator):
+
+| arm | infidelity | \|δSˣ\| | dE | χ |
+|---|---|---|---|---|
+| `tdvp2` | 1.9927e-06 | 2.70e-03 | 1.3e-10 | 6 |
+| `tdvp_cbe1s` | 1.9927e-06 | 2.70e-03 | 1.3e-10 | 6 |
+| `cbe_bug` (historical) | 3.9743e-05 | 8.65e-03 | 1.565e-03 | 6 |
+| `cbe_bug kstep=false` | 2.4427e-05 | 8.70e-03 | **7.4e-15** | 6 |
+| **`cbe_bug kaug=true`** | **3.2749e-11** | **7.62e-07** | 4.5e-15 | 6 |
+
+⚠️ **Do not rank these by energy drift.** `kstep = false` conserves energy to 7.4e-15 — the best
+of any arm — and is **12× worse than `tdvp2`** on state infidelity. Energy conservation is a
+conservation check, not an accuracy check, and on this problem the two orderings disagree
+outright. Always compare against an exact reference.
+
+⚠️ **`S^x_tot` alone is one scalar** and can be right while the state is wrong; note the
+historical arm's `|δSˣ|` dipping to 4.5e-04 at step 15 purely because the curve crosses. The
+infidelity column shows no such dip.
+
+⚠️ **Raise `maxiter` with `L`.** `maxiter = 12` is justified at L = 10 by `‖H_OAT‖ ≈ L²/8 = 12.5`
+→ Krylov argument `≈ 0.31` → bound `≈ 1e-15`. At L = 20, `‖H‖ ≈ 50`, the argument is 1.25 and the
+same depth bounds only `≈ 3e-8`, larger than the effects being compared. `benchmarks/oat_l10.jl`
+now DERIVES the depth from `(‖H‖·dt/2)^m/m! < 1e-14` (arg 10 overrides) and prints the resulting
+bound in its header — check that line before trusting an arm.
+
+### The 10π campaign (2.5 revival periods), against `tdvp_cbe1s`
+
+`tdvp_cbe1s` is the method to beat — it is the paper's own, and it matches `tdvp2`'s accuracy to
+four digits at every `D` while costing less, so it is the honest baseline for **both** axes.
+
+| L | D (= exact ceiling) | `cbe_bug` | `tdvp_cbe1s` | accuracy | cost |
+|---|---|---|---|---|---|
+| 10 | 6 | 5.467e-06 | 4.491e-03 | **821×** | **3.11× cheaper** |
+| 12 | 7 | 2.588e-05 | 8.376e-03 | **324×** | **3.26× cheaper** |
+
+Per revival the error is **bounded**: `cbe_bug` 5.460e-06 → 5.467e-06 → 5.386e-06 at L = 10. Under
+truncation (`D = 4`, below the ceiling) `cbe_bug` stays flat while `tdvp_cbe1s` *grows*
+(3.680 → 4.443 → 4.488) — a stability difference that a single-period run cannot show, since one
+revival cannot distinguish a bounded error from an accumulating one.
+
+⚠️ **The accuracy ratio SHRINKS with L** (821× → 324×) while the cost ratio holds at ~3.2×. Two
+points are not a trend; L = 16/20 (`benchmarks/submit_oat_large.slurm`) is what would settle it.
+Do not quote 821× as "the" advantage.
+
+⚠️ **`cbe_bug` does NOT self-truncate to the exact rank over long windows.** At `D = 16` the bond
+reaches χ = 8 against an exact rank of 6 (L = 10) and **χ = 14 against 7** (L = 12) — nearly the
+whole cap. Accuracy is unchanged (identical to the `D = ceiling` arm), so this is noise above the
+physically-occupied rank, the same effect §6 documents for `tdvp_cbe1s`. An earlier claim that it
+converges to exactly `min(n, L-n)+1` held only at 4π and L = 10.
+
+⚠️ **The OAT fourth-order convergence does not generalise.** `H_OAT` is diagonal with commuting
+terms, so a splitting integrator incurs no Trotter error on it; measured `dt` ratio 19.59 versus
+4.03 for both TDVP arms. On Heisenberg `cbe_bug` is second order and loses to `tdvp2`.
+
 ## 7. Gotchas
 
 - **`set_symmetry!` before building tensors**, never mid-run.
+- **A `χ = 1` start costs BUG a bootstrap step** that no CBE knob can tune away — grade the first
+  step instead (§6b). Comparing `cbe_bug` to a sweep without it measures the bootstrap.
 - **`maxbd` must reach the cap** before an error column means anything (§6).
 - **First call costs minutes of JIT.** A silent log is not a hang; `1site_tdvp_cbe` 87.5 s vs
   `1site_tdvp_cbe_rsvd` 4.8 s at L=8 is compilation reuse, not an 18× speedup.

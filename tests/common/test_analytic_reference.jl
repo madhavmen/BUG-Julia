@@ -103,6 +103,36 @@ using LinearAlgebra
         end
     end
 
+    @testset "bethe_xxx_open_energy == exact diagonalisation" begin
+        # THE OPEN CHAIN IS THE CAMPAIGN'S HEISENBERG REFERENCE, so this is the test that decides
+        # whether every Heisenberg error number means anything. It is also the one that caught a
+        # solver which converged to residual 1e-14 and was 0.24 BELOW ED at every L -- so the
+        # residual is asserted AND the value is checked, because the first does not imply the
+        # second.
+        for L in (4, 6, 8, 10, 12)
+            e, lam, res = bethe_xxx_open_energy(L)
+            @test res < 1e-12
+            @test length(lam) == L ÷ 2
+            # open chain: L-1 bonds, so the nearest-neighbour matrix without the wrap-around
+            Jm = zeros(Float64, L, L)
+            for i in 1:(L - 1)
+                Jm[i, i + 1] = 1.0
+            end
+            e_ed = eigen(Hermitian(Matrix(dense_pairs(L, Jm)))).values[1]
+            @test e ≈ e_ed atol = 1e-10
+        end
+    end
+
+    @testset "the open chain approaches Hulthen from ABOVE, and more slowly than the ring" begin
+        # Not decoration: the open chain carries an O(1/L) BOUNDARY correction where the ring's
+        # leading correction is O(1/L^2). If a future edit silently turned the open solver into
+        # the ring one, the energies would still look plausible -- this is what would catch it.
+        e64, _, r64 = bethe_xxx_open_energy(64)
+        @test r64 < 1e-12
+        @test e64 / 64 > hulthen_energy_density()            # from above
+        @test abs(e64 / 64 - hulthen_energy_density()) > 1e-3  # slower than the ring's 5e-4
+    end
+
     @testset "Hulthen is a LIMIT and is labelled as one" begin
         @test hulthen_energy_density() ≈ 0.25 - log(2) atol = 1e-15
         # Finite-size corrections fall off as 1/L^2, so the L=10 ring is still ~2% away. This
