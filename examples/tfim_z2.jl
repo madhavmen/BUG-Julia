@@ -34,7 +34,9 @@ include(joinpath(@__DIR__, "common.jl"))
 # ── PARAMETERS -- EDIT THESE (or override as name=value on the command line) ──────────────
 const P = parse_params((
     L            = 16,      # sites. Even, so the wall sits on a bond.
-    t_over_pi    = 1.0,     # total time in units of π
+    # ⛔ PLAIN TIME, NOT UNITS OF π -- same reason as `xx_domain_wall.jl`. Only OAT has a
+    # period (revivals every 4π); the TFIM's scales are set by `J` and `h`, so π would hide them.
+    t_max        = 3.0,     # total time, in units of 1/J
     dt           = 0.05,    # time step
     J            = 1.0,     # Ising coupling (ferromagnetic for J > 0)
     h            = 1.0,     # transverse field. h = J is the critical point.
@@ -47,7 +49,7 @@ const P = parse_params((
 ))
 # ──────────────────────────────────────────────────────────────────────────────────────────
 
-const T_MAX = P.t_over_pi * π
+const T_MAX = P.t_max
 
 # ‖H‖ ≤ J(L-1) + hL by the triangle inequality -- LINEAR in L, like XX and unlike OAT.
 const HNORM   = P.J * (P.L - 1) + P.h * P.L
@@ -121,9 +123,9 @@ note in `xx_domain_wall.jl`."
 left_x_magnetisation(psi) = sum(x_profile(psi)[1:(P.L ÷ 2)])
 tfim_left_x_exact(t) = sum(tfim_x_profile_exact(P.L, t, DIRS; J = P.J, h = P.h)[1:(P.L ÷ 2)])
 
-@printf("TFIM  L=%d  symmetry=%s  J=%g  h=%g%s  t=%gπ (%.3f)  dt=%g  maxdim=%d  trunc=%g\n",
+@printf("TFIM  L=%d  symmetry=%s  J=%g  h=%g%s  t=%g (1/J)  dt=%g  maxdim=%d  trunc=%g\n",
         P.L, P.symmetry, P.J, P.h, P.J == P.h ? " (critical)" : "",
-        P.t_over_pi, T_MAX, P.dt, P.maxdim, P.trunc_thresh)
+        T_MAX, P.dt, P.maxdim, P.trunc_thresh)
 @printf("krylov depth = %d  (arg %.3f, Lanczos bound %.1e -- must sit under %g)\n",
         MAXITER, HNORM * P.dt / 2, krylov_bound(HNORM, P.dt, MAXITER), P.trunc_thresh)
 @printf("mpo virtual dims = %s   initial chi = %d   M_L(0) = %.6f (exact %.6f)\n\n",
@@ -131,8 +133,8 @@ tfim_left_x_exact(t) = sum(tfim_x_profile_exact(P.L, t, DIRS; J = P.J, h = P.h)[
         left_x_magnetisation(copy(PSI0)), tfim_left_x_exact(0.0))
 
 const OUT = joinpath(RESULTS,
-                     @sprintf("tfim_L%d_%s_D%d_dt%g_T%gpi%s.csv",
-                              P.L, P.symmetry, P.maxdim, P.dt, P.t_over_pi,
+                     @sprintf("tfim_L%d_%s_D%d_dt%g_T%g%s.csv",
+                              P.L, P.symmetry, P.maxdim, P.dt, T_MAX,
                               P.dover == 0 ? "" : "_dover$(P.dover)"))
 io = open_csv(OUT)
 try

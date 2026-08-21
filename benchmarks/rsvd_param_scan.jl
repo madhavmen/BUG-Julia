@@ -48,10 +48,10 @@
 #
 # ⛔ WALL TIME FROM A LOCAL RUN IS NOT DATA. Use `submit_rsvd_scan.slurm`: one job at a time,
 # single-threaded. Locally this file is for the ERROR columns only, and `phase=0` at a short
-# `t_over_pi` is the part worth running interactively.
+# `t_max` is the part worth running interactively.
 #
 #   julia --project=. benchmarks/rsvd_param_scan.jl phase=0 model=xx
-#   julia --project=. benchmarks/rsvd_param_scan.jl phase=2 model=oat t_over_pi=1.0
+#   julia --project=. benchmarks/rsvd_param_scan.jl phase=2 model=oat t_max=3.14
 #   sbatch benchmarks/submit_rsvd_scan.slurm
 
 using LinearAlgebra, Printf, Random
@@ -78,18 +78,20 @@ function parse_params(defaults::NamedTuple)
     return NamedTuple(vals)
 end
 
+# ⛔ TIME IS PLAIN, AND ITS DEFAULT BELONGS TO THE MODEL. π is meaningful for OAT alone -- that
+# state revives every 4π, so a run is naturally quoted as a fraction of a revival. The XX chain
+# has no period at all: its only scale is set by `J`, and the landmark that matters is the front
+# reaching the boundary at `t ≈ L/(2J)`. Quoting XX in units of π would hide the one number a
+# reader needs. So `t_max = 0` asks each model for its own default rather than imposing one.
 const P = parse_params((
-    model     = "oat",   # "oat" | "xx"
-    L         = 16,
-    phase     = 0,       # 0 = saturation gate, 1 = noise floor, 2 = budget scan
-    t_over_pi = 1.0,     # keep short: this is a PARAMETER scan, not a physics run
-    dt        = 0.05,
-    maxdim    = 0,       # 0 = the per-model rank-limited default (see below)
-    nseeds    = 6,       # phase 1 only
+    model  = "oat",      # "oat" | "xx"
+    L      = 16,
+    phase  = 0,          # 0 = saturation gate, 1 = noise floor, 2 = budget scan
+    t_max  = 0.0,        # 0 = the model's own default; keep it SHORT, this is a parameter scan
+    dt     = 0.05,
+    maxdim = 0,          # 0 = the per-model rank-limited default (see below)
+    nseeds = 6,          # phase 1 only
 ))
-
-const T_MAX  = P.t_over_pi * π
-const NSTEPS = round(Int, T_MAX / P.dt)
 
 # ── the two models, each with an EXACT reference and no 2^L object anywhere ────────────────
 #
@@ -118,7 +120,10 @@ function build_model(model::String, L::Int)
         # at or above 9 every arm is exact and the scan would measure roundoff.
         return (mpo = oat_mpo(L), psi0 = x_polarized_state(L),
                 obs = psi -> total_sx(psi), exact = t -> oat_sx_exact(L, t),
-                cap = 6, hnorm = L^2 / 8, label = "OAT")
+                cap = 6, hnorm = L^2 / 8, label = "OAT",
+                # One quarter of the 4π revival: long enough that the collapse is well under
+                # way, short enough that this stays a parameter scan and not a physics run.
+                t_default = π)
     elseif model == "xx"
         set_symmetry!(:U1)
         # XX has NO rank ceiling -- the wall spreads and entanglement grows -- so any cap is a
@@ -127,13 +132,20 @@ function build_model(model::String, L::Int)
         return (mpo = xxz_mpo(L; J = 1.0, delta = 0.0), psi0 = domain_wall_state(L),
                 obs = psi -> sum(sz_expectation(psi, j) for j in 1:(L ÷ 2)),
                 exact = t -> xx_left_mag_exact(L, t),
-                cap = 24, hnorm = L / 2, label = "XX")
+                cap = 24, hnorm = L / 2, label = "XX",
+                # In units of 1/J. The front reaches the boundary at L/(2J) = 8 for L=16, so 6
+                # keeps the run in the clean spreading regime -- and it is LATER than the π this
+                # model used to inherit from OAT, which matters because the rank has to grow far
+                # enough to bind against `cap` or the budget scan measures the wrong thing.
+                t_default = 6.0)
     end
     error("model must be \"oat\" or \"xx\", got $(repr(model))")
 end
 
 const M      = build_model(P.model, P.L)
 const MAXDIM = P.maxdim == 0 ? M.cap : P.maxdim
+const T_MAX  = P.t_max == 0.0 ? M.t_default : P.t_max
+const NSTEPS = round(Int, T_MAX / P.dt)
 
 # Krylov depth from ||H||*dt/2, so the SOLVER is never the limiter. A depth that is too shallow
 # does not error -- it caps every arm at the same floor and makes the scan look flat.
@@ -253,8 +265,8 @@ end
 
 # ── run ───────────────────────────────────────────────────────────────────────────────────
 
-@printf("RSVD parameter scan   %s  L=%d  maxdim=%d  dt=%g  t=%gπ (%d steps)  krylov depth=%d\n",
-        M.label, P.L, MAXDIM, P.dt, P.t_over_pi, NSTEPS, MAXITER)
+@printf("RSVD parameter scan   %s  L=%d  maxdim=%d  dt=%g  t=%.4f (%d steps)  krylov depth=%d\n",
+        M.label, P.L, MAXDIM, P.dt, T_MAX, NSTEPS, MAXITER)
 @printf("initial chi = %d   obs(0) = %.6f (exact %.6f)\n",
         maximum(bond_dims(M.psi0)), M.obs(copy(M.psi0)), M.exact(0.0))
 flush(stdout)

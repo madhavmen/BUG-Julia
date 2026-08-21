@@ -49,7 +49,11 @@ PHASE=${PHASES[$I]}
 echo "task $I: model=$MODEL phase=$PHASE  on $(hostname)  $(date)"
 echo "threads: JULIA=$JULIA_NUM_THREADS OPENBLAS=$OPENBLAS_NUM_THREADS"
 
+# `t_max` is left OFF so each model uses its own default -- π for OAT, which has a 4π revival,
+# and 6.0 (units of 1/J) for XX, which has no period and is instead bounded by the front reaching
+# the wall at L/(2J) = 8. Forcing one shared time on both is what the π parametrisation used to
+# do, and for XX it was simply the wrong scale.
 julia --project=. benchmarks/rsvd_param_scan.jl \
-      model="$MODEL" phase="$PHASE" L=16 t_over_pi=1.0 dt=0.05
+      model="$MODEL" phase="$PHASE" L=16 dt=0.05
 
 echo "done $(date)"

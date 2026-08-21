@@ -23,8 +23,8 @@ Every script takes its parameters from a block at the top of the file marked
 
 ```bash
 julia --project=. examples/oat_z2.jl L=12 t_over_pi=4 dt=0.05 trunc_thresh=1e-10 maxdim=16
-julia --project=. examples/xx_domain_wall.jl L=24 maxdim=128 symmetry=none
-julia --project=. examples/tfim_z2.jl L=20 h=0.5 maxdim=128
+julia --project=. examples/xx_domain_wall.jl L=24 t_max=10 maxdim=128 symmetry=none
+julia --project=. examples/tfim_z2.jl L=20 t_max=5 h=0.5 maxdim=128
 ```
 
 Unrecognised names are rejected rather than ignored, so a typo stops the run instead of silently
@@ -35,7 +35,8 @@ producing a figure from the defaults.
 | name | meaning |
 |---|---|
 | `L` | number of sites |
-| `t_over_pi` | total simulated time, in units of π |
+| `t_max` *(XX, TFIM)* | total simulated time, in units of `1/J` |
+| `t_over_pi` *(OAT only)* | total simulated time, in units of π |
 | `dt` | time step |
 | `maxdim` | bond-dimension cap |
 | `trunc_thresh` | CBE root-to-leaves truncation threshold at the end of each sweep |
@@ -46,6 +47,12 @@ producing a figure from the defaults.
 
 `oat_z2.jl` additionally accepts `maxdim=0`, meaning "use the exact rank ceiling".
 `xx_domain_wall.jl` has `J`; `tfim_z2.jl` has `J` and `h`.
+
+⛔ **Only OAT takes its time in units of π**, because only OAT has a period — the state revives
+every `4π`, so a run is naturally quoted as a fraction of a revival. XX and TFIM have no such
+structure; their scales come from `J` (and `h`), and the landmark that matters for XX is the
+front reaching the boundary at `t ≈ L/(2J)`. Quoting those two in π would hide the one number a
+reader needs, so they take a plain `t_max`.
 
 ## The three integrators
 

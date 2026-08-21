@@ -35,7 +35,12 @@ include(joinpath(@__DIR__, "common.jl"))
 # ── PARAMETERS -- EDIT THESE (or override as name=value on the command line) ──────────────
 const P = parse_params((
     L            = 16,      # sites. Even, so the wall sits on a bond and S^z_tot = 0.
-    t_over_pi    = 2.0,     # total time in units of π (see the front-speed note below)
+    # ⛔ PLAIN TIME, NOT UNITS OF π. `oat_z2.jl` takes `t_over_pi` because OAT genuinely has a
+    # period -- the state revives every 4π -- so π is the natural unit there. The XX chain has no
+    # such structure: its only time scale is set by `J`, and the meaningful landmark is the front
+    # reaching the boundary at `t ≈ L/(2J)`. Expressing that in π would hide the one number a
+    # reader needs to compare against.
+    t_max        = 6.0,     # total time, in units of 1/J (front hits the wall at L/(2J))
     dt           = 0.05,    # time step
     J            = 1.0,     # hopping
     maxdim       = 64,      # bond-dimension cap. UNLIKE OAT there is no exact ceiling.
@@ -47,13 +52,14 @@ const P = parse_params((
 ))
 # ──────────────────────────────────────────────────────────────────────────────────────────
 
-const T_MAX = P.t_over_pi * π
+const T_MAX = P.t_max
 
 # The single-particle dispersion is `ε(k) = J cos k`, so the maximum group velocity is `J` and
-# the front travels `≈ J·t` sites from the wall. It reaches the boundary at `t ≈ L/(2J)`; the
-# default `2π ≈ 6.3` at `L = 16` stops just before `8`, so the run stays in the clean spreading
-# regime. Going past it is not an error -- the reference handles reflection exactly -- but the
-# physics changes, so the header says which side of it this run is on.
+# the front travels `≈ J·t` sites from the wall. It reaches the boundary at `t ≈ L/(2J)`, which
+# is `8` at `L = 16` -- so the default `t_max = 6` stops short of it and the run stays in the
+# clean spreading regime. Going past it is not an error, since the free-fermion reference handles
+# reflection exactly, but the physics changes; the header prints which side of it this run ends
+# on rather than leaving the reader to do the arithmetic.
 const T_FRONT = P.L / (2 * P.J)
 
 # ‖H_XX‖ = Σ of the positive single-particle energies ≈ J·L/π, LINEAR in L rather than OAT's
@@ -103,8 +109,8 @@ const PSI0   = domain_wall_state(P.L)
 # error rather than an indexing one.
 left_magnetisation(psi) = sum(sz_expectation(psi, j) for j in 1:(P.L ÷ 2))
 
-@printf("XX domain wall  L=%d  symmetry=%s  J=%g  t=%gπ (%.3f)  dt=%g  maxdim=%d  trunc=%g\n",
-        P.L, P.symmetry, P.J, P.t_over_pi, T_MAX, P.dt, P.maxdim, P.trunc_thresh)
+@printf("XX domain wall  L=%d  symmetry=%s  J=%g  t=%g (1/J)  dt=%g  maxdim=%d  trunc=%g\n",
+        P.L, P.symmetry, P.J, T_MAX, P.dt, P.maxdim, P.trunc_thresh)
 @printf("krylov depth = %d  (arg %.3f, Lanczos bound %.1e -- must sit under %g)\n",
         MAXITER, HNORM * P.dt / 2, krylov_bound(HNORM, P.dt, MAXITER), P.trunc_thresh)
 @printf("front reaches the boundary at t ≈ %.2f -- this run ends at %.2f (%s)\n",
@@ -114,8 +120,8 @@ left_magnetisation(psi) = sum(sz_expectation(psi, j) for j in 1:(P.L ÷ 2))
         xx_left_magnetisation(P.L, 0.0; J = P.J))
 
 const OUT = joinpath(RESULTS,
-                     @sprintf("xx_L%d_%s_D%d_dt%g_T%gpi%s.csv",
-                              P.L, P.symmetry, P.maxdim, P.dt, P.t_over_pi,
+                     @sprintf("xx_L%d_%s_D%d_dt%g_T%g%s.csv",
+                              P.L, P.symmetry, P.maxdim, P.dt, T_MAX,
                               P.dover == 0 ? "" : "_dover$(P.dover)"))
 io = open_csv(OUT)
 try
