@@ -59,11 +59,17 @@ Keywords beyond the [`cbe_expand`](@ref) ones (`dex`, `growth`, `dover`, `comp_r
     CBE is the sole source. Two sweeps wanting different constants is that difference, not an
     oversight.
 
-    MEASURED (`benchmarks/rsvd_param_scan.jl`, XX L=16, maxdim=24, t=6): the final error is
-    invariant to the budget at 5.0e-8 relative -- 4.59041166e-05 to 4.59041397e-05 across the
-    whole `dex`/`growth` grid -- while `err_fnl`, the fraction of ranked candidate weight
-    DISCARDED for want of budget, spans 0.0 to 0.59. Raising `growth` buys nothing on that
-    model and costs sketch work.
+    MEASURED (`benchmarks/rsvd_param_scan.jl`, XX L=16, maxdim=24, t=6): the final error moves
+    by 5.0e-7 RELATIVE across the whole `dex`/`growth` grid -- 4.59041166e-05 to
+    4.59041397e-05 -- while `err_fnl`, the fraction of ranked candidate weight DISCARDED for
+    want of budget, spans 0.0 to 0.59. Raising `growth` buys nothing on that model and costs
+    sketch work.
+
+    THAT NUMBER IS RESOLVED, NOT ROUNDING. Phase 1 measures the seed noise floor on the same
+    arm: `cbe_bug` returns 4.5904e-05 over six seeds with a spread of 1.807e-13, i.e. 3.9e-9
+    relative, so the budget effect sits 128x above the floor. It is real and it is negligible.
+    For scale, `tdvp_cbe1s` on the identical grid moves 6.1e-3 against its own floor of 9.9e-7
+    -- a budget response four orders of magnitude larger than this sweep's.
 
     ⛔ EVERY NUMBER ABOVE IS FROM A CAP-BOUND RUN, which is the regime where the budget CANNOT
     matter: `maxdim` throws away what the expansion admits. The argument for `2.0` bites only
