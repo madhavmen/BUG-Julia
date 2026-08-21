@@ -146,8 +146,21 @@ function run_model(io::IO, model::String, symmetry::String, psi0, mpo,
     end
 end
 
-"Open `path` for writing and emit the header row."
+"""
+    open_csv(path) -> IO
+
+Open `path` for writing and emit the header row.
+
+⛔ THE `flush(stdout)` IS LOAD-BEARING, and not for this file's sake. Julia BUFFERS stdout when
+it is not a terminal, so every example's header -- the parameters, the Krylov depth, the rank
+ceiling -- sits unseen in the buffer while the run JIT-compiles, which on a cold cache is
+minutes. Piping to `tail` or a log file makes it worse: the reader buffers too, and the run
+looks HUNG when it is merely quiet. Flushing here empties whatever the caller already wrote
+(flush is about the buffer, not about who filled it), so one line covers all three scripts and
+the header appears before the first long wait rather than after it.
+"""
 function open_csv(path::String)
+    flush(stdout)
     mkpath(dirname(path))
     io = open(path, "w")
     println(io, join(COLS, ","))
