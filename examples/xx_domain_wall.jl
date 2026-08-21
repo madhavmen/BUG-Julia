@@ -46,7 +46,6 @@ const P = parse_params((
     maxdim       = 64,      # bond-dimension cap. UNLIKE OAT there is no exact ceiling.
     trunc_thresh = 1e-10,   # CBE root-to-leaves truncation threshold at the end of each sweep
     maxiter      = 0,       # 0 = derive the Krylov depth from ‖H‖·dt/2
-    dover        = 0,       # RSVD oversampling for cbe_bug. 0 = the sweep's own default.
     sample_every = 0.2,     # record a row every this much physical time
     symmetry     = "U1",    # "U1" (S^z_tot conserved) or "none" (the dense control)
 ))
@@ -120,9 +119,8 @@ left_magnetisation(psi) = sum(sz_expectation(psi, j) for j in 1:(P.L ÷ 2))
         xx_left_magnetisation(P.L, 0.0; J = P.J))
 
 const OUT = joinpath(RESULTS,
-                     @sprintf("xx_L%d_%s_D%d_dt%g_T%g%s.csv",
-                              P.L, P.symmetry, P.maxdim, P.dt, T_MAX,
-                              P.dover == 0 ? "" : "_dover$(P.dover)"))
+                     @sprintf("xx_L%d_%s_D%d_dt%g_T%g.csv",
+                              P.L, P.symmetry, P.maxdim, P.dt, T_MAX))
 io = open_csv(OUT)
 try
     run_model(io, "XX", P.symmetry, PSI0, MPO_XX,
@@ -130,7 +128,7 @@ try
               t   -> xx_left_magnetisation(P.L, t; J = P.J),           # its exact value
               (; t_max = T_MAX, dt = P.dt, maxdim = P.maxdim,
                  trunc_thresh = P.trunc_thresh, maxiter = MAXITER,
-                 dover = P.dover, sample_every = P.sample_every))
+                 sample_every = P.sample_every))
 finally
     close(io)
 end

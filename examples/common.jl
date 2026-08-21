@@ -65,29 +65,49 @@ krylov_bound(hnorm::Real, dt::Real, m::Int) =
     Float64((hnorm * dt / 2)^m / factorial(big(m)))
 
 """
-    steppers(mpo; maxdim, trunc_thresh, maxiter, dover = nothing)
+    steppers(mpo; maxdim, trunc_thresh, maxiter)
 
 The three integrators, as closures over one MPO. Any difference between them is the integrator.
 
-`dover` is the RSVD oversampling and reaches `cbe_bug` only -- the other two do not sketch.
+`cbe_bug` runs here in its SIMPLEST configuration: the exact SVD rather than the randomised
+sketch, and `kaug = false`. See the two notes on the call itself -- one of those choices is free
+and the other is not.
 """
-function steppers(mpo; maxdim::Int, trunc_thresh::Float64, maxiter::Int,
-                  dover::Union{Nothing, Int} = nothing)
+function steppers(mpo; maxdim::Int, trunc_thresh::Float64, maxiter::Int)
     return (
         "tdvp2"      => (p, tau) -> tdvp2_step!(p, mpo, tau; maxdim = maxdim,
                                                 trunc_thresh = trunc_thresh, maxiter = maxiter),
         "tdvp_cbe1s" => (p, tau) -> tdvp_cbe1s_step!(p, mpo, tau; maxdim = maxdim,
                                                      trunc_thresh = trunc_thresh,
                                                      maxiter = maxiter),
-        # The two scheme knobs, both at their defaults and named explicitly so the example shows
-        # where they go. `kaug = false` reproduces the pre-fix behaviour (docs/USAGE.md 6b).
-        "cbe_bug"    => (p, tau) -> cbe_bug_step!(p, mpo, tau; kstep = true, kaug = true,
-                                                  maxdim = maxdim, dover = dover,
+        # ⛔ `exact = true` MEANS NO RANDOMISED SVD, AND IT COSTS NOTHING HERE. Measured at L=16
+        # on both OAT and XX (benchmarks/rsvd_param_scan.jl phase 0), the sketch and the exact
+        # SVD give `cbe_bug` results that are BIT-IDENTICAL -- relative difference 0.000e+00, not
+        # "agrees to N digits". The sketch is SATURATED: it already spans the whole relevant
+        # subspace, so a different draw is just a different basis of the same space. That is also
+        # why `dover`, `comp_ratio` and the RNG seed are inert for this scheme, and why the
+        # oversampling knob was dropped from these scripts. On OAT the exact SVD was even
+        # slightly FASTER (68.9s vs 72.8s) -- at small rank the sketch's fixed overhead does not
+        # amortise. Randomisation is a cost optimisation, never an accuracy one.
+        #
+        # ⛔ `kaug = false` IS THE HISTORIC BEHAVIOUR AND IT IS MEASURABLY WORSE -- this one is a
+        # real trade, unlike `exact`. With the union off, each half-sweep's basis update REPLACES
+        # the CBE frame instead of unioning with it, so the directions CBE just paid to find are
+        # discarded before they can reach the state. MEASURED on OAT (L=10, T=2):
+        #
+        #     cbe_bug kaug=true    2.2901e-06
+        #     cbe_bug kaug=false   1.8271e-02      <- 8000x worse, and 4.2x worse than tdvp2
+        #
+        # It is set here because the simpler scheme -- expand, then a plain 1-site update -- is
+        # what these examples are meant to show. Pass `kaug = true` for the accurate variant;
+        # docs/USAGE.md 6b has the full comparison.
+        "cbe_bug"    => (p, tau) -> cbe_bug_step!(p, mpo, tau; kstep = true, kaug = false,
+                                                  exact = true, maxdim = maxdim,
                                                   trunc_thresh = trunc_thresh, maxiter = maxiter),
     )
 end
 
-const COLS = ["model", "scheme", "symmetry", "L", "maxdim", "dover", "dt", "t",
+const COLS = ["model", "scheme", "symmetry", "L", "maxdim", "dt", "t",
               "obs", "obs_exact", "err", "maxbond", "energy", "dE", "krylov"]
 
 """
@@ -112,22 +132,15 @@ function run_model(io::IO, model::String, symmetry::String, psi0, mpo,
     # equally, because it is not their error at all. The CSV rows were always right (they emit
     # `exact(k*dt)` at the same `k*dt`); this is the summary line.
     t_final = nsteps * p.dt
-    # `dover = 0` in a parameter block means "the sweep's own default", which is `nothing`
-    # (`Dpre = ceil(1.2 * dex)`). It is NOT the same as oversampling by zero: MEASURED, an
-    # explicit `dover = 0` starves the preselection so nothing is admitted and the bond stays
-    # at chi = 1, which on OAT gave err 4.98 against 0.245 for every other setting. Keeping 0
-    # as the sentinel means the degenerate case is reachable only by asking for it directly.
-    dov = get(p, :dover, 0)
-    dover = dov == 0 ? nothing : dov
     for (name, step!) in steppers(mpo; maxdim = p.maxdim, trunc_thresh = p.trunc_thresh,
-                                  maxiter = p.maxiter, dover = dover)
+                                  maxiter = p.maxiter)
         psi = copy(psi0)
         e0  = real(mpo_energy(copy(psi), mpo)) / max(norm(psi)^2, eps())
         kry = 0
         emit(t, o, k) = begin
             e = real(mpo_energy(copy(psi), mpo)) / max(norm(psi)^2, eps())
-            @printf(io, "%s,%s,%s,%d,%d,%d,%g,%g,%.10g,%.10g,%.6e,%d,%.10g,%.6e,%d\n",
-                    model, name, symmetry, length(psi), p.maxdim, dov, p.dt, t,
+            @printf(io, "%s,%s,%s,%d,%d,%g,%g,%.10g,%.10g,%.6e,%d,%.10g,%.6e,%d\n",
+                    model, name, symmetry, length(psi), p.maxdim, p.dt, t,
                     o, exact(t), abs(o - exact(t)), maximum(bond_dims(psi)), e, abs(e - e0), k)
             flush(io)
         end

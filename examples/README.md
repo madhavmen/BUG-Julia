@@ -41,7 +41,6 @@ producing a figure from the defaults.
 | `maxdim` | bond-dimension cap |
 | `trunc_thresh` | CBE root-to-leaves truncation threshold at the end of each sweep |
 | `maxiter` | Krylov depth. `0` derives it from `‖H‖·dt/2` — leave it there unless you are testing the solver |
-| `dover` | RSVD oversampling for `cbe_bug`. `0` means the sweep's own default (see below) |
 | `sample_every` | how much physical time between recorded rows |
 | `symmetry` | the symmetric run, or `none` for the dense control |
 
@@ -65,45 +64,57 @@ integrator and nothing else.
 | `tdvp_cbe1s` | 1-site TDVP with controlled bond expansion (arXiv:2208.10972). Matches 2-site accuracy at 1-site cost. |
 | `cbe_bug` | RSVD-CBE + rank-adaptive BUG. `K`/`L` half-sweeps build the bases, one Galerkin step at the centre root. |
 
-`cbe_bug` has exactly two scheme knobs:
+`cbe_bug` has exactly two scheme knobs, and these scripts run it in its **simplest**
+configuration — no randomised SVD, and the historic (non-union) basis update:
 
-- **`kstep`** (default `true`) — do the BUG basis update. `false` takes the CBE frame directly.
-- **`kaug`** (default `true`) — UNION the basis update with the CBE frame rather than letting it
-  replace it. With `kaug = false` the directions CBE just paid to find are discarded before they
-  reach the state; see `docs/USAGE.md` §6b.
+- **`kstep`** (default `true`) — do the BUG basis update.
+- **`kaug`** — UNION the basis update with the CBE frame instead of letting it replace it.
+  **These examples set `kaug = false`**, the historic behaviour: CBE expands, then a plain 1-site
+  update takes over the frame.
+
+⛔ **`kaug = false` is a real accuracy trade, not a simplification.** Measured on OAT (L=10, T=2):
+
+| | max error vs closed form |
+|---|---|
+| `cbe_bug`, `kaug = true` | 2.2901e-06 |
+| `cbe_bug`, `kaug = false` | **1.8271e-02** — ~8000× worse, and 4.2× worse than `tdvp2` |
+
+Pass `kaug = true` in `common.jl`'s `steppers` for the accurate variant; `docs/USAGE.md` §6b has
+the full comparison.
 
 The sweep is always interleaved (expand bond `i`, then immediately evolve site `i`) — the
 ordering of the reference implementation.
 
-### The randomised sketch, and how much it matters
+### The randomised sketch — measured, and switched off
 
-`cbe_bug` finds its expansion directions with a randomised sketch. `dover` (oversampling) is
-exposed as an example parameter because it is the only sketch setting that was measured to
-change anything.
+These scripts run `cbe_bug` with **`exact = true`**: the exact SVD, no randomised sketch. That
+costs nothing, and the measurement is the reason.
 
-Measured on OAT at L=10, at the exact rank ceiling and at two ranks below it:
+At L=16 on **both** OAT and XX (`benchmarks/rsvd_param_scan.jl`, phase 0), the sketch and the
+exact SVD give `cbe_bug` results that are **bit-identical** — relative difference `0.000e+00`,
+not "agrees to N digits":
 
-| knob | effect |
-|---|---|
-| RNG seed | **none** — four seeds agree to ~1e-13 relative |
-| `comp_ratio` (complement/in-span split) | **none** — 0.0, 0.25, 0.5, 0.75, 1.0 all identical |
-| `dover` = 2, 4, 8, or default | **none** — identical to every digit |
-| `exact = true` (no randomisation at all) | **none** — identical to the random sketch |
-| `dover = 0` | **catastrophic** — err 4.98 against 0.245 |
+| model | sketch | exact SVD | rel. diff |
+|---|---|---|---|
+| OAT | 7.755e-01 | 7.755e-01 | **0.000e+00** |
+| XX | 4.5904130e-05 | 4.5904130e-05 | **0.000e+00** |
 
-The seed control is what settles it: redrawing the sketch changes nothing, so the sketch is
-*saturated* — it already captures the whole relevant subspace, and no knob that reshuffles the
-draw can matter. `exact = true` agreeing confirms it independently: randomisation contributes
-zero error here.
+The sketch is **saturated**: it already spans the whole relevant subspace, so a different draw is
+just a different basis of the same space. That is why `dover`, `comp_ratio` and the RNG seed are
+all inert for this scheme — and why the oversampling knob was removed from these scripts rather
+than left as a dial that does nothing.
 
-`dover = 0` is a cliff rather than a dial. With no oversampling the preselection has no
-candidates to rank, nothing is admitted, and the bond stays at χ=1 while the exact solution
-moves away from it — which is why `0` is the sentinel for "use the default" in the parameter
-blocks and the degenerate case is reachable only by editing the sweep directly.
+This was checked on XX specifically because its rank *grows*, which is where a sketch should come
+under pressure. It doesn't.
 
-⛔ This was measured on **OAT**, whose rank ceiling is constant in time, so the sketch is never
-under pressure there. `xx_domain_wall.jl` and `tfim_z2.jl` grow entanglement without bound and
-are where varying `dover` could actually bite.
+⛔ **The randomisation is a cost optimisation, never an accuracy one — and it does not always
+win.** On OAT at `maxdim = 6` the exact SVD was *faster* (68.9s vs 72.8s): at small rank the
+sketch's fixed overhead never amortises. It pays off when the target rank is much smaller than
+the matrix dimension.
+
+The budget knobs (`dex`, `growth`) were measured too, and on XX they move the error by **0.6%
+across their entire range** — from discarding 59% of ranked candidate weight down to 0%. At fixed
+`maxdim` the error is set by the rank, not by the search. **To improve accuracy, raise `maxdim`.**
 
 ## What comes out
 
@@ -111,7 +122,7 @@ Each CSV has one row per sample time per scheme, with columns:
 
 | column | meaning |
 |---|---|
-| `model`, `scheme`, `symmetry`, `L`, `maxdim`, `dover`, `dt` | what was run |
+| `model`, `scheme`, `symmetry`, `L`, `maxdim`, `dt` | what was run |
 | `t` | physical time |
 | `obs`, `obs_exact` | the observable and its exact value |
 | `err` | `abs(obs - obs_exact)` — the error plot's y-axis |

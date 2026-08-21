@@ -43,7 +43,6 @@ const P = parse_params((
     maxdim       = 64,      # bond-dimension cap. Like XX there is no exact ceiling.
     trunc_thresh = 1e-10,   # CBE root-to-leaves truncation threshold at the end of each sweep
     maxiter      = 0,       # 0 = derive the Krylov depth from ‖H‖·dt/2
-    dover        = 0,       # RSVD oversampling for cbe_bug. 0 = the sweep's own default.
     sample_every = 0.2,     # record a row every this much physical time
     symmetry     = "Z2",    # "Z2" (the spin flip) or "none" (the dense control)
 ))
@@ -133,9 +132,8 @@ tfim_left_x_exact(t) = sum(tfim_x_profile_exact(P.L, t, DIRS; J = P.J, h = P.h)[
         left_x_magnetisation(copy(PSI0)), tfim_left_x_exact(0.0))
 
 const OUT = joinpath(RESULTS,
-                     @sprintf("tfim_L%d_%s_D%d_dt%g_T%g%s.csv",
-                              P.L, P.symmetry, P.maxdim, P.dt, T_MAX,
-                              P.dover == 0 ? "" : "_dover$(P.dover)"))
+                     @sprintf("tfim_L%d_%s_D%d_dt%g_T%g.csv",
+                              P.L, P.symmetry, P.maxdim, P.dt, T_MAX))
 io = open_csv(OUT)
 try
     run_model(io, "TFIM", P.symmetry, PSI0, MPO_TF,
@@ -143,7 +141,7 @@ try
               t   -> tfim_left_x_exact(t),          # its exact value
               (; t_max = T_MAX, dt = P.dt, maxdim = P.maxdim,
                  trunc_thresh = P.trunc_thresh, maxiter = MAXITER,
-                 dover = P.dover, sample_every = P.sample_every))
+                 sample_every = P.sample_every))
 finally
     close(io)
 end

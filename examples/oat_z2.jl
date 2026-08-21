@@ -35,7 +35,6 @@ const P = parse_params((
     maxdim       = 0,       # 0 = use the exact ceiling min(n,L-n)+1; any other value caps there
     trunc_thresh = 1e-14,   # CBE root-to-leaves truncation threshold at the end of each sweep
     maxiter      = 0,       # 0 = derive the Krylov depth from ‖H‖·dt/2 (see below)
-    dover        = 0,       # RSVD oversampling for cbe_bug. 0 = the sweep's own default.
     sample_every = 0.2,     # record a row every this much physical time
     symmetry     = "Z2",    # "Z2" (the paper's) or "none" (the dense control)
 ))
@@ -71,9 +70,8 @@ const PSI0    = x_polarized_state(P.L)
         CEIL, maximum(bond_dims(PSI0)), total_sx(copy(PSI0)))
 
 const OUT = joinpath(RESULTS,
-                     @sprintf("oat_L%d_%s_D%d_dt%g_T%gpi%s.csv",
-                              P.L, P.symmetry, MAXDIM, P.dt, P.t_over_pi,
-                              P.dover == 0 ? "" : "_dover$(P.dover)"))
+                     @sprintf("oat_L%d_%s_D%d_dt%g_T%gpi.csv",
+                              P.L, P.symmetry, MAXDIM, P.dt, P.t_over_pi))
 io = open_csv(OUT)
 try
     run_model(io, "OAT", P.symmetry, PSI0, MPO_OAT,
@@ -81,7 +79,7 @@ try
               t   -> oat_sx_exact(P.L, t),            # its closed form
               (; t_max = T_MAX, dt = P.dt, maxdim = MAXDIM,
                  trunc_thresh = P.trunc_thresh, maxiter = MAXITER,
-                 dover = P.dover, sample_every = P.sample_every))
+                 sample_every = P.sample_every))
 finally
     close(io)
 end
