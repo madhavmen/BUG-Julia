@@ -9,11 +9,23 @@ Hamiltonian itself. There is no random sector seeding and no padding anywhere.
 
 ## Install and run
 
+Julia 1.10+, and `matplotlib` if you want the figures.
+
 ```bash
+git clone https://github.com/madhavmen/BUG-Julia.git && cd BUG-Julia
 julia --project=. -e 'using Pkg; Pkg.instantiate()'
 julia --project=. examples/oat_z2.jl          # a full benchmark, ~1 min
 python3 examples/plot_examples.py             # figures for every CSV produced
 ```
+
+`instantiate` pulls two dependencies that are **not in the General registry** and come straight
+from GitHub — [`LurCGT.jl`](https://github.com/lurlurlurrrrr/LurCGT.jl) (symmetric-tensor
+bookkeeping) and [`Telum.jl`](https://github.com/ssblee/Telum.jl) (the tensor layer). Both are
+pinned by commit in the tracked `Manifest.toml`, so the versions are reproducible; if
+`instantiate` fails, it is almost always because one of those two could not be reached, not
+because of anything in this repository.
+
+The first run compiles the package and takes a couple of minutes; later runs are fast.
 
 That is the whole quick start. **[examples/](examples/)** is the place to begin — three
 self-contained scripts, each one model, each writing a CSV and three figures, with every
