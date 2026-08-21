@@ -444,11 +444,23 @@ Keywords:
     that set it.
   - `dover` -- oversampling for the preselection. `nothing` gives `ceil(0.2*dex)`, i.e.
     `Dpre = ceil(1.2*dex)` as in the reference.
-  - `comp_ratio` -- the sketch's complement/isometry split (`CompRatio`, default 0.5).
-  - `sulz_cap` -- keep the expanded rank at or below `2r` (default `true`). The reference
-    instead caps the expansion itself at `2r` (total `3r`, `RSVDpreBE0SiQS.m:77`); the
-    tighter bound is kept by default because it is the regime whose order behaviour is
-    already characterised.
+  - `comp_ratio` -- the sketch's complement/isometry split (`CompRatio`). **Default `1.0`,
+    i.e. the sketch is drawn ENTIRELY from the frame's orthogonal complement -- the
+    discarded space.**
+
+    ⚠️ THIS DEPARTS FROM THE REFERENCE DELIBERATELY. `RSVDpreBE0SiQS.m:339` reads "do not
+    project into complement space, 1-site components are also important for bond update",
+    i.e. the MATLAB explicitly rejects the pure-complement choice and splits the probe.
+    The default here is `1.0` because one knob that is either on or off is easier to reason
+    about than a continuum, and the complement is the part that finds NEW directions.
+    `0.5` restores the reference's split; `nothing` drops the split entirely (probe drawn
+    from the full randomised fusion basis, with the exact `P_perp` still applied downstream
+    in preselection, so orthogonality is not at risk either way).
+  - `sulz_cap` -- keep the expanded rank at or below `2r`. **Default `false`, which applies
+    NO bound** -- growth is limited by `room` (a hard local-space limit) and by `maxdim` at
+    the truncation. Note that neither setting reproduces the reference, which caps the
+    EXPANSION at `2r` for a total of `3r` (`RSVDpreBE0SiQS.m:77`); `true` caps the TOTAL at
+    `2r`, which is tighter than both.
   - `preselect_only` -- skip the final selection and take the preselected candidates
     directly, the reference's `'-p'` mode. Diagnostic: it isolates how much the
     weight-ranking is worth.
@@ -802,7 +814,8 @@ Controls for one run of ANY of the three modes, on either path. Mirrors `BondUpd
 where the meaning is the same, so the integrators can be driven from the same campaign code.
 
   - `dt`, `n_steps` -- step size and how many to take. `dt` is a REAL time step in
-    [`RealTime`](@ref) and an INVERSE-TEMPERATURE step in [`ImaginaryTime`](@ref); the mode
+    real time (`tau = -im*dt`) and an INVERSE-TEMPERATURE step in imaginary time
+    (`tau = -dt`); the mode
     forms `tau` from it. [`GroundState`](@ref) ignores both and uses `n_sweeps`/`etol`.
   - `dex`, `growth`, `dover`, `comp_ratio`, `sulz_cap`, `preselect_only` -- the expansion,
     forwarded to [`cbe_expand`](@ref). `dex = 0` (default) uses the `growth` schedule;
@@ -1462,138 +1475,3 @@ cbe_bond_update(f::BondFrame, gate, tau::Number; kwargs...) =
     cbe_bond_update(f, gate, ComplexF64(tau); kwargs...)
 
 # ── the sweep ────────────────────────────────────────────────────────────────
-
-"""
-    cbe_bond_update_sweep!(psi, gates, parity, tau; kwargs...) -> NamedTuple
-
-`BondUpdateBUG.parity_sweep!` with [`cbe_bond_update`](@ref) at each bond. Returns
-`(; aug_k, aug_l, discarded, err_pre, err_fnl)`, each the maximum over the group's bonds.
-
-The sweep itself is copied unchanged from the validated one, including the reason it needs no
-re-canonicalisation: the bond update returns `left_core` already a left isometry with the
-centre in `right_core`, so `psi.center = i + 1` is exact and the next bond of the group is one
-move to the right. Bonds of one parity act on disjoint site pairs, so the group is an EXACT
-factor of the Trotter step.
-"""
-function cbe_bond_update_sweep!(psi::SymMPS, gates, parity::Symbol, tau::ComplexF64; kwargs...)
-    aug_k = 0; aug_l = 0
-    discarded = 0.0; err_pre = 0.0; err_fnl = 0.0
-    n_matvec = 0; aug_sum = 0; nbond = 0; iter_sum = 0
-    for i in parity_bonds(length(psi), parity)
-        gates[i] === nothing && continue
-        canonical!(psi, i)
-        f = bond_frame(psi, i)
-        r = cbe_bond_update(f, gates[i], tau; kwargs...)
-        n_matvec += r.n_matvec
-        aug_sum += r.aug_k * r.aug_l          # the SIZE each of those matvecs acted on
-        nbond += 1
-        iter_sum += r.n_iter                  # growth passes this bond actually needed
-        psi[i] = r.left_core
-        psi[i + 1] = r.right_core
-        psi.center = i + 1
-        aug_k = max(aug_k, r.aug_k)
-        aug_l = max(aug_l, r.aug_l)
-        discarded = max(discarded, r.discarded)
-        err_pre = max(err_pre, r.err_pre)
-        err_fnl = max(err_fnl, r.err_fnl)
-    end
-    return (; aug_k, aug_l, discarded, err_pre, err_fnl, n_matvec, aug_sum, nbond, iter_sum)
-end
-
-cbe_bond_update_sweep!(psi::SymMPS, gates, parity::Symbol, tau::Number; kwargs...) =
-    cbe_bond_update_sweep!(psi, gates, parity, ComplexF64(tau); kwargs...)
-
-# ── the driver ───────────────────────────────────────────────────────────────
-
-"""
-    cbe_gate_evolve!(psi, gates, tau_step; opts=CBEBugOptions(), energy_gates=nothing)
-        -> CBEBugRunInfo
-
-Evolve `psi` in place with the gate-based CBE-BUG for `opts.n_steps` steps, each step
-applying `exp(tau_step * H)` in the Strang composition `even tau/2, odd tau, even tau/2`.
-
-THE ONLY THING THAT DISTINGUISHES REAL FROM IMAGINARY TIME IS `tau_step`, which is why this
-takes it as an argument rather than forming it from `opts.dt`:
-
-  - `tau_step = -im*dt` -- real time. `exp(-i dt H)` is unitary, the norm is conserved up to
-    Trotter and truncation error, and `opts.normalize` is a hygiene measure.
-  - `tau_step = -dt` -- imaginary time. `exp(-dt H)` is a CONTRACTION, not unitary: it damps
-    every eigencomponent by `exp(-dt E)` and the norm decays. `opts.normalize` is then
-    LOAD-BEARING rather than hygiene -- without it the state underflows -- and the recorded
-    `norms` are the decay factors, whose log gives the energy estimate.
-
-The modes are the submodules [`RealTime`](@ref) and [`ImaginaryTime`](@ref); neither adds
-any integration logic, they only fix `tau_step` and what gets recorded.
-
-`opts.order` is not a field of `CBEBugOptions`; the composition here is Strang, second
-order, matching `bond_update_bug!`'s default. One RNG threads the whole run, so a run is
-reproducible while consecutive steps still draw different sketches.
-
-`energy_gates`, when given, records `energy(psi, energy_gates)` after each step. Imaginary
-time wants this (it is the convergence signal); real time does not pay for it by default.
-"""
-function cbe_gate_evolve!(psi::SymMPS, gates, tau_step::ComplexF64;
-                          opts::CBEBugOptions = CBEBugOptions(),
-                          energy_gates = nothing)
-    rng = MersenneTwister(opts.seed)
-    tau = tau_step
-    kw = (; maxdim = opts.maxdim, trunc_thresh = opts.trunc_thresh,
-            maxiter = opts.maxiter, tol = opts.tol, rng = rng,
-            s_iters = opts.s_iters, s_reorth = opts.s_reorth,
-            exact = opts.exact,
-            dex = opts.dex, growth = opts.growth,
-            dover = opts.dover, comp_ratio = opts.comp_ratio,
-            sulz_cap = opts.sulz_cap, preselect_only = opts.preselect_only)
-
-    times = Float64[]; norms = Float64[]
-    bds = Vector{Int}[]; maxbd = Int[]
-    expanded = Vector{Int}[]; maxexp = Int[]; centres = Int[]
-    epre = Float64[]; efnl = Float64[]; disc = Float64[]
-    mags = Vector{Float64}[]; obs = Any[]
-    kdim = Int[]; maug = Float64[]; energies = Float64[]
-
-    for step in 1:opts.n_steps
-        a = cbe_bond_update_sweep!(psi, gates, :even, tau / 2; kw...)
-        b = cbe_bond_update_sweep!(psi, gates, :odd,  tau;     kw...)
-        c = cbe_bond_update_sweep!(psi, gates, :even, tau / 2; kw...)
-
-        nrm = norm(psi)
-        opts.normalize && nrm > 0 && (psi[psi.center] =
-            to_concrete((1.0 / nrm) * psi[psi.center]))
-
-        push!(times, step * opts.dt); push!(norms, nrm)
-        d = bond_dims(psi); push!(bds, d); push!(maxbd, maximum(d; init = 0))
-        push!(centres, d[center_bond(psi)])
-        aug = [a.aug_k, a.aug_l, b.aug_k, b.aug_l, c.aug_k, c.aug_l]
-        push!(expanded, aug); push!(maxexp, maximum(aug; init = 0))
-        push!(epre, max(a.err_pre, b.err_pre, c.err_pre))
-        push!(efnl, max(a.err_fnl, b.err_fnl, c.err_fnl))
-        push!(disc, max(a.discarded, b.discarded, c.discarded))
-        # SUMMED over the three parity sweeps: the gate path solves one exponential per bond,
-        # so the step's cost is the total, not a maximum. `mean_aug` is the mean expanded
-        # AREA (aug_k*aug_l) those solves acted on, in the same units for both paths.
-        push!(kdim, a.n_matvec + b.n_matvec + c.n_matvec)
-        nb = a.nbond + b.nbond + c.nbond
-        push!(maug, nb == 0 ? 0.0 : (a.aug_sum + b.aug_sum + c.aug_sum) / nb)
-        opts.record_magnetisation && push!(mags, magnetisation(copy(psi)))
-        # Energy AFTER the renormalisation, so imaginary time reports the Rayleigh quotient of
-        # a unit-norm state and not one scaled by the decay factor.
-        energy_gates === nothing || push!(energies, real(energy(psi, energy_gates)))
-        opts.observe === nothing || push!(obs, opts.observe(copy(psi), step, step * opts.dt))
-    end
-
-    return CBEBugRunInfo(times, norms, bds, maxbd, expanded, maxexp, centres,
-                         epre, efnl, disc, mags, obs, kdim, maug, energies)
-end
-
-"""
-    cbe_bond_update_bug!(psi, gates; opts=CBEBugOptions()) -> CBEBugRunInfo
-
-Real-time gate-based CBE-BUG: [`cbe_gate_evolve!`](@ref) at `tau = -im*dt`.
-
-Kept as the historical entry point -- every existing test and benchmark calls it -- and it is
-exactly the real-time mode, so [`RealTime.evolve!`](@ref) is an alias for it rather than a
-reimplementation.
-"""
-cbe_bond_update_bug!(psi::SymMPS, gates; opts::CBEBugOptions = CBEBugOptions()) =
-    cbe_gate_evolve!(psi, gates, ComplexF64(-im * opts.dt); opts = opts)

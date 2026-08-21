@@ -81,6 +81,18 @@ function _absorb_right!(psi::SymMPS, i::Int, V_ex)
     return psi
 end
 
+"""Put a frame's two bond legs back on the state's own link tags.
+
+BOTH legs, not one: adjacent tensors in a `SymMPS` must agree on the shared link tag, and
+retagging one side only leaves `psi[i].inds[3] != psi[i+1].inds[1]`, which `contract` rejects on
+the next sweep.
+
+Lives here beside [`_frame_from`](@ref) because both are shared frame plumbing for every sweep.
+It previously sat in `jan_bug.jl`, and deleting that file took `cbe_bug_step!` down with it --
+the helper is not specific to any one integrator.
+"""
+_relink(T, t1, t3) = to_concrete(setitag(setitag(T, 1, t1), 3, t3))
+
 """
     _frame_from(left, right) -> BondFrame
 
@@ -599,72 +611,3 @@ cbe_lubich_sweep(psi::SymMPS, h::Union{XXZChain, MPO}, tau::Number; kwargs...) =
 # ── driver ───────────────────────────────────────────────────────────────────
 
 
-"""
-    cbe_lubich_bug!(psi, h; opts=CBEBugOptions()) -> CBEBugRunInfo
-
-Evolve `psi` in place for `opts.n_steps` real-time steps of `opts.dt` with CBE-BUG.
-
-A TERM LIST IS CONVERTED TO AN MPO ONCE, HERE, and every step then runs on the genuine
-`W^[i]` of `mpo.jl` -- the representation arXiv:2606.28169 Eq. (1.3) names, with the rank-3
-environments of Eq. (1.8) and `H_eff` as the single contraction of Eq. (1.7). The two
-representations are the same operator (`test_mpo.jl` pins them elementwise and at sweep
-level), so this changes no number; it changes which contraction produces them, and the
-measured consequence is fewer Krylov matvecs at the centre, since a single contraction
-reaches an exact Lanczos breakdown where a sum of separately-rounded channel terms does
-not. Pass an `MPO` to skip the conversion, or call [`cbe_lubich_sweep`](@ref) directly with
-an `XXZChain` when the channel path is wanted as a cross-check.
-
-Building it once outside the loop matters: `mpo_from_terms` is `O(L)` tensor assembly, and
-`H` does not change between steps.
-
-One RNG is threaded through the whole run rather than re-seeded per step, so the sketches
-are reproducible without every step drawing the same directions.
-"""
-function cbe_lubich_bug!(psi::SymMPS, h::Union{XXZChain, MPO}; opts::CBEBugOptions = CBEBugOptions())
-    mpo = h isa MPO ? h : mpo_from_terms(h)
-    rng = MersenneTwister(opts.seed)
-    times = Float64[]; norms = Float64[]
-    bdims = Vector{Int}[]; maxb = Int[]
-    expanded = Vector{Int}[]; maxex = Int[]
-    cranks = Int[]; epre = Float64[]; efnl = Float64[]; disc = Float64[]
-    mags = Vector{Float64}[]; obs = Any[]
-    kdim = Int[]; maug = Float64[]
-
-    for step in 1:opts.n_steps
-        info = cbe_lubich_sweep(psi, mpo, ComplexF64(-im * opts.dt);
-                                   dex = opts.dex, growth = opts.growth,
-                                   dover = opts.dover,
-                                   comp_ratio = opts.comp_ratio,
-                                   sulz_cap = opts.sulz_cap,
-                                   preselect_only = opts.preselect_only, exact = opts.exact,
-                                   centre_expand = opts.centre_expand,
-                                   maxdim = opts.maxdim,
-                                   trunc_thresh = opts.trunc_thresh,
-                                   maxiter = opts.maxiter, tol = opts.tol, rng = rng)
-
-        n = norm(psi)                                # recorded BEFORE renormalising
-        if opts.normalize && n > 0
-            psi[psi.center] = to_concrete((1.0 / n) * psi[psi.center])
-        end
-
-        bd = bond_dims(psi)
-        push!(times, step * opts.dt); push!(norms, n)
-        push!(bdims, bd); push!(maxb, maximum(bd; init = 0))
-        push!(expanded, info.expanded); push!(maxex, maximum(info.expanded; init = 0))
-        push!(cranks, info.centre_rank)
-        push!(epre, info.err_pre); push!(efnl, info.err_fnl)
-        push!(disc, info.discarded)
-        push!(kdim, info.krylov_dim)
-        # The centre solve acts on `expanded[c] x expanded[c]`, so the mean over the sweep's
-        # bonds is the right size scale to pair the iteration count with.
-        push!(maug, isempty(info.expanded) ? 0.0 :
-                    sum(info.expanded) / length(info.expanded))
-
-        # Diagnostics read a copy, so moving the centre can never disturb the live state.
-        opts.record_magnetisation && push!(mags, magnetisation(copy(psi)))
-        opts.observe === nothing || push!(obs, opts.observe(copy(psi), step, step * opts.dt))
-    end
-
-    return CBEBugRunInfo(times, norms, bdims, maxb, expanded, maxex, cranks,
-                         epre, efnl, disc, mags, obs, kdim, maug)
-end

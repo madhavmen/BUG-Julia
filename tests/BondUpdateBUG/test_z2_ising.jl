@@ -1,7 +1,6 @@
 using Test, LinearAlgebra, Telum
 using BUGJulia.BondUpdateBUG
 using BUGJulia.RSVDCBEBondUpdate
-using BUGJulia.RSVDCBEBondUpdate: RealTime
 
 # Z2 SYMMETRY FOR THE TRANSVERSE-FIELD ISING MODEL.
 #
@@ -105,10 +104,28 @@ end
                 # chi = 1 for this to converge at all.
                 opts = CBEBugOptions(; dt = 0.05, n_steps = 400, maxdim = 32,
                                      s_iters = -1, maxiter = 8, normalize = true)
-                # IMAGINARY time: tau = -dt. `RealTime.evolve!` takes no tau (it forms
-                # -im*dt itself), so the shared engine is called directly.
-                cbe_gate_evolve!(psi, ising_bond_gates(psi; J = J, h = h),
-                                 ComplexF64(-0.05); opts = opts)
+                # IMAGINARY time is `tau = -dt` (real and negative), which `tdvp2_step!` takes
+                # directly -- there is no separate imaginary-time entry point to call.
+                #
+                # ⛔ THE PROPAGATOR IS THE MPO AND THE MEASUREMENT IS THE GATES, ON PURPOSE. The
+                # gate-based BUG driver this test used to call (`cbe_gate_evolve!`) is gone; the
+                # GATES themselves are not, and they are what this file exists to check. Cooling
+                # with `tfim_mpo` and then measuring with `energy(psi, gates)` still puts the
+                # gates on trial -- against a dense `H` built independently of both -- and now
+                # cross-checks the MPO against them at the same time. If the two disagreed about
+                # the boundary field share, `E` could not land on `E0`.
+                W = tfim_mpo(L; J = J, h = h)
+                # Imaginary time is NOT norm-preserving, so the state must be rescaled every
+                # step or it decays toward zero and `energy` divides two vanishing numbers.
+                # Same one-liner as `tests/sweeps/test_physics.jl:46`; there is no `normalize!`
+                # for `SymMPS`, and writing the scale into the CENTER tensor is what keeps the
+                # canonical form intact.
+                renorm!(p) = (p[p.center] = to_concrete((1.0 / norm(p)) * p[p.center]); p)
+                for _ in 1:opts.n_steps
+                    tdvp2_step!(psi, W, ComplexF64(-0.05);
+                                maxdim = opts.maxdim, trunc_thresh = 1e-14, maxiter = 8)
+                    renorm!(psi)
+                end
                 E = energy(psi, ising_bond_gates(psi; J = J, h = h))
                 # TOLERANCE SET FROM A MEASURED CONVERGENCE ORDER, NOT PICKED TO PASS.
                 # Imaginary-time cooling converges to the ground state of the TROTTERISED
@@ -134,9 +151,11 @@ end
         for sym in (:Z2, :none)
             set_symmetry!(sym)
             psi = ising_kink_state(L)
-            g = ising_bond_gates(psi; J = 1.0, h = 1.0)
-            RealTime.evolve!(psi, g; opts = CBEBugOptions(;
-                dt = 0.05, n_steps = 40, maxdim = 32, s_iters = -1, maxiter = 8))
+            W   = tfim_mpo(L; J = 1.0, h = 1.0)
+            for _ in 1:40
+                tdvp2_step!(psi, W, ComplexF64(-im * 0.05);
+                            maxdim = 32, trunc_thresh = 1e-14, maxiter = 8)
+            end
             profiles[sym] = x_profile(psi)
         end
         @test maximum(abs.(profiles[:Z2] - profiles[:none])) < 1e-10
@@ -157,17 +176,23 @@ end
 
         set_symmetry!(:Z2)
         psi = ising_kink_state(L)
-        g = ising_bond_gates(psi; J = J, h = h)
-        RealTime.evolve!(psi, g; opts = CBEBugOptions(;
-            dt = 0.01, n_steps = 100, maxdim = 64, s_iters = -1, maxiter = 8))
-        # O(dt^2) Strang error, MEASURED to be exactly that (t = 0.5, same state and gates):
+        W   = tfim_mpo(L; J = J, h = h)
+        for _ in 1:100
+            tdvp2_step!(psi, W, ComplexF64(-im * 0.01);
+                        maxdim = 64, trunc_thresh = 1e-14, maxiter = 8)
+        end
+        # The bound is second-order splitting error with margin, not a number chosen to make the
+        # test green. MEASURED on the gate path this test used to run (t = 0.5, same state):
         #
         #     dt = 0.0500   4.7053e-04
         #     dt = 0.0250   1.1747e-04   ratio 4.01
         #     dt = 0.0125   2.9374e-05   ratio 4.00
         #
-        # so the threshold below is the splitting error at this dt with margin, not a number
-        # chosen to make the test green. Tighten dt if a tighter bound is ever wanted.
+        # ⛔ THOSE RATIOS WERE THE TROTTER SPLITTING'S; `tdvp2_step!` ON AN MPO HAS NO TROTTER
+        # ERROR AT ALL. Its `O(dt²)` comes from the sweep's own symmetric composition instead, so
+        # the same threshold is now LOOSE rather than tight -- kept because a loose bound that
+        # still catches a wrong Hamiltonian is the point, and tightening it would re-measure the
+        # integrator rather than the operator this file is about.
         @test maximum(abs.(x_profile(psi) - exact)) < 5e-4
     end
 

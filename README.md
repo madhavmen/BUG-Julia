@@ -1,165 +1,148 @@
-# BUG-Julia — `bond_update_bug`
+# BUG-Julia — `cbe_bug`
 
-A symmetry-native, rank-adaptive Basis-Update-and-Galerkin time integrator for
-1D tensor networks, built on Telum / LurCGT so that U(1)
-and non-Abelian symmetric tensors stay block-sparse throughout.
+A symmetry-native, rank-adaptive **Basis-Update-and-Galerkin** time integrator for 1D tensor
+networks, built on Telum / LurCGT so that U(1), ℤ₂ and non-Abelian symmetric tensors stay
+block-sparse throughout.
 
+Rank grows only through **RSVD controlled bond expansion** — directions drawn through the
+Hamiltonian itself. There is no random sector seeding and no padding anywhere.
 
-## Quick start
-
-The bond update is **RSVD controlled bond expansion** (`rsvd_cbe`) — rank grows only from
-directions drawn through the gate, with no random sector seeding anywhere.
-
-```julia
-using BUGJulia.BondUpdateBUG
-using BUGJulia.RSVDCBEBondUpdate
-using BUGJulia.RSVDCBEBondUpdate: RealTime
-
-set_symmetry!(:U1)                                # :none | :U1 | :SU2 — set it FIRST
-psi   = domain_wall_state(8)                      # |up up up up down down down down>
-gates = bond_gates(psi; J = 1.0, delta = 1.0)     # delta = 0 gives XX
-
-info = RealTime.evolve!(psi, gates; opts = CBEBugOptions(
-    dt = 0.05, n_steps = 40, maxdim = 32, s_iters = -1, maxiter = 8))
-
-magnetisation(copy(psi))                          # the evolved profile
-bond_dims(psi)                                    # rank growth: 1 -> [2,4,8,16,8,4,2]
-info.max_bond_dims                                # per step
-```
-
-**Two paths, same expansion and same S-step**, differing only in how `H` is applied:
-
-```julia
-RealTime.evolve!(psi, gates; opts)                       # gate-based: Strang over bond gates
-RealTime.evolve_mpo!(psi, xxz_chain(8; delta = 1.0); opts)   # Lubich: MPO envs, no Trotter error
-```
-
-Also `ImaginaryTime.evolve!` / `cool!` and `GroundState.rsvd_cbe_dmrg!` — same engine, the mode
-only fixes `tau` and what is recorded.
-
-**Symmetries** — one call, before building any tensors:
-
-| mode | model | charge | notes |
-|---|---|---|---|
-| `:none` | XXZ / Heisenberg | — | one dense block |
-| `:U1` | XXZ / Heisenberg | `Sz` | the default |
-| `:SU2` | Heisenberg (isotropic) | total spin | χ counts **multiplets**, not states |
-| `:Z2` | **transverse-field Ising** | spin-flip parity | its own local space, gates and states |
-
-```julia
-set_symmetry!(:Z2)                                # H = -J Σ ZZ - h Σ X
-psi   = ising_kink_state(8)
-gates = ising_bond_gates(psi; J = 1.0, h = 1.0)
-RealTime.evolve!(psi, gates; opts = CBEBugOptions(dt = 0.05, n_steps = 40, maxdim = 32))
-x_profile(psi)                                    # <X_j>; <Z_j> is identically zero by symmetry
-```
-
-Z2 works in the **σ^x basis**, where the flip `P = Π X_i` becomes a charge and the tensors go
-block-sparse (in the usual σ^z basis it is off-diagonal and buys nothing). Gate path only so
-far — see [docs/USAGE.md §3b](docs/USAGE.md).
-
-📖 **[docs/USAGE.md](docs/USAGE.md)** — the full guide: symmetry switching, both paths, the
-three modes, which options matter and why, how to read the diagnostics, and the gotchas.
-
-▶️ **[examples/heisenberg_domain_wall.jl](examples/heisenberg_domain_wall.jl)** — runnable L=8
-Heisenberg domain wall in `:none` and `:U1`, both paths, checked against an exact
-sparse-Krylov reference:
+## Install and run
 
 ```bash
-julia --project=. examples/heisenberg_domain_wall.jl
-```
-```
-── symmetry = :none ──          ── symmetry = :U1 ──
-   bond dims : [2,4,8,16,8,4,2]    bond dims : [2,4,8,16,8,4,2]
-   max |error vs exact| = 9.901e-05
-
-SAME PHYSICS CHECK  max |<Sz>_none - <Sz>_U1| = 4.746e-15
+julia --project=. -e 'using Pkg; Pkg.instantiate()'
+julia --project=. examples/oat_z2.jl          # a full benchmark, ~1 min
+python3 examples/plot_examples.py             # figures for every CSV produced
 ```
 
-### The earlier KLS bond update
+That is the whole quick start. **[examples/](examples/)** is the place to begin — three
+self-contained scripts, each one model, each writing a CSV and three figures, with every
+parameter in an editable block at the top:
 
-`bond_update_bug!` with `BondUpdateOptions` is the original K/L/S kernel, described below. It
-is **superseded** by the RSVD-CBE path above and is no longer the default: its rank growth
-under U(1) comes entirely from `missing_fill` — a random column seeded into an empty charge
-sector — and it cannot grow rank at all under `:none`, where there is no empty sector to seed.
-RSVD-CBE needs no such thing and grows in every mode.
-
-## The algorithm
-
-1. **K-step.** `H_K x = V0'·gate(x ⊗ V0)`, then project *before* the exponential:
-   `G_K x = H_K x − U0(U0'·H_K x)`. That makes `G_K` **non-Hermitian**, so the K
-   and L substeps take an Arnoldi exponential, not Lanczos.
-2. **L-step.** The mirror, with `P⊥_V0` applied on the right.
-3. **Augmentation.** `Q = orth([U0 | K1])` per charge sector. **No tolerance is
-   applied here** — every direction the step finds is kept, and the only
-   constraint is the Sulz bound `rank([U0|K1]) ≤ 2r`.
-4. **Missing-quantum-number fill.** Under U(1) with the opposite frame frozen,
-   `K1` stays inside `U0`'s sectors and can never *open* a new one, so a reachable
-   sector that neither populates is seeded with a minimal random orthonormal
-   block. Only sectors whose dual is reachable on the other side are seeded — an
-   unpaired one is structurally zero and would be dead weight. The fill draws
-   from the same `2r` budget as the complement, and goes **first**: starve it and
-   the state freezes.
-5. **S-step.** `Ŝ0 = Û'·Θ0·V̂'` .
-6. **Truncate.** A symmetry-blocked SVD of `S1` sets the new bond dimension and
-   prunes any seeded sector the dynamics left empty.
-
-## `BondUpdateOptions`
-
-| field | default | |
+| script | model | what it exercises |
 |---|---|---|
-| `dt`, `n_steps` | 0.05, 10 | real time step and count |
-| `order` | `:strang` | `:strang` (even ½, odd, even ½) or `:lie` |
-| `maxdim` | 200 | hard bond-dimension cap |
-| `trunc_thresh` | 1e-12 | singular-value cutoff for the S-step split |
-| `normalize` | true | rescale after each step; the norm is recorded *before* |
-| `augment`, `missing_fill` | true, 1 | rank adaptation; there is deliberately **no** K/L tolerance |
-| `lanczos_tol`, `lanczos_maxiter` | 1e-15, 30 | Krylov budget for all three substeps |
-| `seed` | `0x5EED` | one RNG for the whole run, so a run is reproducible |
+| [`oat_z2.jl`](examples/oat_z2.jl) | one-axis twisting, ℤ₂ | rank is **constant** in time — the calibration case |
+| [`xx_domain_wall.jl`](examples/xx_domain_wall.jl) | XX chain, U(1) | rank **grows** — adaptivity under load |
+| [`tfim_z2.jl`](examples/tfim_z2.jl) | transverse-field Ising, ℤ₂ | rank grows, and a ℤ₂-charged coupling |
 
-`bond_update_bug!` returns a `BondUpdateInfo` with `times`, `norms`,
-`bond_dims`, `max_bond_dims`, `aug_k_dims`, `aug_l_dims` and `discarded`.
+Every one is checked against a **closed form or a free-fermion solution**, never a second
+integrator and never a `2^L` diagonalisation — so the error column is an error, not a
+disagreement, and stays available at sizes where exact diagonalisation is not.
+See [examples/README.md](examples/README.md).
 
-## Accuracy
+## The three integrators
 
-L=6 Heisenberg, `Dmax=8`, `dt=0.01`, against a dense propagator using the *same*
-odd/even split:
+All take an `MPS` and an `MPO` and advance it by `tau`, so any difference between them is the
+integrator and nothing else.
 
-| | |
+```julia
+using BUGJulia.BondUpdateBUG, BUGJulia.RSVDCBEBondUpdate
+
+set_symmetry!(:U1)                                # :none | :U1 | :SU2 | :Z2 — set it FIRST
+psi = domain_wall_state(8)                        # |↑↑↑↑↓↓↓↓⟩, χ = 1
+W   = xxz_mpo(8; J = 1.0, delta = 1.0)
+
+for _ in 1:40
+    cbe_bug_step!(psi, W, ComplexF64(-im * 0.05); maxdim = 32, trunc_thresh = 1e-10)
+end
+
+bond_dims(psi)          # rank grew from a product state: 1 -> [2,4,8,16,8,4,2]
+mpo_energy(psi, W)
+```
+
+| function | what it is |
 |---|---|
-| projection error | 6.25e-5, converging second order in `dt` |
-| vs the Alice reference kernel (`⟨Sz_j⟩`) | 6.33e-8 |
-| vs Alice with the Sulz bound relaxed | **4.27e-11** |
-| XX vs the free-fermion analytic solution | < 1e-6 |
+| `cbe_bug_step!` | RSVD-CBE + rank-adaptive BUG. `K`/`L` half-sweeps build the bases, one Galerkin step at the centre root. |
+| `tdvp_cbe1s_step!` | 1-site TDVP with controlled bond expansion ([arXiv:2208.10972](https://arxiv.org/abs/2208.10972)) — the baseline to beat. |
+| `tdvp2_step!` | 2-site TDVP. The conventional reference. |
 
-BUG is **not** exact at `Dmax=8`: `exp(-iτh)Θ` has right support up to twice the
-link support, so the `h²` term wants more room than `2r` permits, and the
-resulting O(τ²) local error is intrinsic to the bound rather than a defect. The
-6.33e-8 gap from Alice is *entirely* the strict `2r` enforcement — the port
-itself agrees to 4.27e-11, and the fill's RNG contributes exactly nothing (four
-seeds, zero spread). Accuracy is to come from raising the order of the sweep,
-never from widening the basis past `2r`.
+`cbe_bug_step!` has exactly **two scheme knobs**, both defaulting to on:
+
+- **`kstep`** — do the BUG basis update. `false` takes the CBE frame directly.
+- **`kaug`** — UNION the basis update with the CBE frame instead of letting it replace it.
+  With `kaug = false` the directions CBE just paid to find are discarded before they reach the
+  state. See [docs/USAGE.md §6b](docs/USAGE.md).
+
+The sweep is always **interleaved** (expand bond `i`, then immediately evolve site `i`) — the
+ordering of the reference implementation.
+
+Imaginary time is the same call with a real negative `tau`; rescale the state each step.
+`GroundState.rsvd_cbe_dmrg!` is the variational ground-state mode.
+
+## Symmetries
+
+One call, before building any tensors:
+
+| mode | models | charge | notes |
+|---|---|---|---|
+| `:none` | all | — | one dense block; the control every symmetric run is checked against |
+| `:U1` | XXZ / Heisenberg / XX | `S^z` | the default |
+| `:SU2` | Heisenberg (isotropic) | total spin | χ counts **multiplets**, not states |
+| `:Z2` | transverse-field Ising, OAT | spin-flip parity | its own local space, gates, states and MPO |
+
+ℤ₂ works in the **σˣ basis**, where the global flip `P = Π X_i` becomes a diagonal charge and the
+tensors go block-sparse (in the usual σᶻ basis it is off-diagonal and buys nothing). The trade is
+that **`X` is diagonal and `Z` is the flip** — the reverse of the usual convention — so `X` is the
+measurable operator and `Z` carries the charge.
+
+```julia
+set_symmetry!(:Z2)                                # H = -J Σ Z_i Z_{i+1} - h Σ X_i
+psi = ising_kink_state(8)                         # a domain wall in the X basis
+W   = tfim_mpo(8; J = 1.0, h = 1.0)               # explicit MPO, virtual dimension 3
+cbe_bug_step!(psi, W, ComplexF64(-im * 0.05); maxdim = 32)
+x_profile(psi)                                    # ⟨X_j⟩; ⟨Z_j⟩ is identically zero by symmetry
+```
+
+## Hamiltonians
+
+Every model is an `MPO`, so all of them drive the same environments, effective Hamiltonians and
+Krylov solves — a run differs from another run only in the operator.
+
+| builder | Hamiltonian | virtual dim |
+|---|---|---|
+| `xxz_mpo(L; J, delta)` | `J Σ (SxSx + SySy + delta·SzSz)`, `delta = 0` is XX | 5 (U(1)) |
+| `heisenberg_su2_mpo(L; J)` | isotropic Heisenberg | 3 multiplets |
+| `tfim_mpo(L; J, h)` | `-J Σ Z_i Z_{i+1} - h Σ X_i` | 3 |
+| `oat_mpo(L)` | `(Σ S^z)² / 2` | — |
+| `pair_mpo(L, J, vertices)` | **any** two-body `J[i,j]`, exactly, including charged operators | `O(L)` |
+| `long_range_mpo` | exponentially decaying tails, one channel per decay | independent of `L` |
+
+`pair_mpo` is what makes Haldane-Shastry exact: `1/sin²` has no finite-dimensional MPO, so `O(L)`
+is what exactness costs rather than a wasteful encoding.
 
 ## Tests
 
 ```bash
-sbatch --job-name=t_all --mem=32G scripts/run_julia.sbatch tests/runtests.jl
+julia --project=. tests/sweeps/runtests.jl        # the sweeps, the models, the physics
+julia --project=. tests/runtests.jl               # BondUpdateBUG
 ```
 
-720 tests. The Python parity test consumes
-`tests/crosscheck/reference_l6_heisenberg.json`, regenerated with:
+Three **disjoint** runners — `tests/runtests.jl`, `tests/sweeps/runtests.jl` and
+`tests/RSVDCBEBondUpdate/runtests.jl` — so running the wrong one proves nothing about the other
+two.
 
-```bash
-sbatch scripts/run_python.sbatch tests/crosscheck/export_python_reference.py
-```
+`tests/sweeps/runtests.jl` is ordered so a red test localises instead of leaving suspects: the
+analytic references are pinned against exact diagonalisation first, then the operators
+(`pair_mpo`, `tfim_mpo`) with no integrator involved, then the sweeps, then cross-symmetry
+parity, then the physics.
 
-Two independent references are used, and each is validated before it is relied
-on: `tests/common/dense_reference.jl` (shares the integrator's conventions) and
-`tests/common/free_fermion.jl` (derived from the Hamiltonian on paper, no 2^L
-object anywhere). They agree to 1e-11.
+Two independent references, each validated before it is relied on:
+`tests/common/dense_reference.jl` (shares the integrator's conventions) and
+`tests/common/free_fermion.jl` (derived from the Hamiltonian on paper, no `2^L` object anywhere).
+
+⛔ **Rank the schemes by error against a reference, never by energy drift.** They disagree
+outright on these models: a scheme can conserve energy to machine precision and still be an order
+of magnitude further from the exact solution.
+
+## Documentation
+
+📖 **[docs/USAGE.md](docs/USAGE.md)** — symmetry switching, the options that matter and why, how
+to read the diagnostics, the `kaug` result (§6b), and the gotchas.
+
+📁 **[examples/README.md](examples/README.md)** — the three example scripts, their parameters,
+the CSV columns, and what the randomised sketch does and does not affect.
 
 ## Retired paths
 
-`exploratory/` holds the global-sweep discarded BUG and the pre-refactor
-ITensors tree (TDVP, TTutils, the faithful-KLS kernel). None of it loads against
-this package's dependencies; it is a record, not a working state.
+`exploratory/` holds the global-sweep discarded BUG and the pre-refactor ITensors tree. None of
+it loads against this package's dependencies; it is a record, not a working state.

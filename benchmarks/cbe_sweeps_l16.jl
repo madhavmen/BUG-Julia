@@ -176,11 +176,9 @@ energy(psi, mpo) = real(mpo_energy(psi, mpo)) / max(norm(psi)^2, eps())
 # One step of each integrator, behind one signature so the loops below are shared.
 function stepper(scheme::String, mpo, maxdim::Int, cutoff::Float64)
     if scheme == "bug_decoupled"
-        return (p, tau) -> cbe_bug_step!(p, mpo, tau; decoupled = true,
-                                         maxdim = maxdim, trunc_thresh = cutoff)
+        return (p, tau) -> cbe_bug_step!(p, mpo, tau; maxdim = maxdim, trunc_thresh = cutoff)
     elseif scheme == "bug_interleaved"
-        return (p, tau) -> cbe_bug_step!(p, mpo, tau; decoupled = false,
-                                         maxdim = maxdim, trunc_thresh = cutoff)
+        return (p, tau) -> cbe_bug_step!(p, mpo, tau; maxdim = maxdim, trunc_thresh = cutoff)
     elseif scheme == "tdvp_cbe1s"
         return (p, tau) -> tdvp_cbe1s_step!(p, mpo, tau;
                                             maxdim = maxdim, trunc_thresh = cutoff)

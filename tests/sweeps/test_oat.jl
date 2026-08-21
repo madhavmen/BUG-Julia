@@ -148,7 +148,7 @@ end
     mk_cbe(d) = (p, tau) -> tdvp_cbe1s_step!(p, mpo, tau; maxdim = d, trunc_thresh = 1e-14)
     mk_t2(d)  = (p, tau) -> tdvp2_step!(p, mpo, tau; maxdim = d, trunc_thresh = 1e-14)
     # INTERLEAVED (`decoupled = false`) -- the reference's own ordering, TDVPSweepCBE1Si.m.
-    mk_bug(d) = (p, tau) -> cbe_bug_step!(p, mpo, tau; decoupled = false, maxdim = d,
+    mk_bug(d) = (p, tau) -> cbe_bug_step!(p, mpo, tau; maxdim = d,
                                           trunc_thresh = 1e-14)
 
     for (name, mk) in (("tdvp_cbe1s", mk_cbe), ("tdvp2", mk_t2), ("cbe_bug", mk_bug))
@@ -351,7 +351,7 @@ end
         psi = x_polarized_state(L)
         kry = 0
         for _ in 1:nst
-            info = cbe_bug_step!(psi, mpo, ComplexF64(-im * dt); decoupled = false, kaug = kaug,
+            info = cbe_bug_step!(psi, mpo, ComplexF64(-im * dt); kaug = kaug,
                                  maxdim = D, trunc_thresh = 1e-14, maxiter = 30)
             kry += info.krylov_dims
         end

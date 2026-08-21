@@ -99,7 +99,6 @@ include("cbe_lubich.jl")
 # direction alternating between steps. MPO-only, so a long-range or site-dependent H needs a
 # different `MPO` and nothing else. After `cbe_lubich.jl`, whose `_frame_from` /
 # `_absorb_left!` / `_absorb_right!` it reuses.
-include("jan_bug.jl")
 
 # models/ -- the BENCHMARK HAMILTONIANS, and the MPO machinery Haldane-Shastry needs that
 # `mpo.jl` deliberately refused to write.
@@ -127,6 +126,7 @@ include("jan_bug.jl")
 include("models/pair_mpo.jl")
 include("models/haldane_shastry.jl")
 include("models/oat.jl")
+include("models/tfim.jl")
 
 # The two TDVP integrators live in their own directories. They are FILES of this module, not
 # submodules: both are built on `henv.jl` (environments) and `cbe_core.jl` (the expansion)
@@ -173,10 +173,20 @@ include("sweeps/tdvp_cbe1s.jl")
 include("sweeps/cbe_bug.jl")
 
 # The modes come last: each imports from the parent, so everything they name must already be
-# defined. They are submodules rather than files so `RealTime.evolve!` and
-# `GroundState.solve!` read as what they are at the call site.
-include("modes/real_time.jl")
-include("modes/imaginary_time.jl")
+# defined. A submodule rather than a file so `GroundState.solve!` reads as what it is at the
+# call site.
+#
+# ⛔ `RealTime` AND `ImaginaryTime` ARE GONE, and the reason is worth recording. Both were pure
+# forwarders to the GATE-BASED engine (`cbe_gate_evolve!`, `cbe_bond_update_bug!`,
+# `cbe_lubich_bug!`), which went with the other BUG implementations -- so their bodies named
+# functions that no longer exist. That does NOT stop the package loading: Julia resolves a
+# called name at CALL time, so `isdefined(RealTime, :evolve!)` kept answering `true` while every
+# actual call threw `UndefVarError` from inside. A name that is present and throws is worse than
+# one that is absent, because "it loads" reads as evidence and is not.
+#
+# Real and imaginary time are now the `tau` argument of the sweeps themselves -- `-im*dt` and
+# `-dt` passed to `cbe_bug_step!` / `tdvp_cbe1s_step!` / `tdvp2_step!` -- which is one fewer
+# layer and cannot drift from them.
 include("modes/ground_state.jl")
 
 export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bond_gate,
@@ -184,7 +194,6 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        LongRangeTerm, long_range_mpo, long_range_zz_mpo,
        LongRangeFit, fit_long_range, default_decays, long_range_terms, power_law_zz_mpo,
        MPOLink, MPOLeftEnvStack, MPORightEnvStack, MPOZeroSiteH, MPOOneSiteH,
-       JanBugInfo, jan_bug_step!, jan_bug!,
        LeftEnvStack, RightEnvStack,
        left_env_stack, right_env_stack, env_energy, env_energy_right,
        ChannelSet, boundary_channels, left_channels, right_channels,
@@ -194,11 +203,11 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        sector_graded_sketch, full_local_basis,
        CBEExpansion, cbe_expand,
        CBEBugInfo, cbe_lubich_sweep, truncate_sweep!, truncate_recursive!,
-       CBEBugOptions, CBEBugRunInfo, cbe_lubich_bug!,
+       CBEBugOptions, CBEBugRunInfo, tfim_mpo,
        sketch_bond_left, sketch_bond_right, cbe_expand_bond,
-       cbe_bond_update, cbe_bond_update_sweep!, cbe_bond_update_bug!,
-       cbe_gate_evolve!, SStepSolver, Propagate, LowestEigen,
-       RealTime, ImaginaryTime, GroundState,
+       cbe_bond_update,
+       SStepSolver, Propagate, LowestEigen,
+       GroundState,
        ZeroSiteH, zero_site_h, apply_zero_site,
        OneSiteH, one_site_h, apply_one_site, TDVP2Info, tdvp2_step!, tensor_elements,
        TDVP1CBEInfo, tdvp1_cbe_step!,

@@ -13,8 +13,10 @@
 #                            test below compares an integrator against these -- if a formula here
 #                            is wrong, all of those tests are wrong in the same direction and
 #                            agree with each other, which is the worst failure mode there is.
-#   2  pair_mpo              the operator, pinned against `mpo_from_terms` (layout) and a dense
-#                            pair sum (charged transport). No integrator involved.
+#   2  pair_mpo, tfim_mpo    the operators, pinned against `mpo_from_terms` (layout), a dense
+#                            pair sum (charged transport) and a dense 2^L TFIM. No integrator
+#                            involved in either -- a wrong operator would make every sweep below
+#                            wrong in the same direction, so the operators are settled first.
 #   3  sweeps                the three sweeps, each against something already trusted.
 #   4  symmetry parity       the same physics under :none / :U1 / :SU2.
 #   5  physics               Haldane-Shastry and Heisenberg, GSE / ITE / RTE, against the
@@ -39,6 +41,7 @@ include(joinpath(@__DIR__, "..", "common", "analytic_reference.jl"))
 @testset "sweeps (RSVD-CBE: DMRG, 1-site TDVP, fixed-rank BUG)" begin
     include(joinpath(@__DIR__, "..", "common", "test_analytic_reference.jl"))
     include("test_pair_mpo.jl")
+    include("test_tfim_mpo.jl")
     include("test_sweeps.jl")
     include("test_symmetry_parity.jl")
     include("test_physics.jl")

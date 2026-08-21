@@ -74,57 +74,49 @@ So an SU(2)-vs-abelian comparison must use `dimer_state` + `bond_energies`, neve
 wall + magnetisation. Asking for `magnetisation` under `:SU2` throws rather than silently
 returning zeros.
 
-## 3. The two paths
+## 3. One path: MPO environments
 
-Both use the **same** RSVD-CBE expansion and the **same** S-step. They differ only in how `H`
-is applied.
+⛔ **THE GATE-BASED PATH IS GONE.** `RealTime.evolve!`, `ImaginaryTime.evolve!`,
+`RealTime.evolve_mpo!` and the engine under them (`cbe_gate_evolve!`,
+`cbe_bond_update_bug!`, `cbe_lubich_bug!`) were removed with the other BUG implementations.
+Everything now goes through **MPO environments**, which is what the surviving sweeps take.
 
-### Gate-based — `RealTime.evolve!`
-
-```julia
-gates = bond_gates(psi; J = 1.0, delta = 1.0)
-info  = RealTime.evolve!(psi, gates; opts = opts)
-```
-
-Strang composition over bond gates: `even τ/2, odd τ, even τ/2`. No MPO environments at all.
-Cheapest per step, and the path the benchmarks exercise most. Carries a **Trotter splitting
-error of order dt²**.
-
-### Lubich sweep — `RealTime.evolve_mpo!`
+Nothing was lost in accuracy by that: the gate path carried a **Trotter splitting error of order
+dt²** that the MPO path does not have at all.
 
 ```julia
-h    = xxz_chain(8; delta = 1.0)          # or heisenberg_su2_chain(8) under :SU2
-info = RealTime.evolve_mpo!(psi, h; opts = opts)
+W = xxz_mpo(8; J = 1.0, delta = 1.0)       # or heisenberg_su2_mpo(8) under :SU2
+for _ in 1:n_steps
+    cbe_bug_step!(psi, W, ComplexF64(-im * dt); maxdim = 32, trunc_thresh = 1e-10)
+end
 ```
 
-One projected exponential per step over a globally expanded subspace, through MPO
-environments. **No Trotter splitting error.** More work per step; measured ~1 `expv` call per
-sweep against ~66 for a 2-site TDVP step at L=18.
+**Time direction is the `tau` argument, not a mode object.** `tau = -im*dt` is real time and
+`tau = -dt` is imaginary time; imaginary time is not norm-preserving, so rescale each step:
 
-For a single sweep rather than a driver loop: `cbe_lubich_sweep(psi, h, tau; maxdim, ...)`.
+```julia
+renorm!(p) = (p[p.center] = to_concrete((1.0 / norm(p)) * p[p.center]); p)
+```
 
-### Which to use
+The three sweeps all share this signature — `cbe_bug_step!`, `tdvp_cbe1s_step!`, `tdvp2_step!` —
+so swapping one for another is a one-word change and any difference between them is the
+integrator. `GroundState.rsvd_cbe_dmrg!` remains the variational ground-state mode.
 
-| | gate | Lubich |
-|---|---|---|
-| Trotter error | O(dt²) | none |
-| needs an MPO | no | yes |
-| cost per step | lower | higher |
-| non-nearest-neighbour `H` | ❌ | ✅ |
-
-**The two paths need not agree to round-off** — the example measures a 3.4e-05 gap at dt=0.05,
-which is the gate path's splitting error and expected physics. Both are checked against the
-exact reference, which is what settles correctness. Do not use one as the other's oracle.
+For a single expansion sweep rather than a step loop: `cbe_lubich_sweep(psi, h, tau; maxdim, ...)`.
 
 ## 3b. The transverse-field Ising model under Z2
 
 ```julia
 set_symmetry!(:Z2)                                   # or :none, same basis, same results
-psi   = ising_kink_state(8)                          # |+...+ -...->, chi = 1
-gates = ising_bond_gates(psi; J = 1.0, h = 1.0)      # H = -J ZZ - h X
-RealTime.evolve!(psi, gates; opts = CBEBugOptions(dt = 0.05, n_steps = 40, maxdim = 32))
+psi = ising_kink_state(8)                            # |+...+ -...->, chi = 1
+W   = tfim_mpo(8; J = 1.0, h = 1.0)                  # H = -J ZZ - h X, virtual dimension 3
+for _ in 1:40
+    cbe_bug_step!(psi, W, ComplexF64(-im * 0.05); maxdim = 32)
+end
 x_profile(psi)                                       # <X_j>, the light-cone observable
 ```
+
+Runnable, with the exact free-fermion reference and figures: [`examples/tfim_z2.jl`](../examples/tfim_z2.jl).
 
 **Everything is in the σ^x eigenbasis, and that is what makes Z2 useful.** In the conventional
 σ^z basis the flip `P = Π X_i` is entirely off-diagonal, so nothing is block-sparse and the
@@ -143,17 +135,31 @@ must be probed with the correlator `⟨Z_i Z_j⟩`, never a single site. This is
 Bond dimensions under `:Z2` count **states** per charge sector, so unlike SU(2) they *are*
 directly comparable with `:none`.
 
-| | supported |
-|---|---|
-| gate path (`RealTime.evolve!`, `cbe_gate_evolve!`) | ✅ the transverse field is folded into the bond gates |
-| Lubich / MPO path (`evolve_mpo!`, `cbe_lubich_sweep`) | ❌ **not yet** — `XXZChain` carries only two-site terms and the `henv.jl` channels have no on-site slot |
+**The MPO path is now the supported one** — `tfim_mpo` builds the automaton explicitly, so the
+TFIM drives the same environments and Krylov solves as every other model. The old note that only
+the gate path supported ℤ₂ is obsolete: it was true when `XXZChain` was the only route to an MPO
+and its channels had no on-site slot, which `tfim_mpo` does not go through.
 
-The field distribution over bonds is not uniform and is easy to get wrong: an interior site
-touches two bonds and takes `h/2` from each, while sites `1` and `L` touch one bond and must
-take the **full** `h` there. Halving every site's field instead would quietly evolve a chain
-with weakened boundary fields — a different Hamiltonian whose error *shrinks* with `L`, so
-small-size tests would miss it. `tests/BondUpdateBUG/test_z2_ising.jl` pins it against a dense
-`H` built independently of the tensor code.
+⛔ **The two halves of the coupling are the adjoint pair `Z`/`Z'`, not `Z`/`Z`.** Mod 2 the flip
+is its own charge partner (`1+1 = 0`), so `Z Z` is *charge*-correct and looks obviously right —
+the failure is an **arrow**. An op-leg is created with direction `'-'`, so `Z`/`Z` gives the
+opening block's outgoing virtual leg and the closing block's incoming one the same direction, and
+Telum will not contract two `'-'` legs. It does not surface as an arrow error either: `oplus`
+fails first, with *"entry 4 has no leg matching reference leg 1"*, which reads like a missing
+mod-2 capability. `_oat_sz_vertex` documents the identical trap for `(Σ S^z)²`.
+
+⛔ **A product-state energy pins the FIELD and not the coupling.** `Z` is the flip here, so
+`⟨s|Z_i Z_{i+1}|s⟩ = 0` for *every* σˣ product state — an MPO with the coupling deleted or at the
+wrong `J` reproduces `⟨H⟩` on all of them. Only a state that is not diagonal in this basis sees
+it, which is why the coupling is pinned by a short quench against `exp(-iHt)` (measured 1.6e-13
+at full rank, L=6).
+
+The gate builders remain, and their field distribution over bonds is not uniform: an interior
+site touches two bonds and takes `h/2` from each, while sites `1` and `L` touch one bond and must
+take the **full** `h` there. Halving every site's field instead would quietly evolve a chain with
+weakened boundary fields — a different Hamiltonian whose error *shrinks* with `L`, so small-size
+tests would miss it. `tests/BondUpdateBUG/test_z2_ising.jl` pins both the gates and the MPO
+against a dense `H` built independently of the tensor code.
 
 ⚠️ **The Z2 local space rests on Telum-private API.** `getLocalSpace` cannot build it: LurCGT
 derives an operator's charge from a Lie-algebra commutator `[Q,O] = q·O`, and the Z2 flip admits

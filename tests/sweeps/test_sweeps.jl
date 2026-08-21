@@ -357,10 +357,8 @@ import Random
             end
             return norm(dense_state(p) - want)
         end
-        bug_d = [run_to_T((p, t) -> cbe_bug_step!(p, mpo, t; decoupled = true,
-                          maxdim = maxdim, trunc_thresh = 1e-14), n) for n in (4, 8, 16)]
-        bug_i = [run_to_T((p, t) -> cbe_bug_step!(p, mpo, t; decoupled = false,
-                          maxdim = maxdim, trunc_thresh = 1e-14), n) for n in (4, 8, 16)]
+        bug_d = [run_to_T((p, t) -> cbe_bug_step!(p, mpo, t; maxdim = maxdim, trunc_thresh = 1e-14), n) for n in (4, 8, 16)]
+        bug_i = [run_to_T((p, t) -> cbe_bug_step!(p, mpo, t; maxdim = maxdim, trunc_thresh = 1e-14), n) for n in (4, 8, 16)]
         tdvp1 = [run_to_T((p, t) -> tdvp_cbe1s_step!(p, mpo, t;
                           maxdim = maxdim, trunc_thresh = 1e-14), n) for n in (4, 8, 16)]
         tdvp2v = [run_to_T((p, t) -> tdvp2_step!(p, mpo, t;
@@ -395,10 +393,8 @@ import Random
         for maxdim in (4, 8)
             a = warm(L); b = copy(a); b.tensors .= copy.(a.tensors)
             for _ in 1:10
-                cbe_bug_step!(a, mpo, -0.05im; decoupled = true,
-                              maxdim = maxdim, trunc_thresh = 1e-14)
-                cbe_bug_step!(b, mpo, -0.05im; decoupled = false,
-                              maxdim = maxdim, trunc_thresh = 1e-14)
+                cbe_bug_step!(a, mpo, -0.05im; maxdim = maxdim, trunc_thresh = 1e-14)
+                cbe_bug_step!(b, mpo, -0.05im; maxdim = maxdim, trunc_thresh = 1e-14)
             end
             @test real(mpo_energy(a, mpo)) ≈ real(mpo_energy(b, mpo)) atol = 1e-10
             @test abs(overlap(a, b)) ≈ norm(a) * norm(b) atol = 1e-10

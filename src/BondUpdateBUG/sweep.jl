@@ -32,43 +32,6 @@ bond_gates(psi::SymMPS; J::Float64 = 1.0, delta::Float64 = 1.0) =
         for i in 1:(length(psi) - 1)]
 
 """
-    parity_sweep!(psi, gates, parity, tau; kwargs...) -> NamedTuple
-
-Advance every bond of one commuting group by `tau`, in place. Returns
-`(; aug_k, aug_l, discarded)`, each the **maximum** over the group's bonds --
-the diagnostics Python's `parity_sweep` returns.
-
-`kwargs` forward to [`kls_bond_update`](@ref): `maxdim`, `trunc_thresh`,
-`augment`, `missing_fill`, `maxiter`, `tol`, `rng`.
-
-No re-canonicalisation after a bond: `kls_bond_update` returns `left_core`
-already a left isometry with the centre in `right_core`, so setting
-`psi.center = i + 1` is exact, and the next bond of the group is one move to the
-right.
-"""
-function parity_sweep!(psi::SymMPS, gates, parity::Symbol, tau::ComplexF64; kwargs...)
-    aug_k = 0
-    aug_l = 0
-    discarded = 0.0
-    for i in parity_bonds(length(psi), parity)
-        gates[i] === nothing && continue
-        canonical!(psi, i)
-        f = bond_frame(psi, i)
-        r = kls_bond_update(f, gates[i], tau; kwargs...)
-        psi[i] = r.left_core
-        psi[i + 1] = r.right_core
-        psi.center = i + 1
-        aug_k = max(aug_k, r.aug_k)
-        aug_l = max(aug_l, r.aug_l)
-        discarded = max(discarded, r.discarded)
-    end
-    return (; aug_k, aug_l, discarded)
-end
-
-parity_sweep!(psi::SymMPS, gates, parity::Symbol, tau::Number; kwargs...) =
-    parity_sweep!(psi, gates, parity, ComplexF64(tau); kwargs...)
-
-"""
     energy(psi, gates) -> Float64
 
 `Σ_b ⟨ψ|h_b|ψ⟩ / ⟨ψ|ψ⟩` over the bonds carrying a gate.

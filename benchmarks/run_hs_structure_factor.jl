@@ -34,9 +34,9 @@ const CUT    = 1e-8
 
 stepper(name, mpo) =
     name == "bug_decoupled"   ? (p, t) -> cbe_bug_step!(p, mpo, t; maxdim = MAXDIM,
-                                                        trunc_thresh = CUT, decoupled = true) :
+                                                        trunc_thresh = CUT) :
     name == "bug_interleaved" ? (p, t) -> cbe_bug_step!(p, mpo, t; maxdim = MAXDIM,
-                                                        trunc_thresh = CUT, decoupled = false) :
+                                                        trunc_thresh = CUT) :
     name == "tdvp2"           ? (p, t) -> tdvp2_step!(p, mpo, t; maxdim = MAXDIM,
                                                       trunc_thresh = CUT) :
     name == "tdvp_cbe1s"      ? (p, t) -> tdvp_cbe1s_step!(p, mpo, t; maxdim = MAXDIM,

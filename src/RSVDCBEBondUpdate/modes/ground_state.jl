@@ -5,7 +5,7 @@ Two-site DMRG whose bond expansion is RSVD-CBE and whose local solve is the SAME
 Krylov iteration the time-evolution modes use.
 
 WHAT IS SHARED, AND IT IS ALMOST EVERYTHING. The local problem here is solved by
-`_expanding_krylov`, the identical function [`RealTime`](@ref) and [`ImaginaryTime`](@ref)
+`_expanding_krylov`, the identical function real- and imaginary-time evolution
 call. Same growth passes, same sector-graded sketch, same `P_perp` projection, same ranking,
 same direct sum, same embedding of stored Krylov vectors into the grown basis, same full
 reorthogonalisation. Two things are swapped:

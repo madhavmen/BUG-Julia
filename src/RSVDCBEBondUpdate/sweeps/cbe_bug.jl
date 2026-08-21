@@ -14,9 +14,8 @@ What one [`cbe_bug_step!`](@ref) did.
   - `err_pre`, `err_fnl` -- largest preselection / final-selection weight discarded. `err_fnl`
     is the one to watch: a large value means the BUDGET, not the selection, limited accuracy.
   - `discarded` -- largest relative weight the closing truncation threw away.
-  - `kaug` -- whether the frame union ACTUALLY ran, which is not the same as the keyword that was
-    passed: it is forced off under `decoupled` (see the keyword's docstring), so this is the field
-    to read when attributing a result rather than the argument at the call site.
+  - `kaug` -- whether the frame union ran. Recorded so a result can be attributed from the info
+    struct alone, without reference to the call site.
   - `krylov_dims` -- operator applications, summed over the `L` K-steps and the one root solve.
   - `peak_elements` -- working set (`state + accumulated frames + transients alive at that
     moment`), the same definition `TDVP2Info` uses, so the two are comparable.
@@ -64,13 +63,6 @@ Keywords beyond the [`cbe_expand`](@ref) ones (`dex`, `growth`, `dover`, `comp_r
     `kstep = true`. `true` is the DEFAULT; `false` reproduces the historical behaviour and is
     kept only as the A/B that exhibits the defect.
 
-    ⛔ INTERLEAVED ONLY -- forced OFF under `decoupled = true`, and `info.kaug` reports what
-    actually ran. The union needs `U_ex` and `svd(K1).U` to be two bases of the SAME space.
-    Interleaved gives that (both built from the same `K`, both on `W[i-1]`'s bond); decoupled does
-    not, because its phase A runs a separate frame chain so `U_ex` sits on `U_ex[i-1]`'s bond
-    instead. Forcing the itags to match would direct-sum vectors from two different bases and
-    return silently wrong numbers.
-
     MEASURED on OAT (L=10, T=2, the `tests/sweeps/test_oat.jl` dt-order configuration), as
     `max_t |S^x_tot - closed form|`:
 
@@ -107,21 +99,6 @@ Keywords beyond the [`cbe_expand`](@ref) ones (`dex`, `growth`, `dover`, `comp_r
 
     ⚠ Not the closing truncation (`trunc_thresh = 0` is bit-identical, `discarded ~1e-6`) and
     not `comp_ratio` (`nothing`/0.0/0.25/0.5/0.75/1.0 all bit-identical).
-  - `decoupled` -- WHERE the expansion happens, and both settings are supported schemes rather
-    than one being a debug path, because the comparison against 2-site TDVP and
-    `tdvp_cbe1s_step!` wants both.
-      * `true`: expansion is its own phase. Every bond is expanded before any
-        evolution, against the START-OF-STEP state -- the environment chain runs through the CBE
-        frames, so a bond's selection never sees a basis some K-step wrote.
-      * `false` (default): the reference's own ordering (`TDVPSweepCBE1Si.m:30`/`:34` -- expand bond `si`,
-        immediately evolve site `si`), so the environment chain runs through the EVOLVED frames
-        and bond `i+1`'s selection sees the update at site `i`.
-    The two cost the SAME: `L` expansions and `L+1` Krylov solves either way. Decoupled pays one
-    extra environment-push chain (a few percent -- one push is a single contraction, one `expv`
-    is `maxiter` of them) and O(L) frame storage instead of O(1). What it buys is that the
-    widened bond space becomes a function of `psi(t_0)` alone, which is what would let the
-    expansion phase be parallelised over bonds; as written it is still sequential, because the
-    environment is chained through the CBE frames rather than frozen (Remark 1, declined).
   - `maxdim`, `trunc_thresh` -- the closing truncation. `truncate = false` disables it, to watch
     the rank ratchet.
     The closing truncation is [`truncate_recursive!`](@ref) -- `Θ_τ` of arXiv:2201.10291 §4.2
@@ -131,16 +108,15 @@ Keywords beyond the [`cbe_expand`](@ref) ones (`dex`, `growth`, `dover`, `comp_r
 """
 function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        dex::Int = 0,
-                       growth::Float64 = 2.0,
+                       growth::Float64 = 1.1,
                        dover::Union{Nothing, Int} = nothing,
-                       comp_ratio::Union{Float64, Nothing} = 0.5,
+                       comp_ratio::Union{Float64, Nothing} = 1.0,
                        sulz_cap::Bool = false,
                        preselect_only::Bool = false,
                        exact::Bool = false,
                        root::Union{Nothing, Int} = nothing,
                        kstep::Bool = true,
                        kaug::Bool = true,
-                       decoupled::Bool = false,
                        truncate::Bool = true,
                        maxdim::Int = 200,
                        trunc_thresh::Float64 = 1e-12,
@@ -186,27 +162,12 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     Uwide = Vector{Any}(undef, kstep ? L - 1 : 0)  # widened LEFT  frame, bonds c … L-1
     # The CBE frame. Needed for `kstep = false` (it IS the basis) and for `kaug` (it is unioned
     # into the basis) -- so it is stored whenever the basis is going to reference it.
-    # ⛔ `kaug` IS AN INTERLEAVED-ONLY OPTION, AND IT IS DISABLED HERE RATHER THAN ERRORING.
-    #
-    # WHY IT CANNOT WORK UNDER `decoupled`. The union needs `U_ex` and `svd(K1).U` to be two
-    # bases OF THE SAME SPACE, so that appending the part of one outside the other is meaningful.
-    # Interleaved gives exactly that: both are built from the same `K` in the same iteration, so
-    # both carry `W[i-1]`'s bond on the left. Decoupled does not -- phase A runs its own
-    # left-to-right chain with `C = U_ex' * K`, so `Wcbe[i]` sits on `U_ex[i-1]`'s bond, while
-    # phase B rebuilds `K` from the EVOLVED basis and `Wk` sits on `W[i-1]`'s. Different spaces.
-    #
-    # This first showed up as `AssertionError: Contracted legs must have matching itags:
-    # 'L,bU' vs '1,cbeW'` from `perp_component`, which reads like a tagging slip and is not one --
-    # forcing the tags to match would produce a direct sum of vectors from two different bases,
-    # i.e. silently wrong numbers instead of a loud stop. Transporting phase-A frames into phase
-    # B's gauge is possible in principle but is a change to what `decoupled` MEANS (its whole
-    # purpose is that phase-A frames are built from the frozen state), not a bug fix.
-    #
-    # Disabled rather than thrown because `decoupled` is the diagnostic A/B arm: callers compare
-    # the two orderings with everything else held fixed, and a default that errors on one of them
-    # would make the comparison impossible to express. `info.kaug` reports what actually ran.
-    kaug_eff = kaug && !decoupled
-    _keepcbe = !kstep || kaug_eff
+    # THE SWEEP IS INTERLEAVED: CBE expands bond `i`, then site `i` is evolved immediately --
+    # the reference's own ordering (TDVPSweepCBE1Si.m:30/:34), so the environment chain runs
+    # through the EVOLVED frames and bond `i+1`'s selection sees the update at site `i`. This is
+    # also what makes `kaug` well defined: `U_ex` and `svd(K1).U` are built from the SAME `K` in
+    # the same iteration, so they are two bases of one space and the union is meaningful.
+    _keepcbe = !kstep || kaug
     Wcbe  = Vector{Any}(undef, _keepcbe ? c : 0)
     Zcbe  = Vector{Any}(undef, _keepcbe ? L - 1 : 0)
 
@@ -233,18 +194,6 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     rstack = right_env_stack(psi, mpo; downto = 3)
     lch = boundary_channels(mpo)
     C = nothing
-    if decoupled
-        for i in 1:c
-            K  = C === nothing ? psi[i] : to_concrete(contract(C, (2,), psi[i], (1,)))
-            ex = record!(cbe_expand(_frame_from(K, psi[i + 1]), mpo, i, lch,
-                                    right_channels(rstack, i + 2); exkw...), i, :left)
-            peak!(ex.U_ex, ex.V_ex)
-            kstep && (Vwide[i] = ex.V_ex)
-            _keepcbe && (Wcbe[i] = ex.U_ex)
-            C = to_concrete(contract(ex.U_ex', (1, 2), K, (1, 2)))
-            i < c && (lch = push_left_channels(lch, mpo, ex.U_ex, i))
-        end
-    end
 
     # ── PHASE B(a). LEFT -> ROOT. THE EVOLUTION, IDENTICAL UNDER BOTH SCHEMES ─────────────
     # Only WHERE `Vwide[i]` comes from differs, which is what makes a measured difference
@@ -254,13 +203,11 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     C = nothing
     for i in 1:c
         K = C === nothing ? psi[i] : to_concrete(contract(C, (2,), psi[i], (1,)))
-        if !decoupled
-            ex = record!(cbe_expand(_frame_from(K, psi[i + 1]), mpo, i, lch,
-                                    right_channels(rstack, i + 2); exkw...), i, :left)
-            peak!(ex.U_ex, ex.V_ex)
-            kstep && (Vwide[i] = ex.V_ex)
-            _keepcbe && (Wcbe[i] = ex.U_ex)
-        end
+        ex = record!(cbe_expand(_frame_from(K, psi[i + 1]), mpo, i, lch,
+                                right_channels(rstack, i + 2); exkw...), i, :left)
+        peak!(ex.U_ex, ex.V_ex)
+        kstep && (Vwide[i] = ex.V_ex)
+        _keepcbe && (Wcbe[i] = ex.U_ex)
         if kstep
 
             M   = to_concrete(contract(psi[i + 1], (2, 3), Vwide[i]', (2, 3)))  # (link_i, b_R)
@@ -277,7 +224,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             Wk = to_concrete(svd(K1, (1, 2); cutoff = 1e-14).U)
             # UNION, not replace -- see `kaug` in the docstring. `W[i]` becomes `psi[i]`, so a
             # CBE direction absent from it never reaches the state.
-            Wk = kaug_eff ? _union_left(Wcbe[i], Wk) : Wk
+            Wk = kaug ? _union_left(Wcbe[i], Wk) : Wk
             W[i] = to_concrete(setitag(Wk, 3, _tagW(i)))
         else
             W[i] = Wcbe[i]                                          # reproduces cbe_lubich
@@ -296,19 +243,6 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     lstack = left_env_stack(psi, mpo; upto = L - 2)
     rch = boundary_channels(mpo)
     D = nothing
-    if decoupled
-        for j in (L - 1):-1:c
-            B  = D === nothing ? psi[j + 1] :
-                 to_concrete(contract(psi[j + 1], (3,), D, (1,)))
-            ex = record!(cbe_expand(_frame_from(psi[j], B), mpo, j,
-                                    left_channels(lstack, j), rch; exkw...), j, :right)
-            peak!(ex.U_ex, ex.V_ex)
-            kstep && (Uwide[j] = ex.U_ex)
-            _keepcbe && (Zcbe[j] = ex.V_ex)
-            D = to_concrete(contract(B, (2, 3), ex.V_ex', (2, 3)))       # (link_j, b_j)
-            j > c && (rch = push_right_channels(rch, mpo, ex.V_ex, j + 1))
-        end
-    end
 
     # ── PHASE B(b). RIGHT -> ROOT. THE EVOLUTION ─────────────────────────────────────────
     rch = boundary_channels(mpo)
@@ -317,13 +251,11 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     for j in (L - 1):-1:c
         B = D === nothing ? psi[j + 1] :
             to_concrete(contract(psi[j + 1], (3,), D, (1,)))
-        if !decoupled
-            ex = record!(cbe_expand(_frame_from(psi[j], B), mpo, j,
-                                    left_channels(lstack, j), rch; exkw...), j, :right)
-            peak!(ex.U_ex, ex.V_ex)
-            kstep && (Uwide[j] = ex.U_ex)
-            _keepcbe && (Zcbe[j] = ex.V_ex)
-        end
+        ex = record!(cbe_expand(_frame_from(psi[j], B), mpo, j,
+                                left_channels(lstack, j), rch; exkw...), j, :right)
+        peak!(ex.U_ex, ex.V_ex)
+        kstep && (Uwide[j] = ex.U_ex)
+        _keepcbe && (Zcbe[j] = ex.V_ex)
         if kstep
             M   = to_concrete(contract(Uwide[j]', (1, 2), psi[j], (1, 2)))     # (b_L, link_j)
             Bex = to_concrete(contract(M, (2,), B, (1,)))           # (b_L, s_{j+1}, b_{j+1})
@@ -334,7 +266,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                       hermitian = true, maxiter = maxiter, tol = tol, reorth = reorth)
             Zk = to_concrete(svd(B1, (1,); cutoff = 1e-14).Vd)
             # Mirror of the K half-sweep: `Z[j]` becomes `psi[j+1]`.
-            Zk = kaug_eff ? _union_right(Zcbe[j], Zk) : Zk
+            Zk = kaug ? _union_right(Zcbe[j], Zk) : Zk
             Z[j] = to_concrete(setitag(Zk, 1, _tagZ(j)))
         else
             Z[j] = Zcbe[j]
@@ -388,7 +320,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     end
 
     return CBEBugSweepInfo(expanded, n_new, c, root_rank, epre, efnl,
-                           discarded, nmv[], peak, kaug_eff)
+                           discarded, nmv[], peak, kaug)
 end
 
 cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::Number; kwargs...) =
