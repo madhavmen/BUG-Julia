@@ -32,26 +32,32 @@ Contents, in dependency order:
     plus the shared `CBEBugOptions` / `CBEBugRunInfo`.
   - `cbe_lubich.jl` — `cbe_lubich_sweep`: basis sweep + one centre-bond Galerkin step, on
     the environment-dressed effective `H`.
-  - `modes/` — the three modes. Each is a THIN submodule: it fixes the operator the local
-    problem is posed with and the reduction applied to the Krylov tridiagonal, and adds no
-    algorithm of its own.
+  - `modes/` — `GroundState` alone. A THIN submodule: it fixes the reduction applied to the
+    Krylov tridiagonal and adds no algorithm of its own.
 
-THE THREE MODES, and what actually distinguishes them:
+ONE PATH: MPO ENVIRONMENTS. Every sweep here poses its local problem with the
+environment-dressed effective `H`, so a run differs from another run only in the operator and
+the sweep, never in how `H` was applied.
 
-| mode             | `applyH` at a bond      | S-step reduction        | path        |
-|------------------|-------------------------|-------------------------|-------------|
-| `RealTime`       | gate, or env-dressed H  | `exp(-i dt H)`          | gate + MPO  |
-| `ImaginaryTime`  | gate, or env-dressed H  | `exp(-dt H)`            | gate + MPO  |
-| `GroundState`    | env-dressed H ONLY      | lowest Ritz vector      | MPO         |
+| entry point           | S-step reduction        | what it is                          |
+|-----------------------|-------------------------|-------------------------------------|
+| `cbe_bug_step!`       | `exp(tau H)`            | RSVD-CBE + rank-adaptive BUG        |
+| `tdvp_cbe1s_step!`    | `exp(tau H)`            | 1-site TDVP + CBE, the baseline     |
+| `tdvp2_step!`         | `exp(tau H)`            | 2-site TDVP, the reference          |
+| `GroundState.solve!`  | lowest Ritz vector      | the variational mode                |
 
-The Krylov space, and every RSVD-CBE growth pass that builds it, is IDENTICAL in all three:
-the ground-state solver is a drop-in replacement for the S step, not a second algorithm.
+`tau = -im*dt` is real time and `tau = -dt` imaginary time; nothing in the S step cares which,
+and the caller renormalises. The Krylov space, and every RSVD-CBE growth pass that builds it,
+is IDENTICAL across them: the ground-state solver is a drop-in replacement for the S step, not
+a second algorithm.
 
-Why `GroundState` is MPO-only: the gate path's environments are the identity by canonical
-form, which is exact for a Trotter factor but means the local operator is the bare two-site
-term. Minimising that at each bond independently does not have the global ground state as
-its fixed point. Imaginary time is unaffected -- `exp(-dt H)` Trotterises exactly as
-`exp(-im dt H)` does -- so it runs on both paths.
+⛔ `RealTime` AND `ImaginaryTime` NO LONGER EXIST, and neither does the gate-based path they
+forwarded to. See the note above `include("modes/ground_state.jl")` for why a name that is
+present and throws is worse than one that is absent. The design constraint that made
+`GroundState` MPO-only in the first place is now vacuous rather than wrong: the gate path's
+environments were the identity by canonical form, so its local operator was the bare two-site
+term, and minimising that bond-by-bond does not have the global ground state as its fixed
+point. With the gate path gone there is no other path for it to be excluded from.
 """
 module RSVDCBEBondUpdate
 

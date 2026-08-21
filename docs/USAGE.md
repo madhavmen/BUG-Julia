@@ -1,9 +1,11 @@
 # Using RSVD-CBE for the bond-update BUG
 
-How to run the rank-adaptive BUG with RSVD controlled bond expansion, on either of its two
-paths — the **gate-based** sweep and the **Lubich** (MPO-environment) sweep.
+How to run the rank-adaptive BUG with RSVD controlled bond expansion. There is **one path**:
+an `MPS`, an `MPO`, and a step function.
 
-Runnable companion: [`examples/heisenberg_domain_wall.jl`](../examples/heisenberg_domain_wall.jl).
+Runnable companions: [`examples/oat_z2.jl`](../examples/oat_z2.jl),
+[`examples/xx_domain_wall.jl`](../examples/xx_domain_wall.jl),
+[`examples/tfim_z2.jl`](../examples/tfim_z2.jl) — see [`examples/README.md`](../examples/README.md).
 Design and measurements: [`docs/cbe_bug.md`](cbe_bug.md), [`docs/current_work.md`](current_work.md).
 
 ---
@@ -11,26 +13,28 @@ Design and measurements: [`docs/cbe_bug.md`](cbe_bug.md), [`docs/current_work.md
 ## 1. Quick start
 
 ```julia
-using BUGJulia.BondUpdateBUG
-using BUGJulia.RSVDCBEBondUpdate
-using BUGJulia.RSVDCBEBondUpdate: RealTime
+using BUGJulia.BondUpdateBUG, BUGJulia.RSVDCBEBondUpdate
 
-set_symmetry!(:U1)                                  # :none | :U1 | :SU2
-psi   = domain_wall_state(8)                        # any state; chi = 1 is fine
-gates = bond_gates(psi; J = 1.0, delta = 1.0)       # one gate per bond
+set_symmetry!(:U1)                                  # :none | :U1 | :SU2 | :Z2 — FIRST
+psi = domain_wall_state(8)                          # any state; chi = 1 is fine
+W   = xxz_mpo(8; J = 1.0, delta = 1.0)              # the Hamiltonian, as an MPO
 
-info = RealTime.evolve!(psi, gates;
-                        opts = CBEBugOptions(dt = 0.05, n_steps = 40, maxdim = 32))
+for _ in 1:40
+    cbe_bug_step!(psi, W, ComplexF64(-im * 0.05); maxdim = 32, trunc_thresh = 1e-10)
+end
 
 magnetisation(copy(psi))     # <Sz_j> per site
-bond_dims(psi)               # how far the bond dimension grew
+bond_dims(psi)               # how far the bond dimension grew: 1 -> [2,4,8,16,8,4,2]
+mpo_energy(psi, W)
 ```
 
-That is the whole surface: **pick a symmetry, build a state, build gates, call `evolve!`.**
+That is the whole surface: **pick a symmetry, build a state, build an MPO, call a step
+function.** `tau = -im*dt` is real time and `tau = -dt` imaginary time — the same call either
+way, and in imaginary time you rescale the state each step.
 
 ```bash
-julia --project=. examples/heisenberg_domain_wall.jl
-L=10 TMAX=3 SYMS=none,U1 julia --project=. examples/heisenberg_domain_wall.jl
+julia --project=. examples/xx_domain_wall.jl
+julia --project=. examples/oat_z2.jl
 ```
 
 ## 2. Switching symmetry
@@ -294,35 +298,49 @@ deliberately not separate implementations — the A/B only means something if th
 otherwise bit-for-bit identical code, so any difference in output comes from the selection rule
 and nothing else.
 
-## 4. The three modes
+## 4. Real time, imaginary time, ground state
 
-Same engine; the mode fixes `τ` and what gets recorded. Nothing else differs — there is no
-real/imaginary branch anywhere in the expansion or the S-step.
+Same engine. `τ` is the only thing that separates real from imaginary time — there is no
+real/imaginary branch anywhere in the expansion or the S-step, which is why there are no
+separate entry points for them.
+
+⛔ **`RealTime` and `ImaginaryTime` NO LONGER EXIST.** They were thin forwarders to the
+gate-based engine removed in §3, so their bodies named functions that were already gone. Pass
+`τ` to a step function instead:
 
 ```julia
-using BUGJulia.RSVDCBEBondUpdate: RealTime, ImaginaryTime, GroundState
+using BUGJulia.RSVDCBEBondUpdate: GroundState
 
-RealTime.evolve!(psi, gates; opts)                    # τ = -i·dt   exp(-iHt)
-RealTime.evolve_mpo!(psi, h; opts)
-
-ImaginaryTime.evolve!(psi, gates; opts, energy_gates = gates)   # τ = -dt  exp(-βH)
-ImaginaryTime.cool!(psi, gates; opts)
+cbe_bug_step!(psi, W, ComplexF64(-im * dt); maxdim = 32)   # τ = -i·dt   exp(-iHt)
+cbe_bug_step!(psi, W, ComplexF64(-dt);      maxdim = 32)   # τ = -dt     exp(-βH)
 
 GroundState.rsvd_cbe_dmrg!(psi, h; opts, n_sweeps = 40, etol = 1e-12)   # the method
 GroundState.cbe_dmrg!(psi, h; opts, n_sweeps = 40, etol = 1e-12)        # exact-CBE control
 ```
 
-Mode-specific things worth knowing:
+`tdvp_cbe1s_step!` and `tdvp2_step!` take the identical signature, so swapping the integrator
+is a one-word change and nothing else moves.
 
-- **Real time.** `exp(-i dt H)` is unitary, so `opts.normalize` is hygiene, and `info.norms`
-  drifting from 1 is a *diagnostic* that truncation is biting. No energy recorded by default —
-  it is conserved, so it carries no convergence information.
-- **Imaginary time.** `exp(-dt H)` is a contraction: the norm decays and `opts.normalize` is
-  **load-bearing**, not hygiene. Pass `energy_gates` — the energy is the convergence signal.
-  Note a dt² splitting error is *invisible* in the energy at any β (O(dt²) state error →
-  O(dt⁴) energy error), so do not use the energy to calibrate `dt`.
-- **Ground state.** `maxiter` here drives a Lanczos **eigensolver**, not an exponential — the
-  time-evolution guidance in §5 about Krylov depth does not transfer.
+Things worth knowing, now that the caller drives the loop rather than an `evolve!` driver:
+
+- **Real time.** `exp(-i dt H)` is unitary, so rescaling is hygiene — but `norm(psi)` drifting
+  from 1 is a *diagnostic* that truncation is biting, and worth watching for that reason. The
+  energy is conserved, so it carries no convergence information and is not a calibration
+  signal.
+- **Imaginary time.** `exp(-dt H)` is a contraction: the norm decays, so **rescaling every step
+  is load-bearing, not hygiene** — there is no `normalize` flag on the step functions, the
+  caller does it. Writing the scale into the CENTER tensor is what keeps the canonical form
+  intact:
+
+  ```julia
+  renorm!(p) = (p[p.center] = to_concrete((1.0 / norm(p)) * p[p.center]); p)
+  ```
+
+  ⛔ A dt² splitting error is *invisible* in the energy at any β (O(dt²) state error → O(dt⁴)
+  energy error), so **do not use the energy to calibrate `dt`.**
+- **Ground state.** `GroundState` still takes `CBEBugOptions`, and its `maxiter` drives a
+  Lanczos **eigensolver**, not an exponential — the Krylov-depth guidance in §5 does not
+  transfer to it.
 
 ## 5. Options that matter
 
