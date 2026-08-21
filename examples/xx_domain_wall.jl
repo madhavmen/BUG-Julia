@@ -4,27 +4,7 @@
 #
 #     observable  M_L(t) = Σ_{ℓ ≤ L/2} ⟨S^z_ℓ⟩   -- the magnetisation still in the left half
 #
-# WHY THIS MODEL, GIVEN THAT OAT IS ALREADY EXACTLY SOLVABLE. OAT's Schmidt rank is CONSTANT in
-# time (`min(n,L-n)+1`), so `maxdim` there is either exact or a fixed truncation and the bond
-# dimension plot is a flat line. Here the wall spreads, entanglement grows without bound, and
-# `maxbond` climbing into the cap is the expected behaviour -- which makes this the example
-# where rank adaptivity is actually under load and the bond-dimension figure is the interesting
-# one. The two models together cover both regimes; either alone is misleading.
-#
-# THE EXACT REFERENCE IS FREE FERMIONS, NOT DIAGONALISATION. Jordan-Wigner maps the XX chain to
-# non-interacting fermions with hopping `J/2`, so a Slater determinant stays a Slater determinant
-# and the whole solution lives in an `L x L` matrix:
-#
-#     ⟨S^z_ℓ(t)⟩ = Σ_{k occupied} |[exp(-i h t)]_{ℓk}|²  −  ½
-#
-# This is EXACT at finite `L` with OPEN boundaries and at any time -- including after the front
-# reflects off the ends -- and it costs `O(L³)`. Nothing here ever forms a `2^L` object, so the
-# reference stays available at sizes where exact diagonalisation does not.
-#
-# U(1) OR NOT. `S^z_tot` is conserved and the domain wall is a single charge sector
-# (`S^z_tot = 0` for even `L`), so `symmetry=U1` is the natural run and `symmetry=none` is the
-# dense control. Same physics, same numbers to ~1e-12; only the block structure differs, so any
-# gap between them is a symmetry-bookkeeping bug rather than physics.
+
 #
 #   julia --project=. examples/xx_domain_wall.jl
 #   julia --project=. examples/xx_domain_wall.jl L=24 maxdim=128 symmetry=none
@@ -35,11 +15,7 @@ include(joinpath(@__DIR__, "common.jl"))
 # ── PARAMETERS -- EDIT THESE (or override as name=value on the command line) ──────────────
 const P = parse_params((
     L            = 16,      # sites. Even, so the wall sits on a bond and S^z_tot = 0.
-    # ⛔ PLAIN TIME, NOT UNITS OF π. `oat_z2.jl` takes `t_over_pi` because OAT genuinely has a
-    # period -- the state revives every 4π -- so π is the natural unit there. The XX chain has no
-    # such structure: its only time scale is set by `J`, and the meaningful landmark is the front
-    # reaching the boundary at `t ≈ L/(2J)`. Expressing that in π would hide the one number a
-    # reader needs to compare against.
+
     t_max        = 6.0,     # total time, in units of 1/J (front hits the wall at L/(2J))
     dt           = 0.05,    # time step
     J            = 1.0,     # hopping
@@ -53,12 +29,7 @@ const P = parse_params((
 
 const T_MAX = P.t_max
 
-# The single-particle dispersion is `ε(k) = J cos k`, so the maximum group velocity is `J` and
-# the front travels `≈ J·t` sites from the wall. It reaches the boundary at `t ≈ L/(2J)`, which
-# is `8` at `L = 16` -- so the default `t_max = 6` stops short of it and the run stays in the
-# clean spreading regime. Going past it is not an error, since the free-fermion reference handles
-# reflection exactly, but the physics changes; the header prints which side of it this run ends
-# on rather than leaving the reader to do the arithmetic.
+
 const T_FRONT = P.L / (2 * P.J)
 
 # ‖H_XX‖ = Σ of the positive single-particle energies ≈ J·L/π, LINEAR in L rather than OAT's
@@ -102,7 +73,6 @@ set_symmetry!(Symbol(P.symmetry))
 const MPO_XX = xxz_mpo(P.L; J = P.J, delta = 0.0)     # delta = 0 is exactly the XX chain
 const PSI0   = domain_wall_state(P.L)
 
-# ⛔ MEASURE THE SAME HALF THE REFERENCE SUMS. `sz_expectation` is per site, and summing
 # `1:(L÷2)` here mirrors `xx_left_magnetisation` exactly; taking `1:(L÷2)` in one and
 # `1:cld(L,2)` in the other differs only for odd `L` and would look like a small integrator
 # error rather than an indexing one.

@@ -3,28 +3,7 @@
 #     H = -J Σ_ℓ Z_ℓ Z_{ℓ+1} - h Σ_ℓ X_ℓ ,   |Ψ(0)⟩ = |+…+−…−⟩   (a wall in the X basis)
 #
 #     observable  M_L(t) = Σ_{ℓ ≤ L/2} ⟨X_ℓ⟩   -- transverse magnetisation left of the wall
-#
-# ⛔ THE BASIS IS σˣ, SO `X` IS DIAGONAL AND `Z` IS THE FLIP -- the OPPOSITE of the usual
-# convention, and reading it the usual way silently describes a different model. `z2_ising.jl`
-# works in the eigenbasis of the ℤ₂ charge (the global spin flip `P = Π 2S^x`), which is what
-# makes the charge diagonal and the symmetric run possible at all. So `X` is charge-neutral and
-# measurable site by site, while `Z` is the charge-1 operator and `Z_ℓ Z_{ℓ+1}` is neutral
-# overall. Same trade as OAT, for the same reason.
-#
-# THE MPO IS EXPLICIT, NOT GATES. `tfim_mpo` (src/RSVDCBEBondUpdate/models/tfim.jl) builds the
-# virtual-dimension-3 automaton, so this model drives the SAME environment machinery, effective
-# Hamiltonians and Krylov solves as OAT and XX. A TFIM run differs from an OAT run only in the
-# operator -- which is the point of comparing integrators on it.
-#
-# THE EXACT REFERENCE IS FREE FERMIONS AT ANY `L`, NOT A `2^L` DIAGONALISATION. Jordan-Wigner
-# maps the TFIM to Majoranas with a quadratic Hamiltonian, a product state in the X basis is
-# Gaussian, and Gaussian is preserved -- so the entire solution lives in a `2L x 2L` real
-# orthogonal evolution. See `tfim_x_profile_exact` below for the derivation and the two pins it
-# is checked against.
-#
-# `symmetry=Z2` is the symmetric run; `symmetry=none` is the dense control. The two agree to
-# ~1e-12, so a gap between them is a charge-bookkeeping bug rather than physics.
-#
+
 #   julia --project=. examples/tfim_z2.jl
 #   julia --project=. examples/tfim_z2.jl L=20 h=0.5 maxdim=128 symmetry=none
 #   python3 examples/plot_examples.py
