@@ -48,34 +48,37 @@ One RSVD-CBE + fixed-rank-BUG step of `tau`, in place. `tau = -im*dt` is real ti
 Keywords beyond the [`cbe_expand`](@ref) ones (`dex`, `growth`, `dover`, `comp_ratio`,
 `sulz_cap`, `preselect_only`, `exact`):
 
-  - `growth` -- `1.1` HERE, against `2.0` in both [`cbe_expand`](@ref) and `CBEBugOptions`.
-    The divergence is deliberate, and it is worth being explicit that this sweep ships the
-    REFERENCE'S DMRG RATCHET -- the constant the budget block in `cbe_core.jl` argues against
-    for a time integrator, on the grounds that a direction the step needs and does not admit
-    is not deferred, it is gone.
+  - `growth` -- the expansion budget, `budget = ceil(growth*dmax) - r`. **`2.0`, matching
+    [`cbe_expand`](@ref) and `CBEBugOptions`.** This shipped `1.1` -- the reference's DMRG
+    ratchet -- until the `rexpand` measurements below; all three now agree.
 
-    IT STANDS HERE BECAUSE CBE IS NOT THE ONLY SOURCE OF NEW DIRECTIONS IN THIS SWEEP. The
-    K-step supplies its own, so the expansion has a narrower job than in `tdvp_cbe1s`, where
-    CBE is the sole source. Two sweeps wanting different constants is that difference, not an
-    oversight.
+    ⛔ `rexpand` NEEDS THE LARGER BUDGET AND `kaug` DOES NOT, and the reason is structural
+    rather than empirical. `rexpand`'s SECOND expansion runs against
+    `U0 = orth([svd(K).U | svd(K1).U])`, which is strictly larger than the first expansion's
+    `U0 = svd(K).U` that `kaug` extends. `r` is that rank, and it is SUBTRACTED from the
+    budget -- so at fixed `growth` the same schedule starves `rexpand` and not `kaug`.
 
-    MEASURED (`benchmarks/rsvd_param_scan.jl`, XX L=16, maxdim=24, t=6): the final error moves
-    by 5.0e-7 RELATIVE across the whole `dex`/`growth` grid -- 4.59041166e-05 to
-    4.59041397e-05 -- while `err_fnl`, the fraction of ranked candidate weight DISCARDED for
-    want of budget, spans 0.0 to 0.59. Raising `growth` buys nothing on that model and costs
-    sketch work.
+    MEASURED on TFIM L=16, D=32, the model where `rexpand` trailed:
 
-    THAT NUMBER IS RESOLVED, NOT ROUNDING. Phase 1 measures the seed noise floor on the same
-    arm: `cbe_bug` returns 4.5904e-05 over six seeds with a spread of 1.807e-13, i.e. 3.9e-9
-    relative, so the budget effect sits 128x above the floor. It is real and it is negligible.
-    For scale, `tdvp_cbe1s` on the identical grid moves 6.1e-3 against its own floor of 9.9e-7
-    -- a budget response four orders of magnitude larger than this sweep's.
+        kaug     growth=1.1   1.4293e-05        rexpand  growth=1.1   3.6578e-05
+        kaug     dex=8        1.6735e-04        rexpand  dex=8        4.8117e-05
+                                                rexpand  dex=16       7.0810e-05
+                                                rexpand  growth=2.0   1.5135e-05
 
-    ⛔ EVERY NUMBER ABOVE IS FROM A CAP-BOUND RUN, which is the regime where the budget CANNOT
-    matter: `maxdim` throws away what the expansion admits. The argument for `2.0` bites only
-    where the cap is slack, and the one slack run measured -- OAT at full rank, above the
-    exact rank 9 -- is already machine-exact at `1.1`. So nothing yet argues for changing it,
-    and the test that could is a slack-cap model, not a wider grid on these two.
+    `growth = 2.0` takes `rexpand` from 2.6x worse to parity. `dex` cannot: it is an ABSOLUTE
+    override that ignores `r` entirely, which is why its sweep is non-monotone and never
+    reaches the schedule's result. And the control rules out "more budget helps everyone" --
+    `kaug` at `dex = 8` is 12x WORSE.
+
+    NO REGRESSION ELSEWHERE. OAT L=10 D=6 and XX L=16 D=24 are unchanged for BOTH mechanisms
+    at `2.0` (OAT 3.2748e-11, XX 8.1911e-05), and `rexpand` at `2.0` becomes bit-identical to
+    `kaug` on OAT rather than differing in the last digit. Cost is +2.7% Krylov on OAT and
+    +0.3% on XX.
+
+    An earlier note here argued `1.1` should stand because the K-step is a second source of
+    directions, with the caveat that every supporting number came from a CAP-BOUND run where
+    the budget cannot matter. That reasoning was right for `kaug` -- which still does not want
+    more budget -- and the caveat is exactly where `rexpand` broke it.
   - `rexpand` -- **THE DEFAULT.** EXPAND EVERY BOND TWICE PER HALF-SWEEP INSTEAD OF UNIONING.
     The split that produces `W[i]` is bounded by the evolve, so it comes out narrower than the
     CBE frame just paid for -- and `W[i]` is what sets site `i+1`'s LEFT bond. `kaug` restores
@@ -124,6 +127,23 @@ Keywords beyond the [`cbe_expand`](@ref) ones (`dex`, `growth`, `dover`, `comp_r
 
     Note also that BOTH TDVPs over-fill the OAT profile to `[2,3,6,6,6,6,6,4,2]`. Landing on the
     exact Schmidt profile is a property of the BUG half-sweeps, not of `kaug` or `rexpand`.
+  - `split_cutoff`, `split_maxdim` -- TRUNCATION AT THE HALF-SWEEP SPLIT, i.e. on `svd(K1).U`
+    and `svd(B1).Vd` rather than at the root. Defaults `1e-14` and `0` (no cap) reproduce the
+    historical behaviour exactly, in which the half-sweeps prune essentially nothing and EVERY
+    rank decision is deferred to the root solve and `truncate_recursive!`.
+
+    THIS IS THE ONE STRUCTURAL DIFFERENCE FROM `tdvp_cbe1s` THAT IS NOT ABOUT WIDENING. That
+    sweep splits with `cutoff = cut, Nkeep = maxdim` at every site, so it prunes continuously;
+    this one does not prune at all until the end. The knob exists to measure whether pruning
+    earlier -- with the local information still present -- beats pruning once at the root, and
+    it is the leading candidate for `rexpand`'s remaining deficit against `kaug` on TFIM:
+    `rexpand`'s `W[i]` spans `K`, `K1` AND the new CBE directions, so it carries more rank into
+    the root than `kaug` does, and the root then has to discard more of it.
+
+    ⛔ THIS DOES NOT REACH THE TRUE-STATE UNION. `_union_left(svd(K).U, Wk)` keeps its own
+    `1e-14`, deliberately: its job is to make `W[i]W[i]'K == K` so the second expansion sees the
+    true block, and truncating it harder reintroduces exactly the projection defect that made
+    TFIM return 2.5e-01. Prune the evolve's basis, never the state's.
   - `root` -- the bond that keeps the Galerkin step. `nothing` is `floor(L/2)`, the paper's
     root, and it is not a free parameter in practice: the root solve explores exactly
     `b_L x b_R` directions, and at the CENTRE both factors are a full half-chain while at bond
@@ -188,7 +208,7 @@ Keywords beyond the [`cbe_expand`](@ref) ones (`dex`, `growth`, `dover`, `comp_r
 """
 function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        dex::Int = 0,
-                       growth::Float64 = 1.1,
+                       growth::Float64 = 2.0,
                        dover::Union{Nothing, Int} = nothing,
                        comp_ratio::Union{Float64, Nothing} = 1.0,
                        sulz_cap::Bool = false,
@@ -198,6 +218,8 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        kstep::Bool = true,
                        kaug::Bool = true,
                        rexpand::Bool = true,
+                       split_cutoff::Float64 = 1e-14,
+                       split_maxdim::Int = 0,
                        truncate::Bool = true,
                        maxdim::Int = 200,
                        trunc_thresh::Float64 = 1e-12,
@@ -213,6 +235,20 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     1 <= c <= L - 1 || throw(ArgumentError("root must be a bond in 1:$(L - 1), got $c"))
 
     cut = max(trunc_thresh, 1e-14)
+
+    # TRUNCATION AT THE HALF-SWEEP SPLIT. Historically this was a hard `cutoff = 1e-14` with no
+    # `Nkeep` at all, so the half-sweeps pruned essentially nothing and every rank decision was
+    # deferred to the root solve and `truncate_recursive!`. `tdvp_cbe1s` instead splits with
+    # `cutoff = cut, Nkeep = maxdim` at every site. These two closures make that difference a
+    # knob rather than a hard-coded constant; the defaults reproduce the historical behaviour
+    # exactly, so `split_cutoff = 1e-14, split_maxdim = 0` is a no-op.
+    _splitU(T) = split_maxdim > 0 ?
+        to_concrete(svd(T, (1, 2); cutoff = split_cutoff, Nkeep = split_maxdim).U) :
+        to_concrete(svd(T, (1, 2); cutoff = split_cutoff).U)
+    _splitV(T) = split_maxdim > 0 ?
+        to_concrete(svd(T, (1,); cutoff = split_cutoff, Nkeep = split_maxdim).Vd) :
+        to_concrete(svd(T, (1,); cutoff = split_cutoff).Vd)
+
     expanded = zeros(Int, L - 1)
     n_new    = zeros(Int, L - 1)
     epre = 0.0; efnl = 0.0; peak = 0
@@ -302,7 +338,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                       hermitian = true, maxiter = maxiter, tol = tol, reorth = reorth)
 
 
-            Wk = to_concrete(svd(K1, (1, 2); cutoff = 1e-14).U)
+            Wk = _splitU(K1)
             # UNION, not replace -- see `kaug` in the docstring. `W[i]` becomes `psi[i]`, so a
             # CBE direction absent from it never reaches the state.
             Wk = (kaug && !rexpand) ? _union_left(Wcbe[i], Wk) : Wk
@@ -385,7 +421,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             peak!(Bex)
             B1 = expv(x -> (nmv[] += 1; apply_one_site(H1, x)), tau, Bex;
                       hermitian = true, maxiter = maxiter, tol = tol, reorth = reorth)
-            Zk = to_concrete(svd(B1, (1,); cutoff = 1e-14).Vd)
+            Zk = _splitV(B1)
             # Mirror of the K half-sweep: `Z[j]` becomes `psi[j+1]`.
             Zk = (kaug && !rexpand) ? _union_right(Zcbe[j], Zk) : Zk
             # Row mirror of the K half-sweep's true-state fix: `Z[j]` must span `B` or the

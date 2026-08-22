@@ -62,7 +62,14 @@ function _arms(mpo, D, dt, maxiter)
             # overrides `kaug`, so `bug(kaug = true)` alone would run the rexpand arm twice and
             # the table would show two identical rows for two different labels.
             "bug kaug=true"    => bug(kaug = true,  rexpand = false),
+            "bug kaug g=2.0"   => bug(kaug = true,  rexpand = false, growth = 2.0),
             "bug rexpand=true" => bug(rexpand = true),
+            # `rexpand`'s second expansion runs against a LARGER `U0` (it has already absorbed
+            # `K1`), so `budget = ceil(growth*dmax) - r` leaves it starved at the shipped
+            # `growth = 1.1`. MEASURED on TFIM L=16 D=32: 3.66e-05 -> 1.51e-05, i.e. parity with
+            # `kaug`'s 1.43e-05, while `kaug` itself does NOT want the extra budget (`dex = 8`
+            # costs it 12x). This row asks whether that survives on OAT and XX.
+            "bug rexpand g=2.0" => bug(rexpand = true, growth = 2.0),
             "bug kaug=false"   => bug(kaug = false, rexpand = false),
             "bug kstep=false"  => bug(kstep = false, rexpand = false)]
 end
