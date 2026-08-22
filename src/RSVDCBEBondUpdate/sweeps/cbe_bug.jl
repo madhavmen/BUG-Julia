@@ -76,6 +76,18 @@ Keywords beyond the [`cbe_expand`](@ref) ones (`dex`, `growth`, `dover`, `comp_r
     where the cap is slack, and the one slack run measured -- OAT at full rank, above the
     exact rank 9 -- is already machine-exact at `1.1`. So nothing yet argues for changing it,
     and the test that could is a slack-cap model, not a wider grid on these two.
+  - `rexpand` -- EXPAND EVERY BOND TWICE PER HALF-SWEEP INSTEAD OF UNIONING. The split that
+    produces `W[i]` is bounded by the evolve, so it comes out narrower than the CBE frame just
+    paid for -- and `W[i]` is what sets site `i+1`'s LEFT bond. `kaug` restores that width by
+    merging the frame back in; `rexpand` restores it by EXPANDING BOND `i` A SECOND TIME against
+    the state as it then stands, so each bond is expanded once as the right bond of site `i` and
+    once as the left bond of site `i+1`. That is the pattern `tdvp_cbe1s` gets for free by
+    expanding on both its forward and backward passes, and it means every site is evolved with
+    BOTH of its bonds widened. No union is performed: `rexpand = true` overrides `kaug`.
+
+    THE COST IS A SECOND `cbe_expand` PER BOND PER HALF-SWEEP, with no extra `expv` -- the
+    re-expansion happens after the exponential, not around it. Whether that buys accuracy is the
+    open question this flag exists to answer; it is `false` by default until measured.
   - `root` -- the bond that keeps the Galerkin step. `nothing` is `floor(L/2)`, the paper's
     root, and it is not a free parameter in practice: the root solve explores exactly
     `b_L x b_R` directions, and at the CENTRE both factors are a full half-chain while at bond
@@ -145,6 +157,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        root::Union{Nothing, Int} = nothing,
                        kstep::Bool = true,
                        kaug::Bool = true,
+                       rexpand::Bool = false,
                        truncate::Bool = true,
                        maxdim::Int = 200,
                        trunc_thresh::Float64 = 1e-12,
@@ -252,10 +265,34 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             Wk = to_concrete(svd(K1, (1, 2); cutoff = 1e-14).U)
             # UNION, not replace -- see `kaug` in the docstring. `W[i]` becomes `psi[i]`, so a
             # CBE direction absent from it never reaches the state.
-            Wk = kaug ? _union_left(Wcbe[i], Wk) : Wk
+            Wk = (kaug && !rexpand) ? _union_left(Wcbe[i], Wk) : Wk
             W[i] = to_concrete(setitag(Wk, 3, _tagW(i)))
         else
             W[i] = Wcbe[i]                                          # reproduces cbe_lubich
+        end
+
+        # ── `rexpand`: WIDEN BOND `i` AGAIN, AFTER THE SPLIT ─────────────────────────────
+        #
+        # The split above is bounded by the evolve, so `W[i]` comes out NARROWER than the CBE
+        # frame that was just paid for -- and `W[i]` is what sets site `i+1`'s LEFT bond. Under
+        # `kaug` that width is restored by unioning the frame back in; here it is restored by
+        # EXPANDING BOND `i` A SECOND TIME, against the state as it now stands. Every bond is
+        # therefore expanded twice per half-sweep -- once as the right bond of site `i`, once as
+        # the left bond of site `i+1` -- which is the pattern `tdvp_cbe1s` gets for free by
+        # expanding on both its forward and backward passes. No union anywhere.
+        #
+        # The frame is `(W[i]) * (C_new · psi[i+1])`: `W[i]` is an isometry out of the split and
+        # the carry holds the amplitude, which is exactly the one-carries-amplitude invariant
+        # `_frame_from` documents. Tags already agree -- `C_new`'s first leg comes from `W[i]'`,
+        # so it is `_tagW(i)` on both sides of the contraction.
+        if kstep && rexpand
+            Cn = to_concrete(contract(W[i]', (1, 2), K, (1, 2)))     # (b_i, link_i)
+            ex2 = record!(cbe_expand(_frame_from(W[i],
+                                                 to_concrete(contract(Cn, (2,), psi[i + 1], (1,)))),
+                                     mpo, i, lch, right_channels(rstack, i + 2); exkw...),
+                          i, :left)
+            peak!(ex2.U_ex)
+            W[i] = to_concrete(setitag(ex2.U_ex, 3, _tagW(i)))
         end
         expanded[i] = leg_dim(W[i], 3)
 
@@ -294,10 +331,24 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                       hermitian = true, maxiter = maxiter, tol = tol, reorth = reorth)
             Zk = to_concrete(svd(B1, (1,); cutoff = 1e-14).Vd)
             # Mirror of the K half-sweep: `Z[j]` becomes `psi[j+1]`.
-            Zk = kaug ? _union_right(Zcbe[j], Zk) : Zk
+            Zk = (kaug && !rexpand) ? _union_right(Zcbe[j], Zk) : Zk
             Z[j] = to_concrete(setitag(Zk, 1, _tagZ(j)))
         else
             Z[j] = Zcbe[j]
+        end
+
+        # Row mirror of the K half-sweep's `rexpand` block: bond `j` is expanded a second time
+        # after the split, so `Z[j]` -- which sets site `j`'s RIGHT bond on the next iteration --
+        # carries the widened frame rather than the evolve-limited one. Frame is
+        # `(psi[j] · D_new) * Z[j]`: the carry holds the amplitude, `Z[j]` is the isometry.
+        if kstep && rexpand
+            Dn = to_concrete(contract(B, (2, 3), Z[j]', (2, 3)))      # (link_j, b_j)
+            ex2 = record!(cbe_expand(_frame_from(to_concrete(contract(psi[j], (3,), Dn, (1,))),
+                                                 Z[j]),
+                                     mpo, j, left_channels(lstack, j), rch; exkw...),
+                          j, :right)
+            peak!(ex2.V_ex)
+            Z[j] = to_concrete(setitag(ex2.V_ex, 1, _tagZ(j)))
         end
         j != c && (expanded[j] = leg_dim(Z[j], 1))
 

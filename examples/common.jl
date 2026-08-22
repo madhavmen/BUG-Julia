@@ -58,9 +58,18 @@ krylov_bound(hnorm::Real, dt::Real, m::Int) =
 
 The three integrators, as closures over one MPO. Any difference between them is the integrator.
 
-`cbe_bug` runs here in its SIMPLEST configuration: the exact SVD rather than the randomised
-sketch, and `kaug = false`. See the two notes on the call itself -- one of those choices is free
-and the other is not.
+`cbe_bug` runs with the exact SVD rather than the randomised sketch. That simplification IS free:
+the sketch is measured bit-identical to the exact SVD on both example models
+(`benchmarks/rsvd_param_scan.jl` phase 0, relative difference 0.000e+00).
+
+⛔ `kaug` IS NOT A KNOB THESE EXAMPLES CAN TURN OFF, and they briefly did. With `kaug = false`
+the half-sweep basis update REPLACES the CBE frame instead of unioning with it, discarding the
+directions CBE just paid to find. `tests/sweeps/test_oat.jl` pins the cost at L=10, D=6 -- the
+OAT example's own configuration -- as infidelity 3.27e-11 with the union against 3.97e-05
+without, a factor of 1.2e6, and the union adds only 2.7% to the operator applications. The
+tell in an example run is the BOND PROFILE: with the union OAT converges to the exact Schmidt
+profile [2,3,4,5,6,5,4,3,2], without it the interior over-fills to [2,3,6,6,6,6,6,3,2] and
+sits at the cap, which reads deceptively like the cap simply binding.
 """
 function steppers(mpo; maxdim::Int, trunc_thresh::Float64, maxiter::Int)
     return (
@@ -70,7 +79,7 @@ function steppers(mpo; maxdim::Int, trunc_thresh::Float64, maxiter::Int)
                                                      trunc_thresh = trunc_thresh,
                                                      maxiter = maxiter),
 
-        "cbe_bug"    => (p, tau) -> cbe_bug_step!(p, mpo, tau; kstep = true, kaug = false,
+        "cbe_bug"    => (p, tau) -> cbe_bug_step!(p, mpo, tau; kstep = true, kaug = true,
                                                   exact = true, maxdim = maxdim,
                                                   trunc_thresh = trunc_thresh, maxiter = maxiter),
     )
