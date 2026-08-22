@@ -221,7 +221,10 @@ function stepper(scheme::String, mpo, maxdim::Int)
         return (p, tau) -> tdvp2_step!(p, mpo, tau; maxdim = maxdim, trunc_thresh = CUTOFF,
                                        maxiter = MAXITER)
     elseif scheme == "cbe_bug"
-        return (p, tau) -> cbe_bug_step!(p, mpo, tau; kaug = KAUG,
+        # ⛔ `rexpand = false` KEEPS `KAUG` MEANINGFUL. `rexpand` is now the default and overrides
+        # `kaug`; without pinning it off, every value of `KAUG` would run the same computation and
+        # this benchmark's union A/B would silently compare an arm with itself.
+        return (p, tau) -> cbe_bug_step!(p, mpo, tau; kaug = KAUG, rexpand = false,
                                          maxdim = maxdim,
                                          trunc_thresh = CUTOFF, maxiter = MAXITER)
     end

@@ -62,14 +62,32 @@ The three integrators, as closures over one MPO. Any difference between them is 
 the sketch is measured bit-identical to the exact SVD on both example models
 (`benchmarks/rsvd_param_scan.jl` phase 0, relative difference 0.000e+00).
 
-⛔ `kaug` IS NOT A KNOB THESE EXAMPLES CAN TURN OFF, and they briefly did. With `kaug = false`
-the half-sweep basis update REPLACES the CBE frame instead of unioning with it, discarding the
-directions CBE just paid to find. `tests/sweeps/test_oat.jl` pins the cost at L=10, D=6 -- the
-OAT example's own configuration -- as infidelity 3.27e-11 with the union against 3.97e-05
-without, a factor of 1.2e6, and the union adds only 2.7% to the operator applications. The
-tell in an example run is the BOND PROFILE: with the union OAT converges to the exact Schmidt
-profile [2,3,4,5,6,5,4,3,2], without it the interior over-fills to [2,3,6,6,6,6,6,3,2] and
-sits at the cap, which reads deceptively like the cap simply binding.
+`rexpand = true` is the scheme's default and is passed explicitly so the choice is visible here
+rather than inherited: every bond is expanded TWICE per half-sweep -- once as the right bond of
+site `i`, once as the left bond of site `i+1` -- so every site is evolved with both of its bonds
+widened, and no basis is ever formed by merging two others. It costs a second `cbe_expand` per
+bond and no extra `expv`.
+
+⛔ THE WIDTH RESTORATION IS NOT OPTIONAL, whichever mechanism supplies it. Without it (`kaug =
+false, rexpand = false`) the half-sweep split leaves the next site's LEFT bond narrow and the
+error is not degraded but WRONG. Measured on these very scripts, TFIM at L=16, maxdim=64:
+
+    mechanism                    :Z2         :none
+    rexpand = true (default)     1.413e-05   1.241e-05
+    kaug    = true               6.563e-06   3.838e-06
+    neither                      1.405e+00   1.235e+00
+
+The run still exits 0 and still writes its CSV in every one of those rows, so the failure is
+silent. `kaug` keeps a 2-3x edge on this model; `rexpand` is the default for its structure --
+no basis is ever formed by merging two others -- and the two are indistinguishable on XX
+(8.1911e-05 both) and on OAT (3.2749e-11 against 3.2748e-11).
+
+The tell is the BOND PROFILE, not the error. On OAT at L=10, D=6 the exact Schmidt profile is
+[2,3,4,5,6,5,4,3,2] for all time; `rexpand` and `kaug` both land on it exactly, while the
+unrestored arm over-fills the interior to [2,3,6,6,6,6,6,3,2] and sits at the cap -- which reads
+deceptively like the cap simply binding. Both TDVPs over-fill it too, so hitting the exact
+profile is a property of the BUG half-sweeps rather than of either restoration mechanism. See
+`benchmarks/arm4_rexpand.jl` for the six-arm table.
 """
 function steppers(mpo; maxdim::Int, trunc_thresh::Float64, maxiter::Int)
     return (
@@ -79,7 +97,7 @@ function steppers(mpo; maxdim::Int, trunc_thresh::Float64, maxiter::Int)
                                                      trunc_thresh = trunc_thresh,
                                                      maxiter = maxiter),
 
-        "cbe_bug"    => (p, tau) -> cbe_bug_step!(p, mpo, tau; kstep = true, kaug = true,
+        "cbe_bug"    => (p, tau) -> cbe_bug_step!(p, mpo, tau; kstep = true, rexpand = true,
                                                   exact = true, maxdim = maxdim,
                                                   trunc_thresh = trunc_thresh, maxiter = maxiter),
     )

@@ -58,10 +58,13 @@ function _arms(mpo, D, dt, maxiter)
             "tdvp_cbe1s"       => p -> tdvp_cbe1s_step!(p, mpo, tau; maxdim = D,
                                                         trunc_thresh = 1e-14,
                                                         maxiter = maxiter),
-            "bug kaug=true"    => bug(kaug = true),
+            # ⛔ EVERY `kaug` ARM MUST PIN `rexpand = false`. `rexpand` is the default and it
+            # overrides `kaug`, so `bug(kaug = true)` alone would run the rexpand arm twice and
+            # the table would show two identical rows for two different labels.
+            "bug kaug=true"    => bug(kaug = true,  rexpand = false),
             "bug rexpand=true" => bug(rexpand = true),
-            "bug kaug=false"   => bug(kaug = false),
-            "bug kstep=false"  => bug(kstep = false)]
+            "bug kaug=false"   => bug(kaug = false, rexpand = false),
+            "bug kstep=false"  => bug(kstep = false, rexpand = false)]
 end
 
 # ── OAT: infidelity AND the exact rank profile ───────────────────────────────────────────

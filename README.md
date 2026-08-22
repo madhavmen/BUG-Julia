@@ -68,12 +68,19 @@ mpo_energy(psi, W)
 | `tdvp_cbe1s_step!` | 1-site TDVP with controlled bond expansion ([arXiv:2208.10972](https://arxiv.org/abs/2208.10972)) — the baseline to beat. |
 | `tdvp2_step!` | 2-site TDVP. The conventional reference. |
 
-`cbe_bug_step!` has exactly **two scheme knobs**, both defaulting to on:
+`cbe_bug_step!` has **three scheme knobs**, all defaulting to on:
 
 - **`kstep`** — do the BUG basis update. `false` takes the CBE frame directly.
-- **`kaug`** — UNION the basis update with the CBE frame instead of letting it replace it.
-  With `kaug = false` the directions CBE just paid to find are discarded before they reach the
-  state. See [docs/USAGE.md §6b](docs/USAGE.md).
+- **`rexpand`** — expand every bond **twice per half-sweep**, once as site `i`'s right bond and
+  once as site `i+1`'s left bond, so every site is evolved with **both** of its bonds widened.
+  This is the default mechanism for keeping the width the half-sweep split would otherwise lose.
+- **`kaug`** — the older mechanism for the same thing: UNION the basis update with the CBE frame
+  rather than letting it replace it. **`rexpand` overrides it**, so an A/B on `kaug` must pass
+  `rexpand = false`.
+
+Turning off *both* is not a tuning choice — it is a wrong answer. On the TFIM example it returns
+`1.4e+00` against `6.6e-06`, while still exiting 0 and writing its CSV. See
+[docs/USAGE.md §6b](docs/USAGE.md) and `benchmarks/arm4_rexpand.jl`.
 
 The sweep is always **interleaved** (expand bond `i`, then immediately evolve site `i`) — the
 ordering of the reference implementation.

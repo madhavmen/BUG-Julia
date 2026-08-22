@@ -351,7 +351,12 @@ end
         psi = x_polarized_state(L)
         kry = 0
         for _ in 1:nst
-            info = cbe_bug_step!(psi, mpo, ComplexF64(-im * dt); kaug = kaug,
+            # ⛔ `rexpand = false` IS LOAD-BEARING, NOT TIDINESS. `rexpand` is the default and it
+            # overrides `kaug`, restoring the same width by re-expanding instead of merging. Left
+            # at the default, BOTH arms below would be the same computation and this testset
+            # would compare an arm with itself -- passing or failing for reasons unrelated to the
+            # union it exists to pin.
+            info = cbe_bug_step!(psi, mpo, ComplexF64(-im * dt); kaug = kaug, rexpand = false,
                                  maxdim = D, trunc_thresh = 1e-14, maxiter = 30)
             kry += info.krylov_dims
         end

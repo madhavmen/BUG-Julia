@@ -76,18 +76,54 @@ Keywords beyond the [`cbe_expand`](@ref) ones (`dex`, `growth`, `dover`, `comp_r
     where the cap is slack, and the one slack run measured -- OAT at full rank, above the
     exact rank 9 -- is already machine-exact at `1.1`. So nothing yet argues for changing it,
     and the test that could is a slack-cap model, not a wider grid on these two.
-  - `rexpand` -- EXPAND EVERY BOND TWICE PER HALF-SWEEP INSTEAD OF UNIONING. The split that
-    produces `W[i]` is bounded by the evolve, so it comes out narrower than the CBE frame just
-    paid for -- and `W[i]` is what sets site `i+1`'s LEFT bond. `kaug` restores that width by
-    merging the frame back in; `rexpand` restores it by EXPANDING BOND `i` A SECOND TIME against
-    the state as it then stands, so each bond is expanded once as the right bond of site `i` and
-    once as the left bond of site `i+1`. That is the pattern `tdvp_cbe1s` gets for free by
-    expanding on both its forward and backward passes, and it means every site is evolved with
-    BOTH of its bonds widened. No union is performed: `rexpand = true` overrides `kaug`.
+  - `rexpand` -- **THE DEFAULT.** EXPAND EVERY BOND TWICE PER HALF-SWEEP INSTEAD OF UNIONING.
+    The split that produces `W[i]` is bounded by the evolve, so it comes out narrower than the
+    CBE frame just paid for -- and `W[i]` is what sets site `i+1`'s LEFT bond. `kaug` restores
+    that width by merging the frame back in; `rexpand` restores it by EXPANDING BOND `i` A SECOND
+    TIME against the state as it then stands, so each bond is expanded once as the right bond of
+    site `i` and once as the left bond of site `i+1`. Every site is therefore evolved with BOTH
+    of its bonds widened, which is what `tdvp_cbe1s` gets for free by expanding on both its
+    forward and backward passes. No basis is ever formed by merging two others:
+    **`rexpand = true` overrides `kaug`**, so an A/B on `kaug` must pass `rexpand = false`.
 
-    THE COST IS A SECOND `cbe_expand` PER BOND PER HALF-SWEEP, with no extra `expv` -- the
-    re-expansion happens after the exponential, not around it. Whether that buys accuracy is the
-    open question this flag exists to answer; it is `false` by default until measured.
+    THE COST IS A SECOND `cbe_expand` PER BOND PER HALF-SWEEP AND NO EXTRA `expv` -- the
+    re-expansion happens after the exponential, not around it, so it is QR and matmul rather
+    than Krylov. MEASURED (`benchmarks/arm4_rexpand.jl`, OAT L=10, D=6 = the exact ceiling, so
+    rank is not the limiter and the bond profile is a pass/fail with no tolerance in it):
+
+        arm                infidelity    krylov  bond profile
+        tdvp2              1.9927e-06     20178  [2,3,6,6,6,6,6,4,2]
+        tdvp_cbe1s         1.9927e-06     16844  [2,3,6,6,6,6,6,4,2]
+        bug kaug=true      3.2748e-11      5149  [2,3,4,5,6,5,4,3,2]  exact
+        bug rexpand=true   3.2749e-11      5135  [2,3,4,5,6,5,4,3,2]  exact
+        bug kaug=false     3.9758e-05      5196  [2,3,6,6,6,6,6,3,2]
+        bug kstep=false    6.3963e-05       560  [2,3,4,5,6,5,4,3,2]  exact
+
+    ACROSS THE THREE EXAMPLE MODELS, against `kaug`:
+
+        OAT   L=10 D=6     3.2749e-11  vs  3.2748e-11    matches to 5 figures
+        XX    L=16 D=24    8.1911e-05  vs  8.1911e-05    identical
+        TFIM  L=16 :Z2     1.413e-05   vs  6.563e-06     2.2x worse
+        TFIM  L=16 :none   1.241e-05   vs  3.838e-06     3.2x worse
+
+    So the two mechanisms agree wherever the evolved basis is already good, and `kaug` keeps a
+    real edge on TFIM. `rexpand` is the default for the STRUCTURE rather than that number: no
+    basis is ever formed by merging two others, and every site is evolved with both of its bonds
+    widened, which is the reference sweep's ordering.
+
+    ⛔ THE `_union_left(svd(K).U, Wk)` ABOVE IS NOT PART OF THE WIDENING AND MUST NOT BE REMOVED
+    AS REDUNDANT. It adds no direction that was not already needed to represent `K`; it only
+    makes `W[i]·W[i]'·K == K`, so that the second expansion sketches `H·Theta` against the TRUE
+    two-site block. Without it the frame is `P_W·K·psi[i+1]`, a PROJECTION -- `svd(K1).U` comes
+    from the evolved tensor and `Kex = K·M` matricises through `M`, so its left span can be
+    strictly smaller than `K`'s. The second expansion then returns the right directions for the
+    wrong `Theta`. MEASURED before the fix: TFIM 2.508e-01 (`:Z2`) and 5.467e-01 (`:none`) --
+    wrong answers, not degraded ones -- while OAT, whose evolved basis is nearly exact so the
+    projection loses almost nothing, moved only from 3.27e-11 to 4.63e-09. The model dependence
+    is the tell, and it is why this cannot be caught on OAT alone.
+
+    Note also that BOTH TDVPs over-fill the OAT profile to `[2,3,6,6,6,6,6,4,2]`. Landing on the
+    exact Schmidt profile is a property of the BUG half-sweeps, not of `kaug` or `rexpand`.
   - `root` -- the bond that keeps the Galerkin step. `nothing` is `floor(L/2)`, the paper's
     root, and it is not a free parameter in practice: the root solve explores exactly
     `b_L x b_R` directions, and at the CENTRE both factors are a full half-chain while at bond
@@ -100,8 +136,12 @@ Keywords beyond the [`cbe_expand`](@ref) ones (`dex`, `growth`, `dover`, `comp_r
     and reproduces `cbe_lubich_sweep`. The A/B that isolates the K-step's contribution.
   - `kaug` -- UNION the basis update with the CBE frame instead of letting it REPLACE it:
     `W[i] = orth([U_ex | svd(K1).U])`, and the mirror for `Z[j]`. Only meaningful with
-    `kstep = true`. `true` is the DEFAULT; `false` reproduces the historical behaviour and is
-    kept only as the A/B that exhibits the defect.
+    `kstep = true`. `false` reproduces the historical behaviour and is kept only as the A/B that
+    exhibits the defect.
+
+    ⛔ INERT UNDER THE DEFAULT. `rexpand = true` restores the same width by re-expanding and
+    overrides this flag entirely, so varying `kaug` alone changes NOTHING unless you also pass
+    `rexpand = false`. Every A/B on `kaug` must do so or it silently compares an arm with itself.
 
     MEASURED on OAT (L=10, T=2, the `tests/sweeps/test_oat.jl` dt-order configuration), as
     `max_t |S^x_tot - closed form|`:
@@ -157,7 +197,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        root::Union{Nothing, Int} = nothing,
                        kstep::Bool = true,
                        kaug::Bool = true,
-                       rexpand::Bool = false,
+                       rexpand::Bool = true,
                        truncate::Bool = true,
                        maxdim::Int = 200,
                        trunc_thresh::Float64 = 1e-12,
@@ -266,6 +306,22 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             # UNION, not replace -- see `kaug` in the docstring. `W[i]` becomes `psi[i]`, so a
             # CBE direction absent from it never reaches the state.
             Wk = (kaug && !rexpand) ? _union_left(Wcbe[i], Wk) : Wk
+
+            # ⛔ `rexpand` MUST RE-EXPAND FROM THE TRUE STATE, AND THAT COSTS THIS ONE LINE.
+            # The frame handed to the second expansion below is `W[i]·(W[i]'K)·psi[i+1]`, which
+            # equals the true two-site block ONLY IF `W[i]` spans `K`. It need not: `svd(K1).U`
+            # comes from the EVOLVED tensor, and `Kex = K·M` already matricises through `M`, so
+            # its left span can be strictly smaller than `K`'s. Left unfixed, the second
+            # expansion sketches `H·Theta` against a PROJECTED state and returns the right
+            # directions for the wrong `Theta` -- measured on TFIM L=16 as 2.5e-01 (`:Z2`) and
+            # 5.5e-01 (`:none`) against 6.6e-06 for the union, while OAT, whose evolved basis is
+            # nearly exact so the projection loses almost nothing, barely moved.
+            #
+            # Unioning `svd(K).U` in is a REPRESENTATION fix, not a widening mechanism: it only
+            # restores exactness of the frame. Every new direction still comes from `cbe_expand`
+            # below, never from a merge -- which is the property that distinguishes this from
+            # `kaug`.
+            rexpand && (Wk = _union_left(to_concrete(svd(K, (1, 2); cutoff = 1e-14).U), Wk))
             W[i] = to_concrete(setitag(Wk, 3, _tagW(i)))
         else
             W[i] = Wcbe[i]                                          # reproduces cbe_lubich
@@ -332,6 +388,10 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             Zk = to_concrete(svd(B1, (1,); cutoff = 1e-14).Vd)
             # Mirror of the K half-sweep: `Z[j]` becomes `psi[j+1]`.
             Zk = (kaug && !rexpand) ? _union_right(Zcbe[j], Zk) : Zk
+            # Row mirror of the K half-sweep's true-state fix: `Z[j]` must span `B` or the
+            # re-expansion below sees `B·P_Z` instead of the true block. Representation only --
+            # the widening still comes from `cbe_expand`.
+            rexpand && (Zk = _union_right(to_concrete(svd(B, (1,); cutoff = 1e-14).Vd), Zk))
             Z[j] = to_concrete(setitag(Zk, 1, _tagZ(j)))
         else
             Z[j] = Zcbe[j]
