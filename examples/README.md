@@ -64,23 +64,49 @@ integrator and nothing else.
 | `tdvp_cbe1s` | 1-site TDVP with controlled bond expansion (arXiv:2208.10972). Matches 2-site accuracy at 1-site cost. |
 | `cbe_bug` | RSVD-CBE + rank-adaptive BUG. `K`/`L` half-sweeps build the bases, one Galerkin step at the centre root. |
 
-`cbe_bug` has exactly two scheme knobs, and these scripts run it in its **simplest**
-configuration — no randomised SVD, and the historic (non-union) basis update:
+`cbe_bug` has three scheme knobs. These scripts run it at its **defaults**, with the one
+simplification that the randomised sketch is switched off (`exact = true`, measured free — see
+below):
 
 - **`kstep`** (default `true`) — do the BUG basis update.
-- **`kaug`** — UNION the basis update with the CBE frame instead of letting it replace it.
-  **These examples set `kaug = false`**, the historic behaviour: CBE expands, then a plain 1-site
-  update takes over the frame.
+- **`rexpand`** (default `true`, **what these scripts pass**) — expand every bond **twice per
+  half-sweep**, once as site `i`'s right bond and once as site `i+1`'s left bond, so every site is
+  evolved with both of its bonds widened. No basis is ever formed by merging two others. This is
+  the same ordering `tdvp_cbe1s` gets for free from its forward and backward passes.
+- **`kaug`** (default `true`) — the older mechanism for the same thing: UNION the basis update
+  with the CBE frame instead of letting it replace it. **`rexpand` overrides it**, so an A/B on
+  `kaug` must pass `rexpand = false` or it silently compares an arm with itself.
 
-⛔ **`kaug = false` is a real accuracy trade, not a simplification.** Measured on OAT (L=10, T=2):
+Both mechanisms exist because the half-sweep split is bounded by the evolve, so the frame comes
+out NARROWER than the CBE expansion that was just paid for — and that frame sets the next site's
+left bond. `rexpand` restores the width by expanding again; `kaug` by merging the frame back in.
 
-| | max error vs closed form |
-|---|---|
-| `cbe_bug`, `kaug = true` | 2.2901e-06 |
-| `cbe_bug`, `kaug = false` | **1.8271e-02** — ~8000× worse, and 4.2× worse than `tdvp2` |
+⛔ **Restoring the width is not optional — but which mechanism does it barely matters, and on one
+model neither matters at all.** Measured at these scripts' own settings
+(`benchmarks/example_defaults.jl`, L=16 `maxdim=64` for TFIM and XX; OAT L=10 at the exact
+ceiling, t=10π):
 
-Pass `kaug = true` in `common.jl`'s `steppers` for the accurate variant; `docs/USAGE.md` §6b has
-the full comparison.
+| mechanism | TFIM `:Z2` | TFIM `:none` | XX `:U1` | OAT infidelity | OAT bond profile |
+|---|---|---|---|---|---|
+| **`rexpand = true`** (default) | **3.8455e-06** | 4.3036e-06 | 8.1911e-05 | **3.2748e-11** | `[2,3,5,5,6,5,4,3,2]` |
+| `kaug = true` | 4.2717e-06 | **4.0839e-06** | 8.1911e-05 | 3.2750e-11 | `[2,3,6,6,6,6,6,3,2]` |
+| neither | 1.9699e-01 | 1.9474e-01 | 8.0282e-05 | 3.9347e-05 | `[2,3,6,6,6,6,6,3,2]` |
+
+Read three things off it:
+
+1. **`rexpand` and `kaug` are at parity on accuracy** — within ~11%, and the direction flips
+   between symmetry modes. `rexpand` is the default for its *structure*, not for a win.
+2. **`neither` is catastrophic on TFIM and OAT and free on XX.** The run still exits 0 and still
+   writes its CSV, so on TFIM the failure is silent at five orders. **Never validate a
+   basis-mechanism change on XX** — it stays low-rank enough not to discriminate, and has now
+   failed to show three separate real effects.
+3. **The bond profile is not the sensitive diagnostic it was documented to be.** `kaug` and
+   `neither` have *identical* profiles with errors six orders apart. The profile separates
+   `rexpand` — which nearly tracks the exact `min(k, L−k)+1` = `[2,3,4,5,6,5,4,3,2]` — from the
+   two that sit pinned at the cap, and that is the one place `rexpand` is clearly ahead: equal
+   accuracy on a leaner state.
+
+`docs/USAGE.md` §6b has the defect analysis behind both mechanisms.
 
 The sweep is always interleaved (expand bond `i`, then immediately evolve site `i`) — the
 ordering of the reference implementation.

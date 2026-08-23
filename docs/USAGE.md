@@ -407,15 +407,37 @@ the expansion — do not add seeding. The proof the growth is not seed-driven: i
 then `maxdim`, `growth` and `trunc_thresh` changed nothing and any comparison across them is
 measuring noise. This has produced several wrong conclusions in this repo — check it first.
 
-## 6b. `cbe_bug`'s basis update discards CBE's expansion — fixed by `kaug`, now the default
+## 6b. `cbe_bug`'s basis update discards CBE's expansion — two mechanisms restore it
 
 **The half-sweep basis update *replaces* the frame CBE just built instead of *adding* to it.**
-That is a defect in `cbe_bug`, it affects every model tested, and `kaug` fixes it.
+That is a defect in `cbe_bug` and it affects every model tested. There are now **two** mechanisms
+that fix it, and the defect analysis below applies to both.
 
-> **`kaug = true` is the DEFAULT** as of the measurement below. `kaug = false` reproduces the old
-> behaviour and is kept only as the A/B that exhibits the defect.
+> **`rexpand = true` IS THE CURRENT DEFAULT**, not `kaug`. It restores the lost width by
+> **expanding bond `i` a second time** — once as site `i`'s right bond, once as site `i+1`'s left
+> bond — so no basis is ever formed by merging two others. **`rexpand` overrides `kaug`**, so
+> every A/B on `kaug` must pass `rexpand = false` or it silently compares an arm with itself.
 >
-> ⛔ **It is INTERLEAVED-ONLY, and is forced off under `decoupled = true`.** The union needs
+> `kaug` is the older mechanism for the same problem and is the one this section was written
+> about; everything below about *why* the width is lost is unchanged and applies to both.
+>
+> ⚠️ **The "`kaug` is 2-3× more accurate" comparison that used to head this section was measured
+> at `growth = 1.1`, which STARVED `rexpand`** — its second expansion runs against a larger `U₀`,
+> and `budget = ceil(growth·dmax) − r` subtracts that `r`. At the current `growth = 2.0` the
+> ordering **reverses**. Measured at the example scripts' own settings (TFIM L=16, `maxdim=64`,
+> `trunc=1e-10`, t=3, `:Z2`): `rexpand` **3.8455e-06**, `kaug` **4.2717e-06**, neither
+> **1.9699e-01**. See `benchmarks/example_defaults.jl`.
+>
+> ⛔ **On COST the two are not established as equal.** `rexpand` performs a second `cbe_expand`
+> per bond, which is QR/matmul work and adds no `expv` — so `krylov`, the cost axis used
+> everywhere else in this repo, is **blind to exactly the work `rexpand` adds**. Local wall time
+> on the run above was 556s vs 275s, which is directionally consistent but is not evidence: wall
+> time here spreads 2.6-2.8× on bit-identical work. Treat the cost comparison as UNMEASURED.
+>
+> ⛔ **`kaug` is INTERLEAVED-ONLY, and is forced off under `decoupled = true`.** (`rexpand` is
+> not affected — it never unions.)
+>
+> The union needs
 > `U_ex` and `svd(K1).U` to be two bases of the *same* space. Interleaved gives that — both are
 > built from the same `K` in the same loop iteration, so both sit on `W[i-1]`'s bond. Decoupled
 > does not: its phase A runs a separate frame chain (`C = U_ex' * K`), so `U_ex` sits on

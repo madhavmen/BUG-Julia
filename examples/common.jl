@@ -68,26 +68,62 @@ site `i`, once as the left bond of site `i+1` -- so every site is evolved with b
 widened, and no basis is ever formed by merging two others. It costs a second `cbe_expand` per
 bond and no extra `expv`.
 
-⛔ THE WIDTH RESTORATION IS NOT OPTIONAL, whichever mechanism supplies it. Without it (`kaug =
-false, rexpand = false`) the half-sweep split leaves the next site's LEFT bond narrow and the
-error is not degraded but WRONG. Measured on these very scripts, TFIM at L=16, maxdim=64:
+⛔ THE WIDTH RESTORATION IS NOT OPTIONAL ON TFIM, AND IS IRRELEVANT ON XX. Without it (`kaug =
+false, rexpand = false`) the half-sweep split leaves the next site's LEFT bond narrow. Measured at
+L=16, maxdim=64, trunc=1e-10 (`benchmarks/example_defaults.jl`) -- ⚠️ the numbers below were taken
+with the RANDOMISED sketch (`exact = false`, the package default) rather than the `exact = true`
+these scripts pass; the arms have since been corrected to pass `exact = true` and the table is due
+a re-measure. Expect it to move very little if the sketch really is free, which is the other
+claim in this docstring that wants re-pinning:
 
-    mechanism                    :Z2         :none
-    rexpand = true (default)     1.413e-05   1.241e-05
-    kaug    = true               6.563e-06   3.838e-06
-    neither                      1.405e+00   1.235e+00
+    mechanism                  TFIM :Z2     TFIM :none    XX :U1
+    rexpand = true (default)   3.8455e-06   4.3036e-06    8.1911e-05
+    kaug    = true             4.2717e-06   4.0839e-06    8.1911e-05
+    neither                    1.9699e-01   1.9474e-01    8.0282e-05
 
-The run still exits 0 and still writes its CSV in every one of those rows, so the failure is
-silent. `kaug` keeps a 2-3x edge on this model; `rexpand` is the default for its structure --
-no basis is ever formed by merging two others -- and the two are indistinguishable on XX
-(8.1911e-05 both) and on OAT (3.2749e-11 against 3.2748e-11).
+On TFIM the unrestored arm is not degraded but WRONG -- five orders, and the run still exits 0 and
+still writes its CSV, so the failure is SILENT. On XX it costs NOTHING; `neither` is marginally
+BEST there.
 
-The tell is the BOND PROFILE, not the error. On OAT at L=10, D=6 the exact Schmidt profile is
-[2,3,4,5,6,5,4,3,2] for all time; `rexpand` and `kaug` both land on it exactly, while the
-unrestored arm over-fills the interior to [2,3,6,6,6,6,6,3,2] and sits at the cap -- which reads
-deceptively like the cap simply binding. Both TDVPs over-fill it too, so hitting the exact
-profile is a property of the BUG half-sweeps rather than of either restoration mechanism. See
-`benchmarks/arm4_rexpand.jl` for the six-arm table.
+⛔ SO DO NOT VALIDATE A BASIS-MECHANISM CHANGE ON XX. That is not a quirk of this table, it is the
+pattern this model shows every time: the `rexpand` projection defect was invisible on XX and
+glaring on TFIM (2.5e-01); `basis_frac` is bit-identical across every value on XX and costs an
+ORDER on TFIM; width restoration is free on XX and worth five orders on TFIM. The XX domain wall
+stays low-rank enough that basis-construction choices do not bind, so it cannot discriminate
+between them -- it is a control, never the evidence.
+
+⛔ THE TWO MECHANISMS ARE AT PARITY, AND THE DIRECTION FLIPS WITH THE SYMMETRY MODE (`rexpand`
+1.11x better under `:Z2`, `kaug` 1.05x better under `:none`). An earlier version of this table
+had `kaug` ahead by 2-3x; that was measured at `growth = 1.1`, which STARVES `rexpand` -- its
+second expansion runs against a larger `U0`, and `budget = ceil(growth*dmax) - r` SUBTRACTS that
+`r`. At the current `growth = 2.0` the gap closes. Any future re-measurement of this table must
+re-check `growth` first, because that is the knob it is sensitive to.
+
+So `rexpand` is the default for its STRUCTURE, not for a win: no basis is ever formed by merging
+two others, and every site is evolved with both of its bonds widened -- the ordering
+`tdvp_cbe1s` gets for free from its forward and backward passes. The measurement says that
+choice costs nothing in accuracy.
+
+⛔ ON COST THEY ARE NOT ESTABLISHED AS EQUAL. `rexpand`'s second `cbe_expand` per bond is
+QR/matmul work that adds no `expv`, so `krylov` -- the cost axis used everywhere else here -- is
+BLIND to exactly the work `rexpand` adds. Wall time on the run above was 556s vs 275s under
+`:Z2`, which is directionally consistent but is NOT evidence: local wall time spreads 2.6-2.8x on
+bit-identical work. Treat the cost comparison as unmeasured.
+
+ON OAT THE ERROR AND THE BOND PROFILE MEASURE DIFFERENT THINGS, AND NEITHER ALONE IS THE TELL.
+At L=10, D=6 (the exact ceiling), t=10π -- the settings `oat_z2.jl` actually runs:
+
+    mechanism                  infidelity   bond profile
+    rexpand = true (default)   3.2748e-11   [2, 3, 5, 5, 6, 5, 4, 3, 2]
+    kaug    = true             3.2750e-11   [2, 3, 6, 6, 6, 6, 6, 3, 2]
+    neither                    3.9347e-05   [2, 3, 6, 6, 6, 6, 6, 3, 2]
+
+The exact Schmidt profile is `min(k, L-k) + 1` = [2,3,4,5,6,5,4,3,2] for all time.
+
+It is also the one place `rexpand` is clearly AHEAD rather than at parity: the same infidelity as
+`kaug` on a leaner state (bond sum 35 against 40), which is some of its extra sketch cost bought
+back. Both TDVPs over-fill this profile too, so tracking it at all is a property of the BUG
+half-sweeps rather than of either restoration mechanism.
 """
 function steppers(mpo; maxdim::Int, trunc_thresh::Float64, maxiter::Int)
     return (
