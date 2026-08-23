@@ -41,6 +41,11 @@ const P = parse_params((
 # ──────────────────────────────────────────────────────────────────────────────────────────
 
 const T_MAX = P.t_over_pi * π
+
+
+const SPP = let s = max(4, round(Int, π / P.dt)); s + (4 - s % 4) % 4 end
+const DT  = π / SPP                     # ~0.0491 for the requested 0.05; divides π exactly
+
 const CEIL  = min(P.L ÷ 2, P.L - P.L ÷ 2) + 1        # the exact rank ceiling
 const MAXDIM = P.maxdim == 0 ? CEIL : P.maxdim
 
@@ -48,7 +53,7 @@ const MAXDIM = P.maxdim == 0 ? CEIL : P.maxdim
 # a depth fixed at 12 bounds 1e-15 at L=10 but only 1e-10 at L=16 and 3e-8 at L=20 -- see
 # `krylov_depth` in common.jl for why a Krylov-limited run is the quiet failure to fear here.
 const HNORM   = P.L^2 / 8
-const MAXITER = P.maxiter == 0 ? krylov_depth(HNORM, P.dt) : P.maxiter
+const MAXITER = P.maxiter == 0 ? krylov_depth(HNORM, DT) : P.maxiter
 
 # The closed form, written out here rather than imported from `tests/common/analytic_reference.jl`
 # so this example stands on its own -- a downloaded copy of the package should not need the test
@@ -61,23 +66,25 @@ set_symmetry!(Symbol(P.symmetry))
 const MPO_OAT = oat_mpo(P.L)
 const PSI0    = x_polarized_state(P.L)
 
-@printf("OAT  L=%d  symmetry=%s  t=%gπ (%.3f)  dt=%g  maxdim=%d%s  trunc=%g\n",
-        P.L, P.symmetry, P.t_over_pi, T_MAX, P.dt, MAXDIM,
+# ⛔ REPORT THE STEP THAT RAN, NOT THE ONE REQUESTED. Printing `P.dt` here would reintroduce
+# exactly the defect `SPP` fixes: a header naming a time grid the run did not use.
+@printf("OAT  L=%d  symmetry=%s  t=%gπ (%.3f)  dt=π/%d=%.6g  maxdim=%d%s  trunc=%g\n",
+        P.L, P.symmetry, P.t_over_pi, T_MAX, SPP, DT, MAXDIM,
         P.maxdim == 0 ? " (exact ceiling)" : "", P.trunc_thresh)
 @printf("krylov depth = %d  (arg %.3f, Lanczos bound %.1e -- must sit under %g)\n",
-        MAXITER, HNORM * P.dt / 2, krylov_bound(HNORM, P.dt, MAXITER), P.trunc_thresh)
+        MAXITER, HNORM * DT / 2, krylov_bound(HNORM, DT, MAXITER), P.trunc_thresh)
 @printf("exact rank ceiling = %d   initial chi = %d   S^x_tot(0) = %.6f\n\n",
         CEIL, maximum(bond_dims(PSI0)), total_sx(copy(PSI0)))
 
 const OUT = joinpath(RESULTS,
                      @sprintf("oat_L%d_%s_D%d_dt%g_T%gpi.csv",
-                              P.L, P.symmetry, MAXDIM, P.dt, P.t_over_pi))
+                              P.L, P.symmetry, MAXDIM, DT, P.t_over_pi))
 io = open_csv(OUT)
 try
     run_model(io, "OAT", P.symmetry, PSI0, MPO_OAT,
               psi -> total_sx(psi),                  # observable
               t   -> oat_sx_exact(P.L, t),            # its closed form
-              (; t_max = T_MAX, dt = P.dt, maxdim = MAXDIM,
+              (; t_max = T_MAX, dt = DT, maxdim = MAXDIM,
                  trunc_thresh = P.trunc_thresh, maxiter = MAXITER,
                  sample_every = P.sample_every))
 finally
