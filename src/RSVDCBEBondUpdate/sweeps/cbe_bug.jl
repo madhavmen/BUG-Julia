@@ -134,11 +134,22 @@ Keywords beyond the [`cbe_expand`](@ref) ones (`dex`, `growth`, `dover`, `comp_r
 
     THIS IS THE ONE STRUCTURAL DIFFERENCE FROM `tdvp_cbe1s` THAT IS NOT ABOUT WIDENING. That
     sweep splits with `cutoff = cut, Nkeep = maxdim` at every site, so it prunes continuously;
-    this one does not prune at all until the end. The knob exists to measure whether pruning
-    earlier -- with the local information still present -- beats pruning once at the root, and
-    it is the leading candidate for `rexpand`'s remaining deficit against `kaug` on TFIM:
-    `rexpand`'s `W[i]` spans `K`, `K1` AND the new CBE directions, so it carries more rank into
-    the root than `kaug` does, and the root then has to discard more of it.
+    this one does not prune at all until the end.
+
+    MEASURED AT THE CURRENT DEFAULTS (`benchmarks/split_truncation.jl`, TFIM L=16 D=32, `rexpand`
+    with `growth = 2.0`): the whole grid spans 1.47e-05 to 1.72e-05 against a 1.5135e-05
+    baseline -- 17%, with `cutoff = 1e-12` marginally the best at 1.4714e-05 -- and XX is
+    BIT-IDENTICAL across every setting. Deferring rank control to the root is therefore very
+    nearly free, not merely defensible, and the default is left alone because 2.8% does not
+    justify another knob in the shipped configuration.
+
+    ⛔ AN EARLIER VERSION OF THIS NOTE SAID PRUNING WAS ACTIVELY HARMFUL AND SHOULD NOT BE
+    RETRIED. That was measured at `growth = 1.1`, which -- as the `growth` entry above records --
+    STARVES `rexpand`. Under starvation the grid spanned 3.66e-05 to 9.48e-05 and `Nkeep = maxdim`
+    cost 2.6x, because trimming could only remove directions the expansion was already short of.
+    The harm was an artefact of the budget, not a property of the split, and it vanished when the
+    budget did. Recorded because the confound is the reusable lesson: a knob measured under a
+    starved sweep tells you about the starvation.
 
     ⛔ THIS DOES NOT REACH THE TRUE-STATE UNION. `_union_left(svd(K).U, Wk)` keeps its own
     `1e-14`, deliberately: its job is to make `W[i]W[i]'K == K` so the second expansion sees the
