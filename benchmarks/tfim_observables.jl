@@ -43,6 +43,7 @@ using BUGJulia.BondUpdateBUG
 using BUGJulia.RSVDCBEBondUpdate
 
 include(joinpath(@__DIR__, "..", "tests", "common", "dense_reference.jl"))
+include(joinpath(@__DIR__, "..", "tests", "common", "free_fermion.jl"))
 
 const L  = 8
 const D  = 1024          # the L=8 Schmidt ceiling is 16: this never binds, nothing truncates
@@ -50,28 +51,14 @@ const MI = 30
 const DIRS = [i <= L ÷ 2 ? :plus : :minus for i in 1:L]
 
 # ── the free-fermion reference: one covariance matrix serves every observable ─────────────
-function majorana_A(L::Int; J = 1.0, h = 1.0)
-    A = zeros(Float64, 2L, 2L)
-    for j in 1:L
-        A[2j - 1, 2j] = -2h; A[2j, 2j - 1] = +2h
-    end
-    for j in 1:(L - 1)
-        A[2j, 2j + 1] = -2J; A[2j + 1, 2j] = +2J
-    end
-    return A
-end
-
-function gamma_at(t, dirs; J = 1.0, h = 1.0)
-    G = zeros(Float64, 2L, 2L)
-    for (j, d) in enumerate(dirs)
-        s = d === :plus ? 1.0 : -1.0
-        G[2j - 1, 2j] = s; G[2j, 2j - 1] = -s
-    end
-    R = exp(majorana_A(L; J = J, h = h) * t)
-    return R * G * transpose(R)
-end
-
-x_exact(t, dirs) = (Gt = gamma_at(t, dirs); [Gt[2j - 1, 2j] for j in 1:L])
+#
+# `tfim_covariance` / `tfim_x_profile` come from `tests/common/free_fermion.jl` and are pinned
+# against exact diagonalisation in `tests/common/test_analytic_reference.jl`. This file used to
+# carry its own copy of the congruence; it does not, because a second copy is a second thing to
+# get the Majorana factors of two wrong in, and the whole point of this benchmark is that several
+# observables are read off ONE matrix.
+gamma_at(t, dirs; J = 1.0, h = 1.0) = tfim_covariance(L, t, dirs; J = J, h = h)
+x_exact(t, dirs) = tfim_x_profile(L, t, dirs)
 
 """
 Entanglement entropy of sites `1:cut` from the Majorana covariance matrix.

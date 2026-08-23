@@ -144,4 +144,62 @@ using LinearAlgebra
         @test r64 < 1e-12
         @test abs(e64 / 64 - hulthen_energy_density()) < 5e-4
     end
+
+    # ── the TFIM Majorana reference ──────────────────────────────────────────────────────────
+    #
+    # Same contract as everything above: pinned HERE against a dense propagator, and used
+    # everywhere else INSTEAD of one. The integrator tests must not build 2^L objects -- that is
+    # what caps them at L~10, and the `rexpand` defect this reference exists to catch is four
+    # orders larger at L=16 than at the L a dense propagator affords.
+    #
+    # The risk is again CONVENTION and not physics: the Majorana factors of two, and the σˣ basis
+    # in which `X` is DIAGONAL and `Z` is the flip.
+    @testset "tfim_x_profile matches dense propagation" begin
+        # Dense TFIM by an explicit bit loop, sharing no code with `free_fermion.jl`.
+        function dense_tfim(L, J, h)
+            D = 2^L
+            H = zeros(ComplexF64, D, D)
+            for s in 0:(D - 1)
+                H[s + 1, s + 1] = -h * sum(((s >> i) & 1) == 0 ? 1.0 : -1.0 for i in 0:(L - 1))
+                for i in 0:(L - 2)
+                    H[(s ⊻ (1 << i) ⊻ (1 << (i + 1))) + 1, s + 1] += -J
+                end
+            end
+            return H
+        end
+
+        # ⛔ ASYMMETRIC STATES ARE THE POINT. A state symmetric under chain reversal is a FIXED
+        # POINT of a mirrored site convention, so it agrees whether or not the two orderings
+        # match -- the polarised and kink cases below would pass a reference with its sites
+        # indexed backwards. The ragged one is what actually tests the ordering.
+        L, J, h, t = 6, 1.0, 0.7, 0.9
+        F = eigen(Hermitian(dense_tfim(L, J, h)))
+        for (nm, dirs) in ("polarised"  => fill(:plus, L),
+                           "kink"       => [i <= L ÷ 2 ? :plus : :minus for i in 1:L],
+                           "asymmetric" => [:plus, :minus, :minus, :plus, :minus, :plus])
+            v0 = zeros(ComplexF64, 2^L)
+            s  = 0
+            for (i, d) in enumerate(dirs); d === :minus && (s |= 1 << (i - 1)); end
+            v0[s + 1] = 1.0
+            vt = F.vectors * (cis.(-t .* F.values) .* (F.vectors' * v0))
+            want = [sum(abs2(vt[b + 1]) * (((b >> (j - 1)) & 1) == 0 ? 1.0 : -1.0)
+                        for b in 0:(2^L - 1)) for j in 1:L]
+            @test tfim_x_profile(L, t, dirs; J = J, h = h) ≈ want atol = 1e-12
+        end
+
+        # `t = 0` returns the state it was handed -- catches a generator that is accidentally
+        # applied twice, or a covariance built with the wrong sign.
+        dirs = [:plus, :minus, :minus, :plus, :minus, :plus]
+        @test tfim_x_profile(L, 0.0, dirs) ≈ [d === :plus ? 1.0 : -1.0 for d in dirs] atol = 1e-14
+
+        # The generator is REAL ANTISYMMETRIC, which is what makes `exp(At)` orthogonal and the
+        # congruence norm-preserving. A wrong factor of `i` anywhere would break this.
+        A = tfim_majorana_generator(8; J = 1.0, h = 1.0)
+        @test A ≈ -transpose(A) atol = 1e-15
+
+        # And the reference runs where a dense propagator cannot -- the regime it exists for.
+        prof = tfim_x_profile(64, 1.0, [i <= 32 ? :plus : :minus for i in 1:64])
+        @test all(abs.(prof) .<= 1 + 1e-12)
+        @test length(prof) == 64
+    end
 end

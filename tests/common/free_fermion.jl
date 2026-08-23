@@ -46,3 +46,71 @@ function xx_free_fermion_sz(L::Int, t::Real; J::Real = 1.0,
     U = exp(-im * t * xx_single_particle_hamiltonian(L; J = J))
     return [sum(abs2(U[j, k]) for k in occupied) - 0.5 for j in 1:L]
 end
+
+# ── TFIM, the same idea one level up: BdG rather than a hopping matrix ────────────────────────
+#
+# `H = -J Σ Z_j Z_{j+1} - h Σ X_j` is quadratic in MAJORANAS, not in fermions -- the ZZ term
+# pairs as well as hops -- so the closed form runs through the 2L x 2L covariance matrix instead
+# of an L x L propagator. Still no 2^L object anywhere, which is the whole point: the integrator
+# tests can then run at the L where a defect is actually LARGE rather than at whatever L a dense
+# propagator happens to fit in.
+#
+# ⛔ THE BASIS IS σˣ: `X` is DIAGONAL and `Z` is the FLIP. Reading it the usual way describes a
+# different Hamiltonian -- see the header of `src/RSVDCBEBondUpdate/models/tfim.jl`.
+
+"""
+    tfim_majorana_generator(L; J=1.0, h=1.0) -> Matrix{Float64}
+
+The real antisymmetric `2L x 2L` generator `A` of the TFIM's Majorana flow.
+
+Writing `H = (i/4) Σ A_{mn} a_m a_n` in Majoranas `a_{2j-1}, a_{2j}`, the field `-h X_j` is the
+on-site pair `(2j-1, 2j)` and the coupling `-J Z_j Z_{j+1}` is the bond pair `(2j, 2j+1)`. The
+factors of two are the Majorana convention and are pinned against exact diagonalisation in
+`test_analytic_reference.jl` rather than asserted here.
+"""
+function tfim_majorana_generator(L::Int; J::Real = 1.0, h::Real = 1.0)
+    A = zeros(Float64, 2L, 2L)
+    for j in 1:L
+        A[2j - 1, 2j] = -2h; A[2j, 2j - 1] = +2h
+    end
+    for j in 1:(L - 1)
+        A[2j, 2j + 1] = -2J; A[2j + 1, 2j] = +2J
+    end
+    return A
+end
+
+"""
+    tfim_covariance(L, t, dirs; J=1.0, h=1.0) -> Matrix{Float64}
+
+The Majorana covariance `Γ(t)` of a σˣ PRODUCT state evolved under the TFIM.
+
+`dirs[j]` is `:plus` or `:minus`. Such a state is Gaussian, so it is fully described by
+`Γ_{2j-1,2j} = ±1`, and Heisenberg evolution is the congruence
+
+    Γ(t) = R Γ(0) Rᵀ,   R = exp(A t)
+
+Cost is `O(L³)`, independent of any bond dimension. THIS is the primitive: `⟨X_j⟩`, the half-chain
+entropy and the connected correlators all read off the SAME `Γ`, so anything needing more than the
+profile should take the matrix rather than grow a second copy of this congruence.
+"""
+function tfim_covariance(L::Int, t::Real, dirs::Vector{Symbol}; J::Real = 1.0, h::Real = 1.0)
+    length(dirs) == L || throw(DimensionMismatch("dirs has $(length(dirs)) entries, need $L"))
+    G = zeros(Float64, 2L, 2L)
+    for (j, d) in enumerate(dirs)
+        s = d === :plus ? 1.0 : -1.0
+        G[2j - 1, 2j] = s; G[2j, 2j - 1] = -s
+    end
+    R = exp(tfim_majorana_generator(L; J = J, h = h) * t)
+    return R * G * transpose(R)
+end
+
+"""
+    tfim_x_profile(L, t, dirs; J=1.0, h=1.0) -> Vector{Float64}
+
+`⟨X_j(t)⟩` for a σˣ product state evolved under the TFIM -- the diagonal pair entries of
+[`tfim_covariance`](@ref).
+"""
+function tfim_x_profile(L::Int, t::Real, dirs::Vector{Symbol}; J::Real = 1.0, h::Real = 1.0)
+    Gt = tfim_covariance(L, t, dirs; J = J, h = h)
+    return [Gt[2j - 1, 2j] for j in 1:L]
+end

@@ -28,27 +28,7 @@ using BUGJulia
 using BUGJulia.BondUpdateBUG
 using BUGJulia.RSVDCBEBondUpdate
 
-function tfim_majorana_generator(L::Int; J::Real = 1.0, h::Real = 1.0)
-    A = zeros(Float64, 2L, 2L)
-    for j in 1:L
-        A[2j - 1, 2j] = -2h; A[2j, 2j - 1] = +2h
-    end
-    for j in 1:(L - 1)
-        A[2j, 2j + 1] = -2J; A[2j + 1, 2j] = +2J
-    end
-    return A
-end
-
-function tfim_x_exact(L::Int, t::Real, dirs::Vector{Symbol}; J = 1.0, h = 1.0)
-    G = zeros(Float64, 2L, 2L)
-    for (j, d) in enumerate(dirs)
-        s = d === :plus ? 1.0 : -1.0
-        G[2j - 1, 2j] = s; G[2j, 2j - 1] = -s
-    end
-    R  = exp(tfim_majorana_generator(L; J = J, h = h) * t)
-    Gt = R * G * transpose(R)
-    return [Gt[2j - 1, 2j] for j in 1:L]
-end
+include(joinpath(@__DIR__, "..", "tests", "common", "free_fermion.jl"))
 
 const L  = 8
 const D  = 1024                       # far above the L=8 ceiling of 16: never binds
@@ -63,7 +43,7 @@ const PSI0 = ising_kink_state(L)
 function one_step(dt, step!)
     psi = copy(PSI0)
     step!(psi, ComplexF64(-im * dt))
-    return maximum(abs.(x_profile(copy(psi)) - tfim_x_exact(L, dt, DIRS))),
+    return maximum(abs.(x_profile(copy(psi)) - tfim_x_profile(L, dt, DIRS))),
            maximum(bond_dims(psi))
 end
 

@@ -53,11 +53,7 @@ const MAXITER = P.maxiter == 0 ? krylov_depth(HNORM, P.dt) : P.maxiter
 #
 # A product state in the X basis has `Γ(0)` block diagonal with `[0 s_ℓ; -s_ℓ 0]`, `s_ℓ = ⟨X_ℓ⟩`,
 # and the observable comes straight back out as `⟨X_ℓ(t)⟩ = Γ(t)_{2ℓ-1, 2ℓ}`.
-#
-# TWO PINS, both checked in the probe that accompanied this file:
-#   * `⟨+…+|H|+…+⟩ = -h·L` for ANY `J`, because `Z_ℓ Z_{ℓ+1}` is purely off-diagonal here. A
-#     wrong sign or index in `A` cannot reproduce it.
-#   * against the dense `2^L` TFIM at `L = 8`, where exact diagonalisation is cheap.
+
 
 "The real antisymmetric `2L x 2L` generator `A`. Majorana `a_ℓ` is index `2ℓ-1`, `b_ℓ` is `2ℓ`."
 function tfim_majorana_generator(L::Int; J::Real = 1.0, h::Real = 1.0)

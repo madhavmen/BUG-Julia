@@ -46,28 +46,6 @@ using BUGJulia.RSVDCBEBondUpdate
 include(joinpath(@__DIR__, "..", "tests", "common", "dense_reference.jl"))
 include(joinpath(@__DIR__, "..", "tests", "common", "free_fermion.jl"))
 
-function tfim_majorana_generator(L::Int; J::Real = 1.0, h::Real = 1.0)
-    A = zeros(Float64, 2L, 2L)
-    for j in 1:L
-        A[2j - 1, 2j] = -2h; A[2j, 2j - 1] = +2h
-    end
-    for j in 1:(L - 1)
-        A[2j, 2j + 1] = -2J; A[2j + 1, 2j] = +2J
-    end
-    return A
-end
-
-function tfim_x_exact(L::Int, t::Real, dirs::Vector{Symbol}; J = 1.0, h = 1.0)
-    G = zeros(Float64, 2L, 2L)
-    for (j, d) in enumerate(dirs)
-        s = d === :plus ? 1.0 : -1.0
-        G[2j - 1, 2j] = s; G[2j, 2j - 1] = -s
-    end
-    R  = exp(tfim_majorana_generator(L; J = J, h = h) * t)
-    Gt = R * G * transpose(R)
-    return [Gt[2j - 1, 2j] for j in 1:L]
-end
-
 _kry(i) = hasproperty(i, :krylov_dims) ? i.krylov_dims : 0
 
 "Evolve a copy of `psi0` for `nst` steps and return `(psi, krylov)`."
@@ -98,7 +76,7 @@ function part_A(; L = 8, dt = 0.01, nst = 10, D = 1024, maxiter = 24)
     set_symmetry!(:Z2)
     dirs = [i <= L ÷ 2 ? :plus : :minus for i in 1:L]
     mtf  = tfim_mpo(L; J = 1.0, h = 1.0)
-    rtf  = tfim_x_exact(L, nst * dt, dirs)
+    rtf  = tfim_x_profile(L, nst * dt, dirs)
     @printf("\n  TFIM L=%d (h = J, critical)\n    %-12s %12s  %s\n", L, "scheme", "max|dX|", "chi")
     for (nm, st) in schemes(mtf, D, tau, maxiter)
         psi, _ = drive(ising_kink_state(L), nst, st)
@@ -130,7 +108,7 @@ function part_B(; L = 16, T = 0.6, D = 64, maxiter = 16)
     for (label, sym, mpo, psi0, ref, meas) in
         (("TFIM (h = J, critical)", :Z2,
           () -> tfim_mpo(L; J = 1.0, h = 1.0), () -> ising_kink_state(L),
-          () -> tfim_x_exact(L, T, [i <= L ÷ 2 ? :plus : :minus for i in 1:L]),
+          () -> tfim_x_profile(L, T, [i <= L ÷ 2 ? :plus : :minus for i in 1:L]),
           (p, r) -> maximum(abs.(x_profile(copy(p)) - r))),
          ("XX (control)", :U1,
           () -> xxz_mpo(L; J = 1.0, delta = 0.0), () -> domain_wall_state(L),

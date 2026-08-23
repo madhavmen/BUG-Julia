@@ -46,28 +46,6 @@ using BUGJulia.RSVDCBEBondUpdate
 
 include(joinpath(@__DIR__, "..", "tests", "common", "free_fermion.jl"))
 
-function tfim_majorana_generator(L::Int; J::Real = 1.0, h::Real = 1.0)
-    A = zeros(Float64, 2L, 2L)
-    for j in 1:L
-        A[2j - 1, 2j] = -2h; A[2j, 2j - 1] = +2h
-    end
-    for j in 1:(L - 1)
-        A[2j, 2j + 1] = -2J; A[2j + 1, 2j] = +2J
-    end
-    return A
-end
-
-function tfim_x_exact(L::Int, t::Real, dirs::Vector{Symbol}; J = 1.0, h = 1.0)
-    G = zeros(Float64, 2L, 2L)
-    for (j, d) in enumerate(dirs)
-        s = d === :plus ? 1.0 : -1.0
-        G[2j - 1, 2j] = s; G[2j, 2j - 1] = -s
-    end
-    R  = exp(tfim_majorana_generator(L; J = J, h = h) * t)
-    Gt = R * G * transpose(R)
-    return [Gt[2j - 1, 2j] for j in 1:L]
-end
-
 _kry(i) = hasproperty(i, :krylov_dims) ? i.krylov_dims : 0
 
 """
@@ -125,7 +103,7 @@ end
 tfim_study(L, D; dt = 0.01, nsteps = 200, sample = 20, maxiter = 30) =
     study("TFIM  L=$L  :Z2  (h = J, critical)", :Z2,
           () -> tfim_mpo(L; J = 1.0, h = 1.0), () -> ising_kink_state(L),
-          t -> tfim_x_exact(L, t, [i <= L ÷ 2 ? :plus : :minus for i in 1:L]),
+          t -> tfim_x_profile(L, t, [i <= L ÷ 2 ? :plus : :minus for i in 1:L]),
           (p, r) -> maximum(abs.(x_profile(copy(p)) - r)), dt, nsteps, sample, D, maxiter)
 
 xx_study(L, D; dt = 0.01, nsteps = 200, sample = 20, maxiter = 30) =

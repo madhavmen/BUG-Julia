@@ -35,31 +35,9 @@ using BUGJulia.RSVDCBEBondUpdate
 include(joinpath(@__DIR__, "..", "tests", "common", "dense_reference.jl"))
 include(joinpath(@__DIR__, "..", "tests", "common", "free_fermion.jl"))
 
-# ── TFIM exact, by Majorana propagation (copied from examples/tfim_z2.jl) ─────────────────
-function tfim_majorana_generator(L::Int; J::Real = 1.0, h::Real = 1.0)
-    A = zeros(Float64, 2L, 2L)
-    for j in 1:L
-        A[2j - 1, 2j] = -2h
-        A[2j, 2j - 1] = +2h
-    end
-    for j in 1:(L - 1)
-        A[2j, 2j + 1] = -2J
-        A[2j + 1, 2j] = +2J
-    end
-    return A
-end
-
-function tfim_x_profile_exact(L::Int, t::Real, dirs::Vector{Symbol}; J::Real = 1.0, h::Real = 1.0)
-    G = zeros(Float64, 2L, 2L)
-    for (j, d) in enumerate(dirs)
-        s = d === :plus ? 1.0 : -1.0
-        G[2j - 1, 2j] = s
-        G[2j, 2j - 1] = -s
-    end
-    R = exp(tfim_majorana_generator(L; J = J, h = h) * t)
-    Gt = R * G * transpose(R)
-    return [Gt[2j - 1, 2j] for j in 1:L]
-end
+# TFIM exact comes from `tests/common/free_fermion.jl` (`tfim_x_profile`), pinned against exact
+# diagonalisation in `tests/common/test_analytic_reference.jl`. This file used to carry its own
+# copy of the congruence.
 
 _kry(info) = hasproperty(info, :krylov_dims) ? info.krylov_dims : 0
 
@@ -109,7 +87,7 @@ function run_tfim(; L = 16, dt = 0.05, nst = 60, D = 32, J = 1.0, h = 1.0, maxit
     dirs = [i <= L ÷ 2 ? :plus : :minus for i in 1:L]
     mpo  = tfim_mpo(L; J = J, h = h)
     psi0 = ising_kink_state(L)
-    ref  = tfim_x_profile_exact(L, nst * dt, dirs; J = J, h = h)
+    ref  = tfim_x_profile(L, nst * dt, dirs; J = J, h = h)
     sweep("TFIM  L=$L  :Z2  (h = J, critical)", mpo, psi0, nst, dt, D, maxiter,
           psi -> maximum(abs.(x_profile(copy(psi)) - ref)))
 end
@@ -161,15 +139,28 @@ function budget_sweep(name, mpo, psi0, nst, dt, D, maxiter, measure)
         end
         return measure(psi), kry, maximum(bond_dims(psi))
     end
-    for (lbl, kw) in [("kaug    growth=1.1",    (kaug = true, rexpand = false, growth = 1.1)),
-                      ("kaug    growth=2.0",    (kaug = true, rexpand = false, growth = 2.0)),
-                      ("kaug    dex=8",         (kaug = true, rexpand = false, dex = 8)),
-                      ("rexpand growth=1.1",    (rexpand = true, growth = 1.1)),
-                      ("rexpand dex=2",          (rexpand = true, dex = 2)),
-                      ("rexpand dex=4",          (rexpand = true, dex = 4)),
-                      ("rexpand dex=8",          (rexpand = true, dex = 8)),
-                      ("rexpand dex=16",         (rexpand = true, dex = 16)),
-                      ("rexpand growth=2.0",     (rexpand = true, growth = 2.0))]
+    # ⛔ THE GROWTH AXIS IS SWEPT PAST THE DEFAULT ON PURPOSE. `growth = 2.0` was adopted because
+    # it took `rexpand` from starved (3.66e-05) to parity (1.51e-05), but "2.0 beats 1.1" does
+    # not establish that 2.0 is the optimum -- only that 1.1 was too small. `budget` is nearly
+    # free in Krylov (14763 -> 14771 across the whole earlier sweep), so if more budget keeps
+    # paying there is no cost reason to stop at 2.0; if it turns over, the turnover point is the
+    # real answer and the current default is on the correct side of it by luck rather than
+    # measurement. `kaug` is carried along at the same values because the two mechanisms want
+    # DIFFERENT budgets -- that is the whole finding this axis rests on.
+    for (lbl, kw) in [("kaug    growth=1.1",   (kaug = true, rexpand = false, growth = 1.1)),
+                      ("kaug    growth=2.0",   (kaug = true, rexpand = false, growth = 2.0)),
+                      ("kaug    growth=4.0",   (kaug = true, rexpand = false, growth = 4.0)),
+                      ("kaug    dex=8",        (kaug = true, rexpand = false, dex = 8)),
+                      ("rexpand growth=1.1",   (rexpand = true, growth = 1.1)),
+                      ("rexpand growth=1.5",   (rexpand = true, growth = 1.5)),
+                      ("rexpand growth=2.0",   (rexpand = true, growth = 2.0)),
+                      ("rexpand growth=3.0",   (rexpand = true, growth = 3.0)),
+                      ("rexpand growth=4.0",   (rexpand = true, growth = 4.0)),
+                      ("rexpand growth=6.0",   (rexpand = true, growth = 6.0)),
+                      ("rexpand growth=8.0",   (rexpand = true, growth = 8.0)),
+                      ("rexpand growth=16.0",  (rexpand = true, growth = 16.0)),
+                      ("rexpand dex=8",        (rexpand = true, dex = 8)),
+                      ("rexpand dex=16",       (rexpand = true, dex = 16))]
         e, k, c = run(p -> cbe_bug_step!(p, mpo, tau; maxdim = D, trunc_thresh = 1e-14,
                                          maxiter = maxiter, kw...))
         @printf("  %-26s %12.4e  %8d  %d\n", lbl, e, k, c)
@@ -223,7 +214,7 @@ function exact_tfim(; L = 16, dt = 0.05, nst = 60, D = 32, J = 1.0, h = 1.0, max
     set_symmetry!(:Z2)
     dirs = [i <= L ÷ 2 ? :plus : :minus for i in 1:L]
     mpo  = tfim_mpo(L; J = J, h = h)
-    ref  = tfim_x_profile_exact(L, nst * dt, dirs; J = J, h = h)
+    ref  = tfim_x_profile(L, nst * dt, dirs; J = J, h = h)
     exact_sweep("TFIM  L=$L  :Z2", mpo, ising_kink_state(L), nst, dt, D, maxiter,
                 psi -> maximum(abs.(x_profile(copy(psi)) - ref)))
 end
@@ -254,14 +245,45 @@ function budget_tfim(; L = 16, dt = 0.05, nst = 60, D = 32, J = 1.0, h = 1.0, ma
     set_symmetry!(:Z2)
     dirs = [i <= L ÷ 2 ? :plus : :minus for i in 1:L]
     mpo  = tfim_mpo(L; J = J, h = h)
-    ref  = tfim_x_profile_exact(L, nst * dt, dirs; J = J, h = h)
+    ref  = tfim_x_profile(L, nst * dt, dirs; J = J, h = h)
     budget_sweep("TFIM  L=$L  :Z2", mpo, ising_kink_state(L), nst, dt, D, maxiter,
+                 psi -> maximum(abs.(x_profile(copy(psi)) - ref)))
+end
+
+"XX: the honest-dt^2 regime, where the schemes are NOT separated by an exact baseline."
+function budget_xx(; L = 16, dt = 0.05, nst = 120, D = 24, J = 1.0, maxiter = 12)
+    set_symmetry!(:U1)
+    mpo = xxz_mpo(L; J = J, delta = 0.0)
+    ref = xx_free_fermion_sz(L, nst * dt; J = J)
+    budget_sweep("XX domain wall  L=$L  :U1", mpo, domain_wall_state(L), nst, dt, D, maxiter,
+                 psi -> maximum(abs.(magnetisation(copy(psi)) - ref)))
+end
+
+"""
+TFIM with the cap BINDING HARD (D=16 against a Schmidt ceiling of 256).
+
+⛔ THIS IS THE REGIME THE DEFAULT SHOULD BE TUNED FOR, and it is not the one `growth = 2.0` was
+chosen in. `cost_fair.jl` measured the error here as TRUNCATION-bound rather than dt-bound --
+every scheme gets WORSE as dt shrinks -- and `cbe_bug` at the coarsest dt is both the cheapest
+and the most accurate row of any scheme. A budget that helps at D=32, where truncation is mild,
+need not help at D=16 where the cap throws away most of what the expansion admits.
+"""
+function budget_tfim_tight(; L = 16, dt = 0.05, nst = 60, D = 16, J = 1.0, h = 1.0, maxiter = 16)
+    set_symmetry!(:Z2)
+    dirs = [i <= L ÷ 2 ? :plus : :minus for i in 1:L]
+    mpo  = tfim_mpo(L; J = J, h = h)
+    ref  = tfim_x_profile(L, nst * dt, dirs; J = J, h = h)
+    budget_sweep("TFIM  L=$L  :Z2  D=16 CAP BINDING HARD", mpo, ising_kink_state(L),
+                 nst, dt, D, maxiter,
                  psi -> maximum(abs.(x_profile(copy(psi)) - ref)))
 end
 
 let model = "both"
     for a in ARGS
         startswith(a, "model=") && (model = split(a, '='; limit = 2)[2])
+    end
+    if model == "growth"
+        budget_tfim(); budget_tfim_tight(); budget_xx()
     end
     model in ("tfim", "both", "all") && run_tfim()
     model in ("xx",   "both", "all") && run_xx()

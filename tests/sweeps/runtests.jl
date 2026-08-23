@@ -37,12 +37,21 @@ Random.seed!(42)
 
 include(joinpath(@__DIR__, "..", "common", "dense_reference.jl"))
 include(joinpath(@__DIR__, "..", "common", "analytic_reference.jl"))
+# The free-fermion closed forms (XX hopping, TFIM Majorana). Integrator tests compare against
+# THESE and never against a dense propagator -- a 2^L reference caps the test at the L where it
+# fits, which is routinely not the L where the effect under test is large.
+include(joinpath(@__DIR__, "..", "common", "free_fermion.jl"))
 
 @testset "sweeps (RSVD-CBE: DMRG, 1-site TDVP, fixed-rank BUG)" begin
     include(joinpath(@__DIR__, "..", "common", "test_analytic_reference.jl"))
     include("test_pair_mpo.jl")
     include("test_tfim_mpo.jl")
     include("test_sweeps.jl")
+    # 3b `rexpand`, the shipped default of `cbe_bug_step!`. Separate from `test_sweeps.jl`
+    #    because the one defect it is prone to is invisible at full rank, invisible at `tau = 0`
+    #    and invisible on XX and OAT -- it needs a CAPPED TFIM run and nothing else shows it, so
+    #    it gets a file whose regime is chosen for that and is not free to drift.
+    include("test_cbe_bug_rexpand.jl")
     include("test_symmetry_parity.jl")
     include("test_physics.jl")
     # 6  one-axis twisting     the arXiv:2208.10972 Fig. 2 benchmark, at L = 10. LAST because it
