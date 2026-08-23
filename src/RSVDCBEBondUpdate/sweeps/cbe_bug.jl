@@ -127,6 +127,57 @@ Keywords beyond the [`cbe_expand`](@ref) ones (`dex`, `growth`, `dover`, `comp_r
 
     Note also that BOTH TDVPs over-fill the OAT profile to `[2,3,6,6,6,6,6,4,2]`. Landing on the
     exact Schmidt profile is a property of the BUG half-sweeps, not of `kaug` or `rexpand`.
+
+  - `basis_frac` -- how far the HALF-SWEEPS evolve, as a fraction of `tau`. The root Galerkin step
+    always takes the full `tau`. `1.0` (default) is the endpoint basis; `0.5` would be the
+    MIDPOINT BUG, the standard route to second order for BUG-type integrators.
+
+    ⛔ MEASURED, AND IT DOES NOT WORK HERE -- LEAVE IT AT `1.0`. The knob is kept only because it
+    is the instrument that established that, and because the XX column below is a live check on a
+    structural property of the half-sweeps. `benchmarks/midpoint_basis.jl`, L=12, three `dt`:
+
+        XX   D=32   basis_frac 1.0 / 0.75 / 0.5 / 0.25 -> BIT-IDENTICAL, 6.4211e-05, ratio 3.99
+        TFIM D=32   1.0    4.8595e-05  3.1491e-06  1.9996e-07   ratio 15.43   <- best, 4th order
+                    0.75   2.0043e-04  2.6416e-05  3.3209e-06   ratio  7.59
+                    0.5    4.1845e-04  5.4065e-05  6.6882e-06   ratio  7.74
+                    0.25   6.3668e-04  8.1329e-05  1.0051e-05   ratio  7.83
+
+    Shortening the basis evolution COSTS AN ORDER on TFIM -- 4th (ratio ~15.5) down to 3rd (~7.8)
+    -- and is 21x worse at the finest `dt`. It is not neutral; it is strictly harmful.
+
+    WHY, AND IT IS THE SAME REASON THE SWEEP IS A BUG AND NOT A TDVP: the half-sweeps are BASIS
+    GENERATORS -- `C = contract(W[i]', K)` uses `K`, not `K1`, so the evolved AMPLITUDE is thrown
+    away and only the COLUMN SPAN is kept. To leading order that span is
+
+        col(Kex) + col(exp(btau·H)·Kex) = col(Kex) + col(H·Kex) + O(btau)
+
+    which is INDEPENDENT of how far the half-sweep evolved. So where nothing truncates the union,
+    `basis_frac` is exactly inert -- which is what the bit-identical XX column IS, measured rather
+    than argued. Where the union IS truncated, `basis_frac` no longer selects a different span,
+    only a worse-resolved one: the `O(btau)` content that distinguishes the good directions from
+    the marginal ones shrinks with `btau`, so the truncation cuts on less information.
+
+    A midpoint rule needs the basis to CARRY the half-step state. This one cannot: it discards
+    amplitude by construction. The midpoint BUG is not available to a sweep built this way, and
+    that is a property of the scheme rather than a tuning failure.
+
+    WHY THERE IS A KNOB HERE AT ALL, and why it is the only symmetrisation left: the K and L
+    half-sweeps do NOT need symmetrising -- both read the FROZEN start-of-step state (`rstack` and
+    `lstack` are built once, before either runs) and write into independent `W[]` / `Z[]`, so
+    swapping their order is a literal no-op. That leaves the ROOT as the only spatial asymmetry --
+    and the root is a BOND, `1:L-1`, on which reflection acts as `b -> L - b`. The default root
+    `L/2` is a FIXED POINT of that map on an even chain. So at its default the sweep is ALREADY
+    spatially reflection-symmetric and a reflected composition has nothing to cancel.
+
+    MEASURED (`benchmarks/symmetric_composition.jl`, XX L=16 D=24): composing `S(tau/2)` at root
+    `c` with `S(tau/2)` at root `L-c` is BIT-IDENTICAL to plain substepping at the same root --
+    2.0258e-05 at 43546 Krylov for both. That is the fixed point showing up as arithmetic, and it
+    doubles as a measurement of the commuting claim above: were the half-sweeps order-dependent,
+    the K-before-L ordering would still break the symmetry at a fixed-point root and the two arms
+    would differ. They agree to the last digit.
+
+    Spatial symmetrisation being exhausted, `basis_frac` is the TEMPORAL one, and it is the cheap
+    kind -- see the `btau` comment in the body for why it costs 1x rather than 2x.
   - `split_cutoff`, `split_maxdim` -- TRUNCATION AT THE HALF-SWEEP SPLIT, i.e. on `svd(K1).U`
     and `svd(B1).Vd` rather than at the root. Defaults `1e-14` and `0` (no cap) reproduce the
     historical behaviour exactly, in which the half-sweeps prune essentially nothing and EVERY
@@ -229,6 +280,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        kstep::Bool = true,
                        kaug::Bool = true,
                        rexpand::Bool = true,
+                       basis_frac::Float64 = 1.0,
                        split_cutoff::Float64 = 1e-14,
                        split_maxdim::Int = 0,
                        truncate::Bool = true,
@@ -244,6 +296,18 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     L >= 2 || throw(ArgumentError("cbe_bug_step! needs at least two sites"))
     c = root === nothing ? max(1, min(L - 1, L ÷ 2)) : root
     1 <= c <= L - 1 || throw(ArgumentError("root must be a bond in 1:$(L - 1), got $c"))
+
+    # THE MIDPOINT-BUG KNOB. The half-sweeps evolve by `btau`, the root Galerkin step always by
+    # the full `tau`. `basis_frac = 1.0` is the endpoint basis (bases and root agree) and is the
+    # historical behaviour; `0.5` builds the bases at the MIDPOINT and is the standard route to
+    # second order for BUG-type integrators -- the bases are the O(tau) object, so centring them
+    # cancels the leading term the same way a midpoint rule does.
+    #
+    # ⛔ THIS IS NOT A COMPOSITION AND DOES NOT DOUBLE THE COST. Same half-sweep count, same root
+    # solve; only the argument of the half-sweep `expv` changes (a shorter `tau` is if anything
+    # slightly CHEAPER in Krylov). So the bar is 1x, not the ~4x that spending the same compute on
+    # substepping already buys -- which is the bar any 2x-cost symmetrisation would have to clear.
+    btau = basis_frac == 1.0 ? tau : ComplexF64(basis_frac) * tau
 
     cut = max(trunc_thresh, 1e-14)
 
@@ -345,7 +409,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             rch1 = push_right_channels(right_channels(rstack, i + 2), mpo, Vwide[i], i + 1)
             H1 = one_site_h(mpo, i, lch, rch1)
             peak!(Kex)
-            K1 = expv(x -> (nmv[] += 1; apply_one_site(H1, x)), tau, Kex;
+            K1 = expv(x -> (nmv[] += 1; apply_one_site(H1, x)), btau, Kex;
                       hermitian = true, maxiter = maxiter, tol = tol, reorth = reorth)
 
 
@@ -430,7 +494,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             lch1 = push_left_channels(left_channels(lstack, j), mpo, Uwide[j], j)
             H1 = one_site_h(mpo, j + 1, lch1, rch)
             peak!(Bex)
-            B1 = expv(x -> (nmv[] += 1; apply_one_site(H1, x)), tau, Bex;
+            B1 = expv(x -> (nmv[] += 1; apply_one_site(H1, x)), btau, Bex;
                       hermitian = true, maxiter = maxiter, tol = tol, reorth = reorth)
             Zk = _splitV(B1)
             # Mirror of the K half-sweep: `Z[j]` becomes `psi[j+1]`.
