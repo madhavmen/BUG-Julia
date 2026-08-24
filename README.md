@@ -74,7 +74,8 @@ build:
 - **`krylov_basis`** (default `30`) — the *cap* on how many orthonormal vectors
   `span{Θ, HΘ, H²Θ, …}` the half-sweep builds per bond. `0` stops at one application of `H`, which
   is what the CBE frame alone gives you.
-- **`krylov_tol`** (default `1e-6`) — the breakdown tolerance that ends the recursion early.
+- **`krylov_tol`** (default `1e-6`) — stops the recursion when the next vector's *contribution*
+  to `exp(τH)Θ` drops below it (Saad's estimate `β_m·|[exp(τT_m)]_{m,1}|`). `0.0` runs to the cap.
 
 ⛔ **`krylov_basis` is the knob to scan when an answer is less accurate than it should be**, and it
 is the one that looks like nothing is wrong. Extra rank, extra expansion budget and switching the

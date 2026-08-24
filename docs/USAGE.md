@@ -413,9 +413,9 @@ measuring noise. This has produced several wrong conclusions in this repo — ch
 half-sweeps build an orthonormal Krylov basis `span{Θ, HΘ, H²Θ, …}` per bond, and its DEPTH is
 what separates a good answer from one that is eight orders out.
 
-> **`krylov_basis`** (default `30`) caps the depth; **`krylov_tol`** (default `1e-6`) is the
-> breakdown tolerance that can end the recursion sooner. On a generic `H` the **cap** is what
-> actually sets the depth — see the warning on β below.
+> **`krylov_basis`** (default `30`) caps the depth; **`krylov_tol`** (default `1e-6`) ends the
+> recursion when the next vector's CONTRIBUTION to `exp(τH)Θ` falls below it — Saad's estimate
+> `β_m·|[exp(τT_m)]_{m,1}|`. `0.0` disables the test and runs to the cap.
 >
 > `krylov_basis = 0` stops after one application of `H`, which is exactly what the CBE frame
 > already spans. So `m = 1` reproduces `m = 0` bit-for-bit, and **the first genuine addition is
@@ -450,10 +450,14 @@ how much **room** it has, so all of them report that nothing is wrong:
 A run at `krylov_basis = 0` exits 0, writes its CSV, conserves energy and reports the correct
 rank. **Nothing but a comparison against an exact reference will tell you.**
 
-⚠️ **β is a breakdown detector, not a convergence criterion.** Heisenberg and XX return
-bit-identical results for `krylov_tol` anywhere from 1e-6 to 1e-13 — the test never fires and every
-bond runs to the cap (5580 operator applications against 1038 for a fixed depth 3). The sharper
-quantity is the Saad contribution estimate `β_m·|coeff_m|`, which is not yet wired in.
+⚠️ **β alone is a breakdown detector, not a convergence criterion — and thresholding it was
+tried first.** Heisenberg and XX returned bit-identical results for anything from 1e-6 to 1e-13;
+the test never fired and every bond ran to the cap (5580 operator applications against 1038 for a
+pinned depth 3). It is now the `_KRY_BREAKDOWN` guard only, and `krylov_tol` compares the Saad
+contribution instead. That estimate is a **conservative** bound — measured on dense Hermitian
+problems it overshoots the true Krylov error by 4×–160× and never undershoots outside roundoff, so
+the rule costs ~1–2 extra vectors and cannot stop short (`test_cbe_bug_exact_refs.jl` pins the
+direction of that inequality).
 
 ⚠️ **Build the basis with full re-orthogonalisation** — two Gram-Schmidt passes, which is what
 `_krylov_frame` does. A raw power iteration collapses onto the dominant eigenvector by `k ≈ 4` and

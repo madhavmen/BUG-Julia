@@ -2,40 +2,89 @@
 _tagW(i::Int) = "cbeW,$i"
 _tagZ(j::Int) = "cbeZ,$j"
 
-"""
-    _krylov_frame(v0, applyH, maxdepth, tol) -> Vector
+# The residual below which the Krylov space has genuinely CLOSED -- an invariant subspace, not a
+# convergence judgement. Kept separate from `krylov_tol` on purpose: one is a property of the
+# operator and the seed, the other is an accuracy request from the caller.
+const _KRY_BREAKDOWN = 1e-13
 
-The ORTHONORMAL Krylov vectors `{v0, v1, …}` of `applyH` seeded at `v0`, stopped when the
-residual `beta` falls below `tol` (the Krylov space has closed) or `maxdepth` is reached.
+"""
+    _kry_contribution(alpha, betas, tau) -> Float64
+
+Saad's estimate of what the NEXT Krylov vector would add to `exp(tau*H)*v0`:
+
+    beta_m * |[exp(tau*T_m)]_{m,1}|
+
+with `T_m` the tridiagonal built from `alpha[1..m]` and `betas[1..m-1]`. `betas[m]` is the
+residual that produced the vector just accepted.
+
+⛔ THIS, NOT `beta`, IS THE CONVERGENCE MEASURE. `beta` alone is a BREAKDOWN detector: it says the
+recursion could not produce another independent direction, which on a generic `H` simply does not
+happen -- MEASURED at L=12, Heisenberg and XX return BIT-IDENTICAL results for a `beta` threshold
+anywhere from `1e-6` to `1e-13`, because the test never fires and every bond runs to the cap. What
+decides whether a vector MATTERS is how much weight the propagator actually puts on it, and that
+is the product above: `beta_m` can be O(1) while `[exp(tau*T_m)]_{m,1}` is `~(tau*||H||)^m/m!`,
+which is what makes a short basis sufficient at small `tau` and a long one necessary at large.
+
+`T_m` is `m x m` with `m` at most `krylov_basis`, so the dense `exp` here is negligible against
+one application of `H` to a bond tensor.
+"""
+function _kry_contribution(alpha::Vector{Float64}, betas::Vector{Float64}, tau::ComplexF64)
+    m = length(alpha)
+    m == 0 && return Inf
+    length(betas) >= m || return Inf
+    T = zeros(Float64, m, m)
+    @inbounds for k in 1:m
+        T[k, k] = alpha[k]
+        if k < m
+            T[k, k + 1] = betas[k]
+            T[k + 1, k] = betas[k]
+        end
+    end
+    E = exp(tau * T)
+    return abs(betas[m]) * abs(E[m, 1])
+end
+
+"""
+    _krylov_frame(v0, applyH, maxdepth, tol, tau) -> Vector
+
+The ORTHONORMAL Krylov vectors `{v0, v1, ...}` of `applyH` seeded at `v0`, stopped when the next
+vector's CONTRIBUTION to `exp(tau*H)*v0` falls below `tol` (see [`_kry_contribution`](@ref)), when
+the recursion breaks down, or when `maxdepth` is reached.
 
 ⛔ NO SVD PER ITERATION. The vectors are accumulated whole and split ONCE by the caller. A
 selection inside the loop -- which is what `cbe_lubich_sweep`'s `grow_iters` does, re-running the
 CBE ranking on every pass -- re-truncates by budget at each step and throws away exactly the
 directions the next application of `H` needs: MEASURED on OAT it bought 1.8x and then saturated
-flat (2.13e-02 → 1.16e-02) no matter how many passes were allowed.
+flat (2.13e-02 -> 1.16e-02) no matter how many passes were allowed.
 
 ⛔ FULL RE-ORTHOGONALISATION IS NOT OPTIONAL, and this is where a plain power iteration fails.
-`H^k v` converges to the dominant eigenvector, so by `k ≈ 4` the raw powers are numerically
+`H^k v` converges to the dominant eigenvector, so by `k ~ 4` the raw powers are numerically
 parallel and the closing SVD deletes them as dependent -- the basis would saturate for a
 CONDITIONING reason that looks exactly like a physical one. Two passes, against the whole basis:
 one pass of modified Gram-Schmidt loses orthogonality once the vectors start to align.
 
-`beta` here is the norm of the residual after orthogonalisation, i.e. the same quantity
-`lanczos_expv` exits on -- so `tol` is a Krylov tolerance in the ordinary sense and pairs with
-`trunc_thresh` the way `tau_Krylov = tau_trunc/10` does.
+⚠ `alpha` is taken BEFORE the orthogonalisation, which is what makes it the Rayleigh quotient
+`<v_k, H v_k>` rather than a residual artefact. `H` is Hermitian here, so it is real up to
+roundoff and the imaginary part is discarded rather than carried.
 """
-function _krylov_frame(v0, applyH, maxdepth::Int, tol::Float64)
+function _krylov_frame(v0, applyH, maxdepth::Int, tol::Float64, tau::ComplexF64)
     b0 = norm(v0)
     b0 <= 0 && return Any[v0]
     vs = Any[to_concrete((1.0 / b0) * v0)]
+    alpha, betas = Float64[], Float64[]
     for _ in 1:maxdepth
         w = applyH(vs[end])
+        push!(alpha, real(tensor_inner(vs[end], w)))
         for _pass in 1:2, u in vs
             w = to_concrete(w - tensor_inner(u, w) * u)
         end
         b = norm(w)
-        b < tol && break
+        # BREAKDOWN comes first and is unconditional: with no independent direction left there is
+        # nothing for the contribution test to weigh, and `1/b` would not be finite.
+        b <= _KRY_BREAKDOWN && break
+        push!(betas, b)
         push!(vs, to_concrete((1.0 / b) * w))
+        tol > 0 && _kry_contribution(alpha, betas, tau) < tol && break
     end
     # The seed carries the state's own scale back in: the caller's SVD cutoff is relative to the
     # largest singular value, and a basis of unit vectors alone would let the closing truncation
@@ -107,20 +156,43 @@ retired it, including the three hypotheses that were wrong on the way.
 Keywords beyond the [`cbe_expand`](@ref) ones (`dex`, `growth`, `dover`, `comp_ratio`,
 `sulz_cap`, `preselect_only`, `exact`, `stol_pre`, `stol_fnl`):
 
-  - `krylov_tol` -- **THE DEFAULT STOPPING RULE, `1e-6`.** The Krylov iteration stops when the
-    Lanczos residual `beta` falls below it. `0.0` falls back to `tau_trunc/10`.
+  - `krylov_tol` -- **THE STOPPING RULE, `1e-6`.** The half-sweep stops adding Krylov vectors when
+    the next one's CONTRIBUTION to `exp(tau*H_1)*Theta` falls below it -- Saad's estimate
+    `beta_m*|[exp(tau*T_m)]_{m,1}|`, see [`_kry_contribution`](@ref). `0.0` disables the test and
+    runs to the cap. Pairs with `trunc_thresh` the way `tau_Krylov = tau_trunc/10` does.
   - `krylov_basis` -- the CAP on that iteration, default `30`.
 
-    ⚠ **THE CAP OFTEN IS THE DEPTH, because `beta` does not decay on a generic `H`.** MEASURED at
-    L=12: Heisenberg and XX give BIT-IDENTICAL results for `krylov_tol` anywhere from `1e-6` to
-    `1e-13` -- the criterion never fires and every bond runs to the cap. Cost follows: Heisenberg
-    9.61e-07 @ 5580 applications against a fixed depth of 3's 2.67e-06 @ 1038. OAT is the one
-    model where it binds (4104 @ `1e-6` against 5983 @ `1e-13`).
+    ⚠ **THE CRITERION USED TO BE `beta` ALONE AND THAT DID NOT WORK.** MEASURED at L=12 before the
+    change: Heisenberg and XX returned BIT-IDENTICAL results for a `beta` threshold anywhere from
+    `1e-6` to `1e-13` -- the test never fired and every bond ran to the cap. `beta` is a BREAKDOWN
+    detector: it reports that no independent direction is left, which on a generic `H` does not
+    happen. It survives here only as the `_KRY_BREAKDOWN` guard, where it belongs.
 
-    `beta` is a BREAKDOWN detector, not a convergence measure; the sharper criterion is the
-    contribution `beta_m*|coeff_m|` that `exact_sparse.jl::_lanczos_expv` computes, and swapping
-    to it is what would make the depth genuinely adaptive. Set `krylov_basis` to a small fixed
-    number (2-3) to pin the depth instead.
+    MEASURED WITH THE CONTRIBUTION RULE, L=12, dt=0.05, T=1.0, against exact references
+    (`benchmarks/krylov_stopping.jl`; `krylov` = accumulated operator applications):
+
+        arm            XX err / krylov        Heisenberg err / krylov   OAT err / krylov
+        cap, no test   1.6948e-04 /  1770     1.0800e-06 /  2280        5.9952e-15 / 2158
+        tol 1e-4       1.6948e-04 /   952     2.4032e-06 /  1384        1.6431e-14 / 1552
+        tol 1e-6  DEF  1.6948e-04 /  1180     1.4748e-06 /  1622        1.0880e-14 / 1766
+        tol 1e-10      1.6948e-04 /  1550     1.1190e-06 /  1976        6.2172e-15 / 2000
+        pinned m=3     1.6948e-04 /   950     2.6697e-06 /  1038        7.0610e-14 / 1036
+        pinned m=0     1.6948e-04 /   289     8.8424e-05 /   308        2.1329e-02 /  313
+
+    Read three things off it. **XX: the rule cuts 1.9x for free** -- bit-identical error at every
+    tolerance, so it correctly finds that depth buys nothing here. **OAT: the rule refuses to cut**
+    -- every tolerance stays at ~1e-14 where `m = 0` is 2.1e-02, which is the safety property that
+    matters, since this is the model where depth is worth eight orders. (The apparent ordering
+    among the OAT tolerance rows is roundoff against roundoff and means nothing.)
+    **Heisenberg: it is a genuine dial, not a free lunch** -- `1e-6` buys 0.71x the cost for 1.37x
+    the error, and `1e-10` is nearly free at 1.04x error for 0.87x cost. That monotone trade is
+    the deliverable; `beta` gave one point and no dial at all.
+
+    ⚠ **`1e-6` WAS CHOSEN WHILE THIS KNOB WAS INERT**, so the number predates the rule that now
+    reads it. It is kept as the default deliberately, but a caller who wants the accurate end
+    should use `1e-10` rather than assume the default is conservative.
+
+    Set `krylov_basis` to a small fixed number (2-3) and `krylov_tol = 0.0` to pin the depth.
 
     ⛔ **NOT CONSIDERING ENOUGH KRYLOV VECTORS IS A REAL AND EASILY-MISSED SOURCE OF ERROR.**
     `krylov_basis = 0` uses `cbe_expand`'s frame alone -- ONE power of `H` -- and that is enough
@@ -295,7 +367,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             rch1 = push_right_channels(right_channels(rstack, i + 2), mpo, ex.V_ex, i + 1)
             H1 = one_site_h(mpo, i, lch, rch1)
             blocks = _krylov_frame(Kex, x -> (nmv[] += 1; apply_one_site(H1, x)),
-                                   krylov_basis, ktol)
+                                   krylov_basis, ktol, tau)
             peak!(blocks...)
             stacked = length(blocks) == 1 ? blocks[1] : to_concrete(oplus(blocks, (3,)))
             W[i] = to_concrete(setitag(_splitU(stacked), 3, _tagW(i)))
@@ -336,7 +408,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             lch1 = push_left_channels(left_channels(lstack, j), mpo, ex.U_ex, j)
             H1 = one_site_h(mpo, j + 1, lch1, rch)
             blocks = _krylov_frame(Bex, x -> (nmv[] += 1; apply_one_site(H1, x)),
-                                   krylov_basis, ktol)
+                                   krylov_basis, ktol, tau)
             peak!(blocks...)
             stacked = length(blocks) == 1 ? blocks[1] : to_concrete(oplus(blocks, (1,)))
             Z[j] = to_concrete(setitag(_splitV(stacked), 1, _tagZ(j)))

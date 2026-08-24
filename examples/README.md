@@ -70,8 +70,10 @@ accuracy is the **depth of the Krylov basis** the half-sweeps build:
 
 - **`krylov_basis`** (default `30`) — the *cap* on how many orthonormal vectors of
   `span{Θ, HΘ, H²Θ, …}` each half-sweep builds per bond, with full re-orthogonalisation.
-- **`krylov_tol`** (default `1e-6`) — the breakdown tolerance that ends the recursion early. In
-  practice the **cap** is what sets the depth on a generic `H`, not this.
+- **`krylov_tol`** (default `1e-6`) — stops the recursion when the next vector's *contribution*
+  to `exp(τH)Θ` drops below it, via Saad's estimate `β_m·|[exp(τT_m)]_{m,1}|`. Thresholding the
+  bare off-diagonal `β` instead does **not** work — it is a breakdown detector and never fires on
+  a generic `H`.
 
 ⛔ **Scan `krylov_basis` before anything else when accuracy disappoints, because every other knob
 will tell you nothing is wrong.** Depth is the only axis that changes which *directions* the step

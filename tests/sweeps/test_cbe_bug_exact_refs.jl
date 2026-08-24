@@ -88,6 +88,57 @@ end
 
 _sz_profile(p) = magnetisation(copy(p)) ./ max(norm(copy(p))^2, eps())
 
+# ── the stopping estimate, on dense matrices, before any tensor is involved ────────────────
+#
+# `_kry_contribution` is what decides the half-sweep basis depth, and it is pure linear algebra:
+# `alpha`/`betas` in, one number out. Testing it here rather than through a sweep means a
+# regression in the DEPTH CONTROL is distinguishable from a regression in the sweep, which the
+# end-to-end arms below cannot do.
+@testset "_kry_contribution is a CONSERVATIVE bound on the Krylov truncation error" begin
+    # ⛔ THE DIRECTION OF THE INEQUALITY IS THE WHOLE POINT. Stopping when the estimate falls
+    # below `tol` is only safe if the estimate is an UPPER bound on the true error. Measured
+    # here it overestimates by 4x-160x and never underestimates outside roundoff -- so the rule
+    # costs ~1-2 extra vectors and cannot silently stop short, which is the trade wanted.
+    kry = RSVDCBEBondUpdate._kry_contribution
+    Random.seed!(7)
+    n = 200
+    for dt in (0.05, 0.5), m in (3, 5, 8)
+        A = randn(n, n); A = (A + A') / 2 / sqrt(n) * 4
+        v = randn(ComplexF64, n)
+        tau = ComplexF64(-im * dt)
+
+        b0 = norm(v); V = [v / b0]; al = Float64[]; be = Float64[]
+        for _ in 1:m
+            w = A * V[end]
+            push!(al, real(dot(V[end], w)))
+            for _p in 1:2, u in V
+                w -= dot(u, w) * u
+            end
+            b = norm(w); b <= 1e-13 && break
+            push!(be, b); push!(V, w / b)
+        end
+        mm = length(al)
+        T = zeros(mm, mm)
+        for k in 1:mm
+            T[k, k] = al[k]
+            k < mm && (T[k, k + 1] = be[k]; T[k + 1, k] = be[k])
+        end
+        E = exp(tau * T)
+        approx = b0 * sum(E[k, 1] * V[k] for k in 1:mm)
+        truerr = norm(exp(Matrix(tau * A)) * v - approx)
+        est = b0 * kry(al, be, tau)
+
+        # Bound, with a floor so the assertion is not comparing two roundoff figures.
+        @test est >= truerr * 0.5 || truerr < 1e-13
+        # ...and not SO loose that the tolerance means nothing: 1e4 is far above the 160x seen.
+        @test est <= max(truerr, 1e-13) * 1e4
+    end
+    # An empty recursion cannot certify anything and must not read as "converged".
+    @test kry(Float64[], Float64[], ComplexF64(-im * 0.05)) == Inf
+    # One step with no accepted residual likewise.
+    @test kry([1.0], Float64[], ComplexF64(-im * 0.05)) == Inf
+end
+
 @testset "cbe_bug_step! against exact references, L=12" begin
     L = 12
 

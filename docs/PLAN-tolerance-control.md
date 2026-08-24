@@ -198,7 +198,24 @@ not evidence*. It has to be re-checked on Heisenberg at L=20 before it is repeat
 
 ## 4. Expand the bond at **every** Lanczos step
 
-Wire `_expanding_krylov` into `cbe_bug_step!`'s K-step and root solve.
+**RE-TARGETED (2026-08-24): there is no K-step any more.** The place this applies is now
+`_krylov_frame`, the half-sweep basis builder. It currently expands the bond ONCE (via
+`cbe_expand`), builds `H1` against that fixed `ex.V_ex`, and runs the whole Krylov recursion at
+that width. Jan's §4 is to widen between iterations instead.
+
+✅ **The pattern already exists in this repo — `_expanding_krylov` (`cbe_core.jl`) does exactly
+this for the ROOT solve**, including the part that is easy to get wrong: it re-runs `cbe_expand`
+and then EMBEDS the accumulated basis into the widened space (`embed_ops` / `embed_with`) rather
+than restarting. So §4 is "give the half-sweep the treatment the root already gets", not a new
+mechanism.
+
+⛔ **AND THERE IS A MEASURED TRAP IN THE OBVIOUS IMPLEMENTATION.** `cbe_lubich_sweep`'s
+`grow_iters` re-runs the CBE *selection* on every pass, which re-truncates by budget and discards
+exactly the directions the next application of `H` needs: MEASURED on OAT it bought 1.8× and then
+went flat (2.13e-02 → 1.16e-02) no matter how many passes were allowed. **Jan's formulation avoids
+this by construction** — "new kept = old kept **plus** expanded" is accumulation, not reselection —
+so a faithful §4 must widen the space without re-ranking what is already in it. Any implementation
+that saturates is reproducing the `grow_iters` bug, not discovering a limit of the method.
 
 Jan's bookkeeping maps onto the existing structure as follows, and one part needs no new code:
 
@@ -206,10 +223,10 @@ Jan's bookkeeping maps onto the existing structure as follows, and one part need
 - *new discarded = old discarded ∖ expanded* → **automatic**. The discarded space here is not
   stored; it is `P⊥ = I − U U†` of the current frame, so widening `U` shrinks it by exactly the
   admitted directions. No separate machinery — worth saying so we don't build redundant state.
-- *environments must be updated* → **this is the real work.** In the K-step the right environment
-  is pushed through the widened frame (`push_right_channels(..., Vwide[i], ...)`,
-  `cbe_bug.jl:409`); once the frame grows *inside* the Krylov loop this push must happen per
-  growth pass, not once per bond.
+- *environments must be updated* → **this is the real work.** The half-sweep builds `H1` from
+  `push_right_channels(right_channels(rstack, i+2), mpo, ex.V_ex, i+1)` once per bond; once the
+  frame grows *inside* the Krylov loop, that push and the `one_site_h` build must happen per
+  growth pass. That is also where the cost is, so Plot 4c is the one that decides this.
 
 > **Plot 4a** — `err` vs `grow_iters ∈ {0,1,2,3,4,…}` at fixed `τ_trunc`.
 > **Plot 4b** — `χ` per Lanczos step within one bond update, showing the geometric growth
@@ -224,18 +241,67 @@ the tolerances are already under control.
 
 ## 5. Terminate Krylov on the tridiagonal elements, `τ_Krylov = τ_trunc/10`
 
-**Now:** `lanczos_expv` (`expv.jl:112-128`) already exits on `b = norm(w) < tol` — `b` *is* the
-off-diagonal `β` of the tridiagonal, so the criterion Jan wants is present. The problem is the
-value: the default is `1e-13` and **`cbe_bug_step!` passes `tol = 1e-15`** (`cbe_bug.jl:290`), so
-it effectively never fires and every solve burns `maxiter`.
+⛔ **THERE ARE TWO KRYLOV DEPTHS IN A STEP, NOT ONE, AND THEY ARE SEPARATE KNOBS.** This section
+originally described only the second; conflating them is why the first went unnoticed.
 
-**Change:** `tol = τ_trunc/10`, and report the achieved depth rather than assuming it.
+| # | where | knobs | status |
+|---|---|---|---|
+| 1 | the **half-sweep basis** each bond builds, `span{Θ, HΘ, …}` | `krylov_basis`, `krylov_tol` | ✅ **DONE 2026-08-24** |
+| 2 | the **root Galerkin solve**, `_expanding_krylov` | `maxiter`, `tol` | ⏳ open |
 
-⚠ **`β` alone is not the error contribution, and I will not silently substitute a better one.**
-The sharper criterion is the Saad estimate `β_m·|coeff_m|` — the weight the projected exponential
-actually puts on the last Krylov vector — and `exact_sparse.jl::_lanczos_expv` already computes it.
-Plan: implement Jan's `β` criterion **as specified**, and record the Saad estimate alongside as a
-diagnostic, so we can report whether `β` is a safe proxy on this problem instead of guessing.
+**(1) — done.** Jan's literal criterion was implemented first and **it does not fire**: thresholding
+the off-diagonal `β` gave BIT-IDENTICAL results at L=12 for anything from `1e-6` to `1e-13`, on
+both Heisenberg and XX, because `β` is a BREAKDOWN detector and a generic `H` never breaks down.
+Replaced with the Saad contribution the section already named:
+
+```
+contribution of vector m+1  =  β_m · |[exp(τ·T_m)]_{m,1}|
+```
+
+The tridiagonal elements ARE tracked, exactly as asked; they are just weighted by what the
+propagator does with them before meeting the tolerance. `β` survives as `_KRY_BREAKDOWN = 1e-13`,
+which is the job it can actually do.
+
+**The estimate was validated before being trusted**, on dense Hermitian problems against the true
+Krylov truncation error: it **overestimates** by 4×–160× and never underestimates outside
+roundoff. That is the safe direction — stopping below `tol` guarantees the true error is below
+`tol`, at a cost of ~1–2 extra vectors. `test_cbe_bug_exact_refs.jl` pins the *direction* of that
+inequality, which is the property that makes the rule sound.
+
+#### MEASURED — L=12, dt=0.05, T=1.0, `benchmarks/krylov_stopping.jl`
+
+| arm | XX err / krylov | Heisenberg err / krylov | OAT err / krylov |
+|---|---|---|---|
+| cap, no test | 1.6948e-04 / 1770 | 1.0800e-06 / 2280 | 5.9952e-15 / 2158 |
+| tol 1e-4 | 1.6948e-04 / **952** | 2.4032e-06 / 1384 | 1.6431e-14 / 1552 |
+| **tol 1e-6 (default)** | 1.6948e-04 / 1180 | 1.4748e-06 / 1622 | 1.0880e-14 / 1766 |
+| tol 1e-10 | 1.6948e-04 / 1550 | 1.1190e-06 / 1976 | 6.2172e-15 / 2000 |
+| pinned m=3 | 1.6948e-04 / 950 | 2.6697e-06 / 1038 | 7.0610e-14 / 1036 |
+| pinned m=0 | 1.6948e-04 / 289 | 8.8424e-05 / 308 | **2.1329e-02** / 313 |
+
+✅ **XX — the rule cuts 1.9× for free.** Bit-identical error at every tolerance: it correctly finds
+that depth buys nothing on this model.
+
+✅ **OAT — the rule refuses to cut.** Every tolerance row stays at ~1e-14 where `m = 0` is 2.1e-02.
+This is the safety property that matters, and it is the model where getting it wrong costs eight
+orders. (The ordering *among* the OAT tolerance rows is roundoff against roundoff — ignore it.)
+
+⚠️ **Heisenberg — it is a genuine dial, not a free lunch.** `1e-6` buys 0.71× the cost for 1.37×
+the error; `1e-10` is nearly free at 1.04× error for 0.87× cost. **That monotone trade IS the
+deliverable** — `β` gave one point and no dial at all, which is what "the criterion never fires"
+means in practice.
+
+⚠️ **`1e-6` was chosen while this knob was inert**, so the number predates the rule that now reads
+it. Kept as the default deliberately; anyone wanting the accurate end should pass `1e-10` rather
+than assume the default is conservative.
+
+**(2) — open, and there is a measured 3.64× sitting in it.** `_expanding_krylov` exits on
+`b < tol` with `cbe_bug_step!` passing `tol = 1e-15`, so every root solve burns `maxiter` (recorded
+elsewhere as 27.4 of 30 used, with `maxiter = 8` giving **3.64× fewer applications at 2e-13**). The
+same substitution applies and is cheaper to justify here, because `_reduce_krylov` **already
+returns the `coeff` vector** the estimate needs. Deferred only because `_expanding_krylov` is
+shared with `cbe_lubich_sweep` and the ground-state mode, so it is a wider blast radius than (1)
+and wants (1)'s measurement in hand first.
 
 > **Plot 5a** — mean/max Krylov depth vs `τ_Krylov`, with the `maxiter` ceiling drawn.
 > **Plot 5b** — `err` vs total operator applications. Prior measurement says `maxiter = 8` gives
