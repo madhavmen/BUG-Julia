@@ -160,27 +160,31 @@ end
         # And that remainder is second order. Halving `dt` must quarter it; the window is wide
         # because the constant is not being asserted, only the ORDER.
         #
-        # ⛔ EXCEPT FOR `cbe_bug`, WHICH IS FOURTH ORDER ON THIS PROBLEM. That is not a looser
-        # test hiding a worse scheme -- it is the strongest arm here by three orders:
+        # ⛔ EXCEPT FOR `cbe_bug`, WHICH IS EXACT ON THIS PROBLEM -- SO IT IS ASSERTED AS EXACT
+        # RATHER THAN GIVEN A WIDER ORDER WINDOW. `H_OAT` is diagonal with a finite set of `m^2`
+        # eigenvalues, so the sweep's Krylov basis CLOSES the local invariant subspace and the
+        # step carries no dt error at all. MEASURED at the settings below:
         #
-        #     tdvp_cbe1s          4.3475e-03   ratio 4.03
-        #     tdvp2               4.3475e-03   ratio 4.03
-        #     cbe_bug             2.2901e-06   ratio 19.59   <- and |e6-e16| is EXACTLY 0.0
+        #     tdvp_cbe1s          4.3475e-03    ratio 4.03
+        #     tdvp2               4.3475e-03    ratio 4.03
+        #     cbe_bug             4.7962e-14    ratio 0.63   <- ROUNDOFF, not an order
         #
-        # WHY IT SUPERCONVERGES, so the window is justified rather than curve-fitted: `H_OAT` is
-        # diagonal in the computational basis and all its terms COMMUTE, so a splitting
-        # integrator incurs no Trotter error on it. This is an OAT property, NOT a claim about
-        # `cbe_bug` in general -- on Heisenberg the same scheme is second order and loses to
-        # `tdvp2`, which is why `test_physics.jl` is where the general claim is made.
+        # ⚠ A RATIO TEST HERE WOULD BE MEASURING NOISE. Both `cbe_bug` errors sit at 1e-14, so
+        # `e16/eh` is the quotient of two roundoff figures and wanders either side of 1 -- the
+        # same "no window" trap `docs/current_work.md` records for full-rank dt scans. Widening
+        # the window to admit 0.63 would turn a real assertion into one that cannot fail.
         #
-        # THE WINDOW IS 10-30, NOT 12-20. Ideal fourth order is 16 and the measurement is 19.59;
-        # the excess is real curvature, not noise, since the `dt/2` error (1.1691e-07) sits far
-        # above any floor `trunc_thresh = 1e-14` could impose. A 12-20 window would put the
-        # measured value on its own boundary and make this test flap.
+        # ⛔ THIS SUPERSEDES THE OLD 10-30 WINDOW, which encoded the RETIRED K-step sweep's
+        # fourth-order superconvergence (ratio 19.59 at 2.2901e-06). That sweep was removed on
+        # 2026-08-24; the current one is five orders better here and exact to roundoff.
         eh = _oat_sx_error(mk, L, 16, 0.025, T)
-        lo, hi = name == "cbe_bug" ? (10.0, 30.0) : (3.0, 5.5)
-        @test lo < e16 / eh < hi ||
-            (@info "$name dt-order outside its window" name e16 eh e16 / eh lo hi; false)
+        if name == "cbe_bug"
+            @test e16 < 1e-12 || (@info "cbe_bug no longer exact on OAT" e16 eh; false)
+            @test eh  < 1e-12 || (@info "cbe_bug no longer exact on OAT at dt/2" e16 eh; false)
+        else
+            @test 3.0 < e16 / eh < 5.5 ||
+                (@info "$name dt-order outside its window" name e16 eh e16 / eh; false)
+        end
     end
 end
 
@@ -323,68 +327,3 @@ end
     set_symmetry!(:none)          # leave the mode as the rest of the file expects
 end
 
-@testset "OAT L=10: kaug UNIONS CBE's frame instead of discarding it" begin
-    set_symmetry!(:none)
-    L, dt, nst, D = 10, 0.05, 20, 6      # D = 6 is the exact ceiling, so rank is NOT the limiter
-    mpo = oat_mpo(L)
-
-    # THE DEFECT THIS PINS. `cbe_expand` returns BOTH frames of a bond. In the half-sweeps the
-    # basis update then took `svd(K1).U` and used it as `psi[i]` -- REPLACING `ex.U_ex` rather
-    # than unioning with it, so the directions CBE had just paid to find were discarded before
-    # they ever reached the state. (`Wcbe` was literally allocated length 0 when `kstep = true`.)
-    # `kaug = true` keeps both: `W[i] = orth([U_ex | svd(K1).U])`, and the mirror for `Z[j]`.
-    #
-    # ⛔ THE METRIC IS THE ERROR AGAINST THE EXACT STATE, NOT ENERGY DRIFT. Ranking these arms by
-    # `dE` picks the WRONG one and nearly shipped it: `kstep = false` conserves energy to 7.4e-15
-    # and is 12x WORSE than `tdvp2` on state infidelity. `dE` is a conservation check; it says
-    # nothing about whether the state went to the right place.
-    #
-    # The exact state needs no diagonalisation -- `H_OAT` is diagonal in the `S^z` basis, so it is
-    # one phase per basis vector. The diagonal is read from the repo's own `dense_total_sz` rather
-    # than hand-rolled, because `dense_state` and `exact_sparse` use MIRRORED bit conventions here
-    # and ⊗|→⟩ is flip-symmetric -- a convention error would be INVISIBLE in this state.
-    v0    = dense_state(x_polarized_state(L))
-    ediag = (diag(dense_total_sz(L)) .^ 2) ./ 2 .- L / 8
-    vex   = exp.(-im * (nst * dt) .* ediag) .* v0
-
-    function arm(kaug::Bool)
-        psi = x_polarized_state(L)
-        kry = 0
-        for _ in 1:nst
-            # ⛔ `rexpand = false` IS LOAD-BEARING, NOT TIDINESS. `rexpand` is the default and it
-            # overrides `kaug`, restoring the same width by re-expanding instead of merging. Left
-            # at the default, BOTH arms below would be the same computation and this testset
-            # would compare an arm with itself -- passing or failing for reasons unrelated to the
-            # union it exists to pin.
-            info = cbe_bug_step!(psi, mpo, ComplexF64(-im * dt); kaug = kaug, rexpand = false,
-                                 maxdim = D, trunc_thresh = 1e-14, maxiter = 30)
-            kry += info.krylov_dims
-        end
-        vn = dense_state(psi)
-        return 1 - abs2(dot(vex, vn)) / real(dot(vex, vex) * dot(vn, vn)), bond_dims(psi), kry
-    end
-
-    f_on,  chi_on,  kry_on  = arm(true)
-    f_off, chi_off, kry_off = arm(false)
-
-    # 1. THE ACCURACY CLAIM. MEASURED infidelity: 3.27e-11 with the union, 3.97e-05 without --
-    #    a factor of 1.2e6. `tdvp2` on the same problem is 1.99e-06. The threshold is 1e3, three
-    #    orders looser than measured, so it pins the effect without pinning the constant.
-    @test f_on < f_off / 1e3 ||
-        (@info "kaug did not improve on the replaced-frame arm" f_on f_off; false)
-
-    # 2. THE STRUCTURAL CLAIM, which the error metric does not feed into. OAT's exact Schmidt rank
-    #    at the cut after site `n` is `min(n, L-n)+1` FOR ALL TIME. With the union the converged
-    #    profile is EXACTLY that -- [2,3,4,5,6,5,4,3,2] -- while the replaced-frame arm over-fills
-    #    the interior to [2,3,6,6,6,6,6,3,2]. Two independent facts agreeing is why this is a fix
-    #    and not a tuned constant.
-    @test chi_on == [min(i, L - i) + 1 for i in 1:(L - 1)] ||
-        (@info "kaug did not converge to the exact rank profile" chi_on; false)
-
-    # 3. THE COST CLAIM. The union is a `perp_component` and a small SVD -- it adds NO `expv`
-    #    calls, so operator applications must be essentially unchanged. MEASURED +2.7%; the bound
-    #    is 20%, loose enough to absorb the slightly wider bases but far under the ~4x that adding
-    #    a solve per site would cost.
-    @test kry_on < 1.2 * kry_off ||
-        (@info "kaug added operator applications it should not have" kry_on kry_off; false)
-end

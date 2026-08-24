@@ -39,8 +39,12 @@
 # The substepping arm is retained because it is the BAR: 8.1911e-05 -> 2.0258e-05 for 21526 ->
 # 43546 Krylov is 4.04x for 2x the cost, and that is what any 2x-cost scheme must beat.
 #
-# WHERE THIS WENT NEXT: `benchmarks/midpoint_basis.jl`, temporal rather than spatial
-# symmetrisation (`basis_frac`), which costs 1x and so only has to beat 1x.
+# WHERE THIS WENT NEXT, AND WHY THAT THREAD IS CLOSED: `benchmarks/midpoint_basis.jl` asked the
+# temporal version of the same question -- build the bases at the midpoint (`basis_frac = 0.5`)
+# rather than the endpoint -- and answered NO, shortening the basis evolution COST an order
+# (TFIM ratio 15.43 at 1.0 against 7.74 at 0.5). Both the knob and that file are gone as of
+# 2026-08-24: the half-sweeps no longer evolve anything to shorten. They build a Krylov basis
+# directly, so there is no `expv` argument left to centre. The SPATIAL result below still holds.
 #
 # The off-centre pair below is the one genuinely reflected composition available -- `c-1` and its
 # true mirror `c+1` -- kept to test whether composing two mirrored OFF-CENTRE roots recovers what

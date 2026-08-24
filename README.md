@@ -68,19 +68,28 @@ mpo_energy(psi, W)
 | `tdvp_cbe1s_step!` | 1-site TDVP with controlled bond expansion ([arXiv:2208.10972](https://arxiv.org/abs/2208.10972)) — the baseline to beat. |
 | `tdvp2_step!` | 2-site TDVP. The conventional reference. |
 
-`cbe_bug_step!` has **three scheme knobs**, all defaulting to on:
+There is **one sweep**, and its accuracy knob is the **depth of the Krylov basis** the half-sweeps
+build:
 
-- **`kstep`** — do the BUG basis update. `false` takes the CBE frame directly.
-- **`rexpand`** — expand every bond **twice per half-sweep**, once as site `i`'s right bond and
-  once as site `i+1`'s left bond, so every site is evolved with **both** of its bonds widened.
-  This is the default mechanism for keeping the width the half-sweep split would otherwise lose.
-- **`kaug`** — the older mechanism for the same thing: UNION the basis update with the CBE frame
-  rather than letting it replace it. **`rexpand` overrides it**, so an A/B on `kaug` must pass
-  `rexpand = false`.
+- **`krylov_basis`** (default `30`) — the *cap* on how many orthonormal vectors
+  `span{Θ, HΘ, H²Θ, …}` the half-sweep builds per bond. `0` stops at one application of `H`, which
+  is what the CBE frame alone gives you.
+- **`krylov_tol`** (default `1e-6`) — the breakdown tolerance that ends the recursion early.
 
-Turning off *both* is not a tuning choice — it is a wrong answer. On the TFIM example it returns
-`1.4e+00` against `6.6e-06`, while still exiting 0 and writing its CSV. See
-[docs/USAGE.md §6b](docs/USAGE.md) and `benchmarks/arm4_rexpand.jl`.
+⛔ **`krylov_basis` is the knob to scan when an answer is less accurate than it should be**, and it
+is the one that looks like nothing is wrong. Extra rank, extra expansion budget and switching the
+closing truncation off entirely all leave the error *unmoved*, because none of them add a
+**direction** — only depth does. Measured at L=12, `dt=0.05`:
+
+| model | one power of `H` | depth 3 |
+|---|---|---|
+| XX | 1.6948e-04 | 1.6948e-04 — extra vectors are pure cost |
+| Heisenberg | 8.8424e-05 | 2.6697e-06 |
+| OAT | 2.1329e-02 | 7.0610e-14 — **eight orders** |
+
+The two schemes agree to O(τ), so they are the same *order* and can look identical (XX: bit
+identical). The difference is entirely in the prefactor, and it appears wherever `τ‖H_loc‖` is not
+small.
 
 The sweep is always **interleaved** (expand bond `i`, then immediately evolve site `i`) — the
 ordering of the reference implementation.
@@ -156,7 +165,7 @@ of magnitude further from the exact solution.
 ## Documentation
 
 📖 **[docs/USAGE.md](docs/USAGE.md)** — symmetry switching, the options that matter and why, how
-to read the diagnostics, the `kaug` result (§6b), and the gotchas.
+to read the diagnostics, the Krylov-depth result (§6b), and the gotchas.
 
 📁 **[examples/README.md](examples/README.md)** — the three example scripts, their parameters,
 the CSV columns, and what the randomised sketch does and does not affect.

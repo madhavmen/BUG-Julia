@@ -407,99 +407,81 @@ the expansion — do not add seeding. The proof the growth is not seed-driven: i
 then `maxdim`, `growth` and `trunc_thresh` changed nothing and any comparison across them is
 measuring noise. This has produced several wrong conclusions in this repo — check it first.
 
-## 6b. `cbe_bug`'s basis update discards CBE's expansion — two mechanisms restore it
+## 6b. Krylov depth is what governs `cbe_bug`'s accuracy
 
-**The half-sweep basis update *replaces* the frame CBE just built instead of *adding* to it.**
-That is a defect in `cbe_bug` and it affects every model tested. There are now **two** mechanisms
-that fix it, and the defect analysis below applies to both.
+**One knob moves the error on a hard model, and it is not the one anyone reaches for.** The
+half-sweeps build an orthonormal Krylov basis `span{Θ, HΘ, H²Θ, …}` per bond, and its DEPTH is
+what separates a good answer from one that is eight orders out.
 
-> **`rexpand = true` IS THE CURRENT DEFAULT**, not `kaug`. It restores the lost width by
-> **expanding bond `i` a second time** — once as site `i`'s right bond, once as site `i+1`'s left
-> bond — so no basis is ever formed by merging two others. **`rexpand` overrides `kaug`**, so
-> every A/B on `kaug` must pass `rexpand = false` or it silently compares an arm with itself.
+> **`krylov_basis`** (default `30`) caps the depth; **`krylov_tol`** (default `1e-6`) is the
+> breakdown tolerance that can end the recursion sooner. On a generic `H` the **cap** is what
+> actually sets the depth — see the warning on β below.
 >
-> `kaug` is the older mechanism for the same problem and is the one this section was written
-> about; everything below about *why* the width is lost is unchanged and applies to both.
->
-> ⚠️ **The "`kaug` is 2-3× more accurate" comparison that used to head this section was measured
-> at `growth = 1.1`, which STARVED `rexpand`** — its second expansion runs against a larger `U₀`,
-> and `budget = ceil(growth·dmax) − r` subtracts that `r`. At the current `growth = 2.0` the
-> ordering **reverses**. Measured at the example scripts' own settings (TFIM L=16, `maxdim=64`,
-> `trunc=1e-10`, t=3, `:Z2`): `rexpand` **3.8455e-06**, `kaug` **4.2717e-06**, neither
-> **1.9699e-01**. See `benchmarks/example_defaults.jl`.
->
-> ⛔ **On COST the two are not established as equal.** `rexpand` performs a second `cbe_expand`
-> per bond, which is QR/matmul work and adds no `expv` — so `krylov`, the cost axis used
-> everywhere else in this repo, is **blind to exactly the work `rexpand` adds**. Local wall time
-> on the run above was 556s vs 275s, which is directionally consistent but is not evidence: wall
-> time here spreads 2.6-2.8× on bit-identical work. Treat the cost comparison as UNMEASURED.
->
-> ⛔ **`kaug` is INTERLEAVED-ONLY, and is forced off under `decoupled = true`.** (`rexpand` is
-> not affected — it never unions.)
->
-> The union needs
-> `U_ex` and `svd(K1).U` to be two bases of the *same* space. Interleaved gives that — both are
-> built from the same `K` in the same loop iteration, so both sit on `W[i-1]`'s bond. Decoupled
-> does not: its phase A runs a separate frame chain (`C = U_ex' * K`), so `U_ex` sits on
-> `U_ex[i-1]`'s bond while phase B's `Wk` sits on `W[i-1]`'s. Attempting the union there raised
-> `AssertionError: Contracted legs must have matching itags: 'L,bU' vs '1,cbeW'`, which reads
-> like a tagging slip and is not one — forcing the tags to agree would direct-sum vectors from two
-> different bases and return silently wrong numbers instead of stopping. **Read `info.kaug`, not
-> the argument you passed**, when attributing a result.
+> `krylov_basis = 0` stops after one application of `H`, which is exactly what the CBE frame
+> already spans. So `m = 1` reproduces `m = 0` bit-for-bit, and **the first genuine addition is
+> `m = 2`** — a scan that starts at 1 will look inert and prove nothing.
 
-The assembly writes `psi[i] = W[i]` and `psi[j+1] = Z[j]`, so **the bases are the state**: a
-direction absent from `W`/`Z` cannot reach the state at all. But each half-sweep keeps the CBE
-frame on the *opposite* side from the basis it is building — `Vwide[i] = ex.V_ex` while building
-`W[i]`, `Uwide[j] = ex.U_ex` while building `Z[j]` — and the frame that would *become* the state
-was not even stored (`Wcbe` was allocated with length 0 when `kstep = true`). The basis then comes
-entirely from `svd(K1,(1,2)).U`, the column space of the evolved tensor. CBE's directions were
-computed and dropped.
+MEASURED at L = 12, `dt = 0.05`:
 
-The signature is `n_new` versus `expanded`, and it is **identical in every model** — measured at
-L = 10, step 1, from a product state:
+| model | `krylov_basis = 0` | `= 2` | `= 3` |
+|---|---|---|---|
+| XX `:U1` | 1.6948e-04 | 1.6948e-04 | 1.6948e-04 |
+| Heisenberg | 8.8424e-05 | — | **2.6697e-06** |
+| OAT | 2.1329e-02 | 1.1358e-04 | **7.0610e-14** |
 
-| model | `expanded`, basis update on | with `kstep = false` | dE on | dE off |
-|---|---|---|---|---|
-| Heisenberg (nearest neighbour) | `[2,2,2,…]` | `[2,3,3,3,…]` | 4.9e-07 → 3.7e-06 | ~1e-15 |
-| Haldane-Shastry (`1/sin²`) | `[2,2,2,…]` | `[2,3,3,3,…]` | 1.5e-03 | ~1e-15 |
-| OAT (all-to-all) | `[2,2,2,…]` | `[2,3,3,3,…]` | 1.565e-03 | ~1e-16 |
+⚠️ **Both schemes are the SAME ORDER**, so a `dt` scan cannot separate them. One power of `H` and
+the full basis agree to O(τ); the entire difference is a prefactor, and it only becomes visible
+where `τ‖H_loc‖` is not small. That is why XX is bit-identical across the whole range while OAT
+spans eight orders.
 
-`n_new = [1,2,2,2,2,2,2,2,1]` in **both** columns — CBE admits the same directions either way and
-one per interior bond is thrown away. The damage is ordered by the Hamiltonian's range, which is
-why it went unnoticed on nearest-neighbour benchmarks: 1e-6 reads as zero next to their other
-errors, and the drift was never plotted.
+### ⛔ Why this is easy to miss
 
-**`kaug = true` unions the two instead of letting one overwrite the other** —
-`W[i] = orth([U_ex | svd(K1).U])`, and the mirror for `Z[j]`. Nothing else changes: CBE still
-expands one bond per site, the site evolution is untouched, and `psi` is still frozen during the
-half-sweeps, so BUG's parallelisable structure is intact.
+Depth is the only axis that changes which **directions** the step has. Every other knob changes
+how much **room** it has, so all of them report that nothing is wrong:
 
-Measured on OAT, L = 10, `dt = 0.05`, 20 steps, **infidelity against the exact state**
-(`H_OAT` is diagonal in the `Sᶻ` basis, so the reference is a phase per basis vector — no
-diagonalisation, no second integrator):
+| what was tried | result |
+|---|---|
+| more expansion budget (`growth` 2/4/8, `dex` 16/32/64, `comp_ratio`) | **bit-identical** across 8 variants, `err_fnl ≈ 1e-14` — the selection discarded nothing |
+| more rank (closing truncation off entirely) | χ 7 → 24, error moved by **zero digits** |
+| more CBE passes (`grow_iters`) | 1.8×, then flat — each pass re-runs the *selection* and so re-truncates by budget, discarding what the next application of `H` needs |
+| energy drift | 1.5e-14, i.e. perfect, on the arm that is eight orders wrong |
+| bond profile | lands exactly on the analytic Schmidt ceiling `min(n, L−n)+1`, on the same wrong arm |
 
-| arm | infidelity | \|δSˣ\| | dE | χ |
-|---|---|---|---|---|
-| `tdvp2` | 1.9927e-06 | 2.70e-03 | 1.3e-10 | 6 |
-| `tdvp_cbe1s` | 1.9927e-06 | 2.70e-03 | 1.3e-10 | 6 |
-| `cbe_bug` (historical) | 3.9743e-05 | 8.65e-03 | 1.565e-03 | 6 |
-| `cbe_bug kstep=false` | 2.4427e-05 | 8.70e-03 | **7.4e-15** | 6 |
-| **`cbe_bug kaug=true`** | **3.2749e-11** | **7.62e-07** | 4.5e-15 | 6 |
+A run at `krylov_basis = 0` exits 0, writes its CSV, conserves energy and reports the correct
+rank. **Nothing but a comparison against an exact reference will tell you.**
 
-⚠️ **Do not rank these by energy drift.** `kstep = false` conserves energy to 7.4e-15 — the best
-of any arm — and is **12× worse than `tdvp2`** on state infidelity. Energy conservation is a
-conservation check, not an accuracy check, and on this problem the two orderings disagree
-outright. Always compare against an exact reference.
+⚠️ **β is a breakdown detector, not a convergence criterion.** Heisenberg and XX return
+bit-identical results for `krylov_tol` anywhere from 1e-6 to 1e-13 — the test never fires and every
+bond runs to the cap (5580 operator applications against 1038 for a fixed depth 3). The sharper
+quantity is the Saad contribution estimate `β_m·|coeff_m|`, which is not yet wired in.
 
-⚠️ **`S^x_tot` alone is one scalar** and can be right while the state is wrong; note the
-historical arm's `|δSˣ|` dipping to 4.5e-04 at step 15 purely because the curve crosses. The
-infidelity column shows no such dip.
+⚠️ **Build the basis with full re-orthogonalisation** — two Gram-Schmidt passes, which is what
+`_krylov_frame` does. A raw power iteration collapses onto the dominant eigenvector by `k ≈ 4` and
+the closing SVD then deletes the vectors as linearly dependent: saturation for a *conditioning*
+reason that is indistinguishable from a physical one.
 
-⚠️ **Raise `maxiter` with `L`.** `maxiter = 12` is justified at L = 10 by `‖H_OAT‖ ≈ L²/8 = 12.5`
-→ Krylov argument `≈ 0.31` → bound `≈ 1e-15`. At L = 20, `‖H‖ ≈ 50`, the argument is 1.25 and the
-same depth bounds only `≈ 3e-8`, larger than the effects being compared. `benchmarks/oat_l10.jl`
-now DERIVES the depth from `(‖H‖·dt/2)^m/m! < 1e-14` (arg 10 overrides) and prints the resulting
-bound in its header — check that line before trusting an arm.
+### What this replaced
+
+Until 2026-08-24 this section documented `kstep`, `kaug` and `rexpand` — three knobs around a
+half-sweep that evolved a one-site tensor per bond and then had to repair the width its split had
+lost. **All three are gone.** The half-sweeps now take the CBE frame as the basis directly and
+deepen it with `H`, so there is no split to lose width and nothing to repair.
+
+The retirement was measured, not assumed (L = 12, `dt = 0.05`, `krylov` = operator applications):
+
+| model | this sweep | old K-step sweep | |
+|---|---|---|---|
+| XX | 1.6948e-04 @ 289 | 1.6948e-04 @ 2888 | identical, **10× cheaper** (at `m = 0`) |
+| Heisenberg | 2.6697e-06 @ 1038 | 2.7869e-06 @ 3423 | better, **3.3× cheaper** |
+| OAT | 7.0610e-14 @ 1036 | 5.2449e-06 @ 3740 | **8 orders better**, 3.6× cheaper |
+
+The old defect is worth keeping on record because its *signature* recurs: the basis update wrote
+`psi[i] = W[i]`, so the bases WERE the state, but each half-sweep kept the CBE frame on the
+opposite side from the basis it was building and dropped the one that would become the state.
+`n_new` was identical either way while `expanded` differed — one admitted direction per interior
+bond discarded — and the damage was ordered by the Hamiltonian's RANGE (dE 4.9e-07 nearest
+neighbour, 1.5e-03 on Haldane-Shastry and OAT). **Nearest-neighbour benchmarks could not see it**,
+which is the same reason XX cannot see Krylov depth today.
 
 ### The 10π campaign (2.5 revival periods), against `tdvp_cbe1s`
 
@@ -526,15 +508,27 @@ whole cap. Accuracy is unchanged (identical to the `D = ceiling` arm), so this i
 physically-occupied rank, the same effect §6 documents for `tdvp_cbe1s`. An earlier claim that it
 converges to exactly `min(n, L-n)+1` held only at 4π and L = 10.
 
-⚠️ **The OAT fourth-order convergence does not generalise.** `H_OAT` is diagonal with commuting
-terms, so a splitting integrator incurs no Trotter error on it; measured `dt` ratio 19.59 versus
-4.03 for both TDVP arms. On Heisenberg `cbe_bug` is second order and loses to `tdvp2`.
+⚠️ **Do not read a `dt` order off OAT at all.** `H_OAT` is diagonal with commuting terms and a
+finite `m²` spectrum, so the Krylov basis closes the local invariant subspace exactly: the current
+sweep is at **machine precision** on this model (4.80e-14 at `dt`, 7.59e-14 at `dt/2`) and there is
+no `dt` error left to have an order. The ratio there is roundoff over roundoff and wanders either
+side of 1 — `tests/sweeps/test_oat.jl` therefore asserts **exactness** on this arm rather than a
+ratio window. (The retired K-step sweep showed 19.59 here, which was read as fourth-order
+superconvergence; it was the same effect seen through a larger error.)
+
+⚠️ **On Heisenberg `cbe_bug` measures THIRD order** (ratios 7.92 / 7.96), not second as this
+document previously stated. Take the order from a rank-limited scan on the model you care about:
+at full rank both sweeps are exact and the "order" you measure is the roundoff floor.
 
 ## 7. Gotchas
 
 - **`set_symmetry!` before building tensors**, never mid-run.
-- **A `χ = 1` start costs BUG a bootstrap step** that no CBE knob can tune away — grade the first
-  step instead (§6b). Comparing `cbe_bug` to a sweep without it measures the bootstrap.
+- **A `χ = 1` start no longer costs a bootstrap step** — dE is 1.4e-15 on the first step from a
+  product state, against 1.561e-3 historically. The old `warmup` grading is kept in
+  `benchmarks/oat_l10.jl` for its own sake, not because the scheme needs it (§6b).
+- **Scan `krylov_basis` before blaming truncation, rank or scheme order** (§6b). It is the only
+  knob that changes which *directions* the step has, and every other diagnostic — energy drift,
+  bond profile, `err_fnl` — reports a healthy run while it is eight orders wrong.
 - **`maxbd` must reach the cap** before an error column means anything (§6).
 - **First call costs minutes of JIT.** A silent log is not a hang; `1site_tdvp_cbe` 87.5 s vs
   `1site_tdvp_cbe_rsvd` 4.8 s at L=8 is compilation reuse, not an 18× speedup.

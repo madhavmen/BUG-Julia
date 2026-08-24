@@ -3,8 +3,14 @@
 # WHAT IS ALREADY EXCLUDED (`tfim_anomaly.jl`, `tfim_bisect.jl`), so this file does not retest it:
 #   * NOT a defective step. One step at dt=1e-2 is 9.76e-13 and FALLS to 4.55e-15 at dt=1e-3 --
 #     214x for a 10x cut, no floor. The step is correct.
-#   * NOT any one component. maxiter, truncate, trunc_thresh, kaug-vs-rexpand, exact-vs-sketch
-#     and growth all return BIT-IDENTICAL 9.7622e-13 for that step.
+#   * NOT any one component. maxiter, truncate, trunc_thresh, the two width-restoration routes
+#     (both retired 2026-08-24), exact-vs-sketch and growth all return BIT-IDENTICAL 9.7622e-13
+#     for that step.
+#
+# ⚠️ ONE AXIS THIS ELIMINATION NEVER SCANNED: the KRYLOV DEPTH of the half-sweep basis. Every
+# "bit-identical" above varies how much ROOM the step has; depth varies which DIRECTIONS it has,
+# and is invisible to all of them. `benchmarks/tfim_bisect.jl` now carries `krylov_basis` rows --
+# read those before treating "the sweep itself" as the remaining suspect.
 #   * NOT truncation, rank, symmetry, interaction range, or dt order -- see those two files.
 #
 # WHAT IS LEFT. Single step: 73x behind `tdvp_cbe1s`. Ten steps: 9500x. `cbe_bug` went

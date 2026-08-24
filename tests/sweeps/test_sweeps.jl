@@ -11,7 +11,7 @@
 #   tdvp_cbe1s_step!  its own channel-path twin `tdvp1_cbe_step!` on a nearest-neighbour chain
 #                     (where both apply), the `dt` order, and unitarity.
 #   cbe_bug_step!     `dt` order, exactness at full rank, and -- the attribution test --
-#                     `kstep = false` reproducing `cbe_lubich_sweep`, which isolates the K-step's
+#                     the sweep against `cbe_lubich_sweep`, which shares its basis-only structure
 #                     contribution with everything else held fixed.
 
 using Test
@@ -227,22 +227,6 @@ import Random
     end
 
     # ── the new sweep ─────────────────────────────────────────────────────────────────────
-    @testset "cbe_bug_step! with kstep=false reproduces cbe_lubich_sweep" begin
-        # THE ATTRIBUTION TEST. Everything except the K-step is shared, so this pins that the
-        # only difference between the two schemes is the basis update -- which is what makes any
-        # measured difference between them attributable to the K-step and to nothing else.
-        set_symmetry!(:U1)
-        L = 6
-        mpo = RSVDCBEBondUpdate.mpo_from_terms(nn_chain(:U1, L))
-        a = warm(L); b = copy(a); b.tensors .= copy.(a.tensors)
-        for _ in 1:4
-            cbe_bug_step!(a, mpo, -0.02im; kstep = false, maxdim = 64, trunc_thresh = 1e-14)
-            cbe_lubich_sweep(b, mpo, -0.02im; maxdim = 64, trunc_thresh = 1e-14)
-        end
-        @test real(mpo_energy(a, mpo)) ≈ real(mpo_energy(b, mpo)) atol = 1e-9
-        @test abs(overlap(a, b)) ≈ norm(a) * norm(b) atol = 1e-7
-    end
-
     @testset "cbe_bug_step! is exact at full rank" begin
         # A fixed-rank BUG sounds like it should not be exact anywhere, and the reason it is here
         # is worth pinning: once the expanded bond reaches the whole local space, `orth(K(tau))`

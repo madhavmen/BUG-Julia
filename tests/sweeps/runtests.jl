@@ -47,11 +47,10 @@ include(joinpath(@__DIR__, "..", "common", "free_fermion.jl"))
     include("test_pair_mpo.jl")
     include("test_tfim_mpo.jl")
     include("test_sweeps.jl")
-    # 3b `rexpand`, the shipped default of `cbe_bug_step!`. Separate from `test_sweeps.jl`
-    #    because the one defect it is prone to is invisible at full rank, invisible at `tau = 0`
-    #    and invisible on XX and OAT -- it needs a CAPPED TFIM run and nothing else shows it, so
-    #    it gets a file whose regime is chosen for that and is not free to drift.
-    include("test_cbe_bug_rexpand.jl")
+    # 3b the sweep itself, pinned against EXACT references on three
+    #    models at L=12. `test_sweeps.jl` only checks it reproduces `cbe_lubich_sweep`, which is
+    #    an agreement between two of our own implementations; this checks it against the answer.
+    include("test_cbe_bug_exact_refs.jl")
     include("test_symmetry_parity.jl")
     include("test_physics.jl")
     # 6  one-axis twisting     the arXiv:2208.10972 Fig. 2 benchmark, at L = 10. LAST because it

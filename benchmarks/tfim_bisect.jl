@@ -65,12 +65,20 @@ rows = ["tdvp2"                  => (p, t) -> tdvp2_step!(p, MPO, t; maxdim = D,
         "  truncate=false"       => bug(truncate = false),
         "  trunc_thresh=0"       => (p, t) -> cbe_bug_step!(p, MPO, t; maxdim = D,
                                                             trunc_thresh = 0.0, maxiter = MI),
-        "  kaug (no rexpand)"    => bug(rexpand = false, kaug = true),
-        "  kstep=false"          => bug(kstep = false),
         "  exact CBE"            => bug(exact = true),
         "  growth=8.0"           => bug(growth = 8.0),
         "  root=2"               => bug(root = 2),
-        "  root=6"               => bug(root = 6)]
+        "  root=6"               => bug(root = 6),
+        # ⛔ THE ROWS THE HEADER'S ELIMINATION ARGUMENT NEVER TRIED: the DEPTH of the Krylov basis
+        # the half-sweeps build. Every "not it" above is a statement about how much ROOM the step
+        # has -- rank, truncation, selection budget -- and depth is the one axis that is about
+        # which DIRECTIONS it has instead. That is why it survives all of them: at `m = 0` the
+        # basis is `span{Theta, H*Theta}`, one power of `H`, and no amount of extra room adds a
+        # second one. Scan it here before concluding "the sweep itself".
+        "  krylov_basis=0"       => bug(krylov_basis = 0),
+        "  krylov_basis=2"       => bug(krylov_basis = 2),
+        "  krylov_basis=3"       => bug(krylov_basis = 3),
+        "  krylov_basis=8"       => bug(krylov_basis = 8)]
 
 @printf("\n  %-24s %12s  %s\n", "arm", "max|dX|", "chi")
 for (nm, st) in rows

@@ -22,7 +22,7 @@
 # comparison.
 #
 # usage:  julia --project=. benchmarks/oat_l10.jl \
-#             [L] [dt] [tmax] [schemes] [maxdims] [every] [warmup] [sym]
+#             [L] [dt] [tmax] [schemes] [maxdims] [every] [warmup] [sym] [maxiter]
 #   e.g.  julia --project=. benchmarks/oat_l10.jl 10 0.01 12.566 all 2,3,4,6,16
 #         julia --project=. benchmarks/oat_l10.jl 10 0.05 12.566 cbe_bug 6 4 16 Z2
 #
@@ -94,7 +94,11 @@ function _krylov_depth(L::Int, dt::Float64; thresh = 1e-14, lo = 12, hi = 40)
     end
     return m
 end
-const MAXITER = length(ARGS) >= 10 ? parse(Int, ARGS[10]) : _krylov_depth(L, DT)
+# ⚠️ THIS MOVED FROM SLOT 10 TO SLOT 9 (2026-08-24), when the `kaug` bool that used to sit at 9
+# was retired. An old 10-argument invocation now hands `"true"` to `parse(Int, ...)` and dies
+# immediately, which is the intended outcome: a silently misread Krylov depth would show up only
+# as a slightly worse arm.
+const MAXITER = length(ARGS) >= 9 ? parse(Int, ARGS[9]) : _krylov_depth(L, DT)
 
 # ── the graded first step ────────────────────────────────────────────────────
 #
@@ -122,19 +126,19 @@ const MAXITER = length(ARGS) >= 10 ? parse(Int, ARGS[10]) : _krylov_depth(L, DT)
 # errors of size `(dt/m)^2` would give. So the error is not spread over the ramp at all: it is
 # one localised event whose size is set by the FIRST sub-step alone.
 #
-# ⛔ THIS KNOB IS OBSOLETE WITH `kaug = true`, AND THE EXPLANATION IT ONCE CARRIED WAS WRONG.
+# ⛔ THIS KNOB IS OBSOLETE, AND THE EXPLANATION IT ONCE CARRIED WAS WRONG.
 #
 # The numbers above are real, but the mechanism attributed to them was not. The claim was that a
 # `chi = 1` start forces a structural rank-DOUBLING ceiling on any frozen-basis scheme. It does
-# not: the actual cause is that `cbe_bug`'s half-sweep basis update REPLACED the CBE frame
-# instead of unioning with it, so CBE's admitted directions never reached the state (see `KAUG`
-# below and `docs/USAGE.md` §6b). The graded start helped only because taking smaller first
-# steps limits how much a too-narrow basis can cost.
+# not: the actual cause was that `cbe_bug`'s half-sweep basis update REPLACED the CBE frame
+# instead of unioning with it, so CBE's admitted directions never reached the state (see the
+# retired-knob note below). The graded start helped only because taking smaller first steps
+# limits how much a too-narrow basis can cost.
 #
-# WITH THE DEFECT FIXED THERE IS NO BOOTSTRAP ERROR TO PAY: `kaug = true` gives dE = 1.4e-15 on
-# the FIRST step from the product state, against 1.561e-3 historically. So `warmup` buys nothing
-# and the default stays 1. The knob is kept because grading a start is occasionally useful on its
-# own terms, not because this benchmark needs it.
+# WITH THE DEFECT FIXED THERE IS NO BOOTSTRAP ERROR TO PAY: dE is 1.4e-15 on the FIRST step from
+# the product state, against 1.561e-3 historically. So `warmup` buys nothing and the default stays
+# 1. The knob is kept because grading a start is occasionally useful on its own terms, not because
+# this benchmark needs it.
 const WARMUP  = length(ARGS) >= 7 ? parse(Int, ARGS[7]) : 1
 WARMUP >= 1 || error("warmup must be >= 1, got $WARMUP")
 
@@ -158,31 +162,29 @@ WARMUP >= 1 || error("warmup must be >= 1, got $WARMUP")
 # `:U1` is refused for physics reasons -- see `_require_sx_measurable`.
 const SYM = length(ARGS) >= 8 ? Symbol(ARGS[8]) : :Z2
 
-# ── the basis-update fix ─────────────────────────────────────────────────────
+# ── the basis-update fix, now unconditional ──────────────────────────────────
 #
-# `kaug = true` UNIONS the CBE frame into `cbe_bug`'s half-sweep basis instead of letting the
-# basis update REPLACE it. Default TRUE here, because the historical behaviour is a defect and
-# plotting it as "CBE-BUG" misrepresents the method -- see `docs/USAGE.md` §6b.
+# THIS WAS THE `KAUG` KNOB AND IT NO LONGER EXISTS (retired 2026-08-24). The defect it worked
+# around was real: each half-sweep kept the CBE frame on the OPPOSITE side from the basis it was
+# building and dropped the one that becomes the state, so admitted directions never reached
+# `psi`. MEASURED at L=10, step 1: `n_new = [1,2,2,...,1]` either way, but `expanded` = [2,2,2,...]
+# with the union against [2,3,3,3,...] without -- one admitted direction per interior bond
+# discarded. The damage was ordered by the Hamiltonian's RANGE (dE 4.9e-7 nearest neighbour,
+# 1.5e-3 on HS and OAT), which is exactly why nearest-neighbour benchmarks never showed it.
 #
-# WHAT IT FIXES. The assembly writes `psi[i] = W[i]`, so the bases ARE the state, but each
-# half-sweep kept the CBE frame on the OPPOSITE side from the basis it was building and dropped
-# the one that becomes the state. MEASURED at L=10, step 1: `n_new = [1,2,2,2,2,2,2,2,1]` either
-# way, but `expanded` = [2,2,2,...] with the update and [2,3,3,3,...] without -- one admitted
-# direction per interior bond discarded. Same signature on Heisenberg and Haldane-Shastry, so
-# this is not an OAT pathology; the DAMAGE is ordered by the Hamiltonian's range (dE 4.9e-7 nn,
-# 1.5e-3 HS and OAT), which is why nearest-neighbour benchmarks never showed it.
+# The current sweep cannot express that defect: there is no basis update to overwrite the frame
+# with. The half-sweeps build the Krylov basis from the expanded frame itself, so both frames
+# always reach the state, and the arms that knob used to select are now the same computation.
 #
-# MEASURED EFFECT, infidelity against the exact state (L=10, maxdim=6, dt=0.05, 20 steps):
+# MEASURED then, infidelity against the exact state (L=10, maxdim=6, dt=0.05, 20 steps):
 #
-#     tdvp2 1.99e-06    tdvp_cbe1s 1.99e-06    historical 3.97e-05    kaug 3.27e-11
+#     tdvp2 1.99e-06    tdvp_cbe1s 1.99e-06    historical 3.97e-05    unioned 3.27e-11
 #
-# and `kaug` converges to chi = [2,3,4,5,6,5,4,3,2], which is EXACTLY `min(i, L-i)+1`, the exact
-# Schmidt rank at every bond -- the historical arm over-fills the interior to [2,3,6,6,6,6,6,3,2].
-# It adds NO `expv` calls; the union is two projections and two small SVDs per site.
+# and the unioned arm converged to chi = [2,3,4,5,6,5,4,3,2] = `min(i, L-i)+1`, the exact Schmidt
+# rank at every bond, where the historical arm over-filled the interior to [2,3,6,6,6,6,6,3,2].
 #
-# ⛔ DO NOT RANK THESE BY ENERGY DRIFT. `kstep = false` conserves energy to 7.4e-15 -- the best
-# of any arm -- and is 12x WORSE than tdvp2 on state infidelity. The orderings disagree.
-const KAUG = length(ARGS) >= 9 ? parse(Bool, ARGS[9]) : true
+# ⛔ DO NOT RANK ARMS BY ENERGY DRIFT. The basis-only arm conserved energy to 7.4e-15 -- the best
+# of any arm -- and was 12x WORSE than tdvp2 on state infidelity. The orderings disagree.
 
 # THE SCHEME SUBSET TAGS THE FILENAME. Without it, running the three schemes as three concurrent
 # processes -- which is the point of accepting a subset at all, and what makes a 15-arm campaign
@@ -193,10 +195,7 @@ const TAG = (length(ARGS) >= 4 && ARGS[4] != "all" ? "_" * replace(ARGS[4], "," 
             (length(ARGS) >= 5 ? "_D" * replace(ARGS[5], "," => "-") : "") *
             # `warmup` and the symmetry BOTH change the numbers, so both have to reach the
             # filename or two arms overwrite each other and the plot silently shows one of them.
-            (WARMUP > 1 ? "_w$(WARMUP)" : "") * "_$(SYM)" *
-            # `kaug` changes `cbe_bug`'s numbers by orders of magnitude, so a fixed run must not
-            # land on top of a historical one.
-            (KAUG ? "" : "_nokaug")
+            (WARMUP > 1 ? "_w$(WARMUP)" : "") * "_$(SYM)"
 const OUT = joinpath(HERE, "results",
                      @sprintf("oat_L%d_dt%.4f_T%.3f%s.csv", L, DT, TMAX, TAG))
 mkpath(dirname(OUT))
@@ -221,11 +220,10 @@ function stepper(scheme::String, mpo, maxdim::Int)
         return (p, tau) -> tdvp2_step!(p, mpo, tau; maxdim = maxdim, trunc_thresh = CUTOFF,
                                        maxiter = MAXITER)
     elseif scheme == "cbe_bug"
-        # ⛔ `rexpand = false` KEEPS `KAUG` MEANINGFUL. `rexpand` is now the default and overrides
-        # `kaug`; without pinning it off, every value of `KAUG` would run the same computation and
-        # this benchmark's union A/B would silently compare an arm with itself.
-        return (p, tau) -> cbe_bug_step!(p, mpo, tau; kaug = KAUG, rexpand = false,
-                                         maxdim = maxdim,
+        # Package defaults for everything the sweep is not being scanned on -- including
+        # `krylov_basis`/`krylov_tol`, which is the axis that actually moves OAT (2.13e-02 at one
+        # power of `H` against ~1e-14 at the defaults). Pin nothing here that a user would not.
+        return (p, tau) -> cbe_bug_step!(p, mpo, tau; maxdim = maxdim,
                                          trunc_thresh = CUTOFF, maxiter = MAXITER)
     end
     error("unknown scheme $scheme -- one of $(ALL_SCHEMES)")
@@ -289,9 +287,9 @@ function main()
                           "3 whatever L is -- the λ=1 self-loop")
     @printf("exact centre rank ceiling = %d  (min(n, L-n)+1)\n", min(n, L - n) + 1)
     @printf("schemes = %s   maxdims = %s\n", string(SCHEMES), string(MAXDIMS))
-    @printf("symmetry = %s%s   warmup = %d%s   kaug = %s\n", SYM,
+    @printf("symmetry = %s%s   warmup = %d%s\n", SYM,
             SYM === :Z2 ? " (the paper's own)" : " (dense control)", WARMUP,
-            WARMUP > 1 ? " sub-steps on step 1" : "", KAUG)
+            WARMUP > 1 ? " sub-steps on step 1" : "")
     # The Krylov depth is derived from ‖H‖·dt/2, not fixed -- print the bound so a run whose
     # accuracy is limited by the SOLVE rather than by the integrator is visible in its own log.
     @printf("krylov depth = %d   (arg %.3f, Lanczos bound %.1e -- must sit under the 1e-14 cutoff)\n",

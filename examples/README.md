@@ -64,49 +64,36 @@ integrator and nothing else.
 | `tdvp_cbe1s` | 1-site TDVP with controlled bond expansion (arXiv:2208.10972). Matches 2-site accuracy at 1-site cost. |
 | `cbe_bug` | RSVD-CBE + rank-adaptive BUG. `K`/`L` half-sweeps build the bases, one Galerkin step at the centre root. |
 
-`cbe_bug` has three scheme knobs. These scripts run it at its **defaults**, with the one
-simplification that the randomised sketch is switched off (`exact = true`, measured free — see
-below):
+These scripts run `cbe_bug` at its **defaults**, with the one simplification that the randomised
+sketch is switched off (`exact = true`, measured free — see below). The knob that governs its
+accuracy is the **depth of the Krylov basis** the half-sweeps build:
 
-- **`kstep`** (default `true`) — do the BUG basis update.
-- **`rexpand`** (default `true`, **what these scripts pass**) — expand every bond **twice per
-  half-sweep**, once as site `i`'s right bond and once as site `i+1`'s left bond, so every site is
-  evolved with both of its bonds widened. No basis is ever formed by merging two others. This is
-  the same ordering `tdvp_cbe1s` gets for free from its forward and backward passes.
-- **`kaug`** (default `true`) — the older mechanism for the same thing: UNION the basis update
-  with the CBE frame instead of letting it replace it. **`rexpand` overrides it**, so an A/B on
-  `kaug` must pass `rexpand = false` or it silently compares an arm with itself.
+- **`krylov_basis`** (default `30`) — the *cap* on how many orthonormal vectors of
+  `span{Θ, HΘ, H²Θ, …}` each half-sweep builds per bond, with full re-orthogonalisation.
+- **`krylov_tol`** (default `1e-6`) — the breakdown tolerance that ends the recursion early. In
+  practice the **cap** is what sets the depth on a generic `H`, not this.
 
-Both mechanisms exist because the half-sweep split is bounded by the evolve, so the frame comes
-out NARROWER than the CBE expansion that was just paid for — and that frame sets the next site's
-left bond. `rexpand` restores the width by expanding again; `kaug` by merging the frame back in.
+⛔ **Scan `krylov_basis` before anything else when accuracy disappoints, because every other knob
+will tell you nothing is wrong.** Depth is the only axis that changes which *directions* the step
+has; everything else changes how much *room* it has. Measured at L=12, `dt=0.05`:
 
-⛔ **Restoring the width is not optional — but which mechanism does it barely matters, and on one
-model neither matters at all.** Measured at these scripts' own settings
-(`benchmarks/example_defaults.jl`, L=16 `maxdim=64` for TFIM and XX; OAT L=10 at the exact
-ceiling, t=10π):
-
-| mechanism | TFIM `:Z2` | TFIM `:none` | XX `:U1` | OAT infidelity | OAT bond profile |
-|---|---|---|---|---|---|
-| **`rexpand = true`** (default) | **3.8455e-06** | 4.3036e-06 | 8.1911e-05 | **3.2748e-11** | `[2,3,5,5,6,5,4,3,2]` |
-| `kaug = true` | 4.2717e-06 | **4.0839e-06** | 8.1911e-05 | 3.2750e-11 | `[2,3,6,6,6,6,6,3,2]` |
-| neither | 1.9699e-01 | 1.9474e-01 | 8.0282e-05 | 3.9347e-05 | `[2,3,6,6,6,6,6,3,2]` |
+| model | one power of `H` (`krylov_basis = 0`) | depth 3 |
+|---|---|---|
+| XX `:U1` | 1.6948e-04 | 1.6948e-04 — bit-identical, extra vectors are pure cost |
+| Heisenberg | 8.8424e-05 | 2.6697e-06 |
+| OAT | 2.1329e-02 | 7.0610e-14 — **eight orders** |
 
 Read three things off it:
 
-1. **`rexpand` and `kaug` are at parity on accuracy** — within ~11%, and the direction flips
-   between symmetry modes. `rexpand` is the default for its *structure*, not for a win.
-2. **`neither` is catastrophic on TFIM and OAT and free on XX.** The run still exits 0 and still
-   writes its CSV, so on TFIM the failure is silent at five orders. **Never validate a
-   basis-mechanism change on XX** — it stays low-rank enough not to discriminate, and has now
-   failed to show three separate real effects.
-3. **The bond profile is not the sensitive diagnostic it was documented to be.** `kaug` and
-   `neither` have *identical* profiles with errors six orders apart. The profile separates
-   `rexpand` — which nearly tracks the exact `min(k, L−k)+1` = `[2,3,4,5,6,5,4,3,2]` — from the
-   two that sit pinned at the cap, and that is the one place `rexpand` is clearly ahead: equal
-   accuracy on a leaner state.
+1. **The two schemes are the same ORDER.** They agree to O(τ), so a `dt` scan cannot separate
+   them — the whole difference is a prefactor that only shows where `τ‖H_loc‖` is not small.
+2. **XX cannot discriminate, and never could.** It is bit-identical across the whole range and has
+   now failed to show four separate real effects. **Never validate a basis change on XX alone.**
+3. **The failure is silent.** At `krylov_basis = 0` an OAT run still exits 0, still writes its CSV,
+   still lands on the correct bond profile, and still conserves energy — it is simply eight orders
+   from the answer. Rank and energy drift both say it is fine.
 
-`docs/USAGE.md` §6b has the defect analysis behind both mechanisms.
+`docs/USAGE.md` §6b has the analysis behind this.
 
 The sweep is always interleaved (expand bond `i`, then immediately evolve site `i`) — the
 ordering of the reference implementation.

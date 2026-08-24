@@ -44,7 +44,7 @@ TMAX=31.416
 EVERY=4
 WARMUP=1             # obsolete since `kaug`; kept at 1 so nothing is graded away silently
 SYM=Z2               # the paper's own symmetry (global spin flip), not U(1)
-KAUG=true            # the union fix -- see USAGE.md 6b
+# (the KAUG slot is gone -- the union it selected is now the only behaviour, see oat_l10.jl)
 
 SCHEMES=(tdvp_cbe1s tdvp2 cbe_bug)
 
@@ -72,9 +72,9 @@ export JULIA_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export OMP_NUM_THREADS=1
 
-# Arg 10 (the Krylov depth) is deliberately OMITTED so the script derives it from ‖H_OAT‖·dt/2.
+# Arg 9 (the Krylov depth) is deliberately OMITTED so the script derives it from ‖H_OAT‖·dt/2.
 # ‖H‖ grows like L², so a depth fixed at the L = 10 value of 12 would quietly become the accuracy
 # limiter here (1e-10 at L = 16, 3e-08 at L = 20). Each task's log prints the depth it chose and
 # the resulting Lanczos bound -- check that line before trusting the arm.
 julia --project=. benchmarks/oat_l10.jl \
-  "$L" "$DT" "$TMAX" all "$MAXDIMS" "$EVERY" "$WARMUP" "$SYM" "$KAUG"
+  "$L" "$DT" "$TMAX" all "$MAXDIMS" "$EVERY" "$WARMUP" "$SYM"
