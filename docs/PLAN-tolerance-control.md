@@ -752,6 +752,44 @@ one-axis scan through this cube would have reproduced the same wrong conclusion 
 
 ## 7. Model ladder
 
+### ⛔ MEASURED (2026-08-25) — `benchmarks/model_ladder.jl`
+
+**Arm A: the standing red magnon test is NOT a Krylov-depth problem, and NOT a rank problem.**
+`tests/sweeps/test_physics.jl:153` has been failing on `cbe_bug` for the Haldane-Shastry magnon
+since before this work started. Scanned against depth for the first time (it could not be scanned
+before, because thresholding `β` never fired):
+
+| arm | max\|dSz\| | χ | krylov |
+|---|---|---|---|
+| `tdvp_cbe1s` (the bar) | **2.5994e-08** | 2 | — |
+| `cbe_bug` DEFAULTS | 4.2543e-03 | 2 | 706 |
+| `cbe_bug` `krylov_tol=0` (to cap) | 4.2543e-03 | 2 | 817 |
+| `cbe_bug` m=2 / 3 / 8 / 16 pinned | 4.2543e-03 | 2 | 424 / 609 / 817 / 817 |
+
+**Bit-identical to five significant figures from m=0 to m=16.** Depth is eliminated. So is rank:
+`tdvp_cbe1s` reaches 2.60e-08 at the SAME χ = 2. The one-magnon state is exactly representable at
+χ = 2, so both schemes represent it perfectly and one is five orders worse — **the defect is in
+the evolution, not in the basis or the rank.** Two suspects down; this is where the next
+investigation of that failure should start.
+
+**Arm B: SU(2) reproduces U(1), and the multiplet/state trap is real.**
+
+| symmetry | E(0) | E(T) | max χ | max states |
+|---|---|---|---|---|
+| `:U1` | −3.0000000000 | −3.0000000000 | 16 | 16 |
+| `:SU2` | −3.0000000000 | −3.0000000000 | **6** | 16 |
+
+Identical energies, both conserved exactly, from the `dimer_state` start (Néel is not
+SU(2)-representable). SU(2) carries the same 16 STATES in 6 MULTIPLETS — 2.7× fewer blocks. Read
+`max χ` alone and SU(2) looks like it lost information; that is the trap, and it is why any
+cross-symmetry rank claim must quote `state_bond_dims`.
+
+**Arm C: Haldane-Shastry conserves energy at every depth** — 3.29e-14 (defaults), 2.53e-14 (m=3),
+1.78e-14 (m=16), at L=12 to T=1.0. Consistent with Arm A. ⚠️ χ hit the cap of 64 here, so this is
+a CONSERVATION check and not an accuracy one — on this repo's models the two orderings disagree.
+
+---
+
 1. **Heisenberg `:U1`, L=20** — everything above.
 2. **Heisenberg `:SU2`** — `heisenberg_su2_mpo(20)`. Two traps: `maxdim` counts **multiplets**, so
    any cross-symmetry plot must index by `state_bond_dims`, never `maxdim`; and **Néel is not

@@ -39,6 +39,11 @@ mkpath(dirname(OUT))
 const IO_ = open(OUT, "w")
 say(l::AbstractString) = (println(IO_, l); flush(IO_); println(stdout, l); flush(stdout))
 
+# ⚠ `renorm!` IS NOT EXPORTED BY THE PACKAGE. Every caller defines its own copy
+# (`benchmarks/cbe_sweeps_l16.jl:159`, `tests/sweeps/test_physics.jl`), so a script that assumes
+# it is available fails with an UndefVarError on the first magnon step. Same definition here.
+renorm!(psi) = (psi[psi.center] = to_concrete((1.0 / norm(psi)) * psi[psi.center]); psi)
+
 # ── ARM A: does Krylov depth move the standing Haldane-Shastry magnon failure? ─────────────
 say("="^96)
 say("ARM A  Haldane-Shastry magnon, L=8, T=0.2  --  the STANDING RED TEST at 4.25e-03")
