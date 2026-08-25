@@ -796,8 +796,99 @@ a CONSERVATION check and not an accuracy one — on this repo's models the two o
    SU(2)-representable** (a definite-`Sz` product state spans many total-spin sectors), so this arm
    needs `dimer_state` + bond energies and a re-run of the U(1) arm on the same start to be
    comparable.
+### ✅ SU(2) CUBE MEASURED (2026-08-25) — `benchmarks/su2_knob_cube.jl`, L=12, dimer start
+
+The full three-knob cube re-run under `:SU2`, and again under `:U1` on the SAME dimer start so the
+two are the same physics. Bond-energy observable against an exact 924-state sector reference.
+
+| depth | τ_trunc | err SU(2) | err U(1) | states | mult SU(2) | mult U(1) | saving |
+|---|---|---|---|---|---|---|---|
+| m3 | 1e-06 | 4.4692e-07 | 4.4692e-07 | 11 | 5 | 11 | 2.20× |
+| m3 | 1e-08 | 4.4948e-07 | 4.4948e-07 | 16 | 6 | 16 | 2.67× |
+| m3 | 1e-10 | 4.4948e-07 | 4.4948e-07 | 26 | 9 | 26 | 2.89× |
+| mdef | 1e-08 | 4.4953e-07 | 4.4953e-07 | 16 | 6 | 16 | 2.67× |
+
+**Worst relative error difference between the two symmetry modes over all 64 cube points:
+9.3e-07, and the STATE counts agree EXACTLY at every point.** SU(2) is the same physics stored in
+2.2–2.9× fewer blocks. The knob hierarchy carries over unchanged: saturation at `τ_trunc = 1e-6`
+with `m3`/`mdef`, and tightening past it buys rank (states 11 → 26) for nothing.
+
+⚠️ **`krylov` DOES NOT SEE SU(2)'s BENEFIT.** Both modes report identical operator-application
+counts (660, 670) — the NUMBER of applications is the same and the TENSORS are smaller. The cost
+axis used everywhere else in this study is blind to exactly the saving SU(2) provides, the same
+way it was blind to the retired `rexpand`'s extra work. Any SU(2) speed claim needs wall clock
+from an isolated run; that is UNMEASURED.
+
+⚠️ **The observable had to change, and this is not a detail.** A dimer has `<S^z_j> = 0` on every
+site and SU(2)-symmetric evolution keeps it there, so the chain cube's Sz profile would have
+reported a flawless `0.000e+00` for every arm at every tolerance — a measurement that cannot fail.
+The bond-energy profile is built through `pair_mpo`, so it is literally the same operator in every
+symmetry mode.
+
 3. **Haldane-Shastry** — `haldane_shastry_mpo`, long-range, `O(L)` virtual dimension, and no exact
    real-time reference; graded on energy conservation and the `S(k,ω)` identities.
+
+---
+
+## 8. THE CYLINDER — where the scheme ranking REVERSES
+
+`benchmarks/su2_cylinder.jl`, Heisenberg on a square-lattice cylinder from a dimer start,
+bond-energy observable against an exact sector reference.
+
+### FULL RANK (4×3, 12 sites, maxdim 128 — nothing truncates)
+
+| scheme | err | krylov | sec |
+|---|---|---|---|
+| tdvp2 | **7.2309e-03** | 5287 | 80.4 |
+| tdvp_cbe1s | **7.2309e-03** | 4385 | 101.6 |
+| cbe_bug defaults | 1.0949e-02 | 552 | 14.2 |
+| cbe_bug m=3 | 1.0949e-02 | 394 | 4.2 |
+| cbe_bug m=0 | 1.1124e-02 | 123 | 2.6 |
+
+TDVP wins on accuracy by 1.51×; `cbe_bug` m=3 is **19× faster in wall clock** and 13× cheaper.
+`states = 64 = 2^(L/2)` is the FULL rank, so nothing truncated and the residual is pure
+time-integration error — the long-range leg and wrap bonds, on which a 2-site update is not exact.
+Depth spans only 1.6% across the whole m range while the gap to TDVP is 51%: **a plateau, not a
+trend.**
+
+### RANK-LIMITED (4×4, 16 sites, maxdim 48 — every arm pinned at the ceiling)
+
+| scheme | err | krylov | sec |
+|---|---|---|---|
+| tdvp2 | 4.3128e-02 | 7383 | 96.8 |
+| tdvp_cbe1s | 4.3128e-02 | 6313 | 131.2 |
+| **cbe_bug defaults** | **2.8095e-02** | **772** | **28.9** |
+| **cbe_bug m=3** | **2.8385e-02** | **490** | **15.6** |
+| cbe_bug m=0 | 3.6936e-02 | 123 | 6.8 |
+
+**THE RANKING FLIPS.** `cbe_bug` is 1.53× MORE accurate than both TDVPs at 9.6× fewer operator
+applications and 3.3× less wall clock. Even `m = 0` — one power of `H` — beats both TDVPs
+(3.69e-02 against 4.31e-02) at **60× fewer applications**.
+
+⛔ **SO "WHICH `m` IS NEEDED TO BE COMPETITIVE" HAS TWO OPPOSITE ANSWERS, AND THE REGIME DECIDES:**
+
+* **rank-limited: none.** `m = 0` already beats both TDVPs; depth then buys a further 1.3× for 4×
+  the cost. This is the regime 2D is actually run in, and the one a rank-adaptive BUG exists for.
+* **full rank: no `m` is enough.** The gap is in the scheme's COMPOSITION — one Galerkin solve at
+  the root against a per-bond sweep — and depth cannot reach it.
+
+⚠️ Any single-regime benchmark of these schemes is therefore misleading, and the earlier chain
+results were all taken at or near full rank.
+
+### ✅ AND THIS SETTLES POINTS 1, 2 AND 4
+
+`err_fnl` is **3.0e-16 / 3.1e-14 / 0.0 even when fully rank-starved** (`states = 48/48` on every
+arm). The CBE selection discards essentially nothing *even here*. The rank limit is enforced by
+the **closing** truncation, not by the selection — so tolerance-driving the selection (§2),
+expanding inside the recursion (§4), and the `_trim_total` ordering defect (§1) all have nothing
+to bite on in 2D either. **All three are null for a structural reason: the selection is never the
+lossy step.**
+
+⚠️ The first 4×3 run reported "the budget does not bind even in 2D" while sitting at FULL RANK,
+where `err_fnl = 0` only means "there was nothing to discard". `su2_cylinder.jl` now computes the
+binding ceiling `min(2^(L/2), maxdim)` and prints **"inconclusive — not rank-starved"** rather
+than a verdict when the arms did not reach it. That is this repo's own §6 rule — a knob is inert
+only if the run is rank-starved — applied to the benchmark itself.
 
 ---
 

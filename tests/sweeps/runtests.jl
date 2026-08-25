@@ -55,6 +55,11 @@ include(joinpath(@__DIR__, "..", "common", "free_fermion.jl"))
     #    a leg joining the wrong pair all give a well-formed Hamiltonian that is simply not the
     #    intended one -- and the run then converges happily to the wrong answer.
     include("test_square_cylinder.jl")
+    # 3d kagome, and it needs the same treatment for a sharper reason: the model is FRUSTRATED,
+    #    so "featureless with near-uniform bonds" is both the expected physics AND what a subtly
+    #    wrong bond list produces. Counts are derived by hand in that file, never read back from
+    #    the constructor.
+    include("test_kagome.jl")
     include("test_symmetry_parity.jl")
     include("test_physics.jl")
     # 6  one-axis twisting     the arXiv:2208.10972 Fig. 2 benchmark, at L = 10. LAST because it

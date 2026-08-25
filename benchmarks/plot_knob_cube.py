@@ -40,6 +40,9 @@ from matplotlib.colors import LogNorm
 HERE = os.path.dirname(os.path.abspath(__file__))
 RES = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "results")
 L = sys.argv[2] if len(sys.argv) > 2 else "16"
+# Optional CSV prefix: "" for the chain cubes (heis_grid_*), "su2"/"u1" for the
+# dimer-start cubes (heis_gridsu2_*), which must never be pooled with the chain ones.
+PRE = sys.argv[3] if len(sys.argv) > 3 else ""
 
 # The depth each sweep name pins. `mdef` is the package default (cap 30 + tol 1e-6) and is
 # deliberately NOT called "m=30": the tolerance usually stops it well short of the cap.
@@ -70,7 +73,7 @@ def cube(tag=""):
     when several runs of them exist -- to the newest `dt`/`T` among them.
     """
     found = {}
-    for p in sorted(glob.glob(os.path.join(RES, f"heis_grid_*_L{L}_*.csv"))):
+    for p in sorted(glob.glob(os.path.join(RES, f"heis_grid{PRE}_*_L{L}_*.csv"))):
         base = os.path.basename(p)
         parts = base[: -len(".csv")].split("_")      # heis grid <sweep> L<L> dt<dt> T<T>
         sweep = parts[2]
@@ -182,9 +185,9 @@ def gradients(data):
     ax.set_ylabel("error spread along the axis  (max / min)")
     ax.set_title(f"Which knob moves the error?  Heisenberg L={L}", fontsize=11)
     ax.legend(fontsize=8)
-    fig.savefig(os.path.join(RES, f"knob_gradients_L{L}.png"), dpi=150, bbox_inches="tight")
+    fig.savefig(os.path.join(RES, f"knob_gradients_L{L}{PRE}.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"wrote knob_gradients_L{L}.png")
+    print(f"wrote knob_gradients_L{L}{PRE}.png")
 
 
 def pareto(data):
@@ -210,23 +213,23 @@ def pareto(data):
     ax.set_title(f"Cost of accuracy across the whole cube -- Heisenberg L={L}", fontsize=11)
     ax.grid(alpha=0.25, which="both", lw=0.5)
     ax.legend(fontsize=8)
-    fig.savefig(os.path.join(RES, f"knob_pareto_L{L}.png"), dpi=150, bbox_inches="tight")
+    fig.savefig(os.path.join(RES, f"knob_pareto_L{L}{PRE}.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"wrote knob_pareto_L{L}.png")
+    print(f"wrote knob_pareto_L{L}{PRE}.png")
 
 
 def main():
     data = cube()
     if not data:
-        print(f"no heis_grid_*_L{L}_*.csv in {RES}")
+        print(f"no heis_grid{PRE}_*_L{L}_*.csv in {RES}")
         return 1
     print("sweeps found:", ", ".join(sorted(data)))
     panel(data, "err_prof", f"Error vs the two truncations, per Krylov depth -- Heisenberg L={L}",
-          f"knob_cube_err_L{L}.png")
+          f"knob_cube_err_L{L}{PRE}.png")
     panel(data, "maxbond", f"Bond dimension -- the price paid -- Heisenberg L={L}",
-          f"knob_cube_chi_L{L}.png", log=False, fmt="{:.0f}")
+          f"knob_cube_chi_L{L}{PRE}.png", log=False, fmt="{:.0f}")
     panel(data, "krylov", f"Operator applications -- Heisenberg L={L}",
-          f"knob_cube_cost_L{L}.png", log=True, fmt="{:.0f}")
+          f"knob_cube_cost_L{L}{PRE}.png", log=True, fmt="{:.0f}")
     gradients(data)
     pareto(data)
     return 0

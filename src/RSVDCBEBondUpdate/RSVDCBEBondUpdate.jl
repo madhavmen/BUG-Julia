@@ -137,6 +137,13 @@ include("models/haldane_shastry.jl")
 #                            ordering is the whole content -- see the file's header for why the
 #                            SHORT direction is the one that wraps.
 include("models/square_cylinder.jl")
+# models/kagome.jl           the KAGOME cylinder -- corner-sharing triangles, coordination 4, and
+#                            the frustrated lattice whose Heisenberg antiferromagnet is a
+#                            spin-liquid candidate. Coupling matrix only, like the square one.
+include("models/kagome.jl")
+# models/breathing_kagome.jl the DIPOLAR XY model of arXiv:2603.21147 -- breathing kagome, 1/R^3
+#                            tail, U(1) only (the XY model has no SU(2) symmetry).
+include("models/breathing_kagome.jl")
 include("models/oat.jl")
 include("models/tfim.jl")
 
@@ -233,6 +240,8 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        spin_vertices,
        haldane_shastry_couplings, haldane_shastry_mpo,
        square_cylinder_couplings, square_cylinder_mpo, square_cylinder_bonds,
+       kagome_cylinder_couplings, kagome_cylinder_mpo, kagome_bonds, kagome_triangles,
+       breathing_kagome_positions, breathing_kagome_couplings, breathing_kagome_mpo,
        heisenberg_chain_mpo, heisenberg_ring_couplings, heisenberg_ring_mpo,
        # models/oat.jl -- one-axis twisting (arXiv:2208.10972 Fig. 2). `x_polarized_state`,
        # `sx_operator`, `sx_profile` and `total_sx` are :none-only BY PHYSICS: S^x is

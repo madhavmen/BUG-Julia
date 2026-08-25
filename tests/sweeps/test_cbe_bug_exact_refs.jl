@@ -176,6 +176,10 @@ end
     # BEHAVIOURAL: deeper `m` must put MORE into the frame. If a cutoff ran per iteration the
     # extra Krylov directions would be discarded before the caller ever saw them, and the
     # pre-truncation bond dimension would stop responding to `m`.
+    # ⚠ `L` IS LOCAL TO THE OTHER TESTSET IN THIS FILE. This one sits outside it and needs its
+    # own: the omission passed a standalone run and only surfaced under the full suite, where the
+    # BEHAVIOURAL half died with `UndefVarError: L` while the structural half still reported pass.
+    L = 12
     set_symmetry!(:U1)
     mpo, psi0 = xxz_mpo(L; J = 1.0, delta = 1.0), neel_state(L)
     widths = map((0, 2, 4)) do m
