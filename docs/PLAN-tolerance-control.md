@@ -69,6 +69,36 @@ later phase runs at that τ_trunc.
 
 ---
 
+### ✅ ANSWERED (2026-08-24, L=12) — and the flat region is NOT dt-limited
+
+The knee is real, but **the prediction above about what lies below it is wrong**, and that matters
+more than the knee's position. Below the knee the error is **Krylov-depth-limited**, not
+`dt`-limited. Two measurements, which meet exactly:
+
+| | held fixed | scanned | result |
+|---|---|---|---|
+| `tolerance_driven_selection.jl` | `krylov_tol = 1e-6` (default) | `τ_trunc` 1e-4 → 1e-10 | error **flat at 1.4748e-06** for `τ_trunc ≤ 1e-8`, while χ climbs 11 → 24 → 37 |
+| `krylov_stopping.jl` | `trunc_thresh = 1e-12` (deep in the flat region) | `krylov_tol` | error **moves**: 2.4032e-06 → 1.4748e-06 → 1.0800e-06 |
+
+**The two tables agree to five digits and to the operator count.** `tolerance_driven_selection`'s
+`τ_trunc = 1e-10` row is `1.4748e-06 @ 1622 krylov`; `krylov_stopping`'s Heisenberg
+`tol 1e-6` row is `1.4748e-06 @ 1622 krylov`. Same number, same cost — so at `τ_trunc ≤ 1e-8` the
+run is **entirely** Krylov-limited and truncation contributes nothing at all.
+
+So the answer to *"why does the error not depend on the truncation threshold?"* is:
+
+1. Above `τ_trunc ≈ 1e-5` it does — that region is truncation-limited and behaves as expected.
+2. Below it the error is pinned by the **depth of the half-sweep Krylov basis**, a knob that was
+   not in the original list of suspects and was until now **inert** (thresholding `β` never fired,
+   §5). Tightening `τ_trunc` there buys 3.4× the rank (χ 11 → 37) for **zero** accuracy.
+3. The floor is therefore moved by `krylov_tol`, not by `τ_trunc`, `growth`, `dex` or `maxdim`.
+
+⚠️ **This makes `τ_trunc = dt × 10⁻²` a rule for the wrong knob in the flat region.** The
+recommendation's *direction* is right where truncation binds; it simply has no purchase below the
+knee, because nothing in the truncation path is what limits the answer there.
+
+---
+
 ## What the code already does — three of the seven points are partly done
 
 Worth stating up front, because it changes the size of the work.
@@ -177,6 +207,48 @@ all errors are governed by `τ_trunc` throughout".
 > **Plot 2b** — `err_fnl`, `err_pre` and `discarded` per step vs `t`, **with the `τ_trunc` line
 > drawn on the axes**. Everything must sit under the line; anything above it names the component
 > that is not yet tolerance-governed.
+
+---
+
+### ⛔ MEASURED (2026-08-24, Heisenberg L=12) — THE PREMISE OF THIS POINT DOES NOT HOLD HERE
+
+| rule | τ_trunc | err | χ | krylov | err_pre | err_fnl |
+|---|---|---|---|---|---|---|
+| budget | 1e-4 | 4.0632e-05 | 7 | 1546 | 1.458e-16 | **0.000e+00** |
+| TOLERANCE | 1e-4 | 4.0632e-05 | 7 | 1544 | 1.038e-04 | 9.297e-05 |
+| budget | 1e-6 | 1.4595e-06 | 11 | 1584 | 4.882e-11 | **3.186e-14** |
+| TOLERANCE | 1e-6 | 1.4595e-06 | 11 | 1580 | 1.702e-06 | 2.878e-07 |
+| budget | 1e-10 | 1.4748e-06 | 37 | 1622 | 1.669e-10 | **3.469e-14** |
+| TOLERANCE | 1e-10 | 1.4748e-06 | 37 | 1622 | 1.669e-10 | 6.858e-11 |
+
+**The two rules give the SAME error, the SAME χ and the same cost to within 0.3%, at every
+tolerance.** And the reason is in the `err_fnl` column: under the budget rule it is **0.000e+00**
+at `τ_trunc = 1e-4` and ~1e-14 elsewhere. *The final selection is discarding nothing.* At
+`growth = 2.0` the count is never the binding constraint on this model, so making the selection
+tolerance-driven has nothing to bite on.
+
+⚠️ **The `_trim_total` ordering defect is therefore LATENT, not live** — it can only mis-select
+when the count binds, and here it does not. It stays documented (`tolerance_driven_selection.jl`
+header) as a trap to fix before anything raises `growth` pressure or lowers `dex`, not as the
+cause of anything currently measured.
+
+**Where the tolerance rule DOES change things** is that it makes `err_pre` / `err_fnl` track
+`τ_trunc` as Jan asked (1.038e-04 at 1e-4 down to 6.858e-11 at 1e-10) instead of sitting at a
+hardcoded floor. That is worth having for *diagnosis* — those columns now mean what the plan says
+they mean — but it does not move the answer.
+
+### ✅ POINT 3 ANSWERED AT THE SAME TIME: the sketch is free
+
+| τ_trunc | full SVD (`exact = true`) | rSVD (`exact = false`) | ratio |
+|---|---|---|---|
+| 1e-6 | 1.4595e-06 (χ 11) | 1.4595e-06 (χ 11) | **1.000** |
+| 1e-10 | 1.4748e-06 (χ 37) | 1.4748e-06 (χ 37) | **1.000** |
+
+Identical error and identical rank. Jan's "use full SVD first to eliminate one source of
+uncertainty" is satisfied trivially on this model: **there is no uncertainty to eliminate.** The
+randomised sketch can stay on, and the plan's phase-6 "re-introduce rSVD" step is a no-op here.
+(This is a Heisenberg L=12 statement; it is exactly the kind of claim to re-check at L=20 and
+under SU(2), where sector dimensions change what the sketch is sampling.)
 
 ---
 
