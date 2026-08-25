@@ -300,6 +300,44 @@ Jan's bookkeeping maps onto the existing structure as follows, and one part need
   frame grows *inside* the Krylov loop, that push and the `one_site_h` build must happen per
   growth pass. That is also where the cost is, so Plot 4c is the one that decides this.
 
+### ⛔ MEASURED (2026-08-25, L=12) — IMPLEMENTED, CORRECT, AND IT BUYS NOTHING
+
+`krylov_grow = true` on `cbe_bug_step!`. Ten steps, dt=0.05, against exact references:
+
+| model | m | grow=false | grow=true | χ (false / true) | widenings |
+|---|---|---|---|---|---|
+| XX | 3 | 5.0060e-05 | 5.0060e-05 | 10 / 10 | 96 |
+| Heisenberg | 3 | 4.5282e-07 | 4.5282e-07 | 35 / 35 | 166 |
+| OAT | 3 | 3.7303e-14 | 1.1546e-14 | 7 / 7 | 133 |
+
+**Bit-identical error, identical final rank.** OAT's difference is roundoff against roundoff —
+both arms are at machine precision. The frame demonstrably DOES widen (`n_grow` counts actual
+widenings, not calls), and the answer does not move.
+
+**WHY, and it is the same root cause as §2's null result.** At `growth = 2.0` the first
+`cbe_expand` on a bond already discards nothing — measured there as `err_fnl = 0.000e+00`. The
+selection is not budget-limited, so the initial frame already spans every direction that carries
+weight, and a second expansion can only admit directions with none. Whatever extra width the
+growth passes add mid-recursion is then removed again by the frame split and the closing
+truncation, which is why the final χ is unchanged to the integer.
+
+**Two implementation traps found on the way, both worth keeping:**
+
+1. `_frame_from` **cannot be used on the already-expanded bond.** It factorises both sides and
+   joins them through `res_l.S * res_l.Vd`; the Krylov vector's bond leg was produced against
+   `V_ex'` and carries the conjugate arrow, so `S` comes back 0-dimensional and the product has
+   nothing to contract. One side is already an isometry, so the core is a single overlap and the
+   `BondFrame` can be built from parts — less work, not more.
+2. **The budget collapses on the second pass.** `budget = ceil(growth·dmax) − r`, and the first
+   expansion already took the bond to `growth·dmax`. Before this was fixed, 178–238 expansion
+   passes per run changed the error by *nothing* — a no-op that a call-counter reported as work.
+   Each pass now gets its own `dex`, set to what the first expansion admitted on that bond.
+
+⚠️ **The null result is only established where the selection is not budget-limited.** If a future
+configuration raises growth pressure or lowers `dex` far enough that `err_fnl` becomes non-zero,
+§4 becomes worth re-testing — that is the regime it was designed for, and this measurement does
+not cover it.
+
 > **Plot 4a** — `err` vs `grow_iters ∈ {0,1,2,3,4,…}` at fixed `τ_trunc`.
 > **Plot 4b** — `χ` per Lanczos step within one bond update, showing the geometric growth
 > `D, growth·D, growth²·D, …` the docstring predicts, and where `room` stops it.

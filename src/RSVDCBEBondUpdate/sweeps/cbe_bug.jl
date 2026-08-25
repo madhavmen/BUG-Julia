@@ -125,6 +125,12 @@ struct CBEBugSweepInfo
     discarded::Float64
     krylov_dims::Int
     peak_elements::Int
+    # ⛔ EXTRA `cbe_expand` PASSES (Jan's point 4), AND IT IS HERE BECAUSE `krylov_dims` CANNOT
+    # SEE THEM. `krylov_dims` counts `apply_one_site` calls; a growth pass is a `cbe_expand`,
+    # whose operator work happens inside `sketch_h_*` and is NOT counted there. Reporting a
+    # growing sweep on `krylov_dims` alone would show its accuracy and hide its cost -- the same
+    # blindness that made the retired `rexpand` look free. Zero when `krylov_grow = false`.
+    n_grow::Int
 end
 
 """
@@ -230,6 +236,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        root::Union{Nothing, Int} = nothing,
                        krylov_basis::Int = 30,
                        krylov_tol::Float64 = 1e-6,
+                       krylov_grow::Bool = false,
                        split_cutoff::Float64 = 1e-14,
                        split_maxdim::Int = 0,
                        truncate::Bool = true,
@@ -270,6 +277,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     n_new    = zeros(Int, L - 1)
     epre = 0.0; efnl = 0.0; peak = 0
     nmv = Ref(0)
+    ngrow = Ref(0)
 
     # `rmax` read ONCE, globally, before anything widens.
     # `stol_pre` / `stol_fnl` are THREADED THROUGH rather than left to `cbe_expand`'s defaults.
@@ -287,6 +295,119 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         efnl = max(efnl, ex.err_fnl)
         n_new[i] = side === :left ? ex.n_new_l : ex.n_new_r
         return ex
+    end
+
+    """
+        _grow_frame(v0, Vopp, side, i, lch, rch) -> (blocks, Vopp_final)
+
+    Jan's point 4: RE-EXPAND THE BOND BETWEEN LANCZOS STEPS instead of once per bond.
+
+    The fixed-width builder [`_krylov_frame`](@ref) widens the bond once, builds `H1` against that
+    frame and runs the whole recursion inside it -- so any part of `H^k*Theta` lying outside the
+    initial expansion is projected away at every step. Here the OPPOSITE frame is re-expanded
+    after each accepted vector, the environment and `H1` are rebuilt against it, and the vectors
+    already accumulated are EMBEDDED into the widened space rather than recomputed.
+
+    ⛔ THE EMBEDDING IS AN OVERLAP, NOT AN ASSUMPTION. `cbe_expand` returns
+    `V_ex = oplus([V0, TRC])` where `V0` is its own factorisation of what was handed in, which
+    need not be the tensor that went in -- the orthonormality guard may rotate within the appended
+    span. Computing `PR` as the true overlap `<V_old, V_new>` is correct under that rotation;
+    assuming `[I 0]` is not. (Same reasoning as `_expanding_krylov`'s `embed_ops`.)
+
+    ⛔ ACCUMULATE, NEVER RE-RANK. Jan's bookkeeping is "new kept = old kept PLUS expanded", and
+    that word is load-bearing: `cbe_lubich_sweep`'s `grow_iters` re-runs the CBE SELECTION each
+    pass, which re-truncates by budget and discards exactly what the next application of `H`
+    needs -- MEASURED on OAT it bought 1.8x and then went flat. Nothing here touches the vectors
+    already accepted; the space only ever grows.
+
+    ⚠ COST DOES NOT APPEAR IN `krylov_dims`. Each pass is a `cbe_expand`, whose operator work is
+    inside `sketch_h_*`. `ngrow` counts the passes for exactly this reason -- see the note on
+    `CBEBugSweepInfo.n_grow`.
+    """
+    function _grow_frame(v0, Vopp, side::Symbol, i::Int, lch, rch, dex_pass::Int)
+        # ⚠ THE TWO SIDES ARE NOT MIRROR IMAGES IN LEG INDEX, and getting this backwards is silent:
+        # the shapes still contract, they just contract the wrong leg.
+        #   :left   opposite frame is `V_ex = (g, site, link)`  -> its bond leg is 1
+        #           the Krylov vectors are `(link, site, g)`    -> their bond leg is 3
+        #   :right  opposite frame is `U_ex = (link, site, g)`  -> its bond leg is 3
+        #           the Krylov vectors are `(g, site, link)`    -> their bond leg is 1
+        leg = side === :left ? 1 : 3                  # the OPPOSITE frame's bond leg
+        b0 = norm(v0)
+        b0 <= 0 && return (Any[v0], Vopp)
+        V  = Vopp
+        vs = Any[to_concrete((1.0 / b0) * v0)]
+        alpha, betas = Float64[], Float64[]
+        for k in 1:krylov_basis
+            H1 = side === :left ?
+                 one_site_h(mpo, i, lch, push_right_channels(rch, mpo, V, i + 1)) :
+                 one_site_h(mpo, i + 1, push_left_channels(lch, mpo, V, i), rch)
+            nmv[] += 1
+            w = apply_one_site(H1, vs[end])
+            push!(alpha, real(tensor_inner(vs[end], w)))
+            for _pass in 1:2, u in vs
+                w = to_concrete(w - tensor_inner(u, w) * u)
+            end
+            b = norm(w)
+            b <= _KRY_BREAKDOWN && break
+            push!(betas, b)
+            push!(vs, to_concrete((1.0 / b) * w))
+            ktol > 0 && _kry_contribution(alpha, betas, tau) < ktol && break
+            k == krylov_basis && break
+
+            # ── expand against the NEWEST direction, then embed everything into the result ──
+            #
+            # ⛔ NOT `_frame_from`. That helper factorises BOTH sides and joins them through
+            # `res_l.S * res_l.Vd`, which needs the two bond legs to meet as an ordinary pair. On
+            # the ALREADY-EXPANDED bond they do not: the Krylov vector's bond leg was produced by
+            # contracting against `V_ex'`, so `S` comes back 0-dimensional and that product has
+            # nothing to contract (`AssertionError: No matching contractible indices`).
+            #
+            # It is also unnecessary work. One side here is ALREADY an isometry -- it is the
+            # opposite CBE frame -- so only the other side needs factorising, and the core is then
+            # a single overlap rather than a product of four SVD outputs.
+            fr = if side === :left
+                res = svd(vs[end], (1, 2), "bU,L", "bU,R"; cutoff = 0.0)
+                U0  = to_concrete(res.U)
+                S0  = to_concrete(contract(U0', (1, 2), vs[end], (1, 2)))      # (bU, g)
+                BondFrame(U0, S0, V,
+                          vs[end].inds[1], vs[end].inds[2], vs[end].inds[3],
+                          V.inds[2], V.inds[3],
+                          leg_dim(U0, 3), copy(vs[end].spaces[3]))
+            else
+                res = svd(vs[end], (1,), "bV,L", "bV,R"; cutoff = 0.0)
+                V0  = to_concrete(res.Vd)
+                S0  = to_concrete(contract(vs[end], (2, 3), V0', (2, 3)))      # (g, bV)
+                BondFrame(V, S0, V0,
+                          V.inds[1], V.inds[2], V.inds[3],
+                          vs[end].inds[2], vs[end].inds[3],
+                          leg_dim(V, 3), copy(V.spaces[3]))
+            end
+            # ⛔ AN EXPLICIT `dex` PER PASS, OR THIS WHOLE BRANCH IS A NO-OP. `cbe_expand`'s
+            # default budget is `ceil(growth*dmax) - r`, and the FIRST expansion already took the
+            # bond to `growth*dmax` -- so on every later pass `r` has grown, the budget collapses
+            # to zero, and the call returns the frame it was given. MEASURED before this line
+            # existed: 178-238 expansion passes per run that changed the error by NOTHING (XX,
+            # Heisenberg and OAT all bit-identical to `grow = false`). Each pass gets its own
+            # allowance instead, so "old kept PLUS expanded" can actually add something.
+            exk = cbe_expand(fr, mpo, i, lch, rch; exkw..., dex = dex_pass)
+            Vn = side === :left ? exk.V_ex : exk.U_ex
+            # `ngrow` counts ACTUAL WIDENINGS, not calls. Counting calls made a no-op look like
+            # work and let the smoke test's "did it grow?" gate pass on a branch that grew nothing.
+            if leg_dim(Vn, leg) > leg_dim(V, leg)
+                ngrow[] += 1
+                P = side === :left ?
+                    to_concrete(contract(V, (2, 3), Vn', (2, 3))) :      # (old_g, new_g)
+                    to_concrete(contract(Vn', (1, 2), V, (1, 2)))       # (new_g, old_g)
+                for t in eachindex(vs)
+                    vs[t] = side === :left ?
+                            to_concrete(contract(vs[t], (3,), P, (1,))) :
+                            to_concrete(contract(P, (2,), vs[t], (1,)))
+                end
+                V = Vn
+            end
+        end
+        vs[1] = to_concrete(b0 * vs[1])
+        return (vs, V)
     end
 
     _frames_stored() = sum(sum(tensor_elements(v[k]) for k in eachindex(v)
@@ -364,10 +485,21 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             # itself. `Kex` is left unnormalised so it keeps the state's own scale.
             M   = to_concrete(contract(psi[i + 1], (2, 3), ex.V_ex', (2, 3)))
             Kex = to_concrete(contract(K, (3,), M, (1,)))
-            rch1 = push_right_channels(right_channels(rstack, i + 2), mpo, ex.V_ex, i + 1)
-            H1 = one_site_h(mpo, i, lch, rch1)
-            blocks = _krylov_frame(Kex, x -> (nmv[] += 1; apply_one_site(H1, x)),
-                                   krylov_basis, ktol, tau)
+            blocks = if krylov_grow
+                # PER-PASS BUDGET = what the FIRST expansion admitted on this bond. Keeping the
+                # increment constant makes the space grow linearly in the Lanczos step, which is
+                # what "old kept plus expanded" asks for; reusing `growth` would re-derive a
+                # budget from the rank that expansion just raised, i.e. zero.
+                bl, Vfin = _grow_frame(Kex, ex.V_ex, :left, i, lch,
+                                       right_channels(rstack, i + 2), max(ex.n_new_r, 1))
+                Vwide[i] = Vfin          # accounting must see the width the growth reached
+                bl
+            else
+                rch1 = push_right_channels(right_channels(rstack, i + 2), mpo, ex.V_ex, i + 1)
+                H1 = one_site_h(mpo, i, lch, rch1)
+                _krylov_frame(Kex, x -> (nmv[] += 1; apply_one_site(H1, x)),
+                              krylov_basis, ktol, tau)
+            end
             peak!(blocks...)
             stacked = length(blocks) == 1 ? blocks[1] : to_concrete(oplus(blocks, (3,)))
             W[i] = to_concrete(setitag(_splitU(stacked), 3, _tagW(i)))
@@ -405,10 +537,17 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             # Row mirror of the K half-sweep's Krylov basis; see the comment there.
             M   = to_concrete(contract(ex.U_ex', (1, 2), psi[j], (1, 2)))     # (b_L, link_j)
             Bex = to_concrete(contract(M, (2,), B, (1,)))
-            lch1 = push_left_channels(left_channels(lstack, j), mpo, ex.U_ex, j)
-            H1 = one_site_h(mpo, j + 1, lch1, rch)
-            blocks = _krylov_frame(Bex, x -> (nmv[] += 1; apply_one_site(H1, x)),
-                                   krylov_basis, ktol, tau)
+            blocks = if krylov_grow
+                bl, Ufin = _grow_frame(Bex, ex.U_ex, :right, j,
+                                       left_channels(lstack, j), rch, max(ex.n_new_l, 1))
+                Uwide[j] = Ufin
+                bl
+            else
+                lch1 = push_left_channels(left_channels(lstack, j), mpo, ex.U_ex, j)
+                H1 = one_site_h(mpo, j + 1, lch1, rch)
+                _krylov_frame(Bex, x -> (nmv[] += 1; apply_one_site(H1, x)),
+                              krylov_basis, ktol, tau)
+            end
             peak!(blocks...)
             stacked = length(blocks) == 1 ? blocks[1] : to_concrete(oplus(blocks, (1,)))
             Z[j] = to_concrete(setitag(_splitV(stacked), 1, _tagZ(j)))
@@ -480,7 +619,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     end
 
     return CBEBugSweepInfo(expanded, n_new, c, root_rank, epre, efnl,
-                           discarded, nmv[], peak)
+                           discarded, nmv[], peak, ngrow[])
 end
 
 cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::Number; kwargs...) =
