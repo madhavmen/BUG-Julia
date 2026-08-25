@@ -671,6 +671,85 @@ dt scan on sweep 1 alone, which is cheap given its cost.
 
 ---
 
+## 6d. THE THREE-KNOB CUBE — how the knobs actually interact
+
+`split_cutoff` (half-sweep) × `trunc_thresh` (root-out) × `krylov_basis` (`m`), Néel quench,
+dt=0.05, T=0.5, `maxdim = 64`. `benchmarks/heisenberg_tolerance.jl phase=grid`, plotted by
+`benchmarks/plot_knob_cube.py`.
+
+| L | depth | best err | χ | krylov | x-spread (half-sweep) | y-spread (root-out) |
+|---|---|---|---|---|---|---|
+| 12 | m0 | 4.293e-05 | 29 | 112 | **1.0** | 3.4 |
+| 12 | m2 | 3.171e-06 | 13 | 360 | 6.6 | 5.2 |
+| 12 | m3 | 4.511e-07 | 15 | 478 | 8.1 | 16.8 |
+| 12 | mdef | 2.632e-07 | **8** | 744 | 8.2 | 28.5 |
+| 16 | m0 | 7.018e-05 | 31 | 112 | **1.0** | 9.8 |
+| 16 | m2 | 3.900e-06 | 18 | 440 | 11.1 | 8.9 |
+| 16 | m3 | 4.955e-07 | **8** | 598 | 16.0 | 15.3 |
+| 16 | mdef | 4.780e-07 | 9 | 994 | 6.7 | 6.7 |
+
+*(spread = worst max/min ratio of the error along that axis; 1.0 means the knob changed nothing)*
+
+### ⛔ THE KNOBS ARE NOT INDEPENDENT: `m` GATES WHETHER `split_cutoff` EXISTS
+
+At `m = 0` the half-sweep cutoff is **exactly inert** — spread `1.0`, i.e. bit-identical error and
+bit-identical χ across four decades, at BOTH sizes:
+
+```
+L=16, m0:  split_cutoff →   1e-4       1e-6       1e-8       1e-10
+  root 1e-4              6.872e-04  6.872e-04  6.872e-04  6.872e-04    χ = 6, 6, 6, 6
+  root 1e-8              7.019e-05  7.019e-05  7.019e-05  7.019e-05    χ = 22 ×4
+```
+
+**The mechanism is structural, not numerical.** At `m = 0` the half-sweep frame is a SINGLE CBE
+block, so `_splitU` has nothing to discard — the knob is attached to nothing. At `m ≥ 2` the frame
+is a STACK of `m+1` Krylov blocks and `split_cutoff` is what truncates that stack. Depth is what
+creates the structure the knob cuts, which is why BOTH truncation spreads grow monotonically with
+`m` (1.0 → 6.6 → 8.1 → 8.2 at L=12; 1.0 → 11.1 → 16.0 at L=16).
+
+### The hierarchy, and what it means for quoting a tolerance
+
+1. **`m` sets the floor.** 163× better error at L=12 (4.29e-05 → 2.63e-07) and 141× at L=16,
+   while *reducing* χ from 29 → 8 and 31 → 8. Depth buys accuracy AND rank, for ~6× the operator
+   applications.
+2. **`trunc_thresh` governs until it saturates, and the knee MOVES WITH `m`.** At `m = 0` it
+   flattens past 1e-8 (χ 22 → 31 for nothing); at `m = 3` it has already flattened at 1e-6.
+   **Quoting a `τ_trunc` without quoting `m` is meaningless** — the knee is not a property of the
+   model alone.
+3. **`split_cutoff` matters only at `m ≥ 2`**, and then it is worth up to 16×.
+
+### ⚠️ AND THEY ARE NOT REDUNDANT — a loose half-sweep makes the root-out knob HARMFUL
+
+The L=16 `mdef` panel is the one place the cube is genuinely two-dimensional:
+
+```
+L=16 mdef:  split →     1e-4        1e-6        1e-8       1e-10
+  root 1e-6         1.193e-06   4.788e-07   4.780e-07   4.780e-07    χ = 21,  9,  9,  9
+  root 1e-8         2.774e-06   4.791e-07   4.791e-07   4.791e-07    χ = 30, 26, 18, 18
+  root 1e-10        3.183e-06   4.793e-07   4.791e-07   4.791e-07    χ = 36, 39, 41, 27
+```
+
+Down the LOOSE `split = 1e-4` column, tightening the root-out threshold makes the error **worse**
+— 1.193e-06 → 2.774e-06 → 3.183e-06 — while χ climbs 21 → 36. More rank, worse answer. Along
+every tighter column the same scan is flat. So "the looser of the two sets the accuracy" is
+**false** here: a half-sweep cutoff that is too loose leaves junk directions in the frame, and a
+tighter closing pass then keeps more of them rather than fewer.
+
+**Practical consequence:** tighten the half-sweep FIRST. A τ_trunc scan run at a loose
+`split_cutoff` measures that interaction, not the truncation error.
+
+### Cost note
+
+At L=16, `m3` reaches 4.955e-07 @ 598 applications against `mdef`'s 4.780e-07 @ 994 — within 4%
+of the accuracy for **40% less cost**. The shipped default is not the cost-optimal point on this
+model; it is the safe one.
+
+⚠️ This is why the earlier one-knob scans read as "the tolerance does nothing": every one of them
+was run at a fixed depth that was itself the binding constraint. A cube was required, and a
+one-axis scan through this cube would have reproduced the same wrong conclusion at any fixed `m`.
+
+---
+
 ## 7. Model ladder
 
 1. **Heisenberg `:U1`, L=20** — everything above.

@@ -60,13 +60,36 @@ def load(path):
     return {k: v[1] for k, v in rows.items()}
 
 
-def cube():
-    out = {}
+def cube(tag=""):
+    """Only the named depth arms, and only one run's parameters.
+
+    ⛔ THE GLOB ALONE IS NOT ENOUGH. `results/` accumulates CSVs from every earlier campaign, and
+    `heis_grid_*_L12_*.csv` happily matches runs with a DIFFERENT `T` and a different tau ladder
+    (`heis_grid_default_L12_dt0.05_T1.5.csv` is one). Pooling those into the same panel compares
+    arms that never saw the same problem. Restrict to the depth arms this cube is about, and --
+    when several runs of them exist -- to the newest `dt`/`T` among them.
+    """
+    found = {}
     for p in sorted(glob.glob(os.path.join(RES, f"heis_grid_*_L{L}_*.csv"))):
         base = os.path.basename(p)
-        # heis_grid_<sweep>_L<L>_dt<dt>_T<T>.csv
-        sweep = base.split("_")[2]
-        d = load(p)
+        parts = base[: -len(".csv")].split("_")      # heis grid <sweep> L<L> dt<dt> T<T>
+        sweep = parts[2]
+        if sweep not in ORDER:
+            continue
+        if tag and tag not in base:
+            continue
+        found.setdefault("_".join(parts[4:]), {})[sweep] = p
+
+    if not found:
+        return {}
+    # newest parameter set wins, by file mtime of its members
+    key = max(found, key=lambda k: max(os.path.getmtime(v) for v in found[k].values()))
+    if len(found) > 1:
+        print(f"note: {len(found)} parameter sets present; using {key!r} "
+              f"and ignoring {sorted(set(found) - {key})}")
+    out = {}
+    for sweep, path in found[key].items():
+        d = load(path)
         if d:
             out[sweep] = d
     return out
