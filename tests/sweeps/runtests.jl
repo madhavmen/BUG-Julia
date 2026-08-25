@@ -51,6 +51,10 @@ include(joinpath(@__DIR__, "..", "common", "free_fermion.jl"))
     #    models at L=12. `test_sweeps.jl` only checks it reproduces `cbe_lubich_sweep`, which is
     #    an agreement between two of our own implementations; this checks it against the answer.
     include("test_cbe_bug_exact_refs.jl")
+    # 3c the 2D geometry, before any physics runs on it. A dropped wrap bond, a doubled one, or
+    #    a leg joining the wrong pair all give a well-formed Hamiltonian that is simply not the
+    #    intended one -- and the run then converges happily to the wrong answer.
+    include("test_square_cylinder.jl")
     include("test_symmetry_parity.jl")
     include("test_physics.jl")
     # 6  one-axis twisting     the arXiv:2208.10972 Fig. 2 benchmark, at L = 10. LAST because it

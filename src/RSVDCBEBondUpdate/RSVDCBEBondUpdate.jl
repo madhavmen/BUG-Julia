@@ -131,6 +131,12 @@ include("cbe_lubich.jl")
 #                              `S^x` is charge-raising and a U(1) run would report a silent zero.
 include("models/pair_mpo.jl")
 include("models/haldane_shastry.jl")
+# models/square_cylinder.jl  the 2D SQUARE LATTICE on a cylinder, as a coupling matrix that
+#                            `pair_mpo` turns into an operator. No new MPO machinery: a 2D model
+#                            reaches an MPS only through an ORDERING of its sites, and the
+#                            ordering is the whole content -- see the file's header for why the
+#                            SHORT direction is the one that wraps.
+include("models/square_cylinder.jl")
 include("models/oat.jl")
 include("models/tfim.jl")
 
@@ -226,6 +232,7 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        nn_coupling_matrix, distance_coupling_matrix,
        spin_vertices,
        haldane_shastry_couplings, haldane_shastry_mpo,
+       square_cylinder_couplings, square_cylinder_mpo, square_cylinder_bonds,
        heisenberg_chain_mpo, heisenberg_ring_couplings, heisenberg_ring_mpo,
        # models/oat.jl -- one-axis twisting (arXiv:2208.10972 Fig. 2). `x_polarized_state`,
        # `sx_operator`, `sx_profile` and `total_sx` are :none-only BY PHYSICS: S^x is

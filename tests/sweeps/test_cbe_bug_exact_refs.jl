@@ -139,6 +139,59 @@ _sz_profile(p) = magnetisation(copy(p)) ./ max(norm(copy(p))^2, eps())
     @test kry([1.0], Float64[], ComplexF64(-im * 0.05)) == Inf
 end
 
+# ── ONE SVD, AT THE END -- pinned, not asserted in a comment ───────────────────────────────
+#
+# The half-sweep accumulates `m+1` Krylov blocks and the CALLER splits the stack ONCE. Selecting
+# inside the loop is the failure mode `cbe_lubich_sweep`'s `grow_iters` demonstrates: it re-runs
+# the CBE ranking every pass, re-truncates by budget, and throws away exactly the directions the
+# next application of `H` needs -- MEASURED on OAT as 1.8x and then flat.
+#
+# ⛔ THIS INVARIANT LIVED ONLY IN A DOCSTRING, WHICH IS NOT ENOUGH. A comment cannot fail. The
+# same session that wrote that comment also shipped a growth path whose "did it grow?" counter
+# counted calls instead of widenings, and the no-op passed its gate. So the property is checked
+# two ways here: structurally (the source has no SVD in the loop) and behaviourally (the frame
+# actually carries the extra blocks into the state).
+@testset "the Krylov frame is split ONCE, not per iteration" begin
+    # ⚠ NORMALISE LINE ENDINGS FIRST. The checkout is CRLF on Windows, so searching for a
+    # newline-delimited "end" finds NOTHING and the slice below silently fails -- which is how
+    # the first version of this test errored instead of checking anything.
+    src = replace(read(joinpath(@__DIR__, "..", "..", "src", "RSVDCBEBondUpdate", "sweeps",
+                                "cbe_bug.jl"), String), "\r\n" => "\n")
+    # The body of `_krylov_frame`, from its signature to the matching bare `end` at column 0.
+    i0 = findfirst("function _krylov_frame(", src)
+    @test i0 !== nothing
+    body = src[first(i0):end]
+    i1 = findfirst("\nend\n", body)
+    @test i1 !== nothing
+    body = i1 === nothing ? body : body[1:first(i1)]
+    @test length(body) < length(src)          # the slice really did cut something
+
+    # STRUCTURAL: no factorisation of any kind inside the recursion. Orthogonalisation is
+    # Gram-Schmidt (`tensor_inner`), which is what makes the stack lossless.
+    @test !occursin("svd(", body) ||
+        (@info "an SVD appeared inside _krylov_frame -- the stack is no longer lossless"; false)
+    @test !occursin("qr(", body)
+    @test occursin("tensor_inner", body)      # ...and the orthogonalisation is still there
+
+    # BEHAVIOURAL: deeper `m` must put MORE into the frame. If a cutoff ran per iteration the
+    # extra Krylov directions would be discarded before the caller ever saw them, and the
+    # pre-truncation bond dimension would stop responding to `m`.
+    set_symmetry!(:U1)
+    mpo, psi0 = xxz_mpo(L; J = 1.0, delta = 1.0), neel_state(L)
+    widths = map((0, 2, 4)) do m
+        psi = copy(psi0)
+        info = cbe_bug_step!(psi, mpo, ComplexF64(-im * 0.05);
+                             krylov_basis = m, krylov_tol = 0.0, exact = true,
+                             truncate = false, split_cutoff = 0.0,
+                             maxdim = 256, trunc_thresh = 1e-14, maxiter = 16)
+        maximum(info.expanded)
+    end
+    @test widths[2] > widths[1] ||
+        (@info "m=2 put nothing extra in the frame" widths; false)
+    @test widths[3] > widths[2] ||
+        (@info "m=4 put nothing extra in the frame" widths; false)
+end
+
 @testset "cbe_bug_step! against exact references, L=12" begin
     L = 12
 
