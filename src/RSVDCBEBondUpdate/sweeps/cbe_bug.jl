@@ -28,19 +28,11 @@ which is what makes a short basis sufficient at small `tau` and a long one neces
 `T_m` is `m x m` with `m` at most `krylov_basis`, so the dense `exp` here is negligible against
 one application of `H` to a bond tensor.
 """
-function _kry_contribution(alpha::Vector{Float64}, betas::Vector{Float64}, tau::ComplexF64)
-    m = length(alpha)
+function _kry_contribution(H::Matrix{ComplexF64}, betas::Vector{Float64}, m::Int,
+                          tau::ComplexF64)
     m == 0 && return Inf
     length(betas) >= m || return Inf
-    T = zeros(Float64, m, m)
-    @inbounds for k in 1:m
-        T[k, k] = alpha[k]
-        if k < m
-            T[k, k + 1] = betas[k]
-            T[k + 1, k] = betas[k]
-        end
-    end
-    E = exp(tau * T)
+    E = exp(tau * @view H[1:m, 1:m])
     return abs(betas[m]) * abs(E[m, 1])
 end
 
@@ -71,20 +63,32 @@ function _krylov_frame(v0, applyH, maxdepth::Int, tol::Float64, tau::ComplexF64)
     b0 = norm(v0)
     b0 <= 0 && return Any[v0]
     vs = Any[to_concrete((1.0 / b0) * v0)]
-    alpha, betas = Float64[], Float64[]
-    for _ in 1:maxdepth
+    betas = Float64[]
+    # ⛔ THE FULL UPPER-HESSENBERG PROJECTION, NOT alpha/beta. The recursion already
+    # orthogonalises against EVERY previous vector (two passes), so it is Arnoldi -- the earlier
+    # version simply DISCARDED the off-diagonal coefficients and rebuilt a SYMMETRIC tridiagonal
+    # from `real(<v,Hv>)`. That is correct only for `H = H'`; on a non-Hermitian generator it is
+    # silently wrong and nothing errors. Keeping the coefficients costs an `m x m` matrix with
+    # `m <= krylov_basis`, and for a Hermitian `H` the Hessenberg IS the tridiagonal, so the
+    # closed-system numbers are unchanged bit for bit.
+    Hm = zeros(ComplexF64, maxdepth + 1, maxdepth + 1)
+    for k in 1:maxdepth
         w = applyH(vs[end])
-        push!(alpha, real(tensor_inner(vs[end], w)))
-        for _pass in 1:2, u in vs
-            w = to_concrete(w - tensor_inner(u, w) * u)
+        for _pass in 1:2, (i, u) in pairs(vs)
+            c = tensor_inner(u, w)
+            # accumulate across BOTH passes: the second pass's correction is part of the
+            # projection, not a separate quantity
+            Hm[i, k] += c
+            w = to_concrete(w - c * u)
         end
         b = norm(w)
         # BREAKDOWN comes first and is unconditional: with no independent direction left there is
         # nothing for the contribution test to weigh, and `1/b` would not be finite.
         b <= _KRY_BREAKDOWN && break
         push!(betas, b)
+        Hm[k + 1, k] = b
         push!(vs, to_concrete((1.0 / b) * w))
-        tol > 0 && _kry_contribution(alpha, betas, tau) < tol && break
+        tol > 0 && _kry_contribution(Hm, betas, k, tau) < tol && break
     end
     # The seed carries the state's own scale back in: the caller's SVD cutoff is relative to the
     # largest singular value, and a basis of unit vectors alone would let the closing truncation
@@ -247,6 +251,12 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        maxiter::Int = 30,
                        tol::Float64 = 1e-15,
                        reorth::Bool = true,
+                       # ⛔ `hermitian = false` SWITCHES THE ROOT SOLVE TO ARNOLDI. Lanczos on a
+                       # non-Hermitian generator -- an open system's Lindbladian or a
+                       # non-Hermitian H_eff -- returns a plausible vector and no error at all.
+                       # The half-sweep basis needs no flag: it already builds the full
+                       # upper-Hessenberg projection, which is the tridiagonal when H = H'.
+                       hermitian::Bool = true,
                        rng::AbstractRNG = MersenneTwister(0x5EED))
     L = length(psi)
     length(mpo) == L || throw(DimensionMismatch(
@@ -576,7 +586,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
 
     H0 = zero_site_h(mpo, c, lenv_root, renv_root, W[c], Z[c])
     S1 = expv(x -> (nmv[] += 1; apply_zero_site(H0, x)), tau, S0;
-              hermitian = true, maxiter = maxiter, tol = tol, reorth = reorth)
+              hermitian = hermitian, maxiter = maxiter, tol = tol, reorth = reorth)
 
     # ⛔ THE ROOT CORE SPLIT DOES NOT TRUNCATE BY DEFAULT. This SVD exists to SPLIT `S1` into
     # the two site tensors below; cutting here was a third, redundant truncation on top of the

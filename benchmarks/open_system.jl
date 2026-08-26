@@ -70,9 +70,14 @@ set_symmetry!(:U1)
 "Real XY couplings and a SEPARATE `S^zS^z` matrix, so only the latter goes complex."
 function geometry(nm)
     if nm == "chain"
-        L = 16; Jm = [abs(i - j) == 1 && i < j ? 1.0 : 0.0 for i in 1:L, j in 1:L]
+        L = 18; Jm = [abs(i - j) == 1 && i < j ? 1.0 : 0.0 for i in 1:L, j in 1:L]
     elseif nm == "square"
-        L = 16; Jm = square_cylinder_couplings(4, 4)
+        # 5x5 cylinder = 25 sites, snake-mapped to an MPS (no PEPS).
+        # ⚠ 25 IS ODD, so there is no half-filled Sz = 0 sector and no `dimer_state`; and the
+        # nearest sector, C(25,12) = 5.2e6 states, needs ~2.5 GB for a depth-30 Krylov basis. So
+        # this size has NO EXACT REFERENCE and is reported on conservation and cross-scheme
+        # agreement only -- `HAVE_REF` below decides, rather than a comment promising it.
+        L = 25; Jm = square_cylinder_couplings(5, 5)
     else
         L = 18; Jm = kagome_cylinder_couplings(2, 3)
     end
@@ -82,11 +87,17 @@ end
 "`H_eff = XY(real) + (1 - i*Gamma) * S^zS^z`, as an MPO."
 function heff(L, Jm, gamma)
     v = pair_vertices(xxz_chain(L; J = 1.0, delta = 1.0))
-    # `xxz_chain(delta=1)` gives [S^zS^z, then the two charged S^+/S^- vertices]. The FIRST is
-    # the one that goes complex; the rest stay real. ⚠ position matters -- `Js[t]` pairs with
-    # `vertices[t]`, and a permuted list would build a different Hamiltonian silently.
+    # ⛔ `S^zS^z` IS THE LAST VERTEX, NOT THE FIRST. `xxz_chain` pushes the two charged
+    # `S^+`/`S^-` terms and only THEN the `S^z` term (`henv.jl`: `delta == 0.0 || push!(...)`).
+    # A first version of this used `Js[1]` and would have made the HOPPING dissipative while
+    # leaving `S^zS^z` real -- a different model that still runs, still conserves U(1), and still
+    # looks Hermitian-ish. This is exactly the "pairs by position" hazard the `pair_mpo`
+    # docstring warns about, so the index is DERIVED and CHECKED rather than written down.
+    izz = findall(t -> t.left === t.right, v)
+    length(izz) == 1 || error("expected exactly one S^zS^z vertex, found $(length(izz)) of " *
+                              "$(length(v)) -- the vertex list has changed shape")
     Js = Any[ComplexF64.(Jm) for _ in v]
-    Js[1] = ComplexF64.(Jm) .* (1.0 - im * gamma)
+    Js[izz[1]] = ComplexF64.(Jm) .* (1.0 - im * gamma)
     return pair_mpo(L, Vector{AbstractMatrix}(Js), v)
 end
 
@@ -130,19 +141,32 @@ for nm in (WHICH == "all" ? ("chain", "square", "kagome") : (WHICH,))
                  "scheme", "gamma", "|psi|", "Re E", "Im E", "err vs exact", "states", "finite"))
     for g in GAMMAS
         W = heff(L, Jm, g)
-        Hs, states, idx = heff_sparse(L, Jm, g)
-        vt = neel_vector(L, idx)
         nst = round(Int, TMAX / DT)
-        for _ in 1:nst
-            vt = expv_sparse(Hs, ComplexF64(-im * DT), vt; m = 30, tol = 1e-13)
+        # ⚠ ONLY WHERE IT IS AFFORDABLE. `H_eff` acts on a STATE, so its reference is a sector
+        # vector and is reachable to L ~ 20 -- unlike a vectorised Lindbladian, whose reference is
+        # a DENSITY MATRIX and is out of reach past L ~ 8.
+        have_ref = iseven(L) && binomial(L, L ÷ 2) <= 200_000
+        ref, states = if have_ref
+            Hs, sts, idx = heff_sparse(L, Jm, g)
+            vt = neel_vector(L, idx)
+            for _ in 1:nst
+                vt = expv_sparse(Hs, ComplexF64(-im * DT), vt; m = 30, tol = 1e-13)
+            end
+            (sz_dense(vt, L, sts), sts)
+        else
+            (Float64[], Int[])
         end
-        ref = sz_dense(vt, L, states)
-        for (snm, st) in (("tdvp2", (p, t) -> tdvp2_step!(p, W, t; maxdim = CAP,
+        # ⛔ `hermitian = false` IS THE WHOLE POINT. `H_eff` is NOT Hermitian, and Lanczos on it
+        # returns a plausible vector with no error at all -- every number below would be quietly
+        # wrong. `g = 0` makes it Hermitian again, which is why that row is the control.
+        for (snm, st) in (("tdvp2", (p, t) -> tdvp2_step!(p, W, t; maxdim = CAP, hermitian = false,
                                         trunc_thresh = 1e-10, maxiter = MI)),
                           ("tdvp_cbe1s", (p, t) -> tdvp_cbe1s_step!(p, W, t; maxdim = CAP,
+                                        hermitian = false,
                                         trunc_thresh = 1e-10, maxiter = MI)),
                           ("cbe_bug", (p, t) -> cbe_bug_step!(p, W, t; exact = true,
                                         krylov_basis = 3, krylov_tol = 0.0, maxdim = CAP,
+                                        hermitian = false,
                                         trunc_thresh = 1e-10, maxiter = MI)))
             psi = neel_state(L); ok = true
             for _ in 1:nst
@@ -156,7 +180,8 @@ for nm in (WHICH == "all" ? ("chain", "square", "kagome") : (WHICH,))
             n = ok ? norm(psi) : NaN
             e = ok && isfinite(n) && n > 0 ? mpo_energy(copy(psi), W) / max(n^2, eps()) :
                                              ComplexF64(NaN)
-            er = ok && isfinite(n) && n > 0 ? maximum(abs.(sz_mps(psi) .- ref)) : NaN
+            er = (have_ref && ok && isfinite(n) && n > 0) ?
+                 maximum(abs.(sz_mps(psi) .- ref)) : NaN
             stt = ok && isfinite(n) ? maximum(state_bond_dims(psi)) : 0
             say(@sprintf("  %-14s %7.2f %12.4e %12.5f %12.5f %12s %7d %8s",
                          snm, g, n, real(e), imag(e),

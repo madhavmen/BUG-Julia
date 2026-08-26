@@ -92,6 +92,9 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                           maxiter::Int = 30,
                           tol::Float64 = 1e-15,
                           reorth::Bool = true,
+                          # `hermitian = false` -> Arnoldi, for a non-Hermitian generator. See
+                          # the note in `cbe_bug_step!`: Lanczos does not fail on one, it lies.
+                          hermitian::Bool = true,
                           rng::AbstractRNG = MersenneTwister(0x5EED))
     L = length(psi)
     length(mpo) == L || throw(DimensionMismatch(
@@ -126,7 +129,7 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     function onesite!(j, lch, rch)
         H1 = one_site_h(mpo, j, lch, rch)
         psi[j] = expv(x -> (nmv += 1; apply_one_site(H1, x)), half, psi[j];
-                      hermitian = true, maxiter = maxiter, tol = tol, reorth = reorth)
+                      hermitian = hermitian, maxiter = maxiter, tol = tol, reorth = reorth)
         psi.center = j
     end
 
@@ -142,7 +145,7 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         # --- forward one-site update at site i, +tau/2 ---
         H1 = one_site_h(mpo, i, lch, rch1)
         M = expv(x -> (nmv += 1; apply_one_site(H1, x)), half, psi[i];
-                 hermitian = true, maxiter = maxiter, tol = tol, reorth = reorth)
+                 hermitian = hermitian, maxiter = maxiter, tol = tol, reorth = reorth)
 
         peak!(M)
         res = svd(M, (1, 2); cutoff = cut, Nkeep = maxdim, get_lists = true)
@@ -158,7 +161,7 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         # expanded `VR`.
         H0 = zero_site_h(mpo, i, lch, right_channels(rstack, i + 2), psi[i], psi[i + 1])
         C = expv(x -> (nmv += 1; apply_zero_site(H0, x)), -half, C;
-                 hermitian = true, maxiter = maxiter, tol = tol, reorth = reorth)
+                 hermitian = hermitian, maxiter = maxiter, tol = tol, reorth = reorth)
 
         # Retag BOTH ends of the bond in one breath: each result is rank-3 with only one leg
         # wanting `tag`, so neither construction ever sees a duplicate index.
@@ -181,7 +184,7 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
 
         H1 = one_site_h(mpo, i + 1, lch1, rch)
         M = expv(x -> (nmv += 1; apply_one_site(H1, x)), half, psi[i + 1];
-                 hermitian = true, maxiter = maxiter, tol = tol, reorth = reorth)
+                 hermitian = hermitian, maxiter = maxiter, tol = tol, reorth = reorth)
 
         res = svd(M, (1,); cutoff = cut, Nkeep = maxdim, get_lists = true)
         disc = max(disc, _trunc_weight(res))
@@ -191,7 +194,7 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
 
         H0 = zero_site_h(mpo, i, left_channels(lstack, i), rch, psi[i], psi[i + 1])
         C = expv(x -> (nmv += 1; apply_zero_site(H0, x)), -half, C;
-                 hermitian = true, maxiter = maxiter, tol = tol, reorth = reorth)
+                 hermitian = hermitian, maxiter = maxiter, tol = tol, reorth = reorth)
 
         psi[i] = to_concrete(setitag(
             to_concrete(contract(psi[i], (3,), C, (1,))), 3, tag))
