@@ -219,11 +219,45 @@ channel that no surviving `J` can close is dropped.
 
 `J[i,i+1]`-only reproduces [`mpo_from_terms`](@ref) elementwise, which is how the
 construction is pinned against the already-validated nearest-neighbour MPO.
+
+# One coupling matrix per vertex
+
+`pair_mpo(L, Js::Vector, vertices)` takes ONE MATRIX PER VERTEX, for models whose operator types
+have DIFFERENT ranges. The single-matrix form applies the same `J[i,j]` to every vertex scaled by
+`vertex.coeff`, which cannot express a Hamiltonian like the lattice Schwinger model, whose hopping
+is NEAREST-NEIGHBOUR while its Coulomb term is ALL-TO-ALL:
+
+    aH = x * sum_n (S+_n S-_{n+1} + h.c.)  +  (1/2) sum_{k>n} (N-k-1) Z_n Z_k
+
+-- two different supports, so no single `J` with per-vertex scalars reproduces both. One matrix
+per vertex does, at no extra bond dimension: the channel count is set by how many OPENINGS are
+still closable, and a vertex whose coupling vanishes past its range stops contributing channels.
+
+⚠️ `Js[t]` PAIRS WITH `vertices[t]` BY POSITION. A permuted list silently builds a different
+Hamiltonian -- still Hermitian, still conserving the same charges, so nothing downstream
+complains.
 """
+function pair_mpo(L::Int, Js::Vector{<:AbstractMatrix}, vertices::Vector{PairVertex})
+
+    length(Js) == length(vertices) || throw(DimensionMismatch(
+        "pair_mpo got $(length(Js)) coupling matrices for $(length(vertices)) vertices; " *
+        "they pair by position"))
+    for (t, J) in pairs(Js)
+        size(J) == (L, L) || throw(DimensionMismatch(
+            "coupling matrix $t is $(size(J)), expected ($L, $L)"))
+    end
+    return _pair_mpo(L, collect(Js), vertices)
+end
+
 function pair_mpo(L::Int, J::AbstractMatrix, vertices::Vector{PairVertex})
     L >= 2 || throw(ArgumentError("pair_mpo needs at least two sites, got $L"))
     size(J) == (L, L) || throw(DimensionMismatch(
         "coupling matrix is $(size(J)), expected ($L, $L)"))
+    return _pair_mpo(L, [J for _ in vertices], vertices)
+end
+
+function _pair_mpo(L::Int, Js::Vector, vertices::Vector{PairVertex})
+    L >= 2 || throw(ArgumentError("pair_mpo needs at least two sites, got $L"))
     n = length(vertices)
     n >= 1 || throw(ArgumentError("pair_mpo needs at least one vertex"))
     for (k, v) in pairs(vertices)
@@ -242,8 +276,12 @@ function pair_mpo(L::Int, J::AbstractMatrix, vertices::Vector{PairVertex})
     Iloc = symmetry_mode() === :SU2 ? local_space(:SU2).I :
            symmetry_mode() === :Z2  ? ising_local_space(:Z2).I : local_space().I
 
-    # `coupling(o, j)` is the weight of the pair, read from the strict upper triangle only.
-    coupling(o, j) = o < j ? J[o, j] : 0.0
+    # `coupling(o, j, t)` is the weight of the pair FOR VERTEX `t`, strict upper triangle only.
+    coupling(o, j, t) = o < j ? Js[t][o, j] : 0.0
+    # ...and `coupling(o, j)` is the weight over ANY vertex, which is what decides whether a
+    # channel is worth carrying. A channel must stay alive if EITHER operator type still has a
+    # partner ahead of it; testing only one would silently drop the longer-ranged term.
+    coupling(o, j) = o < j ? maximum(abs(Js[t][o, j]) for t in eachindex(Js)) : 0.0
     # A channel opened at `o` is still useful at link `i` iff some later site can close it.
     closable(o, i) = any(coupling(o, j) != 0.0 for j in (i + 1):L)
     # Openings alive on link `i` (i.e. between sites `i` and `i+1`): opened at `o <= i`.
@@ -299,9 +337,15 @@ function pair_mpo(L::Int, J::AbstractMatrix, vertices::Vector{PairVertex})
         end
         # `(o,t) -> done`: CLOSE at site `i`, weighted by `J[o,i]` and the vertex coefficient.
         for o in prev, t in 1:n
-            c = coupling(o, i) * vertices[t].coeff
-            c == 0.0 && continue
-            mat[rowof[(o, t)], ncol] = to_concrete(c * closes[t])
+            c = coupling(o, i, t) * vertices[t].coeff
+            # ⛔ AN EXPLICIT ZERO, NOT A GAP. With ONE matrix per vertex a channel can be alive
+            # (some vertex still has a partner ahead) while THIS vertex's coupling vanishes here
+            # -- the mixed-range case the per-vertex form exists for. Leaving that entry unset
+            # gives `oplus` a hole it cannot infer spaces for:
+            #     ArgumentError: cannot infer zero TLArray at (3,1): missing space information
+            # Under a SHARED matrix the situation never arose: `J[o,i] == 0` killed every vertex
+            # at once, so whole rows were skipped consistently.
+            mat[rowof[(o, t)], ncol] = to_concrete((c == 0.0 ? zero(c) : c) * closes[t])
         end
 
         # Boundaries: site 1 can only be in `id`, site `L` can only end `done`.
