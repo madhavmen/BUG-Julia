@@ -39,6 +39,36 @@
 #            `Tr rho^2 = || |rho>> ||^2` is NON-INCREASING under the exact dynamics. `amp > 1` is
 #            therefore a PROVABLE violation, not a tolerance question, and it is exactly what an
 #            anti-dissipative substep produces.
+#
+#            ⛔⛔ BUT THE RAW RATIO IS NOT THAT WITNESS, AND THIS FILE REPORTED IT AS ONE UNTIL
+#            2026-08-27. `fused_lindblad` DELIBERATELY FACTORS THE ZERO-BODY TERM OUT OF THE MPO
+#            (`fused_common.jl:188`, returned as `shift = -sum(gammas)/4`), so the operator the
+#            integrator actually exponentiates is `W = L_true - shift*I` and
+#
+#                exp(dt*W) = exp(-dt*shift) * exp(dt*L_true) = exp(+gamma*L*dt/4) * exp(dt*L_true)
+#
+#            EVERY arm's raw norm therefore grows by `exp(+gamma*L*dt/4)` BY CONSTRUCTION, and
+#            `shift!` divides it back out. MEASURED at L=12, gamma=0.1 (so `exp(0.3*dt)`), the raw
+#            `amp_max` against that prediction:
+#
+#                dt      predicted   tdvp2       tdvp_cbe1s   cbe_bug
+#                0.05    1.015113    1.0150899   1.0150908    1.0150899
+#                0.10    1.030455    1.0302678   1.0302751    1.0302676
+#                0.20    1.061837    1.0603288   1.0603847    1.0603228
+#                0.40    1.127497    1.1155286   1.1158752    1.1153406
+#
+#            Three arms agreeing to SIX DIGITS -- `cbe_bug` INCLUDED, which has no backward step at
+#            all -- is the tell: the raw ratio is dominated by the shift (1.5e-2) and the physics it
+#            was built to detect sits ~4 ORDERS BELOW that (~2e-6). The witness was swamped and
+#            could not have detected the effect either way.
+#
+#   `amp_phys` = the SAME ratio with the shift divided out, `(n_after/n_before)*exp(dt*shift)`.
+#            THIS is the purity witness, and it is the column to read. Applying the same correction
+#            to the table above gives 1.0000023 / 0.99981 / 0.99857 / 0.98938 -- purity NON-INCREASING
+#            at every dt, for every arm. ⚠ SO THE BACKWARD SUBSTEP DOES NOT VIOLATE THE PURITY BOUND
+#            AT gamma = 0.1, T = 1, L = 12: that is a NULL RESULT for the anti-dissipative mechanism
+#            in this regime, not a confirmation, and it is why the gamma ladder below exists. Report
+#            it as a null result; do not quote the raw column as if it were the effect.
 #   `dtr`  = max over steps of `|Tr rho - 1|`, read AFTER the zero-body shift and BEFORE
 #            `restore_trace!`. `Tr rho = 1` holds for any Lindbladian. ⚠ THIS IS WHY `_open` now
 #            exposes `shift!` and `restore!` separately: calling the bundled `post!` first destroys
@@ -57,6 +87,24 @@ using BUGJulia.RSVDCBEBondUpdate
 
 include(joinpath(@__DIR__, "fused_common.jl"))
 include(joinpath(@__DIR__, "study_models.jl"))
+include(joinpath(@__DIR__, "..", "tests", "common", "free_fermion.jl"))
+
+"""
+    exact_final(nm, L, t, gamma) -> Vector{Float64} or nothing
+
+The exact `<S^z_j>(t)` where one exists, so an escalation ladder can be scored ABSOLUTELY.
+
+⛔ WITHOUT THIS THE LADDER ONLY HAS `dev_vs_bug`, WHICH CANNOT SETTLE THE QUESTION IT IS ASKED.
+A deviation between two arms says they disagree, not which one is wrong -- and at large `gamma*dt`,
+where the backward substep is supposed to fail, `cbe_bug` is exactly the arm whose correctness is in
+question. `xx_open` has a closed form at ANY `gamma` (`xx_dephasing_sz`), and `xx` at gamma = 0, so
+on those two models every arm gets a real error and the ladder is decisive.
+"""
+function exact_final(nm, L::Int, t::Real, gamma::Real)
+    nm == "xx"      && return xx_free_fermion_sz(L, t; J = 1.0, occupied = 1:2:L)
+    nm == "xx_open" && return xx_dephasing_sz(L, t; J = 1.0, gamma = gamma, occupied = 1:2:L)
+    return nothing
+end
 
 const OUT     = joinpath(@__DIR__, "results")
 const MODELS  = split(get(ENV, "MODELS", "xx,xx_open,square_open"), ",")
@@ -96,6 +144,11 @@ remaining ladder still runs.
 function run_arm(S, arm, step!, dt, nsteps)
     psi = copy(S.psi0)
     amp = 0.0; dtr = 0.0; kry = 0; wall = 0.0; died = 0
+    # ⛔ THE SHIFT THE MPO DOES NOT CARRY. `exp(dt*W) = exp(-dt*shift)*exp(dt*L_true)`, so the raw
+    # norm ratio is inflated by `1/unshift` on EVERY arm by construction -- see the header table.
+    # Multiplying by this is what turns the raw ratio into the purity witness.
+    unshift = exp(dt * S.shift)
+    aphys = 0.0
     for k in 1:nsteps
         n_before = norm(copy(psi))
         t0 = time_ns()
@@ -117,7 +170,9 @@ function run_arm(S, arm, step!, dt, nsteps)
                     arm, k, n_after)
             break
         end
-        amp = max(amp, n_after / max(n_before, eps()))
+        ratio = n_after / max(n_before, eps())
+        amp   = max(amp, ratio)
+        aphys = max(aphys, ratio * unshift)
         # ⛔ THE TRACE IS READ BETWEEN THE SHIFT AND THE RESTORE. See the header.
         if S.d == 4
             S.shift!(psi)
@@ -126,15 +181,18 @@ function run_arm(S, arm, step!, dt, nsteps)
         end
     end
     prof = died == 0 ? S.profile(psi) : Float64[]
-    return (amp = amp, dtr = dtr, kry = kry, wall = wall, died = died,
+    return (amp = amp, aphys = aphys, dtr = dtr, kry = kry, wall = wall, died = died,
             chi = maximum(bond_dims(psi); init = 0), prof = prof)
 end
 
 function main()
     mkpath(OUT)
     csv = open(joinpath(OUT, "l18_backward_step.csv"), "w")
-    println(csv, "model,d,arm,L,cap,gamma,dt,nsteps,amp_max,trace_err,krylov,secs," *
-                 "maxbond,died_at,dev_vs_bug")
+    # ⛔ `amp_max` IS THE RAW RATIO AND IS DOMINATED BY THE ZERO-BODY SHIFT -- `amp_phys` IS THE
+    # PURITY WITNESS. `amp_pred` is what the shift alone predicts for `amp_max`, so a reader can
+    # confirm from the CSV that the raw column carries no physics. See the header.
+    println(csv, "model,d,arm,L,cap,gamma,dt,nsteps,amp_max,amp_pred,amp_phys,trace_err,err," *
+                 "krylov,secs,maxbond,died_at,dev_vs_bug")
     flush(csv)
 
     @printf("L=%d  tmax=%.2f  cap=%d  maxiter=%d\n", SITES, TMAX, CAP, MAXITER)
@@ -159,7 +217,10 @@ function main()
                         sprint(showerror, e)[1:min(end, 160)])
             end
         end
-        println("      dt      arm            amp_max    |Tr-1|     krylov      secs   chi   dev_vs_bug")
+        @printf("   raw-amp prediction from the shift alone: exp(%+.4f*dt)  <- amp_max must match" *
+                " this, amp_phys is the witness\n", -S0.shift)
+        println("      dt      arm             amp_max   amp_phys     |Tr-1|   err_exact     " *
+                "krylov      secs   chi   dev_vs_bug")
         flush(stdout)
         for dt in DTS
             S = setup(nm; sites = SITES, dt = dt, gamma = g, cap = CAP)
@@ -175,12 +236,22 @@ function main()
                 # trajectories end up; it is NOT evidence that `cbe_bug` is the correct one.
                 dev = (arm == "cbe_bug" || r.died != 0 || isempty(res["cbe_bug"].prof)) ? NaN :
                       maximum(abs.(r.prof[1:S.L] .- res["cbe_bug"].prof[1:S.L]))
-                @printf("   %6.3f   %-12s  %9.4f  %9.2e  %9d  %8.1f  %4d   %.3e%s\n",
-                        dt, arm, r.amp, r.dtr, r.kry, r.wall, r.chi, dev,
+                # The ABSOLUTE error where a closed form exists -- this is the column that ranks
+                # the arms; `dev_vs_bug` only says they disagree. See `exact_final`.
+                exv = exact_final(nm, S.L, nsteps * dt, g)
+                aerr = (exv === nothing || r.died != 0 || isempty(r.prof)) ? NaN :
+                       maximum(abs.(r.prof[1:S.L] .- exv))
+                # `amp_phys > 1` is the violation; a trailing `PURITY+` marks it so a long ladder
+                # does not have to be read digit by digit.
+                @printf("   %6.3f   %-12s  %9.6f  %9.6f  %9.2e  %9.2e  %9d  %8.1f  %4d   " *
+                        "%.3e%s%s\n",
+                        dt, arm, r.amp, r.aphys, r.dtr, aerr, r.kry, r.wall, r.chi, dev,
+                        r.aphys > 1 + 1e-9 ? "  PURITY+" : "",
                         r.died == 0 ? "" : "   DIED@$(r.died)")
-                @printf(csv, "%s,%d,%s,%d,%d,%g,%g,%d,%.8g,%.6e,%d,%.4f,%d,%d,%.6e\n",
-                        nm, S.d, arm, S.L, CAP, g, dt, nsteps, r.amp, r.dtr, r.kry, r.wall,
-                        r.chi, r.died, dev)
+                @printf(csv, "%s,%d,%s,%d,%d,%g,%g,%d,%.8g,%.8g,%.8g,%.6e,%.6e,%d,%.4f,%d,%d," *
+                        "%.6e\n",
+                        nm, S.d, arm, S.L, CAP, g, dt, nsteps, r.amp, exp(-dt * S.shift), r.aphys,
+                        r.dtr, aerr, r.kry, r.wall, r.chi, r.died, dev)
                 flush(csv)
             end
             flush(stdout)

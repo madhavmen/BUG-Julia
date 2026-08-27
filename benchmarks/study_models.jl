@@ -61,7 +61,8 @@ function _closed(nm, L, W, Jm, label, dt)
     # neither: there is no zero-body dissipator term and the 2-norm is already the invariant.
     return (nm = nm, label = label, L = L, W = W, d = 2, tau = ComplexF64(-im * dt),
             psi0 = neel_state(L), profile = prof, post! = (p) -> p,
-            shift! = (p) -> p, restore! = (p) -> p, imps = nothing, shift = 0.0)
+            shift! = (p) -> p, restore! = (p) -> p, imps = nothing, shift = 0.0,
+            params = nothing)
 end
 
 """
@@ -71,7 +72,7 @@ Fused open system: `tau = dt` REAL (the generator already carries the `-i`), pro
 ⚠ THE POST-STEP WORK IS OUTSIDE EVERY TIMED REGION -- it is common to all arms and is not what is
 being compared.
 """
-function _open(nm, N, W, shift, label, dt, cap)
+function _open(nm, N, W, shift, label, dt, cap; params = nothing)
     imps = identity_superket(N)
     prof = rho -> [real(trace_rho(imps, rho, N; at = j)) for j in 1:N]
     # ⛔ THE TWO HALVES OF `post!` ARE ALSO EXPOSED SEPARATELY, and the reason is a measurement.
@@ -91,10 +92,17 @@ function _open(nm, N, W, shift, label, dt, cap)
         restore!(p)
         return p
     end
+    # ⛔ `params` CARRIES THE COUPLINGS THAT BUILT `W`, AND THAT IS THE WHOLE POINT. An exact
+    # dense-Liouvillian reference (`tests/common/dense_lindblad.jl`) must be built from the SAME
+    # numbers the MPO was built from. A driver that re-derives the lattice itself is not validating
+    # the integrator -- it is comparing two independent lattice constructions, and a disagreement
+    # there is indistinguishable from an integrator error. Passing them through makes the reference
+    # a function of the model rather than a second guess at it.
     return (nm = nm, label = label, L = N, W = W, d = 4, tau = ComplexF64(dt),
             psi0 = rho0_product([isodd(k) ? :up : :down for k in 1:N]),
             profile = prof, post! = post!,
-            shift! = shift!, restore! = restore!, imps = imps, shift = shift)
+            shift! = shift!, restore! = restore!, imps = imps, shift = shift,
+            params = params)
 end
 
 """
@@ -159,14 +167,18 @@ function setup(nm; sites::Int = 18, size::Vector{Int} = Int[], dt::Float64 = 0.0
         Jm = [abs(i - j) == 1 && i < j ? 1.0 : 0.0 for i in 1:N, j in 1:N]
         W, shift = fused_lindblad(N, Jm, fill(gamma, N); delta = 0.0)
         return _open(nm, N, W, shift,
-                     "XX + dephasing, N = $N, NN only (narrow MPO at d = 4)", dt, cap)
+                     "XX + dephasing, N = $N, NN only (narrow MPO at d = 4)", dt, cap;
+                     params = (Jm = Jm, gammas = fill(gamma, N), delta = 0.0,
+                               hz = nothing, Jzz = nothing))
     elseif nm == "square_open"
         LX, LY = sz[1], sz[2]
         N = LX * LY
         Jm = square_cylinder_couplings(LX, LY; periodic_y = false)
         W, shift = fused_lindblad(N, Jm, fill(gamma, N); delta = 1.0)
         return _open(nm, N, W, shift,
-                     "Heisenberg $(LX)x$(LY) open patch + dephasing, $N sites", dt, cap)
+                     "Heisenberg $(LX)x$(LY) open patch + dephasing, $N sites", dt, cap;
+                     params = (Jm = Jm, gammas = fill(gamma, N), delta = 1.0,
+                               hz = nothing, Jzz = nothing))
     elseif nm == "lgt"
         # ⚠ THE STAGGERED-FERMION CHAIN NEEDS AN EVEN N -- an odd request is rounded DOWN, not
         # thrown, so a mixed table still runs and the printed site count shows what happened.
@@ -174,7 +186,9 @@ function setup(nm; sites::Int = 18, size::Vector{Int} = Int[], dt::Float64 = 0.0
         Jxy, Jzz, hz = schwinger_terms(N, 1.0, 0.5, 0.0)
         W, shift = fused_lindblad(N, Jxy, fill(gamma, N); hz = hz, Jzz = Jzz)
         return _open(nm, N, W, shift,
-                     "Schwinger + bath, N = $N (the widest generator here)", dt, cap)
+                     "Schwinger + bath, N = $N (the widest generator here)", dt, cap;
+                     params = (Jm = Jxy, gammas = fill(gamma, N), delta = 0.0,
+                               hz = hz, Jzz = Jzz))
     end
     error("unknown model $nm -- one of xx | square | kagome | xx_open | square_open | lgt")
 end

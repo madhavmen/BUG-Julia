@@ -250,26 +250,44 @@ def backward_figure():
         mr = [r for r in rs if r["model"] == model]
         d = int(mr[0]["d"])
         closed = d == 2
+        # Hoisted out of the arm loop: it is read after the loop, and an arm with no rows
+        # `continue`s before it would be assigned.
+        akey = "amp_phys" if "amp_phys" in mr[0] else "amp_max"
         for arm, st in ARM_STYLE.items():
             rr = sorted([r for r in mr if r["arm"] == arm], key=lambda r: f(r, "dt"))
             if not rr:
                 continue
             dts = [f(r, "dt") for r in rr]
             kw = dict(marker=st["marker"], ms=5, lw=1.5, color=st["color"], label=st["label"])
-            # amplification: 1.0 is the exact bound for a unital channel
-            axes[0][c].plot(dts, [f(r, "amp_max") for r in rr], **kw)
+            # ⛔ PLOT `amp_phys`, NEVER `amp_max`. `fused_lindblad` factors the zero-body term out
+            # of the MPO, so the RAW ratio `amp_max` is inflated by `exp(+gamma*L*dt/4)` on EVERY
+            # arm by construction and all three curves land on top of that shift instead of on the
+            # physics -- measured, they agreed to SIX DIGITS including cbe_bug, which has no
+            # backward step at all. `amp_phys` has the shift divided out and is the purity witness.
+            axes[0][c].plot(dts, [f(r, akey) for r in rr], **kw)
             tr = [max(f(r, "trace_err"), 1e-18) for r in rr]
             axes[1][c].loglog(dts, tr, **kw)
             axes[2][c].loglog(dts, [f(r, "secs") for r in rr], **kw)
             for r in rr:
                 if int(r["died_at"]) > 0:
-                    axes[0][c].annotate("DIED", (f(r, "dt"), f(r, "amp_max")),
+                    axes[0][c].annotate("DIED", (f(r, "dt"), f(r, akey)),
                                         fontsize=8, color=st["color"], weight="bold")
+        # The raw column, drawn once as a grey reference so the reader can see how far the shift
+        # alone displaces it -- this is the curve an earlier version of this figure mistook for
+        # the effect.
+        if akey == "amp_phys":
+            r2 = sorted([r for r in mr if r["arm"] == "cbe_bug"], key=lambda r: f(r, "dt"))
+            if r2:
+                axes[0][c].plot([f(r, "dt") for r in r2], [f(r, "amp_max") for r in r2],
+                                color="#999999", ls=":", lw=1.4, marker="x", ms=4, zorder=0,
+                                label="raw ratio (= the zero-body\nshift, NOT the physics)")
 
         title = f"{model}" + ("   (CLOSED CONTROL)" if closed else "   (dissipative, d = 4)")
         axes[0][c].axhline(1.0, color="k", ls="--", lw=1.2)
-        axes[0][c].set(xlabel="$dt$", ylabel=r"max$_k\ \|\psi_{k+1}\|/\|\psi_k\|$",
-                       title=f"{title}\nper-step amplification — dashed line is the EXACT bound")
+        axes[0][c].set(xlabel="$dt$",
+                       ylabel=r"max$_k\ \|\psi_{k+1}\|/\|\psi_k\| \times e^{dt\,\rm shift}$",
+                       title=f"{title}\npurity witness (shift divided out) — dashed line is the "
+                             "EXACT bound")
         axes[0][c].legend(fontsize=8)
         axes[0][c].grid(alpha=0.3)
         axes[1][c].set(xlabel="$dt$", ylabel=r"max$_k\ |{\rm Tr}\,\rho - 1|$",
@@ -284,9 +302,13 @@ def backward_figure():
 
     fig.text(0.5, 0.005,
              "Amplification above 1 is a PROVABLE violation, not a tolerance question: dephasing "
-             "is a unital channel, so Tr(rho^2) = |||rho>>||^2 cannot increase. The closed control "
-             "column is the discriminator — the mechanism predicts NO effect there, because for "
-             "tau = -i*dt the backward step is unitary.",
+             "is a unital channel, so Tr(rho^2) = |||rho>>||^2 cannot increase — but only once the "
+             "factored-out zero-body shift exp(+gamma*L*dt/4) is divided out (grey dotted = the raw "
+             "ratio, which is that shift and nothing else). The closed control column is the "
+             "discriminator: the mechanism predicts NO effect there, because for tau = -i*dt the "
+             "backward step is unitary. MEASURED at gamma=0.1, L=12 the corrected witness is a NULL "
+             "RESULT — no arm violates the bound, so the separation there is in the trace row, not "
+             "this one.",
              ha="center", fontsize=8.5, style="italic", color="#444444")
     fig.tight_layout(rect=(0, 0.02, 1, 0.94))
     out = RESULTS / "l18_backward_step.png"

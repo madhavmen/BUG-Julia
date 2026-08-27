@@ -61,13 +61,21 @@ const TMID    = parse(Float64, get(ENV, "TMID",  "1.25"))   # before any cap bin
 const MAXITER = parse(Int,     get(ENV, "MAXITER", "8"))
 const CAPS    = [parse(Int, s) for s in split(get(ENV, "CAPS", "64,128,256"), ",")]
 const DEXS    = [parse(Int, s) for s in split(get(ENV, "DEXS", "8,4,2"), ",")]
+# ⛔ `dover` IS A SEPARATE AXIS FROM `dex`, AND SCANNING ONLY `dex` CANNOT SEPARATE THEM.
+# `npre = dex + dover` (`cbe_core.jl:587`) is the PROBE WIDTH while `dex` is the ADMITTED budget, so
+# moving `dex` alone moves both at once. The distinction is the whole hypothesis here: an
+# UNDER-SAMPLED PROBE does not merely lose accuracy, it ADMITS SPURIOUS DIRECTIONS -- measured on
+# Heisenberg at L=10/12, `dover` 0->4 was worth SEVEN ORDERS and dropped chi from 28 to the exact 26
+# at no cost in seconds. If `cbe_bug` carries ~2x tdvp2's rank at L=18, an under-sampled probe at
+# the larger L is the first thing to rule out, and only a `dover` scan at FIXED `dex` rules it out.
+const DOVERS  = [parse(Int, s) for s in split(get(ENV, "DOVERS", "4"), ",")]
 
 exact_sz_at(L, t) = xx_free_fermion_sz(L, t; J = 1.0, occupied = 1:2:L)
 
 function main()
     mkpath(OUT)
     csv = open(joinpath(OUT, "l18_rank_scan.csv"), "w")
-    println(csv, "arm,cap,dex,L,dt,t_mid,err_mid,chi_mid,t_end,err_end,chi_end,krylov,secs")
+    println(csv, "arm,cap,dex,dover,L,dt,t_mid,err_mid,chi_mid,t_end,err_end,chi_end,krylov,secs")
     flush(csv)
 
     S = setup("xx"; sites = SITES, dt = DT, cap = maximum(CAPS))
@@ -102,31 +110,33 @@ function main()
 
     mk_t2(cap) = (p, tau) -> tdvp2_step!(p, S.W, tau; maxdim = cap, trunc_thresh = 1e-10,
                                          maxiter = MAXITER, hermitian = true)
-    mk_bug(cap, dex) = (p, tau) -> cbe_bug_step!(p, S.W, tau; exact = false, dex = dex,
-                                                 dover = 4, comp_ratio = 1.0,
+    mk_bug(cap, dex, dover) = (p, tau) -> cbe_bug_step!(p, S.W, tau; exact = false, dex = dex,
+                                                 dover = dover, comp_ratio = 1.0,
                                                  krylov_basis = 3, krylov_tol = 0.0,
                                                  parallel = true, maxdim = cap,
                                                  trunc_thresh = 1e-10, maxiter = MAXITER,
                                                  hermitian = true)
-    for f in (mk_t2(CAPS[1]), mk_bug(CAPS[1], DEXS[1]))
+    for f in (mk_t2(CAPS[1]), mk_bug(CAPS[1], DEXS[1], DOVERS[1]))
         try; f(copy(S.psi0), S.tau); catch; end
     end
 
-    @printf("   %-22s %5s %4s | %11s %5s | %11s %5s | %9s %8s\n",
-            "arm", "cap", "dex", "err(mid)", "chi", "err(end)", "chi", "krylov", "secs")
+    @printf("   %-22s %5s %4s %6s %5s | %11s %5s | %11s %5s | %9s %8s\n",
+            "arm", "cap", "dex", "dover", "Dpre", "err(mid)", "chi", "err(end)", "chi",
+            "krylov", "secs")
     for cap in CAPS
         r = run(mk_t2(cap))
-        @printf("   %-22s %5d %4s | %11.4e %5d | %11.4e %5d | %9d %8.1f\n",
-                "tdvp2", cap, "-", r.emid, r.cmid, r.eend, r.cend, r.kry, r.wall)
-        @printf(csv, "tdvp2,%d,0,%d,%g,%g,%.6e,%d,%g,%.6e,%d,%d,%.3f\n",
+        @printf("   %-22s %5d %4s %6s %5s | %11.4e %5d | %11.4e %5d | %9d %8.1f\n",
+                "tdvp2", cap, "-", "-", "-", r.emid, r.cmid, r.eend, r.cend, r.kry, r.wall)
+        @printf(csv, "tdvp2,%d,0,0,%d,%g,%g,%.6e,%d,%g,%.6e,%d,%d,%.3f\n",
                 cap, L, DT, kmid * DT, r.emid, r.cmid, nsteps * DT, r.eend, r.cend, r.kry, r.wall)
         flush(csv); flush(stdout)
-        for dex in DEXS
-            rb = run(mk_bug(cap, dex))
-            @printf("   %-22s %5d %4d | %11.4e %5d | %11.4e %5d | %9d %8.1f\n",
-                    "cbe_bug", cap, dex, rb.emid, rb.cmid, rb.eend, rb.cend, rb.kry, rb.wall)
-            @printf(csv, "cbe_bug,%d,%d,%d,%g,%g,%.6e,%d,%g,%.6e,%d,%d,%.3f\n",
-                    cap, dex, L, DT, kmid * DT, rb.emid, rb.cmid, nsteps * DT, rb.eend,
+        for dex in DEXS, dover in DOVERS
+            rb = run(mk_bug(cap, dex, dover))
+            @printf("   %-22s %5d %4d %6d %5d | %11.4e %5d | %11.4e %5d | %9d %8.1f\n",
+                    "cbe_bug", cap, dex, dover, dex + dover,
+                    rb.emid, rb.cmid, rb.eend, rb.cend, rb.kry, rb.wall)
+            @printf(csv, "cbe_bug,%d,%d,%d,%d,%g,%g,%.6e,%d,%g,%.6e,%d,%d,%.3f\n",
+                    cap, dex, dover, L, DT, kmid * DT, rb.emid, rb.cmid, nsteps * DT, rb.eend,
                     rb.cend, rb.kry, rb.wall)
             flush(csv); flush(stdout)
         end
@@ -138,8 +148,13 @@ function main()
     println("  err(end) FALLS toward tdvp2 as `cap` rises  -> (a) BUDGET: the cap was too small.")
     println("  err(end) FLAT in `cap` but falls with lower `dex` -> (b) SELECTION: spurious")
     println("     directions; the expansion admits noise and truncation then keeps it.")
-    println("  err(mid) is measured BEFORE any cap binds, so a deficit there is the INTEGRATOR")
-    println("     and is not fixed by either knob.")
+    println("  err FALLS with HIGHER `dover` at FIXED `dex`   -> (c) UNDER-SAMPLED PROBE. This is a")
+    println("     DEFAULT to change, not a structural defect: `dover` costs nothing in seconds and")
+    println("     an under-sampled probe admits spurious directions, so chi should FALL with it.")
+    println("  chi(mid) vs tdvp2's chi(mid) is the direct read on (b)/(c): carrying ~2x the rank")
+    println("     BEFORE any cap binds is the signature, and the fix must bring that ratio down.")
+    println("  err(mid) is measured BEFORE any cap binds, so a deficit there that survives every")
+    println("     knob is the INTEGRATOR and is fixed by none of them.")
 end
 
 main()

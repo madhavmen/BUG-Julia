@@ -2481,3 +2481,106 @@ or plain interpolation for Telum leg metadata.
 ⚠ `TaskStop` KILLS THE BASH WRAPPER, NOT THE JULIA CHILD. An orphan from a stopped scan was found
 at 2782 CPU-seconds. Check `Get-Process julia | Select Id,CPU,StartTime` and kill by `StartTime`
 before trusting any timing.
+
+## 2026-08-27 (late) — the backward-substep witness was measuring the shift, and every open model now has an exact reference
+
+### The purity witness was swamped by a constant, and the corrected result is null
+
+`l18_backward_step.jl` reported `amp_max = max_k ||psi_{k+1}||/||psi_k||` on the raw step output and
+read `amp > 1` as a purity violation — dephasing is unital, so `Tr rho^2 = || |rho>> ||^2` cannot
+increase. The L=12 ladder came back with `amp_max` of 1.01509 / 1.03027 / 1.06033 / 1.11553 at
+dt = 0.05 / 0.1 / 0.2 / 0.4, which looks like exactly the predicted `exp(+|Re lambda| dt/2)` growth.
+
+It is not. **All three arms agree to six digits, `cbe_bug` included — and `cbe_bug` has no backward
+substep at all.** That is the tell. `fused_lindblad` (`fused_common.jl:277`) deliberately factors the
+dissipator's zero-body term out of the MPO and returns it as `shift = -sum(gammas)/4`, because
+`pair_mpo` has nowhere to put a constant. So the operator every arm actually exponentiates is
+`W = L_true - shift*I`, and
+
+    exp(dt*W) = exp(-dt*shift) * exp(dt*L_true) = exp(+gamma*N*dt/4) * exp(dt*L_true)
+
+At gamma = 0.1, N = 12 that factor is `exp(0.3*dt)` = 1.015113 / 1.030455 / 1.061837 / 1.127497 —
+the measured column, to within the arms' own O(dt^2) error. `shift!` divides it straight back out.
+
+The witness is therefore the raw ratio times `exp(dt*shift)`, reported as `amp_phys`. Corrected:
+**1.0000023 / 0.99981 / 0.99857 / 0.98938 — purity non-increasing at every dt for every arm.**
+
+⛔ **This is a NULL RESULT for the anti-dissipative mechanism at gamma = 0.1, T = 1, L = 12**, not a
+confirmation of it. The shift is 1.5e-2 and the physics sits ~4 orders below it, so the original
+witness could not have detected the effect in either direction. `amp_phys` is now the column to
+read; `amp_max` and `amp_pred` are both written so the diagnosis is reproducible from the CSV, and
+`plot_l18_special.py` draws the raw ratio in grey as the curve that was mistaken for the effect.
+
+### What the L=12 ladder does separate: the trace, and the cost
+
+| model | dt | tdvp2 | tdvp_cbe1s | cbe_bug |
+|-------|----|-------|------------|---------|
+| xx_open `|Tr-1|` | 0.05 | **2.40e-06** | 1.64e-03 | 6.84e-03 |
+| xx_open `|Tr-1|` | 0.10 | **2.42e-06** | 6.53e-03 | 2.71e-02 |
+| xx_open `|Tr-1|` | 0.20 | **2.41e-06** | 2.59e-02 | 1.04e-01 |
+| xx_open `|Tr-1|` | 0.40 | **1.55e-07** | 9.97e-02 | 3.60e-01 |
+
+`tdvp2` is **flat in dt** at its truncation floor — it inherits `<<I|L = 0` exactly, because its
+sweep is a product of local exponentials each of which annihilates `<<I|`. Both Galerkin arms are
+**O(dt^2)** (ratio ~3.9 per doubling), `cbe_bug` about 4x `tdvp_cbe1s`. This is the projection, not
+the truncation, and it vanishes as dt -> 0.
+
+Cost at dt = 0.05: krylov 6661 / 7290 / **878**. `cbe_bug` does **7.6x less operator work** for
+1.19x less wall time (277.0 / 186.4 / 232.5 s), because `t_cbe` is ~72% of the step at d = 4.
+
+⛔ **`square_open` at L=12, cap 48 is not a fair integrator comparison.** Every arm pins at
+`maxbond = 48` and `|Tr-1|` is 1.8e-01 to 3.0e-01 **including tdvp2** — when the cap binds, TDVP
+loses the trace too. Truncation, not integrator.
+⚠ Two Julia processes were live during that run, so its `secs` column carries ~2x oversubscription.
+The `krylov` ratios are unaffected. Re-time before quoting wall clock.
+
+### Every open model now has an exact reference, not a trend
+
+`square_open` and `lgt` had only published trends (arXiv:2410.18468, arXiv:2501.13675), and a trend
+cannot separate "the integrator drifted" from "the generator is wrong". But the Liouvillian is a
+`4^N x 4^N` **matrix**, so at small N it can simply be exponentiated:
+
+* `tests/common/dense_lindblad.jl` — `dense_lindblad_super(L, Jm, gammas; delta, hz, Jzz)` mirrors
+  `fused_lindblad` term for term, plus `fused_dense_state`, `dense_sz_profile`, `dense_trace`.
+  Bounded at **N <= 6** (4096 x 4096; N = 7 is 4.3 GB) and it throws rather than trying.
+* `benchmarks/open_exact_gate.jl` — three ordered checks. **A** the dense<->MPS mapping on an
+  **asymmetric** state (Neel, domain-wall and dimer are all invariant under a mirrored bit order and
+  pass a broken mapping). **B** the dense operator against the **analytic** free-fermion ODE on
+  `xx_open` — two independently derived exact references, and agreement is what promotes the dense
+  operator to a reference for the models with no closed form. **C** the three arms on a dt ladder.
+
+This is an exact diagonalisation sharing no code path with the MPO, the sweeps, the truncation or
+the Krylov solver — not the our-own-finest-grid mistake. The cap cannot bind at N = 6 (full rank is
+4^3 = 64), so check C measures the integrator with no truncation in it.
+
+⛔ The reference is built from `S.params`, which `_open` now carries: the exact
+`(Jm, gammas, delta, hz, Jzz)` that went into `fused_lindblad`. A driver that re-derives the square
+patch or the Schwinger terms itself is comparing two lattice constructions, and a mismatch there is
+indistinguishable from an integrator error.
+
+⚠ One matrix exponential per model, then squarings: `exp(L*t)^2 = exp(L*2t)` is exact, so the time
+points are powers of two times `T/4`. The first draft of that file called `exp` on a 4096 x 4096
+matrix six times.
+
+### L=12 open trajectory campaign
+
+`l18_campaign.jl` crashed on the `sz_expectation` gate (a d = 2 `S^z` cannot contract a fused d = 4
+site); fixed to read `S.profile`, and the t=0 convention gate now passes at **4.996e-16**.
+
+Running at L=12, cap 48, gamma=0.1, dt=0.05, T=2.5. `xx_open` partial (tdvp2):
+
+| t | err vs exact | chi | S_op [bits] | krylov | secs |
+|---|--------------|-----|-------------|--------|------|
+| 0.25 | 3.34e-09 | 30 | 0.225 | 1621 | 36.1 |
+| 0.50 | 2.52e-08 | 48 (cap) | 0.627 | 3301 | 177.4 |
+| 0.75 | 9.82e-08 | 48 | 1.050 | 4981 | 309.1 |
+| 1.00 | 7.59e-07 | 48 | 1.429 | 6661 | 480.9 |
+
+⚠ **The cap binds at t = 0.5 out of T = 2.5**, so 80% of the trajectory is rank-limited. That makes
+this an error-at-fixed-rank benchmark, which is the right benchmark for the layout question, but it
+is not an integrator-error measurement — `open_exact_gate.jl` at N = 6 is.
+
+`plot_l18_campaign.py` now has eight panels: the operator entanglement (log_2, arXiv:2410.18468
+Eq. 3) was being written to CSV and never plotted, and panel (h) is the efficiency frontier —
+error against the wall clock that bought it, the only panel that ranks the arms. `xx_open` joined
+`EXACT_MODELS`, so its `err` column is read as a true error rather than a deviation from `tdvp2`.
