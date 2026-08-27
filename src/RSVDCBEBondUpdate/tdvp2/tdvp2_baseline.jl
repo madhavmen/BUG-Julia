@@ -97,14 +97,16 @@ through the freshly written tensor, which is the O(1) alternative to rebuilding 
 """
 function _tdvp2_bond!(psi::SymMPS, h::Union{XXZChain, MPO}, i::Int, tau::ComplexF64,
                       dir::Symbol, lch, rch;
-                      maxdim, trunc_thresh, maxiter, tol, acc, hermitian = true)
+                      maxdim, trunc_thresh, maxiter, tol, acc, hermitian = true,
+                      conv_tol::Float64 = 0.0, substeps::Int = 1)
     Theta = to_concrete(psi[i] * psi[i + 1])        # rank 4 -- the object being compared
     acc[2] = max(acc[2], tensor_elements(Theta))
     acc[4] = max(acc[4], _state_stored(psi) + tensor_elements(Theta))
     # `acc[1]` is the operator-application counter -- see `TDVP2Info.krylov_dims`. It was an
     # unused slot before, so nothing else reads it.
     Theta = expv(x -> (acc[1] += 1; apply_h_two_site(x, h, i, lch, rch)), tau, Theta;
-                 hermitian = hermitian, maxiter = maxiter, tol = tol)
+                 hermitian = hermitian, maxiter = maxiter, tol = tol,
+                 conv_tol = conv_tol, substeps = substeps)
 
     res = svd(Theta, (1, 2); cutoff = max(trunc_thresh, 1e-14), Nkeep = maxdim,
               get_lists = true)
@@ -119,7 +121,8 @@ function _tdvp2_bond!(psi::SymMPS, h::Union{XXZChain, MPO}, i::Int, tau::Complex
         M = to_concrete(setitag(to_concrete(res.S * res.Vd), 1, tag))
         if i < length(psi) - 1
             M = expv(x -> (acc[1] += 1; apply_one_site(one_site_h(h, i + 1, lnext, rch), x)),
-                     -tau, M; hermitian = hermitian, maxiter = maxiter, tol = tol)
+                     -tau, M; hermitian = hermitian, maxiter = maxiter, tol = tol,
+                     conv_tol = conv_tol, substeps = substeps)
         end
         psi[i + 1] = M
         psi.center = i + 1
@@ -130,7 +133,8 @@ function _tdvp2_bond!(psi::SymMPS, h::Union{XXZChain, MPO}, i::Int, tau::Complex
         M = to_concrete(setitag(to_concrete(res.U * res.S), 3, tag))
         if i > 1
             M = expv(x -> (acc[1] += 1; apply_one_site(one_site_h(h, i, lch, rnext), x)),
-                     -tau, M; hermitian = hermitian, maxiter = maxiter, tol = tol)
+                     -tau, M; hermitian = hermitian, maxiter = maxiter, tol = tol,
+                     conv_tol = conv_tol, substeps = substeps)
         end
         psi[i] = M
         psi.center = i
@@ -166,7 +170,20 @@ function tdvp2_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::ComplexF64;
                      tol::Float64 = 1e-15,
                      # `hermitian = false` -> Arnoldi. TDVP2 needs it for the same reason the
                      # other two do: Lanczos on a non-Hermitian generator does not fail, it lies.
-                     hermitian::Bool = true)
+                     #
+                     # ⛔ THIS KEYWORD WAS ACCEPTED AND THEN IGNORED. Both `_tdvp2_bond!` calls
+                     # below passed a hardcoded `hermitian = true`, so `tdvp2_step!(...;
+                     # hermitian = false)` ran LANCZOS on a non-Hermitian generator -- silently,
+                     # since that is the failure mode the comment above describes. Anything
+                     # measured on a non-Hermitian model through this entry point before
+                     # 2026-08-27 used the wrong solver.
+                     hermitian::Bool = true,
+                     # See `BondUpdateBUG/expv.jl`: a real convergence test, and splitting `tau`
+                     # so a large step does not need a larger `maxiter`. Both integrators take
+                     # them, because handing one arm a better exponential than the other would
+                     # make the comparison meaningless.
+                     conv_tol::Float64 = 0.0,
+                     substeps::Int = 1)
     L = length(psi)
     L >= 2 || throw(ArgumentError("tdvp2_step! needs at least two sites"))
     length(h) == L || throw(DimensionMismatch(
@@ -184,7 +201,8 @@ function tdvp2_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::ComplexF64;
     for i in 1:(L - 1)
         lch = _tdvp2_bond!(psi, h, i, half, :right,
                            lch, right_channels(rstack, i + 2);
-                           maxdim, trunc_thresh, maxiter, tol, acc, hermitian = true)
+                           maxdim, trunc_thresh, maxiter, tol, acc, hermitian = hermitian,
+                           conv_tol = conv_tol, substeps = substeps)
     end
 
     lstack = left_env_stack(psi, h; upto = L - 2)
@@ -193,7 +211,8 @@ function tdvp2_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::ComplexF64;
         canonical!(psi, i)
         rch = _tdvp2_bond!(psi, h, i, half, :left,
                            left_channels(lstack, i), rch;
-                           maxdim, trunc_thresh, maxiter, tol, acc, hermitian = true)
+                           maxdim, trunc_thresh, maxiter, tol, acc, hermitian = hermitian,
+                           conv_tol = conv_tol, substeps = substeps)
     end
 
     return TDVP2Info(maximum(bond_dims(psi); init = 0), acc[2], acc[3], acc[4], acc[1])

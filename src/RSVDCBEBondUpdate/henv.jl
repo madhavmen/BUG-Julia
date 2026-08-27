@@ -614,8 +614,23 @@ not the bond's gate -- which is the point of the module.
 function apply_h_two_site(Theta, h::XXZChain, i::Int,
                           lch::ChannelSet, rch::ChannelSet)
     tl, tr = Theta.inds[2].itags, Theta.inds[3].itags
-    acc = nothing
-    add!(x) = (acc = acc === nothing ? x : to_concrete(acc + x))
+    # ⛔ COLLECT, THEN SUM ONCE. This used to accumulate pairwise --
+    # `acc = to_concrete(acc + x)` -- which for a nearest-neighbour chain is 2 + 2*|terms| + 1
+    # ~ 9 separate `_sum_tlarrays` calls, each followed by its own `to_concrete`. Every
+    # `to_concrete` runs `materialize` + `_eager_tlarray` and rebuilds the qlabel / wmatinfo /
+    # RMT vectors from scratch, so the metadata churn was paid nine times per call.
+    #
+    # MEASURED COST OF THAT (`benchmarks/rsvd_probe_microbench.jl`): the CBE probe, which is one
+    # `apply_h_two_site` plus a projection and a sketch contraction, allocated 1.53 MB at chi=16
+    # on a two-site block holding 16 KB of data -- 96x the tensor's own size -- and 84% of that
+    # was this function. It is what makes the probe allocation-bound rather than flop-bound, and
+    # therefore what makes the randomised sketch unable to show a speedup: RSVD reduces flops,
+    # and flops were not the cost.
+    #
+    # Telum's `sum` over a tuple/vector aligns all summands ONCE and adds them in a single pass
+    # (`_sum_tlarrays`), so one materialisation replaces nine.
+    terms = AbstractTLArray[]
+    add!(x) = push!(terms, x)
 
     # (a), (b): the completed channels, with an implicit identity on the far side.
     lch.done === ZERO || add!(_apply_theta_env(Theta, lch.done, 1))
@@ -638,7 +653,10 @@ function apply_h_two_site(Theta, h::XXZChain, i::Int,
     # (e) the bond's own term, via the gate the Trotter path is pinned against.
     add!(apply_gate(bond_gate(h, tl, tr), Theta, tl, tr))
 
-    return acc
+    # `nothing` when every channel was ZERO and there is no gate -- preserved from the pairwise
+    # version, which returned an unset `acc`.
+    isempty(terms) && return nothing
+    return length(terms) == 1 ? terms[1] : to_concrete(sum(terms))
 end
 
 apply_h_two_site(Theta, h::XXZChain, i::Int,

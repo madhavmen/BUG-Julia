@@ -237,7 +237,8 @@ still closable, and a vertex whose coupling vanishes past its range stops contri
 Hamiltonian -- still Hermitian, still conserving the same charges, so nothing downstream
 complains.
 """
-function pair_mpo(L::Int, Js::Vector{<:AbstractMatrix}, vertices::Vector{PairVertex})
+function pair_mpo(L::Int, Js::Vector{<:AbstractMatrix}, vertices::Vector{PairVertex};
+                  Iloc = nothing)
 
     length(Js) == length(vertices) || throw(DimensionMismatch(
         "pair_mpo got $(length(Js)) coupling matrices for $(length(vertices)) vertices; " *
@@ -246,17 +247,17 @@ function pair_mpo(L::Int, Js::Vector{<:AbstractMatrix}, vertices::Vector{PairVer
         size(J) == (L, L) || throw(DimensionMismatch(
             "coupling matrix $t is $(size(J)), expected ($L, $L)"))
     end
-    return _pair_mpo(L, collect(Js), vertices)
+    return _pair_mpo(L, collect(Js), vertices; Iloc = Iloc)
 end
 
-function pair_mpo(L::Int, J::AbstractMatrix, vertices::Vector{PairVertex})
+function pair_mpo(L::Int, J::AbstractMatrix, vertices::Vector{PairVertex}; Iloc = nothing)
     L >= 2 || throw(ArgumentError("pair_mpo needs at least two sites, got $L"))
     size(J) == (L, L) || throw(DimensionMismatch(
         "coupling matrix is $(size(J)), expected ($L, $L)"))
-    return _pair_mpo(L, [J for _ in vertices], vertices)
+    return _pair_mpo(L, [J for _ in vertices], vertices; Iloc = Iloc)
 end
 
-function _pair_mpo(L::Int, Js::Vector, vertices::Vector{PairVertex})
+function _pair_mpo(L::Int, Js::Vector, vertices::Vector{PairVertex}; Iloc = nothing)
     L >= 2 || throw(ArgumentError("pair_mpo needs at least two sites, got $L"))
     n = length(vertices)
     n >= 1 || throw(ArgumentError("pair_mpo needs at least one vertex"))
@@ -273,7 +274,15 @@ function _pair_mpo(L::Int, Js::Vector, vertices::Vector{PairVertex})
     # Ising space is built below the IROP layer instead (see `z2_ising.jl`) -- and hard-coding
     # `local_space()` here is what previously made every Z2 model unreachable through `pair_mpo`
     # even though `_charged_transport` handles charged channels perfectly well.
-    Iloc = symmetry_mode() === :SU2 ? local_space(:SU2).I :
+    #
+    # ⛔ AND IT CAN BE OVERRIDDEN, because the mode does not always determine the SITE. The
+    # vectorised Lindbladian fuses each (ket, bra) pair into one d = 4 site -- the layout that
+    # makes `H` range 1 (so a two-site update can actually start the dynamics), the jump term
+    # on-site, and `|I>>` a product state. That chain runs under `:none` but its identity is 4x4,
+    # and defaulting to the spin-1/2 one builds an MPO whose transport block has the wrong
+    # dimension. `Iloc` is a tensor, not a mode, so passing it keeps `pair_mpo` agnostic.
+    Iloc = Iloc !== nothing ? Iloc :
+           symmetry_mode() === :SU2 ? local_space(:SU2).I :
            symmetry_mode() === :Z2  ? ising_local_space(:Z2).I : local_space().I
 
     # `coupling(o, j, t)` is the weight of the pair FOR VERTEX `t`, strict upper triangle only.

@@ -253,6 +253,6 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        DMRGCBEInfo, DMRGCBERun, dmrg_cbe1s_sweep!, dmrg_cbe1s!,
        rsvd_cbe_dmrg1s!, exact_cbe_dmrg1s!, rsvd_cbe_dmrg1s_seeded!,
        TDVPCBEInfo, tdvp_cbe1s_step!,
-       CBEBugSweepInfo, cbe_bug_step!
+       CBEBugSweepInfo, cbe_bug_step!, cbe_bug_midpoint_step!
 
 end # module

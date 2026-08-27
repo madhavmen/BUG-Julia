@@ -53,7 +53,8 @@ using LinearAlgebra, Random
 using LurCGT, Telum
 
 using ..RSVDCBEBondUpdate: CBEBugOptions, LowestEigen, _expanding_krylov, _reframe,
-                          cbe_expand, XXZChain, apply_h_two_site,
+                          cbe_expand, XXZChain, MPO, apply_h_two_site,
+                          truncate_recursive!,
                           boundary_channels, left_channels, right_channels,
                           push_left_channels, push_right_channels,
                           left_env_stack, right_env_stack
@@ -114,8 +115,20 @@ is heading: `:right` makes `psi[i]` a left isometry and parks the centre on `psi
 which assumes a true canonical snapshot.
 """
 function _write_bond!(psi::SymMPS, i::Int, f, U_aug, V_aug, S, moving::Symbol;
-                      maxdim::Int, trunc_thresh::Float64)
-    res = svd(S, (1,); cutoff = max(trunc_thresh, 1e-14), Nkeep = maxdim, get_lists = true)
+                      maxdim::Int, trunc_thresh::Float64, defer::Bool = false)
+    # ⛔ `defer = true` MAKES THIS SPLIT LOSSLESS. The SVD still has to happen -- it is what
+    # separates `S` into the two site tensors -- but it keeps every direction instead of cutting
+    # to `maxdim` here. Rank control then happens ONCE, at the end of `solve!`, so the eigensolve
+    # is never handed a state that a previous bond's truncation has already narrowed.
+    #
+    # WHY THAT MATTERS FOR A GROUND-STATE SEARCH SPECIFICALLY: the CBE pass and the growth
+    # iterations spend operator applications finding directions, and truncating at the very next
+    # bond can discard them before the eigensolve has ever seen them weighted. The variational
+    # bound is unaffected either way -- a smaller space still gives an upper bound -- but the
+    # SWEEPS-TO-CONVERGENCE is not, which is the quantity being optimised here.
+    res = defer ? svd(S, (1,); cutoff = 0.0, get_lists = true) :
+                  svd(S, (1,); cutoff = max(trunc_thresh, 1e-14), Nkeep = maxdim,
+                      get_lists = true)
     tag = f.link_mid.itags
     if moving === :right
         psi[i]     = to_concrete(setitag(to_concrete(U_aug * res.U), 3, tag))
@@ -141,9 +154,9 @@ start of the half sweep. That stack stays valid for exactly this direction, beca
 left-to-right pass only ever rewrites sites at or behind the bond it is on, and the stack is
 read ahead of it.
 """
-function _half_sweep!(psi::SymMPS, h::XXZChain, moving::Symbol, exkw, nmv;
+function _half_sweep!(psi::SymMPS, h::Union{XXZChain, MPO}, moving::Symbol, exkw, nmv;
                       grow_iters::Int, maxiter::Int, tol::Float64,
-                      maxdim::Int, trunc_thresh::Float64)
+                      maxdim::Int, trunc_thresh::Float64, defer::Bool = false)
     L = length(psi)
     e_best = Inf
     maxexp = 0
@@ -182,7 +195,8 @@ function _half_sweep!(psi::SymMPS, h::XXZChain, moving::Symbol, exkw, nmv;
         isnan(e) || (e_best = min(e_best, real(e)))
 
         _, exp_here = _write_bond!(psi, i, f, U, V, S, moving;
-                                   maxdim = maxdim, trunc_thresh = trunc_thresh)
+                                   maxdim = maxdim, trunc_thresh = trunc_thresh,
+                                   defer = defer)
         maxexp = max(maxexp, exp_here)
 
         # Carry the environment across the bond just written, in the sweep's direction.
@@ -233,8 +247,9 @@ a lucky sweep.
 U(1) NOTE: the symmetry pins the particle-number sector to whatever `psi` starts in, so this
 finds the ground state OF THAT SECTOR. `neel_state` is half filling.
 """
-function solve!(psi::SymMPS, h::XXZChain; opts::CBEBugOptions = CBEBugOptions(),
-                n_sweeps::Int = 20, etol::Float64 = 1e-10, grow_iters::Int = 1)
+function solve!(psi::SymMPS, h::Union{XXZChain, MPO}; opts::CBEBugOptions = CBEBugOptions(),
+                n_sweeps::Int = 20, etol::Float64 = 1e-10, grow_iters::Int = 1,
+                defer_truncation::Bool = false)
     L = length(psi)
     length(h) == L || throw(DimensionMismatch(
         "chain has $(length(h)) sites, state has $L"))
@@ -256,7 +271,8 @@ function solve!(psi::SymMPS, h::XXZChain; opts::CBEBugOptions = CBEBugOptions(),
         e, mx, ng = _half_sweep!(psi, h, isodd(sweep) ? :right : :left, exkw, nmv;
                                  grow_iters = grow_iters, maxiter = opts.maxiter,
                                  tol = opts.tol, maxdim = opts.maxdim,
-                                 trunc_thresh = opts.trunc_thresh)
+                                 trunc_thresh = opts.trunc_thresh,
+                                 defer = defer_truncation)
         push!(energies, e)
         d = bond_dims(psi); push!(bds, d); push!(maxbd, maximum(d; init = 0))
         push!(maxexp, mx); push!(kdim, nmv[]); push!(grows, ng)
@@ -269,6 +285,26 @@ function solve!(psi::SymMPS, h::XXZChain; opts::CBEBugOptions = CBEBugOptions(),
             break
         end
         prev = e
+    end
+
+    # ⛔ THE DEFERRED TRUNCATION, AND IT MUST NOT BE SKIPPED. With `defer_truncation` the sweeps
+    # never cut, so `maxdim` and `trunc_thresh` have had NO effect up to this point and the state
+    # carries whatever rank the expansions produced. One recursive root-to-leaves pass applies
+    # them, cutting each bond exactly once -- the same `Theta_tau` the time-evolution sweeps close
+    # with (arXiv:2201.10291 section 4.2, Algorithm 7), not an edge-to-edge pass that would cut
+    # every bond twice.
+    #
+    # The energies already recorded are unaffected: each was a variational bound in the space the
+    # solve actually used. This changes the STATE that is returned, so a caller measuring the
+    # energy afterwards can see it rise -- that is the truncation being paid for, once, instead of
+    # L-1 times per sweep.
+    if defer_truncation
+        canonical!(psi, max(1, min(L - 1, L ÷ 2)))
+        truncate_recursive!(psi, max(1, min(L - 1, L ÷ 2));
+                            maxdim = opts.maxdim, cutoff = opts.trunc_thresh)
+        # OVERWRITE, not push: these arrays are indexed BY SWEEP and an extra entry would
+        # invent a sweep that never ran.
+        d = bond_dims(psi); bds[end] = d; maxbd[end] = maximum(d; init = 0)
     end
 
     return GroundStateInfo(energies, bds, maxbd, maxexp, kdim, grows, converged)

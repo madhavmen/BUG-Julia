@@ -391,6 +391,18 @@ function cbe_lubich_sweep(psi::SymMPS, h::Union{XXZChain, MPO}, tau::ComplexF64;
                              trunc_thresh::Float64 = 1e-12,
                              maxiter::Int = 30,
                              tol::Float64 = 1e-15,
+                             # ⛔ THIS SWEEP HAD NO `hermitian` KNOB AND HARDCODED LANCZOS, so a
+                             # non-Hermitian generator (an open system's Lindbladian, a
+                             # non-Hermitian H_eff) was silently solved with the wrong method --
+                             # Lanczos does not fail there, it returns a plausible vector. The
+                             # same defect was present in `tdvp2_step!`, which accepted the
+                             # keyword and then ignored it at both call sites.
+                             hermitian::Bool = true,
+                             # See `BondUpdateBUG/expv.jl`: a genuine convergence test (Saad's
+                             # contribution estimate) in place of the breakdown-only exit, and
+                             # splitting `tau` so a large step needs no larger `maxiter`.
+                             conv_tol::Float64 = 0.0,
+                             substeps::Int = 1,
                              rng::AbstractRNG = MersenneTwister(0x5EED))
     L = length(psi)
     length(h) == L || throw(DimensionMismatch(
@@ -568,7 +580,8 @@ function cbe_lubich_sweep(psi::SymMPS, h::Union{XXZChain, MPO}, tau::ComplexF64;
         H0 = zero_site_h(h, c, lenv_c, renv_c, W[c], Z[c])
         (W[c], Z[c],
          expv(x -> (nmv[] += 1; apply_zero_site(H0, x)), tau, S0;
-              hermitian = true, maxiter = maxiter, tol = tol))
+              hermitian = hermitian, maxiter = maxiter, tol = tol,
+              conv_tol = conv_tol, substeps = substeps))
     end
     expanded[c] = leg_dim(Wc, 3)
     res = svd(S1, (1,); cutoff = max(trunc_thresh, 1e-14), Nkeep = maxdim, get_lists = true)
