@@ -1846,6 +1846,16 @@ fixed in the plot legend.
 
 ### L=16 ITE, β=20 — both BUG orderings
 
+⛔ **HISTORICAL — THE TWO ORDERINGS NO LONGER EXIST AS SEPARATE SCHEMES (noted 2026-08-26).** The
+`decoupled` flag lived on the K-step path, which was removed together with `kaug` and `rexpand` on
+2026-08-24; after that `bug_decoupled` and `bug_interleaved` called `cbe_bug_step!` with
+**identical arguments**, i.e. they were one run under two names. Every row below and in the tables
+further down was measured BEFORE that removal, when the distinction was real — the numbers stand as
+a record, but they are **not** a live comparison, and nothing should be re-run against
+`bug_decoupled`. `bug_interleaved` is now the single BUG scheme across the closed suite and every
+open-system driver. The surviving sweep IS the interleaved ordering (`sweeps/cbe_bug.jl:447`,
+matching the reference's `TDVPSweepCBE1Si.m:30/:34`).
+
 | scheme | E(β=20) | err vs Bethe | χ | krylov |
 |---|---|---|---|---|
 | bug_decoupled | −6.9116773060 | 5.983956e-05 | 64 | 67,240 |
@@ -2167,3 +2177,150 @@ was killed at step 17 of 80 and rerun into its own CSV, and the figures are of t
 matching file — so a truncated series would have been drawn over the complete one in the same
 colour, reading as an integrator that stopped early. `_dedupe_arms` keeps the longest series per
 `(suite, scheme, model, sym, cutoff, dt)` and prints what it ignored.
+
+## 2026-08-27 — `cbe_expand` built `H·Θ` three times per bond, and it was the whole rSVD story
+
+### The defect
+
+`cbe_expand` calls its sketch closures **three** times with identical arguments — `skl(OmR)` and
+`skr(OmL)` for the two preselections, then `skl(QR)` again for the joint final-selection ranking
+(`cbe_core.jl:664`). Each closure ran its own `apply_h_two_site(frame_theta(f), ...)`, so the most
+expensive object in the expansion was materialised three times per bond per half-sweep, and the
+left projector `P_perp (H Θ)` twice.
+
+⛔ **The randomised sketch shrinks the preselection SVD and the sketch contraction. It does not
+touch `H·Θ`.** With the dominant cost paid three times over, `t_cbe` was mostly work rSVD is
+incapable of reducing — which is why every crossover measurement came back near 1.0x against a
+`Dpre/(d·χ)` ceiling of ~16x.
+
+⚠ **AND IT INVERTED THE MODEL RANKING THE STUDY WAS BUILT AROUND.** `apply_h_two_site` scales with
+the MPO virtual dimension, so the redundancy taxed *wide* generators hardest. The resulting pattern
+(1.63x on the XX chain, MPO dim 4; 1.07x on the square cylinder, MPO dim 14) was read as "a wide
+MPO lowers `f_cbe` and hence the rSVD ceiling", i.e. as a property of the method. **It was an
+artefact of the triple build.** The corrected measurement below shows the reduction in `t_cbe`
+*growing* with MPO width, which is what sharing one build predicts.
+
+### Fix
+
+`_sketch_closures(f, buildHT; share = true)` memoises `H·Θ` and one projection per side across all
+three calls. The laziness is load-bearing: `cbe_expand` returns before either closure runs when
+both frames are saturated (`dex_l <= 0 && dex_r <= 0`), the ordinary case at a boundary bond, so an
+eager build would ADD a contraction to exactly the bonds that previously did none.
+
+⛔ **The arithmetic is unchanged bit for bit**, and that is how it is tested: `share_ht = true/false`
+is asserted with `==`, not `isapprox`, because a tolerance would pass a cache returning a STALE
+`H·Θ` from a previous bond — the way this class of bug actually fails. `share_ht = false` survives
+as a runtime A/B so the speedup is reproducible without checking out an old commit.
+
+### The half-sweeps were never coupled, so they now run concurrently
+
+The left sweep reads the state canonical at 1 and writes `W/Vwide/Wcbe`; the right reads it
+canonical at `L` and writes `Z/Uwide/Zcbe`. Neither reads the other output — the only meeting point
+is the single Galerkin solve at the root, which needs both and runs after both. The sequential
+order was an artefact of re-gauging ONE state object in place. `parallel = true` gives the left
+sweep its own `copy(psi)` and spawns the right one.
+
+⚠ **`psi` itself stays the L-canonical object, deliberately.** `AL` and `AR` meet over link `c+1`
+and must be in ONE gauge; the left sweep own carry `C` is built in the 1-canonical gauge, so
+contracting it with `AR` would pair two different bases for the same link and be silently wrong.
+`AL` is therefore still recomputed against `psi` — but **`AR` is now free**: the `D` recursion in
+the right sweep and the `AR` loop that used to follow both sweeps are the same recursion over the
+same tensors in the same gauge, so the second was a redundant pass over half the chain. Deleted.
+
+Three consequences for the bookkeeping, all of which would have failed silently:
+* `n_new` at bond `c` is written by BOTH sweeps (`n_new_l` from the left, `n_new_r` from the right).
+  Benign under last-writer-wins, undefined when concurrent. Two arrays, merged right-wins.
+* every counter and phase timer moved from closure `Ref`s into a per-sweep `_HalfAcc`. A racy `+=`
+  on a `Float64` does not crash — it silently loses increments, so the failure would appear as a
+  profile that quietly under-reports.
+* `peak_elements` used to re-scan all six frame arrays on every call, which both races the other
+  sweep `setindex!` and is `O(L²)` of pure diagnostic work per step. Now accumulated incrementally
+  per sweep and summed, which is an upper bound on the old figure and is literally correct under
+  `parallel = true`.
+
+### Measured, L = 18, dt = 0.05, one process, `-t 2` (`benchmarks/rsvd_parallel.jl`)
+
+Every arm steps from the SAME state at each χ; the root solve is pinned (`maxiter = 20, tol = 0`)
+so all CBE arms do identical operator work (`krylov = 74` throughout: 3 applications × 18 bonds +
+20 root). `err_t2` is against 2-site TDVP at the same rank cap.
+
+Wall-clock speedup against the **pre-fix** code (`share_ht = false`); last column is the best arm:
+
+| model | MPO dim | d | χ | OLD | shared `H·Θ` | + sketch | best (parallel) | tdvp2 |
+|---|---|---|---|---|---|---|---|---|
+| xx | 4 | 2 | 32 | 4.412 s | 1.37x | 1.43x | **1.72x** | 26.81 s |
+| xx | 4 | 2 | 64 | 7.977 s | 1.20x | 1.02x | **1.60x** | 35.69 s |
+| xx | 4 | 2 | 128 | 10.689 s | 1.08x | 1.11x | **1.54x** | 46.28 s |
+| square | 11 | 2 | 32 | 4.007 s | 1.55x | 1.83x | **2.38x** | 20.95 s |
+| square | 11 | 2 | 64 | 5.457 s | 1.00x | 1.16x | **1.65x** | 32.14 s |
+| square | 11 | 2 | 128 | 8.344 s | 1.21x | 1.28x | **1.39x** | 46.96 s |
+| kagome | 34 | 2 | 32 | 2.993 s | 1.60x | 1.33x | **1.72x** | 24.08 s |
+| kagome | 34 | 2 | 64 | 6.807 s | 1.20x | 1.25x | **1.80x** | 28.77 s |
+| kagome | 34 | 2 | 128 | 7.329 s | 1.39x | 1.15x | **1.64x** | 42.43 s |
+| xx_open | 10 | 4 | 32 | 22.49 s | 1.17x | 1.36x | **1.54x** | 97.19 s |
+| xx_open | 10 | 4 | 64 | 63.25 s | 0.88x | 1.42x | **1.65x** | 180.85 s |
+| xx_open | 10 | 4 | 128 | 157.5 s | 0.98x | 1.13x | **1.34x** | 484.27 s |
+
+**`t_cbe` alone — the phase the fix targets — scales with MPO width exactly as sharing one build
+predicts, and this is the number that corrects the earlier wrong conclusion:**
+
+| model | MPO dim | `t_cbe` OLD | `t_cbe` shared | ratio |
+|---|---|---|---|---|
+| xx | 4 | 2.499 s | 1.453 s | 1.72x |
+| square | 11 | 1.326 s | 0.728 s | 1.82x |
+| kagome | 34 | 1.430 s | 0.590 s | **2.42x** |
+
+And the SKETCH pays where `t_cbe` is the largest share of the step, which is the `d = 4` fused open
+systems (`f_cbe ≈ 0.72`), not where the MPO is widest: `xx_open` `t_cbe` 16.6 → 8.7 s (**1.91x**) at
+χ=32. On the closed spin-½ lattices at these χ the sketch is roughly neutral.
+
+### Against 2-site TDVP: the headline
+
+Same rank cap, same state, agreement at `err_t2`:
+
+| model | χ | best CBE-BUG | tdvp2 | faster by | `err_t2` | operator applications |
+|---|---|---|---|---|---|---|
+| xx | 128 | 6.95 s | 46.28 s | **6.7x** | 5.06e-05 | 74 vs 1980 |
+| square | 32 | 1.69 s | 20.95 s | **12.4x** | 1.18e-06 | 74 vs 1980 |
+| kagome | 32 | 1.74 s | 24.08 s | **13.8x** | 6.21e-04 | 74 vs 1980 |
+| xx_open | 128 | 117.2 s | 484.3 s | **4.1x** | 2.20e-06 | 74 vs 1980 |
+
+⚠ **`74 vs 1980` is `info.krylov_dims`, not the `expv` log, and that distinction was a real defect
+in the driver.** `get_krylov_log()` records `expv` calls, and CBE-BUG calls `expv` exactly once per
+step (the root Galerkin solve) — all its half-sweep operator work goes through
+`_krylov_frame`/`apply_one_site`, which the log never sees. Reading the log gave `20` against
+TDVP2 `1980` and would have been quoted as a 99x reduction. Both info structs already carry the
+true count.
+
+⚠ **The pinned root solve UNDERSTATES the sweep-side gains.** `maxiter = 20, tol = 0` makes `root`
+~3.3 s of a 9.9 s XX step at χ=128 — a third of the step that neither optimisation touches, capping
+both by Amdahl. In production the root exits on tolerance, so these speedups (and the margin over
+TDVP2) are lower bounds.
+
+⚠ **REPS = 2 on one contended laptop, and some rows show it.** `xx_open` shared-`H·Θ` reads 0.88x
+at χ=64 and 0.98x at χ=128 — slower than code it strictly does less work than. Those rows are
+variance, not a result; the χ=32 row (1.17x) and every other model agree with the mechanism. Where
+a claim rests on a single row, it is not a claim.
+
+### Two operational traps that cost hours
+
+⛔ **The package had NO precompile workload**, so every `julia --project=.` invocation specialised
+Telum generic block-sparse code at run time: MEASURED 265 s in model setup and **313 s in the first
+`cbe_bug_step!`**, against 0.25 s for every step after it. A `PrecompileTools` `@compile_workload`
+in `src/BUGJulia.jl` that actually CALLS `cbe_bug_step!` (both `exact` paths, both `parallel` paths,
+`:U1` and `:none`, L = 6) cut the first step to **0.56 s**. The trade is that `Pkg.precompile` now
+takes ~9-11 minutes and is re-paid after every edit to `src/` — batch source edits, then precompile
+once.
+
+⛔ **A dead Julia process was eating a core for five days, and a crashed run left another at 4071
+CPU-seconds.** `TaskStop` kills the bash wrapper, NOT the Julia child, and a run that exits 127
+leaves its child detached. Four concurrent Julia processes made every wall clock meaningless, and
+the "exit 127, no output, no crash event" failure that lost five models of a six-model sweep was
+this. Check `Get-Process julia | Select Id,CPU,StartTime` before trusting any timing, and kill by
+`StartTime`. The VSCode Julia language server is also a `julia.exe` child of `Code.exe` — it reached
+1.7 GB and respawned on every crash; `julia.lint.run: false` is the lever.
+
+⛔ **Never pipe a long background Julia run through `tail`.** Julia block-buffers a redirected
+stdout, so a run that is killed discards everything it printed: 27 minutes of test suite, exit 127,
+and an EMPTY output file. Write to a file with explicit `flush`, and print a per-file marker so a
+death localises.

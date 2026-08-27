@@ -126,17 +126,33 @@ _sz_profile(p) = magnetisation(copy(p)) ./ max(norm(copy(p))^2, eps())
         E = exp(tau * T)
         approx = b0 * sum(E[k, 1] * V[k] for k in 1:mm)
         truerr = norm(exp(Matrix(tau * A)) * v - approx)
-        est = b0 * kry(al, be, tau)
+        # ⛔ THE 4-ARGUMENT SIGNATURE, AND THIS TEST WAS RED BEFORE IT WAS UPDATED.
+        # `_kry_contribution` took `(alpha, betas, tau)` while the sweep built a SYMMETRIC
+        # tridiagonal from `real(<v,Hv>)`. It now takes the full upper-HESSENBERG projection
+        # `(H, betas, m, tau)`, because the sweep is Arnoldi and rebuilding a symmetric
+        # tridiagonal is correct only for `H = H'` -- silently wrong on a Lindbladian. The old
+        # method was deleted with the change and this call site was missed, so the testset had
+        # been erroring with `MethodError` rather than checking anything.
+        # ⚠ `A` HERE IS HERMITIAN BY CONSTRUCTION, so the Hessenberg IS the tridiagonal and the
+        # bound being tested is the same quantity as before -- only the calling convention moved.
+        Hm = zeros(ComplexF64, mm + 1, mm + 1)
+        for k in 1:mm
+            Hm[k, k] = al[k]
+            k < mm && (Hm[k, k + 1] = be[k]; Hm[k + 1, k] = be[k])
+        end
+        est = b0 * kry(Hm, be, mm, tau)
 
         # Bound, with a floor so the assertion is not comparing two roundoff figures.
         @test est >= truerr * 0.5 || truerr < 1e-13
         # ...and not SO loose that the tolerance means nothing: 1e4 is far above the 160x seen.
         @test est <= max(truerr, 1e-13) * 1e4
     end
-    # An empty recursion cannot certify anything and must not read as "converged".
-    @test kry(Float64[], Float64[], ComplexF64(-im * 0.05)) == Inf
-    # One step with no accepted residual likewise.
-    @test kry([1.0], Float64[], ComplexF64(-im * 0.05)) == Inf
+    # ⛔ THE TWO DEGENERATE CASES MUST RETURN `Inf`, i.e. "cannot certify convergence", NEVER a
+    # small number -- a stopping rule that reads an empty recursion as converged stops at m = 0.
+    # `m = 0`: an empty recursion certifies nothing.
+    @test kry(zeros(ComplexF64, 1, 1), Float64[], 0, ComplexF64(-im * 0.05)) == Inf
+    # One step with no accepted residual likewise: `betas` is shorter than `m`.
+    @test kry(ComplexF64[1.0 0.0; 0.0 0.0], Float64[], 1, ComplexF64(-im * 0.05)) == Inf
 end
 
 # ── ONE SVD, AT THE END -- pinned, not asserted in a comment ───────────────────────────────
@@ -293,5 +309,165 @@ end
         # property of the BUG half-sweeps and not a tautology.
         @test b.chi == oat_rank(L, L ÷ 2, 1.0)   # measured 7 == 7
         set_symmetry!(:U1)
+    end
+end
+
+# ── THE TWO 2026-08-27 PERFORMANCE CHANGES, EACH PINNED TO ITS OWN CORRECTNESS CLAIM ──────
+#
+# Both are pure performance work, and each has a DIFFERENT thing to prove. Asserting the same
+# tolerance for both would let a real defect through on one of them:
+#
+#   * SHARING `H*Theta` across `cbe_expand`'s three sketch calls contracts the same tensors in
+#     the same order and merely stops rebuilding them, so it must be **BIT-IDENTICAL**. A
+#     tolerance of `1e-10` here would pass a cache that returns a STALE `H*Theta` from a
+#     previous bond -- which is exactly the way this kind of bug fails.
+#   * RUNNING THE HALF-SWEEPS CONCURRENTLY gives each sweep its own copy of the state to re-gauge,
+#     so `canonical!` starts from a different centre and the floating-point path genuinely
+#     differs. Demanding bit-identity there would assert something false.
+@testset "share_ht and parallel: performance changes that must not move the physics" begin
+    set_symmetry!(:U1)
+    L = 10
+    mpo = xxz_mpo(L; J = 1.0, delta = 1.0)
+
+    "Run `n` steps and return the observables the claim is about."
+    function _run(; share_ht::Bool, parallel::Bool, exact::Bool, n::Int = 6)
+        psi = neel_state(L)
+        nmv = 0
+        for _ in 1:n
+            info = cbe_bug_step!(psi, mpo, ComplexF64(-im * 0.05);
+                                 exact = exact, share_ht = share_ht, parallel = parallel,
+                                 dex = 8, dover = 0, comp_ratio = 1.0,
+                                 krylov_basis = 3, krylov_tol = 0.0,
+                                 maxdim = 32, trunc_thresh = 1e-10, maxiter = 20, tol = 0.0)
+            nmv += info.krylov_dims
+        end
+        n2 = max(norm(copy(psi))^2, eps())
+        return (sz = [real(sz_expectation(copy(psi), j)) for j in 1:L],
+                e = real(mpo_energy(copy(psi), mpo)) / n2,
+                chi = bond_dims(psi), nmv = nmv)
+    end
+
+    @testset "sharing H*Theta is BIT-IDENTICAL, on both selection paths" begin
+        for exact in (true, false)
+            a = _run(; share_ht = true,  parallel = false, exact = exact)
+            b = _run(; share_ht = false, parallel = false, exact = exact)
+            # `===`-level equality, not `isapprox`: the arithmetic is the same arithmetic.
+            @test a.sz == b.sz
+            @test a.e == b.e
+            @test a.chi == b.chi
+            # and the same operator work -- a cache that changed the SELECTION would show up
+            # here even if it happened to land on the same observables.
+            @test a.nmv == b.nmv
+        end
+    end
+
+    @testset "parallel half-sweeps agree with sequential to roundoff" begin
+        for exact in (true, false)
+            a = _run(; share_ht = true, parallel = false, exact = exact)
+            b = _run(; share_ht = true, parallel = true,  exact = exact)
+            @test a.chi == b.chi
+            @test maximum(abs.(a.sz .- b.sz)) < 1e-10
+            @test isapprox(a.e, b.e; atol = 1e-10)
+        end
+    end
+
+    @testset "the half-sweeps really are independent: neither reads the other's frames" begin
+        # ⛔ THE STRUCTURAL CLAIM BEHIND `parallel`, TESTED DIRECTLY. If the right half-sweep
+        # depended on anything the left one wrote, running them concurrently would be a race and
+        # the result would vary between runs. Repeating the parallel arm and demanding the SAME
+        # answer each time is what distinguishes "independent" from "usually wins the race".
+        runs = [_run(; share_ht = true, parallel = true, exact = true) for _ in 1:3]
+        for r in runs[2:end]
+            @test r.sz == runs[1].sz
+            @test r.chi == runs[1].chi
+        end
+    end
+end
+
+# ── THE SHIPPED CONFIGURATION AGAINST 2-SITE TDVP: same answer, far less operator work ────
+#
+# ⛔ THIS IS THE CLAIM THE EXAMPLE SCRIPTS NOW REST ON, so it needs a test rather than a benchmark.
+# `examples/common.jl` runs `cbe_bug` at `m = 3` with the randomised sketch; the reason that is the
+# right default is that it matches TDVP2 to the discretisation error while applying the operator
+# an order of magnitude fewer times. Nothing asserted either half of that before.
+#
+# ⛔ THE COST AXIS IS **OPERATOR APPLICATIONS**, NOT WALL CLOCK. `krylov_dims` is deterministic;
+# seconds depend on the machine, on BLAS threads, and (measured the hard way) on whether a stale
+# Julia process from a previous run is still pinned to a core. A timing assertion in a test suite
+# is a flake generator. The wall-clock numbers live in `benchmarks/rsvd_parallel.jl`.
+#
+# ⚠ `krylov_dims` COUNTS BOTH SWEEPS AND THE ROOT SOLVE. It is NOT `get_krylov_log()`, which sees
+# `expv` calls only -- and CBE-BUG calls `expv` exactly ONCE per step (the root Galerkin solve),
+# with all half-sweep operator work going through `_krylov_frame`/`apply_one_site`. Reading the log
+# would report ~20 against TDVP2's ~1980 and overstate the advantage by 25x.
+@testset "the shipped cbe_bug config vs tdvp2: same physics, an order less operator work" begin
+    set_symmetry!(:U1)
+    dt, nst = 0.05, 20
+
+    "Run one integrator and return what the comparison needs."
+    function _arm(mpo, psi0, L, cap, which; exact = true)
+        psi = copy(psi0); nmv = 0
+        for _ in 1:nst
+            info = which === :bug ?
+                cbe_bug_step!(psi, mpo, ComplexF64(-im * dt); exact = exact,
+                              dex = 8, dover = 4, comp_ratio = 1.0,    # Dpre = 12
+                              krylov_basis = 3, krylov_tol = 0.0,      # m = 3, pinned
+                              maxdim = cap, trunc_thresh = 1e-10) :
+                tdvp2_step!(psi, mpo, ComplexF64(-im * dt);
+                            maxdim = cap, trunc_thresh = 1e-10)
+            nmv += info.krylov_dims
+        end
+        n2 = max(norm(copy(psi))^2, eps())
+        return (sz = [real(sz_expectation(copy(psi), j)) for j in 1:L],
+                e = real(mpo_energy(copy(psi), mpo)) / n2, nmv = nmv)
+    end
+
+    # Thresholds are set FROM the measured values with roughly 3x headroom, never fitted to them.
+    # MEASURED (Heisenberg, dt = 0.05, 20 steps):
+    #
+    #   L, cap     nmv bug   nmv tdvp2   ratio   max|dsz|    |dE|       sketch vs exact
+    #   10, 32     1193      20163       16.90   1.6893e-06  1.5543e-13  1.3184e-14
+    #   12, 48     1313      24907       18.97   2.2513e-06  1.8963e-13  5.4151e-14
+    for (L, cap) in ((10, 32), (12, 48))
+        mpo  = xxz_mpo(L; J = 1.0, delta = 1.0)
+        psi0 = neel_state(L)
+        bug    = _arm(mpo, psi0, L, cap, :bug)
+        sketch = _arm(mpo, psi0, L, cap, :bug; exact = false)
+        t2     = _arm(mpo, psi0, L, cap, :t2)
+
+        dsz = maximum(abs.(bug.sz .- t2.sz))
+        ratio = t2.nmv / bug.nmv
+
+        # ── same physics ──
+        # The two integrators differ only by their splitting error at this dt, so the site
+        # magnetisations agree to ~2e-06 and the ENERGY -- which both conserve -- to roundoff.
+        @test dsz < 1e-5 ||
+            (@info "cbe_bug and tdvp2 no longer agree on the magnetisation" L cap dsz; false)
+        @test abs(bug.e - t2.e) < 1e-10 ||
+            (@info "cbe_bug and tdvp2 no longer agree on the energy" L cap bug.e t2.e; false)
+
+        # ── an order less operator work ──
+        # ⚠ ASSERTED AS A RATIO, not as an absolute count: `nmv` moves with `L`, the rank cap and
+        # the root solve's convergence, none of which this test is about.
+        @test ratio > 5.0 ||
+            (@info "cbe_bug lost its operator-count advantage over tdvp2" L cap bug.nmv t2.nmv ratio;
+             false)
+
+        # ── and the sketch is free at `Dpre = 12`, which is why the examples take it ──
+        #
+        # ⛔ NOT ASSERTED AS BIT-IDENTICAL. The sketch is a different ALGORITHM -- a randomised
+        # estimate of the same range -- unlike `share_ht`, which is the same arithmetic and IS
+        # asserted with `==` above.
+        #
+        # ⛔ AND THIS THRESHOLD IS WHAT CAUGHT `dover = 0` BEING WRONG. At `Dpre <= 10` the sketch
+        # sits at 1.0234e-07 -- seven orders worse -- and inflates the rank from 26 to 28, i.e. an
+        # under-sampled probe admits spurious directions as well as missing real ones. MEASURED at
+        # `Dpre = 12`: 6.0507e-15 (L=10) and 5.1043e-14 (L=12), against a 2e-06 discretisation
+        # difference, at the same wall clock. If this test goes red at ~1e-07, the probe width was
+        # cut, not the algorithm broken.
+        dsketch = maximum(abs.(sketch.sz .- bug.sz))
+        @test dsketch < 1e-11 ||
+            (@info "the sketch is no longer free -- check dover/Dpre" L cap dsketch; false)
+        @test sketch.nmv == bug.nmv          # same depth, so the same number of applications
     end
 end

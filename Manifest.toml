@@ -2,7 +2,7 @@
 
 julia_version = "1.12.5"
 manifest_format = "2.0"
-project_hash = "1286d7a1f6bb7fbaf50d7f24ff46e6d8b6196cc7"
+project_hash = "49e45c8025794550ba596898ae720ad86f9bf1fe"
 
 [[deps.AbstractAlgebra]]
 deps = ["LinearAlgebra", "MacroTools", "PrecompileTools", "Preferences", "Random", "RandomExtensions", "SparseArrays"]
@@ -27,7 +27,7 @@ uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
 version = "1.11.0"
 
 [[deps.BUGJulia]]
-deps = ["LinearAlgebra", "LurCGT", "Printf", "Random", "Telum"]
+deps = ["JSON", "LinearAlgebra", "LurCGT", "Printf", "Random", "SparseArrays", "Telum"]
 path = "."
 uuid = "8f2a1c34-5d6e-4b7a-9c8d-1e2f3a4b5c6d"
 version = "0.1.0"

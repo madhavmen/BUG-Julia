@@ -58,14 +58,47 @@ krylov_bound(hnorm::Real, dt::Real, m::Int) =
 
 The three integrators, as closures over one MPO. Any difference between them is the integrator.
 
-`cbe_bug` runs with the exact SVD rather than the randomised sketch. That simplification IS free:
-the sketch is measured bit-identical to the exact SVD on both example models
-(`benchmarks/rsvd_param_scan.jl` phase 0, relative difference 0.000e+00).
+⛔ `cbe_bug` NOW RUNS THE MEASURED-BEST CONFIGURATION: the RANDOMISED SKETCH (`exact = false`) at
+a PINNED Krylov depth of `m = 3` (`krylov_basis = 3, krylov_tol = 0.0`), with `dex = 8, dover = 4,
+comp_ratio = 1.0`. Every part of that is measured, not assumed:
 
-`cbe_bug` otherwise runs at its package defaults, INCLUDING the Krylov depth of the half-sweep
-basis (`krylov_basis = 30`, `krylov_tol = 1e-6`). That is deliberate: depth is the knob that
-actually moves this scheme's error, so pinning it here would make these scripts report something
-no user runs.
+  * `m = 3` is the accuracy/cost optimum. From `docs/PLAN-tolerance-control.md` at L=12, dt=0.05
+    (error / operator applications):
+
+        arm            XX                 Heisenberg         OAT
+        cap, no test   1.6948e-04 / 1770  1.0800e-06 / 2280  5.9952e-15 / 2158
+        tol 1e-6 (old default)
+                       1.6948e-04 / 1180  1.4748e-06 / 1622  1.0880e-14 / 1766
+        pinned m = 3   1.6948e-04 /  950  2.6697e-06 / 1038  7.0610e-14 / 1036
+        pinned m = 0   1.6948e-04 /  289  8.8424e-05 /  308  2.1329e-02 /  313
+
+    `m = 3` holds XX and OAT at the deep-basis answer for ~0.6x the operator work, and gives up
+    1.8x on Heisenberg for 0.64x the cost. `m = 0` is eight orders worse on OAT -- ⛔ DEPTH IS THE
+    ONE KNOB THAT MUST NOT BE CUT TO ZERO.
+  * The SKETCH is worth taking because the expansion it shrinks is no longer paid three times over
+    (see `_sketch_closures`). It buys `t_cbe` 1.3-1.9x, the most where `t_cbe` is the largest share
+    of the step (the `d = 4` fused open systems, ~72%).
+  * ⛔ `dover = 4` IS NOT A ROUNDING OF THE DEFAULT -- IT IS WORTH SEVEN ORDERS, FOR FREE.
+    `npre = dover === nothing ? ceil(1.2*dex) : dex + dover` (`cbe_core.jl:587`), so this is the
+    PROBE WIDTH, and at `dex = 8` the probe is what binds rather than the admitted budget.
+    MEASURED (Heisenberg, 20 steps of dt=0.05, deviation from the EXACT-CBE arm):
+
+        dover     Dpre   L=10 vs exact CBE   L=12 vs exact CBE   chi (exact = 26)   secs (L=10)
+        default     10        1.0234e-07          1.0234e-07             28             11.16
+        0            8        1.0234e-07          1.0234e-07             28             11.01
+        2           10        1.0234e-07          1.0234e-07             28             11.27
+        4           12        6.0507e-15          5.1043e-14             26             10.96
+
+    Three columns say the same thing. An under-sampled probe is not merely less accurate: it also
+    ADMITS SPURIOUS DIRECTIONS (chi 28 against the exact 26), so it costs rank as well. And the
+    seconds are flat across the whole column -- two extra probe columns are free.
+    ⚠ THIS SUPERSEDES `dover = 0`, which an earlier sweep (`rsvd_optimal.jl`, Schwinger d=4,
+    chi=32) picked as "measured-best". That sweep optimised SPEED on one model and never compared
+    the arms against the exact-CBE reference, so it could not see the seven orders it was paying.
+
+⚠ `parallel` IS LEFT OFF HERE. It is worth 1.2-1.7x but needs `julia -t 2` or more, and an example
+script that silently reads as a pessimisation on a single-threaded run is worse than one that is
+honest about its defaults. Pass `parallel = true` for production runs with threads.
 
 ⛔ DO NOT VALIDATE A BASIS-CONSTRUCTION CHANGE ON XX. It is a control, never the evidence. The XX
 domain wall stays low-rank enough that basis choices do not bind, and it has now failed to show
@@ -92,7 +125,14 @@ function steppers(mpo; maxdim::Int, trunc_thresh::Float64, maxiter::Int)
                                                      trunc_thresh = trunc_thresh,
                                                      maxiter = maxiter),
 
-        "cbe_bug"    => (p, tau) -> cbe_bug_step!(p, mpo, tau; exact = true, maxdim = maxdim,
+        # THE MEASURED-BEST RUNNER -- see the docstring above for every number behind it.
+        "cbe_bug"    => (p, tau) -> cbe_bug_step!(p, mpo, tau;
+                                                  exact = false,        # randomised sketch
+                                                  dex = 8, dover = 4,  # Dpre = 12; see above
+                                                  comp_ratio = 1.0,
+                                                  krylov_basis = 3,     # m = 3
+                                                  krylov_tol = 0.0,     # pinned, not a tolerance
+                                                  maxdim = maxdim,
                                                   trunc_thresh = trunc_thresh, maxiter = maxiter),
     )
 end

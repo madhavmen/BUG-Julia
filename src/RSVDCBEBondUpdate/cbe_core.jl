@@ -64,6 +64,74 @@ end
 # no-op on an already-projected `Y` -- and it is kept because it also orthonormalises and
 # returns the residual the selection needs.
 
+# ⛔ `H*Theta` IS BUILT **ONCE** PER `cbe_expand`, AND THAT IS A FIX, NOT A TIDY-UP.
+#
+# `cbe_expand` calls its sketch closures THREE times with identical arguments -- `skl(OmR)` and
+# `skr(OmL)` for the two preselections, then `skl(QR)` again for the joint final-selection
+# ranking (`:664`). Each call used to run its own `apply_h_two_site(frame_theta(f), ...)`, so the
+# single most expensive object in the expansion was materialised THREE TIMES per bond per
+# half-sweep, and the left projector `P_perp (H Theta)` TWICE.
+#
+# ⚠ THIS IS WHY THE RANDOMISED SKETCH COULD NOT WIN, and the note in `henv.jl:624` had already
+# found the reason without finding the cause: "RSVD reduces flops, and flops were not the cost."
+# The sketch shrinks the SVD and the sketch contraction; it does NOT touch `H*Theta`. With the
+# expensive part paid three times over, `t_cbe` was dominated by work the sketch is incapable of
+# reducing, and the whole-step speedup was capped far below what `Dpre/(d*chi)` promised.
+#
+# ⚠ AND IT EXPLAINS THE MODEL DEPENDENCE. `apply_h_two_site` scales with the MPO's virtual
+# dimension, so the redundancy costs MORE the wider the generator: MEASURED 1.63x on the XX chain
+# (MPO dim 4) against 1.07x on the square cylinder (MPO dim 14) -- the wide-MPO models were being
+# taxed hardest by the very thing the study was trying to measure.
+#
+# ⛔ THE ARITHMETIC IS UNCHANGED, BIT FOR BIT: the same tensors are contracted in the same order,
+# they are simply not rebuilt. Any accuracy difference after this change would be a bug in it, and
+# `tests/rsvd_cbe/` checks exactly that.
+
+"""
+    _sketch_closures(f, buildHT) -> (skl, skr)
+
+The `(skl, skr)` pair [`cbe_expand`](@ref) wants, sharing ONE `H*Theta` and ONE projection per
+side across every call the selection makes.
+
+`buildHT()` returns `H*Theta` with legs `(link_l, site_l, site_r, link_r)`; it is invoked at most
+once, and not at all when both sides are already complete and `cbe_expand` returns early.
+
+⚠ THE LAZINESS IS LOAD-BEARING, not stylistic. `cbe_expand` returns before either closure runs
+whenever `dex_l <= 0 && dex_r <= 0` (both frames saturated), which at a boundary bond is the
+ordinary case -- building `H*Theta` eagerly here would ADD an expensive contraction to exactly the
+bonds that previously did none.
+"""
+function _sketch_closures(f::BondFrame, buildHT; share::Bool = true)
+    HT = Ref{Any}(nothing)
+    AL = Ref{Any}(nothing)          # P_perp^L (H Theta) -- wanted by BOTH `skl` calls
+    AR = Ref{Any}(nothing)          # (H Theta) P_perp^R
+    # ⚠ `share = false` IS THE OLD BEHAVIOUR, KEPT AS AN A/B AND NOTHING ELSE. A performance claim
+    # that can only be reproduced by checking out an old commit is not reproducible in practice;
+    # this makes "how much did sharing buy?" a switch that `benchmarks/rsvd_parallel.jl` can flip
+    # inside ONE process -- which matters here, because a cold Julia process spends ~10 minutes
+    # compiling before it can time anything.
+    _ht() = share ? (HT[] === nothing && (HT[] = buildHT()); HT[]) : buildHT()
+    function _al()
+        share && AL[] !== nothing && return AL[]
+        H = _ht()
+        c = contract(f.U0', (1, 2), H, (1, 2))             # (bond, site_r, link_r)
+        A = to_concrete(H - to_concrete(contract(f.U0, (3,), c, (1,))))
+        share && (AL[] = A)
+        return A
+    end
+    function _ar()
+        share && AR[] !== nothing && return AR[]
+        H = _ht()
+        c = contract(H, (3, 4), f.V0', (2, 3))             # (link_l, site_l, bond)
+        A = to_concrete(H - to_concrete(contract(c, (3,), f.V0, (1,))))
+        share && (AR[] = A)
+        return A
+    end
+    skl = Om -> to_concrete(contract(_al(), (3, 4), Om', (2, 3)))       # (link_l, site_l, g)
+    skr = Om -> to_concrete(permutedims(contract(_ar(), (1, 2), Om', (1, 2)), (3, 1, 2)))
+    return skl, skr
+end
+
 """
     sketch_h_left(f, h, i, lenv, renv, Om) -> TLArray
 
@@ -74,14 +142,13 @@ space the left frame is expanded into.
 `Om` carries `V0`'s layout `(g, site_r, link_r)`: it IS a candidate right frame, with
 `g = Dpre` columns instead of `r`. `Om = f.V0` recovers the exact left factor of
 `P_perp (H Theta)` projected on the current right frame.
+
+⚠ A STANDALONE CALL REBUILDS `H*Theta`. Inside a sweep the caching above is what runs; this
+method exists for tests and microbenchmarks that want one probe in isolation.
 """
-function sketch_h_left(f::BondFrame, h::XXZChain, i::Int,
-                       lch::ChannelSet, rch::ChannelSet, Om)
-    HT = apply_h_two_site(frame_theta(f), h, i, lch, rch)  # (link_l, site_l, site_r, link_r)
-    c  = contract(f.U0', (1, 2), HT, (1, 2))               # (bond, site_r, link_r)
-    A  = to_concrete(HT - to_concrete(contract(f.U0, (3,), c, (1,))))
-    return to_concrete(contract(A, (3, 4), Om', (2, 3)))   # (link_l, site_l, g)
-end
+sketch_h_left(f::BondFrame, h::XXZChain, i::Int,
+              lch::ChannelSet, rch::ChannelSet, Om) =
+    first(_sketch_closures(f, () -> apply_h_two_site(frame_theta(f), h, i, lch, rch)))(Om)
 
 """
     sketch_h_right(f, h, i, lenv, renv, Om) -> TLArray
@@ -90,14 +157,9 @@ Mirror of [`sketch_h_left`](@ref): the right matricization of `(H Theta) P_perp^
 `P_perp^R = I - V0' V0`, sketched from the left. `Om` carries `U0`'s layout
 `(link_l, site_l, g)` and the result is `(g, site_r, link_r)`.
 """
-function sketch_h_right(f::BondFrame, h::XXZChain, i::Int,
-                        lch::ChannelSet, rch::ChannelSet, Om)
-    HT = apply_h_two_site(frame_theta(f), h, i, lch, rch)
-    c  = contract(HT, (3, 4), f.V0', (2, 3))               # (link_l, site_l, bond)
-    A  = to_concrete(HT - to_concrete(contract(c, (3,), f.V0, (1,))))
-    Y  = contract(A, (1, 2), Om', (1, 2))                  # (site_r, link_r, g)
-    return to_concrete(permutedims(Y, (3, 1, 2)))          # (g, site_r, link_r)
-end
+sketch_h_right(f::BondFrame, h::XXZChain, i::Int,
+               lch::ChannelSet, rch::ChannelSet, Om) =
+    last(_sketch_closures(f, () -> apply_h_two_site(frame_theta(f), h, i, lch, rch)))(Om)
 
 # ── the sector-graded Gaussian sketch ────────────────────────────────────────
 #
@@ -472,10 +534,11 @@ the step in it. So there is no `expv` per bond on a one-site object, only the `O
 matrix-free 0-site Krylov, and no rank-4 tensor anywhere.
 """
 cbe_expand(f::BondFrame, h::XXZChain, i::Int,
-           lch::ChannelSet, rch::ChannelSet; kwargs...) =
+           lch::ChannelSet, rch::ChannelSet; share_ht::Bool = true, kwargs...) =
     cbe_expand(f,
-               Om -> sketch_h_left(f, h, i, lch, rch, Om),
-               Om -> sketch_h_right(f, h, i, lch, rch, Om); kwargs...)
+               _sketch_closures(f,
+                   () -> apply_h_two_site(frame_theta(f), h, i, lch, rch);
+                   share = share_ht)...; kwargs...)
 
 """
     cbe_expand(f, skl, skr; kwargs...) -> CBEExpansion

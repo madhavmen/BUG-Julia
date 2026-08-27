@@ -686,31 +686,28 @@ apply_h_two_site(Theta, mpo::MPO, i::Int,
 # selection knows how `H` is stored.
 
 "See the [`sketch_h_left`](@ref) for a term list; this is the same sketch on MPO
-environments."
-function sketch_h_left(f::BondFrame, mpo::MPO, i::Int,
-                       lenv::MPOLink, renv::MPOLink, Om)
-    HT = apply_h_two_site(frame_theta(f), mpo, i, lenv, renv)
-    c  = contract(f.U0', (1, 2), HT, (1, 2))               # (bond, site_r, link_r)
-    A  = to_concrete(HT - to_concrete(contract(f.U0, (3,), c, (1,))))
-    return to_concrete(contract(A, (3, 4), Om', (2, 3)))   # (link_l, site_l, g)
-end
+environments. ⚠ A standalone call rebuilds `H*Theta`; inside a sweep the shared cache in
+[`_sketch_closures`](@ref) is what runs."
+sketch_h_left(f::BondFrame, mpo::MPO, i::Int, lenv::MPOLink, renv::MPOLink, Om) =
+    first(_sketch_closures(f,
+        () -> apply_h_two_site(frame_theta(f), mpo, i, lenv, renv)))(Om)
 
 "Mirror of [`sketch_h_left`](@ref) on MPO environments."
-function sketch_h_right(f::BondFrame, mpo::MPO, i::Int,
-                        lenv::MPOLink, renv::MPOLink, Om)
-    HT = apply_h_two_site(frame_theta(f), mpo, i, lenv, renv)
-    c  = contract(HT, (3, 4), f.V0', (2, 3))               # (link_l, site_l, bond)
-    A  = to_concrete(HT - to_concrete(contract(c, (3,), f.V0, (1,))))
-    Y  = contract(A, (1, 2), Om', (1, 2))                  # (site_r, link_r, g)
-    return to_concrete(permutedims(Y, (3, 1, 2)))          # (g, site_r, link_r)
-end
+sketch_h_right(f::BondFrame, mpo::MPO, i::Int, lenv::MPOLink, renv::MPOLink, Om) =
+    last(_sketch_closures(f,
+        () -> apply_h_two_site(frame_theta(f), mpo, i, lenv, renv)))(Om)
 
+# ⛔ ONE `H*Theta` PER EXPANSION, SHARED BY ALL THREE SKETCH CALLS -- see `_sketch_closures`.
+# The MPO path is where this costs most: `apply_h_two_site` scales with the MPO's virtual
+# dimension, so the old triple build taxed the WIDE generators (square, kagome, Schwinger)
+# hardest, which are exactly the models the rSVD study needed to win on.
 "The bond expansion at bond `i`, driven by MPO environments."
 cbe_expand(f::BondFrame, mpo::MPO, i::Int,
-           lenv::MPOLink, renv::MPOLink; kwargs...) =
+           lenv::MPOLink, renv::MPOLink; share_ht::Bool = true, kwargs...) =
     cbe_expand(f,
-               Om -> sketch_h_left(f, mpo, i, lenv, renv, Om),
-               Om -> sketch_h_right(f, mpo, i, lenv, renv, Om); kwargs...)
+               _sketch_closures(f,
+                   () -> apply_h_two_site(frame_theta(f), mpo, i, lenv, renv);
+                   share = share_ht)...; kwargs...)
 
 """
     MPOOneSiteH
