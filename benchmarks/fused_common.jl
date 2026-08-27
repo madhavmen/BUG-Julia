@@ -237,17 +237,58 @@ constructors (`rho` carries the sweep's `cbeW`/`cbeZ` tags, `|I>>` carries `L,i`
 refuses a direct sum across mismatched itags. Retagging the bonds is safe -- they are internal
 labels, summed over -- while retagging a PHYSICAL leg would silently pair the wrong sites, which is
 why only legs 1 and 3 are touched.
+
+⛔ AND RETAGGING IS NOT ENOUGH: `Telum._qindex_match_for_oplus` requires `itags`, **`dir`**, `plev`
+AND `lock` to agree, and `setitag` fixes only the first. The BOND ARROW is what differs, and it
+differs BY SWEEP -- measured on the fused d = 4 chain, `psi[1]` leg 3 after one step:
+
+    tdvp2        dir = '+'      add_mps THREW
+    tdvp_cbe1s   dir = '+'      add_mps THREW
+    cbe_bug      dir = '-'      add_mps OK        <- matches the identity superket
+
+So this function only ever worked on `cbe_bug` output, which is exactly why every previous
+open-system trajectory passed: `rsvd_parallel.jl` calls `post!` only in its warmup, on a `cbe_bug`
+step. The first `tdvp2` trajectory on a fused generator found it immediately.
+
+⛔ THE FIX IS TO GAUGE BOTH INPUTS THE SAME WAY, NOT TO FLIP ARROWS. `dag` would flip every leg
+including the PHYSICAL one and conjugate the data; there is no `setdir` in Telum's API. But the
+arrow on a bond is set by which side of the centre it lies on, so canonicalising both arguments to
+the same site makes the conventions agree by construction -- and `restore_trace!` re-canonicalises
+after the sum anyway, so this costs one extra gauge pass and changes no result.
+
+⚠ THE ERROR MESSAGE IS WIDENED DELIBERATELY. Telum's own message says "no leg matching reference
+leg 3" without saying WHICH attribute, and that cost an hour to localise. On failure this now prints
+the four attributes side by side.
 """
 function add_mps(a, b)
     n = length(a)
     n == length(b) || throw(DimensionMismatch("add_mps: $(n) vs $(length(b)) sites"))
+    # Gauge both to site 1 so the bond arrows agree; see the note above.
+    canonical!(a, 1)
+    canonical!(b, 1)
     out = Any[]
     for i in 1:n
         A = a[i]
         B = to_concrete(setitag(setitag(b[i], 1, A.inds[1].itags), 3, A.inds[3].itags))
-        push!(out, i == 1 ? to_concrete(oplus([A, B], (3,))) :
-                   i == n ? to_concrete(oplus([A, B], (1,))) :
-                            to_concrete(oplus([A, B], (1, 3))))
+        legs = i == 1 ? (3,) : i == n ? (1,) : (1, 3)
+        try
+            push!(out, to_concrete(oplus([A, B], legs)))
+        catch e
+            e isa ArgumentError || rethrow()
+            io = IOBuffer()
+            println(io, "add_mps: oplus failed at site $i (legs $legs). Telum needs itags, dir, ",
+                        "plev and lock to all agree. Side by side:")
+            for k in 1:length(A.inds)
+                println(io, "   leg $k  a: itags=", repr(A.inds[k].itags),
+                            " dir=", repr(A.inds[k].dir), " plev=", A.inds[k].plev,
+                            " lock=", repr(A.inds[k].lock))
+                println(io, "          b: itags=", repr(B.inds[k].itags),
+                            " dir=", repr(B.inds[k].dir), " plev=", B.inds[k].plev,
+                            " lock=", repr(B.inds[k].lock))
+            end
+            print(io, "original: ", sprint(showerror, e))
+            throw(ArgumentError(String(take!(io))))
+        end
     end
     return SymMPS(out, n)
 end
@@ -299,8 +340,17 @@ OPERATOR ENTANGLEMENT at the central cut: the von Neumann entropy of `|rho>>` tr
 
 ⚠ `|rho>>` IS NOT NORMALISED (`Tr rho = 1` is the conservation law, not the 2-norm), so the
 Schmidt values are renormalised here before the entropy is taken. Returns `(S, n_states)`.
+
+⛔ `base` IS PART OF THE OBSERVABLE, NOT A DISPLAY CHOICE. The default `e` (nats) is what every
+caller before 2026-08-27 measured and is kept so their numbers do not move. The dissipative
+operator-entanglement literature quotes **`log_2`** — arXiv:2410.18468 Eq. (3),
+`S_op = -sum_a lambda_a^2 log_2 lambda_a^2`, and its late-time law
+`S_op(t -> inf) = eta log_2(tJ) + S_0` — so a run being compared against that paper must pass
+`base = 2`. Quoting nats against a `log_2` figure understates the entropy by a factor
+`ln 2 = 0.693` and, worse, rescales the FITTED PREFACTOR `eta` by the same factor while leaving
+the logarithmic SHAPE intact, so the plot still looks right.
 """
-function operator_entanglement(psi)
+function operator_entanglement(psi; base::Real = ℯ)
     p = copy(psi); c = max(1, length(p) ÷ 2)
     canonical!(p, c)
     res = svd(p[c], (1, 2); cutoff = 0.0, get_lists = true)
@@ -311,5 +361,6 @@ function operator_entanglement(psi)
     isempty(s) && return 0.0, 0
     s ./= sqrt(sum(abs2, s))
     p2 = abs2.(s)
-    return -sum(x -> x > 0 ? x * log(x) : 0.0, p2), length(s)
+    S = -sum(x -> x > 0 ? x * log(x) : 0.0, p2)
+    return S / log(base), length(s)
 end

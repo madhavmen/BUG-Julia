@@ -2324,3 +2324,160 @@ this. Check `Get-Process julia | Select Id,CPU,StartTime` before trusting any ti
 stdout, so a run that is killed discards everything it printed: 27 minutes of test suite, exit 127,
 and an EMPTY output file. Write to a file with explicit `flush`, and print a per-file marker so a
 death localises.
+
+---
+
+## 2026-08-27 (later) — the open-system suite gets an EXACT reference, and three bugs on the way
+
+Drivers added: `l18_campaign.jl` (trajectories, 3 arms), `l18_backward_step.jl` (stability),
+`l18_square_open_protocol.jl` (the dissipative entanglement transition), `l18_krylov_depth.jl`,
+`l18_rank_scan.jl`, `xx_open_exact_gate.jl`. Plots: `plot_l18_campaign.py`, `plot_l18_special.py`.
+
+### ⛔ `xx_open` HAS A CLOSED FORM, AND IT IS THE ONLY OPEN MODEL THAT DOES
+
+Onsite dephasing CLOSES the single-particle correlation matrix — the dissipator maps
+`c_i^dag c_j` to a multiple of itself, generating no higher correlator:
+
+    dC/dt = -i[h, C] - gamma (1 - delta_ij) C_ij ,      <S^z_j> = C_jj - 1/2
+
+so `<S^z_j(t)>` is an `L x L` linear ODE at ANY `L` and ANY `gamma`, with nothing of size `4^L`
+built. `tests/common/free_fermion.jl`: `xx_dephasing_correlation` / `xx_dephasing_sz`.
+
+⇒ This is the ONE open model where "TDVP degraded" can be told apart from "BUG drifted". Every
+other open model is scored against a published TREND, and a trend cannot distinguish an arm that
+survived CORRECTLY from one that merely survived. It is therefore the right vehicle for the
+large-`gamma` / long-`T` escalation, not `square_open`.
+
+⚠ AND `L_j = S^z_j` IS THE SAME CHANNEL AS `L_j = n_j`, so the standard result applies unchanged:
+`D[L + cI] = D[L]` identically for Hermitian `L` and real `c` (the `c` terms cancel exactly), and
+`S^z = n - 1/2` is exactly such a shift. Treating them as different channels and hunting the
+difference is a dead end.
+
+### THE MPDO FORMALISM IS VALIDATED — `benchmarks/xx_open_exact_gate.jl`, L=6 fused, FULL RANK
+
+Full rank matters: at cap 2 `trace_preservation.jl` measured EVERY arm pinned at state dev
+1.35e-01, `tdvp2` included, so a binding cap measures truncation instead of the operator. L=6
+fused has a maximum bond of `4^3 = 64`, so `cap = 256` cannot bind; measured `chi` 43-47.
+
+    A  gamma=0, xx_dephasing_sz vs xx_free_fermion_sz : 6.661e-16   PASS  (no solver involved)
+
+    arm            gamma=0: dt 0.05 -> 0.0125     ratio      gamma=0.1: same ladder      ratio
+    tdvp2          2.2436e-08 -> 3.6995e-10       8.70/6.97  2.1612e-08 -> 3.2890e-10    8.71/7.54
+    tdvp_cbe1s     2.7220e-03 -> 7.2151e-04       1.94/1.94  2.6549e-03 -> 7.0357e-04    1.94/1.94
+    cbe_bug        8.5687e-04 -> 5.3797e-05       3.99/3.99  8.5678e-04 -> 5.3854e-05    3.98/3.99
+
+1. **`tdvp2` reproduces the exact dephasing solution to 3.7e-10.** The fused d=4 layout, the
+   Liouvillian MPO, the identity superket and the trace machinery are all correct — checked against
+   a CLOSED FORM, not against another arm.
+2. **`gamma = 0` and `gamma = 0.1` are nearly identical** (`cbe_bug` 8.5687e-04 vs 8.5678e-04), so
+   the error is dominated by the HAMILTONIAN half of the doubled chain. The bath machinery adds
+   essentially nothing to it.
+3. **`cbe_bug` is second order (3.99) with a large prefactor**; **`tdvp_cbe1s` is FIRST order
+   (1.94)** and the least accurate of the three. ⛔ THE SECOND HALF OF THAT IS NEW AND MATTERS:
+   `tdvp_cbe1s` tracks `tdvp2` to SIX DIGITS on the closed XX chain but degrades to order 1 on the
+   fused non-Hermitian generator. It is the published baseline, so a "BUG vs 1-site CBE" comparison
+   on open systems measures a defect in the baseline as much as a property of BUG.
+
+### ⛔ AND THE TRACE QUESTION WAS ALREADY ANSWERED — `benchmarks/trace_preservation.jl` (2026-08-26)
+
+`Tr rho` is the Lindbladian's conservation law (`<<I|L = 0`), and `tdvp2` inherits it EXACTLY: its
+sweep is a product of local exponentials and each `h_i` separately annihilates `<<I|`. A GALERKIN
+scheme does not — `Tr(P rho) = <<P I|rho>>`, so the trace survives iff `P|I>> = |I>>`, and nothing
+in CBE/BUG puts the identity superket in the basis. MEASURED at full rank, L=3, gamma=0.5, T=0.3:
+
+    arm                       steps=3      steps=12     steps=48     1-Tr @ 48
+    tdvp2                     1.93e-14     3.54e-14     5.48e-13     2.99e-13   (exact)
+    cbe_bug                   2.42e-03     1.53e-04     9.56e-06     1.95e-05   (O(dt^2))
+    bug + rescale Tr          4.66e-03     2.92e-04     1.83e-05     ~0         1.91x WORSE state
+    bug + restore along |I>>  1.81e-03     1.14e-04     7.12e-06     ~1e-15     25% BETTER state
+
+`1-Tr` falls 4.91e-03 -> 3.11e-04 -> 1.95e-05, a clean factor of 16 per 4x refinement ⇒ the loss is
+the GALERKIN PROJECTION, not truncation, and it vanishes as `dt -> 0`. It is not a defect.
+⛔ `restore_trace!` (move along `|I>>` only) is the correct fix and it is FREE: exact trace AND a
+25% better state, where plain rescaling is 1.91x worse because it multiplies the traceless part too.
+⚠ At cap 2, `tdvp2` ALSO loses trace (1-Tr = 2.5e-2, flat in dt). Once truncation binds, exact
+trace preservation is not a TDVP-vs-BUG discriminator.
+
+### ⛔ `add_mps` ALIGNED ONLY `itags`, AND THE BOND ARROW DIFFERS BY SWEEP
+
+`Telum._qindex_match_for_oplus` needs `itags`, **`dir`**, `plev` and `lock` to agree. Measured,
+fused d=4, `psi[1]` leg 3 after one step: `tdvp2` `'+'`, `tdvp_cbe1s` `'+'`, `cbe_bug` `'-'` — and
+only the last matches the identity superket.
+
+⛔ **CONSEQUENCE: no open-system TRAJECTORY had ever been run with `tdvp2` or `tdvp_cbe1s`.**
+`restore_trace!` is mandatory for a trajectory and was reachable only from `cbe_bug`;
+`rsvd_parallel.jl` calls `post!` only in its warmup, on a `cbe_bug` step (line 197). Every
+open-system result before this commit is `cbe_bug`-only, so the requested TDVP-vs-BUG comparison on
+`square_open` was not merely unmeasured — it was not runnable.
+
+Fix = GAUGE, not arrow surgery: Telum exports no `setdir` and `dag` would flip the PHYSICAL leg and
+conjugate the data, so `canonical!(a,1); canonical!(b,1)` before the `oplus` makes the conventions
+agree by construction (`restore_trace!` re-canonicalises afterwards anyway). Verified on all three
+arms. `add_mps` now also reprints all four leg attributes for both operands on failure — Telum's
+message names the LEG but not the ATTRIBUTE, which is what made this expensive.
+
+### ⛔ THE d=4 MODELS MUST BE READ THROUGH `S.profile`, NEVER `sz_expectation`
+
+A fused site is a `(ket, bra)` PAIR, so `d = 4` and a `d = 2` `S^z` cannot contract against it:
+`Contracted legs must have matching space info`. The moment `xx_open` gained a closed form and
+started running the `t = 0` convention gate, that gate threw. `S.profile` is `<S^z_j>` for the
+closed models and `Tr(S^z_j rho)` for the fused ones — the same physical quantity, obtained the way
+each layout requires, which is why the models expose it rather than a raw operator.
+
+### CBE-BUG's L=18 ACCURACY: NOT DEPTH, NOT THE BUDGET — THE DIRECTIONS
+
+`xx`, L=18, dt=0.05, T=5, cap=64, against the exact free-fermion solution:
+
+    tdvp2        chi 64   krylov 52692   445.3 s   err 1.6569e-07
+    tdvp_cbe1s   chi 64   krylov 50995   833.6 s   err 1.657e-07
+    cbe_bug      chi 64   krylov  6196   155.7 s   err 5.0554e-02
+
+⛔ KRYLOV DEPTH IS EXCLUDED. `l18_krylov_depth.jl` swept `m` = 3,6,10,16,24,30: the error was
+**5.0554e-02 for every one of them**, identical to five significant figures, with `krylov_dims`
+saturating at ~15028 from m=10 on. More depth is neither used nor helpful.
+⛔ AND "RANK-LIMITED" DOES NOT EXPLAIN IT: `tdvp2` sits at the SAME `chi = 64` and holds 1.66e-07.
+Sixty-four directions are demonstrably enough; CBE-BUG keeps the wrong ones. The tell is the `chi`
+column long BEFORE the cap binds — t=0.25: 22 against 8; t=1.25: 39 against 21. Roughly DOUBLE the
+rank for an 8x WORSE answer, then a four-order runaway once the cap starts binding at t~2.75.
+
+⚠ SO ITS "8.5x FEWER OPERATOR APPLICATIONS" AT m=3 IS NOT A SAVING. An operator count is a cost
+only when the arms agree on the answer; at five orders off it measures work SKIPPED.
+⚠ AND THE ERROR SPLITS IN TWO: a flat ~8x deficit present from the FIRST sample (integrator), plus
+the truncation runaway (selection). Quoting the endpoint merges them and sends the fix to the wrong
+place. `l18_rank_scan.jl` separates them: `maxdim` tests the budget, `dex` tests the selection.
+
+### Operational
+
+⛔ **A WARMUP IS MANDATORY IN EVERY MULTI-ARM DRIVER.** `@compile_workload` covers `cbe_bug_step!`
+only, so whichever TDVP arm runs first absorbs its own specialisation: measured L=8, `tdvp2` 61.6 s
+against `cbe_bug` 2.7 s, and `tdvp2` led only because it is first in the list.
+
+⚠ **AND EXTENDING THE WORKLOAD DID NOT TAKE — `Pkg.precompile` EXITING 0 DOES NOT MEAN IT DID.**
+After adding both TDVP arms, a cold process still measured `tdvp2` 33.1 s / `tdvp_cbe1s` 4.6 s /
+`cbe_bug` 1.25 s. The workload is wrapped in ONE `try/catch`, so a throw inside it silently skips
+everything after; `cbe_bug` was warm because it runs first. Fix = per-call `try/catch` and order the
+shipped path first. ⇒ ALWAYS ASSERT WARM/COLD BY TIMING A FIRST CALL.
+
+⛔ **THE VSCODE JULIA LANGUAGE SERVER TAKES THE PACKAGE PRECOMPILE LOCK.** A `Pkg.precompile()` sat
+at CONSTANT CPU for 8 minutes behind it and exited 0 having done nothing (`src/BUGJulia.jl` stamped
+16:43, newest `.ji` 16:36); killing the LS let it finish in seconds, logging "attempting to remove
+probably stale pidfile". It respawns within a minute and reaches 2-3.6 GB and 700+ CPU-seconds, so
+killing does not stick and `julia.lint.run: false` needs a window RELOAD. Until then: de-prioritise
+rather than kill — at the start of a stage every existing `julia.exe` is by definition not the
+measurement, so Idle priority plus a one-core affinity removes the contention.
+
+⛔ **NEVER EDIT `src/` WHILE A MULTI-STAGE CAMPAIGN IS RUNNING.** The stages are separate processes;
+a source edit invalidates the cache and the next stage pays a fresh ~14-minute recompile INSIDE its
+timed region. Benchmark-directory files are safe — that is how `add_mps` was repaired mid-campaign.
+
+⛔ **FLUSH EVERY LINE AND MIRROR IT TO A FILE.** Julia BLOCK-BUFFERS a redirected stdout, so a killed
+run discards everything it printed. The exactness gate was first run without it: 31 minutes, 2085
+CPU-seconds, killed, `exit 127`, and a COMPLETELY EMPTY log. Nothing recoverable. Partial results
+from a killed run are the normal case on a contended laptop.
+
+⚠ `@printf("%s", ix.itags)` throws `MethodError: no method matching codeunit(::Itag)` — use `repr`
+or plain interpolation for Telum leg metadata.
+
+⚠ `TaskStop` KILLS THE BASH WRAPPER, NOT THE JULIA CHILD. An orphan from a stopped scan was found
+at 2782 CPU-seconds. Check `Get-Process julia | Select Id,CPU,StartTime` and kill by `StartTime`
+before trusting any timing.

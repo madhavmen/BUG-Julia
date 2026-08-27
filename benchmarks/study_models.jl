@@ -56,8 +56,12 @@ function _closed(nm, L, W, Jm, label, dt)
         push!(vals, real(mpo_energy(copy(psi), W)) / n2)
         return vals
     end
+    # ⚠ THE NO-OP `shift!` / `restore!` ARE HERE SO A DRIVER CAN RUN A CLOSED MODEL AS THE CONTROL
+    # ARM OF AN OPEN-SYSTEM EXPERIMENT without branching on `S.d`. A closed unitary step needs
+    # neither: there is no zero-body dissipator term and the 2-norm is already the invariant.
     return (nm = nm, label = label, L = L, W = W, d = 2, tau = ComplexF64(-im * dt),
-            psi0 = neel_state(L), profile = prof, post! = (p) -> p)
+            psi0 = neel_state(L), profile = prof, post! = (p) -> p,
+            shift! = (p) -> p, restore! = (p) -> p, imps = nothing, shift = 0.0)
 end
 
 """
@@ -70,14 +74,27 @@ being compared.
 function _open(nm, N, W, shift, label, dt, cap)
     imps = identity_superket(N)
     prof = rho -> [real(trace_rho(imps, rho, N; at = j)) for j in 1:N]
-    post! = function (p)
+    # ⛔ THE TWO HALVES OF `post!` ARE ALSO EXPOSED SEPARATELY, and the reason is a measurement.
+    # `shift!` supplies the dissipator's ZERO-BODY term (`exp(tau*c)` as an exact scalar, since
+    # `pair_mpo` has nowhere to put a constant), so `Tr rho` is only meaningful AFTER it.
+    # `restore!` then projects the drift away. A driver that wants to USE `Tr rho = 1` as an exact
+    # error measure -- it is a conservation law of any Lindbladian, so its violation is an error
+    # with no reference state required -- must read the trace BETWEEN the two. Calling `post!`
+    # first destroys exactly the number it wanted to measure.
+    shift! = function (p)
         shift != 0.0 && apply_shift!(p, exp(dt * shift))
-        restore_trace!(imps, p, N; maxdim = cap, cutoff = 1e-10)
+        return p
+    end
+    restore! = (p) -> restore_trace!(imps, p, N; maxdim = cap, cutoff = 1e-10)
+    post! = function (p)
+        shift!(p)
+        restore!(p)
         return p
     end
     return (nm = nm, label = label, L = N, W = W, d = 4, tau = ComplexF64(dt),
             psi0 = rho0_product([isodd(k) ? :up : :down for k in 1:N]),
-            profile = prof, post! = post!)
+            profile = prof, post! = post!,
+            shift! = shift!, restore! = restore!, imps = imps, shift = shift)
 end
 
 """
