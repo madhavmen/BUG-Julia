@@ -177,9 +177,22 @@ function run_model(io::IO, model::String, symmetry::String, psi0, mpo,
                 emit(k * p.dt, observable(copy(psi)), kry)
             end
         end
+        # ⛔ PRINT THE WHOLE BOND PROFILE, NOT JUST ITS MAXIMUM. One number cannot distinguish
+        # "the rank GREW to the ceiling" from "the rank is FROZEN", and that ambiguity was read as
+        # a bug in `cbe_bug` on OAT: `chi = 6` never moves there, which looks like a freeze and is
+        # in fact CORRECT -- OAT's exact Schmidt rank `min(n, L-n) + 1` is CONSTANT IN TIME, and
+        # `maxdim` on that example defaults to exactly that ceiling. The profile settles it at a
+        # glance: `[2,3,4,5,6,5,4,3,2]` is the analytic answer, `[1,1,2,4,2,1,1]` is the freeze
+        # this repo actually had once (`cbe_core.jl:638`).
+        #
+        # ⚠ AND THE PROFILE IS STILL NOT AN ACCURACY DIAGNOSTIC -- see the `steppers` docstring: a
+        # `krylov_basis = 0` run on OAT lands EXACTLY on the analytic profile and conserves energy
+        # to 1.5e-14 while sitting eight orders from the answer. It answers "did the rank grow",
+        # nothing more; `final err` is the only column that ranks the arms.
         @printf("  %-11s maxdim=%-3d  final err = %.3e   chi = %d   krylov = %d\n",
                 name, p.maxdim, abs(observable(copy(psi)) - exact(t_final)),
                 maximum(bond_dims(psi)), kry)
+        @printf("  %-11s bond profile = %s\n", "", string(bond_dims(psi)))
         flush(stdout)
     end
 end

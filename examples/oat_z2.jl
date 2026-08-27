@@ -6,12 +6,30 @@
 # diagonalisation and no second integrator anywhere:
 #
 #     S^x_tot(t) = (L/2)·cos^(L-1)(t/2)
-#     exact Schmidt rank at the cut after site n  =  min(n, L-n) + 1,  FOR ALL TIME
+#     exact Schmidt rank at the cut after site n  =  min(n, L-n) + 1,  at GENERIC t
 #
 # The rank being constant in time is what makes `maxdim` meaningful here rather than a tolerance:
 # at or above the ceiling the sweeps are exact and what remains is the time-step error, below it
 # the truncation is genuine. Both regimes are worth running, and a comparison that shows only one
 # of them is measuring roundoff or truncation rather than the integrator.
+#
+# ⛔ BUT "FOR ALL TIME" IS WRONG, AND THIS FILE SAID SO UNTIL 2026-08-27. THE RANK COLLAPSES AT
+# t = π. `H = (S^z_tot)²/2`, so a state of definite `m` picks up `exp(-i t m²/2)`; at `t = π` that
+# is `exp(-iπ m²/2)`, and `m² mod 4 ∈ {0, 1}`, so the phase takes only **TWO** distinct values --
+# one for even `m`, one for odd. The state is therefore a TWO-BRANCH superposition at `t = π`: a
+# cat state, of Schmidt rank EXACTLY 2 at every cut, not `min(n, L-n) + 1`.
+#
+# ⚠ THIS WAS READ AS A BUG IN `cbe_bug`, AND IT IS THE OPPOSITE. MEASURED, L=10, t=π, maxdim=6:
+#
+#     tdvp2        final err 3.816e-06   chi = 6   krylov 25914
+#     tdvp_cbe1s   final err 3.816e-06   chi = 6   krylov 22935
+#     cbe_bug      final err 8.271e-15   chi = 2   krylov  2684
+#
+# `cbe_bug` FINDS the rank-2 structure and is nine orders more accurate for a tenth of the work;
+# the TDVP arms carry rank 6 with four near-zero Schmidt values. A `chi` that DROPS here is the
+# correct answer, and reading the bond dimension as "did not grow" inverts the result. The run loop
+# in `common.jl` now prints the whole bond profile for exactly this reason -- one number cannot
+# tell a collapse-to-the-true-rank from a freeze.
 #
 # THE Z2 IS THE PAPER'S. The conserved quantity is the global spin flip P = Π_ℓ 2S^x_ℓ, NOT
 # S^z_tot -- H is even in S^z. In the σ^x basis that flip is diagonal, so S^x is measurable and
