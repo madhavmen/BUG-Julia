@@ -199,6 +199,102 @@ def plot_csv(path):
     return out
 
 
+# Q colours: ferro / Neel / longest incommensurate.
+QCOL = [("szz_q0", "#d62728", r"$S_{zz}(q{=}0)$"),
+        ("szz_qpi", "#1f77b4", r"$S_{zz}(q{=}\pi)$"),
+        ("szz_q2pin", "#7f7f7f", r"$S_{zz}(q{=}2\pi/N)$")]
+# per-ARM colour, used only in the cost panel where the curve is a property of the arm rather than
+# of a Pauli component.
+ARMC = {"tdvp2": "#8c8c8c", "tdvp_cbe1s": "#ff9e1b", "cbe_bug": "#2ca02c",
+        "bug_rsvd": "#2ca02c", "bug_par": "#1f77b4"}
+
+
+def plot_steady(path):
+    """Their Fig. 5: steady-state S_zz(q) swept over J2, Kac-normalised.
+
+    ⛔ UNCONVERGED POINTS ARE DRAWN HOLLOW AND EXCLUDED FROM THE LINE. A transient that has not
+    reached the NESS still traces a smooth, plausible curve against J2; plotting it joined to the
+    converged points is precisely how it would be mistaken for one.
+    """
+    rows = load(path)
+    if not rows:
+        return None
+    arms = []
+    for r in rows:
+        if r["arm"] not in arms:
+            arms.append(r["arm"])
+    L = int(rows[0]["L"])
+    shape = rows[0].get("shape", f"chain{L}")
+    j2s = sorted({f(r, "j2") for r in rows})
+
+    fig, axes = plt.subplots(1, 3, figsize=(16.5, 4.9))
+    ax_s, ax_c, ax_k = axes
+    fig.suptitle(f"{path.stem}   —   L = {L} ({shape}), Kac-normalised, steady state"
+                 "   —   2-site TDVP vs 1-site CBE-TDVP vs CBE-BUG", fontsize=12, y=0.98)
+
+    nbad = 0
+    for a in arms:
+        st = ARM.get(a, dict(ls="-", lw=1.5, alpha=1.0, z=2, label=a))
+        base = dict(ls=st["ls"], lw=st["lw"], alpha=st["alpha"], zorder=st["z"])
+        fin, bad = {}, {}
+        for j2 in j2s:
+            sub = sorted([r for r in rows if r["arm"] == a and f(r, "j2") == j2],
+                         key=lambda r: f(r, "t"))
+            if not sub:
+                continue
+            fin[j2] = sub[-1]
+            bad[j2] = int(f(sub[-1], "converged")) == 0
+            # (b) the convergence witness itself: S_zz(pi) against time, one line per J2
+            ax_c.plot([f(r, "t") for r in sub], [f(r, "szz_qpi") for r in sub],
+                      color=plt.cm.viridis(j2 / max(max(j2s), 1e-9)), **base)
+        ok = [j for j in j2s if j in fin and not bad[j]]
+        nbad += sum(1 for j in j2s if j in fin and bad[j])
+        for key, col, lab in QCOL:
+            ax_s.plot(ok, [f(fin[j], key) for j in ok], color=col, marker="o", ms=4, **base)
+            hollow = [j for j in j2s if j in fin and bad[j]]
+            if hollow:
+                ax_s.plot(hollow, [f(fin[j], key) for j in hollow], color=col, ls="none",
+                          marker="o", ms=6, mfc="none", mew=1.4, zorder=st["z"])
+        # ⚠ EXPLICIT COLOUR, matching the legend below. Letting matplotlib cycle here would colour
+        # the arms while the legend claimed linestyle told them apart.
+        ax_k.plot([j for j in j2s if j in fin], [f(fin[j], "krylov") for j in j2s if j in fin],
+                  color=ARMC.get(a, "#333333"), marker="o", ms=4, **base)
+
+    ax_s.set_xlabel(r"$J_2$  (van der Waals, $\alpha=6$)")
+    ax_s.set_ylabel(r"$S_{zz}(q)$")
+    ax_s.set_title("(a) steady-state structure factor — their Fig. 5")
+    for key, col, lab in QCOL:
+        ax_s.plot([], [], color=col, lw=2.5, label=lab)
+    ax_s.legend(fontsize=8, ncol=1)
+    ax_c.set_xlabel("$t$")
+    ax_c.set_ylabel(r"$S_{zz}(q{=}\pi)$")
+    ax_c.set_title("(b) approach to the steady state (colour = $J_2$)")
+    ax_k.set_xlabel(r"$J_2$")
+    ax_k.set_ylabel("cumulative Krylov matvecs")
+    ax_k.set_title("(c) cost to reach it")
+    ax_k.set_yscale("log")
+    for a in arms:
+        st = ARM.get(a, dict(ls="-", lw=1.5, alpha=1.0, z=2, label=a))
+        ax_k.plot([], [], color=ARMC.get(a, "#333333"), ls=st["ls"], lw=st["lw"],
+                  alpha=st["alpha"], label=st["label"])
+    ax_k.legend(fontsize=8)
+    for ax in axes:
+        ax.grid(alpha=0.3)
+
+    note = ("Hollow markers in (a) failed the 2% drift test over the last quarter of the window: "
+            "they are NOT steady-state values and are excluded from the lines"
+            + (f" ({nbad} here)." if nbad else "; none here.")
+            + "   Kac normalisation is ON here, OFF in the dynamics figures — it rescales energy, "
+              "and so time, with N.")
+    fig.text(0.5, 0.012, note, ha="center", fontsize=8, style="italic", color="#444444",
+             wrap=True)
+    fig.tight_layout(rect=(0, 0.06, 1, 0.93))
+    out = RESULTS / f"{path.stem}.png"
+    fig.savefig(out, dpi=145)
+    plt.close(fig)
+    return out
+
+
 def main():
     args = sys.argv[1:]
     paths = [Path(a) for a in args] if args else sorted(
@@ -206,7 +302,13 @@ def main():
     if not paths:
         sys.exit("no dissip_*.csv in benchmarks/results")
     for p in paths:
-        out = plot_csv(p)
+        head = load(p)
+        if not head:
+            print("skip (empty)", p.name)
+            continue
+        # dispatch on SHAPE, not on filename: the steady-state sweep carries a `j2` column and no
+        # single-site Pauli columns, so feeding it to plot_csv would render a grid of empty axes.
+        out = plot_steady(p) if "j2" in head[0] else plot_csv(p)
         if out:
             print("wrote", out.relative_to(HERE.parent))
 

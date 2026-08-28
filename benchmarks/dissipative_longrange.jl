@@ -70,7 +70,12 @@ include(joinpath(@__DIR__, "fused_common.jl"))
 
 const OUT = joinpath(@__DIR__, "results")
 mkpath(OUT)
-const LOG = open(joinpath(OUT, "dissipative_longrange.txt"), "a")
+# ⛔ ONE LOG FILE PER MODE, NOT ONE PER DRIVER. The figures are run CONCURRENTLY (four jobs, ~2
+# cores each, on a 12-core box), and on Windows several processes holding the same file open for
+# append is a sharing violation at LOAD time -- i.e. every job dies before it computes anything.
+# Interleaved output would be the milder version of the same bug.
+const LOG = open(joinpath(OUT, "dissipative_longrange_" *
+                               (isempty(ARGS) ? "certify" : ARGS[1]) * ".txt"), "a")
 # ⛔ MIRROR AND FLUSH. Julia BLOCK-BUFFERS a redirected stdout, so a piped long run shows nothing
 # until it exits and a crash loses the log. This repo has already lost a 31-minute run that way.
 say(l) = (println(LOG, l); flush(LOG); println(stdout, l); flush(stdout))
@@ -321,6 +326,36 @@ rho0_for(start::Symbol, L::Int) =
     rho0_product([isodd(k) ? :up : :down for k in 1:L])
 
 """
+    szz_at(Imps, rho, L, trr, qs) -> Vector{Float64}
+
+The magnetic structure factor `S_zz(q) = (1/N^2) sum_{j,k} e^{i q (j-k)} <sigma^z_j sigma^z_k>`
+(their Fig. 5), evaluated at each `q` in `qs`.
+
+⛔ ONE DEFINITION, TWO CALLERS. `protocol_lr` writes it against time and `steady_lr` writes its
+converged value; if each carried its own copy they could drift in normalisation or in the q grid and
+the two figures would silently stop being the same quantity.
+
+⛔ THE FULL CHAIN, NOT THE BULK WINDOW, and the `1/N^2` prefactor goes with that choice. Restricting
+to the bulk would change the normalisation and the q-grid together.
+
+⚠ `zz[j,j] = 1` because `(sigma^z)^2 = I` -- it is NOT measured, and leaving it out (or measuring it
+and picking up `<sigma^z_j>^2` instead) shifts every `q` by the same constant `1/N`, which looks like
+a baseline offset rather than an error. At `t = 0` from a product state this makes `S_zz(q) = 1/N`
+for EVERY `q`; that q-independence is the cheapest available check that the normalisation is right.
+"""
+function szz_at(Imps, rho, L::Int, trr::Real, qs)
+    zz = zeros(Float64, L, L)
+    for j in 1:L
+        zz[j, j] = 1.0                          # (sigma^z_j)^2 = I, exactly
+    end
+    for j in 1:L, k in (j + 1):L
+        v = pauli_2site(Imps, rho, L, j, k; tr = trr)[3]
+        zz[j, k] = v; zz[k, j] = v
+    end
+    return [real(sum(cis(q * (j - k)) * zz[j, k] for j in 1:L, k in 1:L)) / L^2 for q in qs]
+end
+
+"""
     certify_lr(P; shape, t, dts) -> Bool
 
 Pin the long-range GENERATOR and the OBSERVABLE PATH against `dense_lr` at small `L`.
@@ -473,25 +508,13 @@ function protocol_lr(P; shape = (16,), tmax::Float64 = 4.0, dt::Float64 = 0.05,
                         end
                         append!(cc, acc ./ max(1, length(ps)))
                     end
-                    # ⛔ `S_zz(q)` USES THE FULL CHAIN, NOT THE BULK WINDOW. It is defined with a
-                    # `1/N^2` prefactor over ALL pairs (their Fig. 5), so restricting it to the bulk
-                    # would change the normalisation and the q-grid together.
-                    zz = zeros(Float64, L, L)
-                    for j in 1:L
-                        zz[j, j] = 1.0                      # sigma^z_j^2 = I
-                    end
-                    for j in 1:L, k in (j + 1):L
-                        v = pauli_2site(Imps, rho, L, j, k; tr = trr)[3]
-                        zz[j, k] = v; zz[k, j] = v
-                    end
-                    szz(q) = real(sum(cis(q * (j - k)) * zz[j, k] for j in 1:L, k in 1:L)) / L^2
+                    sq  = szz_at(Imps, rho, L, trr, (0.0, pi, 2pi / L))
                     chi = maximum(bond_dims(rho))
                     kry = sum(get_krylov_log())
                     @printf(io, "%s,%d,%s,%g,%.6f,%d,%d,%.3f,%.10g,%.10g,%.10g,%.10g,%s,%s\n",
                             arm, L, tag, dt, tnow, chi, kry, sec, trb, sx, sy, sz,
                             join([@sprintf("%.10g", x) for x in cc], ","),
-                            join([@sprintf("%.10g", szz(q))
-                                  for q in (0.0, pi, 2pi / L)], ","))
+                            join([@sprintf("%.10g", x) for x in sq], ","))
                     flush(io)
                     (si <= 3 || si % 10 == 0) &&
                         say(@sprintf("     t=%5.2f  chi=%-4d kry=%-8d %7.1fs  <sx>=%+.5f <sy>=%+.5f <sz>=%+.5f  Czz1=%+.5f",
@@ -510,6 +533,127 @@ function protocol_lr(P; shape = (16,), tmax::Float64 = 4.0, dt::Float64 = 0.05,
         end
     end
     say("wrote " * out)
+    return out
+end
+
+"""
+    steady_lr(P; shape, j2s, tmax, dt, cap, nsave, maxiter, arms, out) -> path
+
+Their Fig. 5: the STEADY-STATE structure factor of the Eq. (6) diagonal model, swept over the second
+(van der Waals, `alpha = 6`) coupling `J2` at fixed dipolar `J1`.
+
+⛔ `kac = true` HERE AND NOWHERE ELSE. The Kac factor divides every coupling by
+`N(alpha) = (1/(N-1)) sum_{i != j} d_ij^(-alpha)`, which the paper uses "to ensure extensivity with
+system size". That rescales the energy -- and therefore TIME -- with `N`, so switching it on for the
+dynamics figures would shift every curve along `t` against the paper's. Switching it OFF here would
+instead make the sweep non-comparable across `L`, which is the whole point of a steady-state figure.
+
+⛔ A STEADY STATE IS A CLAIM, NOT A LONG `tmax`. Each arm reports `drift`, the largest change in
+`S_zz(q)` over the LAST QUARTER of the window relative to its final value. A run whose `drift` is not
+small has not reached the NESS and its point on the sweep is reported as UNCONVERGED rather than
+plotted as one -- an unconverged transient still traces a smooth, entirely plausible curve against
+`J2`, which is exactly the failure this witness exists to catch.
+
+⚠ THE THREE `q` VALUES ARE THE ORDER PARAMETER. `q = 0` is ferromagnetic, `q = pi` is Neel, and
+`q = 2pi/N` is the longest incommensurate wavelength the chain can hold; the competition between the
+`alpha = 3` and `alpha = 6` terms is what moves weight between them.
+"""
+function steady_lr(P; shape = (16,), j2s = (0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0),
+                   tmax::Float64 = 8.0, dt::Float64 = 0.05, cap::Int = 20, nsave::Int = 33,
+                   maxiter::Int = 8, arms = ("tdvp2", "tdvp_cbe1s", "cbe_bug"),
+                   growth::Float64 = 4.0, out::String = "")
+    set_symmetry!(:none)
+    (J1c, a1), (_, a2) = P.Js[1], P.Js[2]
+    tag = length(shape) == 1 ? "chain$(shape[1])" : "sq$(shape[1])x$(shape[2])"
+    out = isempty(out) ? joinpath(OUT, @sprintf("dissip_lr_fig5steady_%s_dt%g.csv", tag, dt)) : out
+    base = (maxdim = cap, trunc_thresh = 1e-12, maxiter = maxiter, hermitian = false)
+    rs = (exact = false, dex = 8, dover = 4, comp_ratio = 1.0,
+          krylov_basis = 3, krylov_tol = 0.0, growth = growth)
+
+    say("\n=== STEADY STATE (Fig. 5): S_zz(q) vs J2, Kac-normalised, " * tag * " ===")
+    say(@sprintf("  J1 = %+.3f (alpha = %g)   J2 swept over %s (alpha = %g)",
+                 J1c[3], a1, string(j2s), a2))
+    say(@sprintf("  t in [0, %g]  dt = %g  cap = %d  maxiter = %d  kac = true", tmax, dt, cap, maxiter))
+    say("  ⛔ symmetry = :none for EVERY arm -- the fused d=4 space has no symmetric variant.")
+
+    nbad = 0
+    open(out, "w") do io
+        println(io, "arm,L,shape,j1,alpha1,j2,alpha2,dt,t,chi,krylov,seconds," *
+                    "trace_pre,sz,szz_q0,szz_qpi,szz_q2pin,drift,converged")
+        # ⚠ FLUSH THE HEADER NOW. Rows can only be written once `drift` is known, which is at the
+        # END of a trajectory, so an interrupted sweep would otherwise leave a ZERO-BYTE file that
+        # looks like a driver that never started rather than one that ran for hours.
+        flush(io)
+        for j2 in j2s
+            Js = [(J1c, a1), ((0.0, 0.0, float(j2)), a2)]
+            W, shift, L = lr_lindblad(shape; Js = Js, h = P.h, hdir = P.hdir, gamma = P.gamma,
+                                      rmax = get(P, :rmax, Inf), kac = true)
+            Imps = identity_superket(L)
+            steppers = Dict{String, Function}(
+                "tdvp2"      => (p, h) -> tdvp2_step!(p, W, ComplexF64(h); base...),
+                "tdvp_cbe1s" => (p, h) -> tdvp_cbe1s_step!(p, W, ComplexF64(h); base...),
+                "cbe_bug"    => (p, h) -> cbe_bug_step!(p, W, ComplexF64(h); base..., rs...,
+                                                        parallel = true))
+            blk = (div(L, 4) + 1):(L - div(L, 4))
+            for arm in arms
+                step! = steppers[arm]
+                rho = rho0_for(P.start, L)
+                enable_krylov_log()
+                tnow = 0.0; sec = 0.0; trb = 1.0
+                saveat = [tmax * k / (nsave - 1) for k in 0:(nsave - 1)]
+                # ⛔ `chi`, `krylov` and `seconds` are recorded AT EACH SAVE TIME, not after the loop.
+                # `krylov` is the CUMULATIVE matvec count and is the cost axis these runs are read
+                # on (wall clock is contaminated whenever anything else shares the box); writing the
+                # final total onto every row would flatten it into a constant and destroy exactly
+                # that. Same convention as `protocol_lr`.
+                rows = NTuple{8, Float64}[]                 # (t, q0, qpi, q2pin, sz, chi, kry, sec)
+                si = 1
+                while si <= nsave
+                    if tnow >= saveat[si] - 1e-9
+                        trr = real(trace_rho(Imps, rho, L))
+                        sq  = szz_at(Imps, rho, L, trr, (0.0, pi, 2pi / L))
+                        sz  = sum(pauli_1site(Imps, rho, L, j; tr = trr)[3] for j in blk) / length(blk)
+                        push!(rows, (tnow, sq[1], sq[2], sq[3], sz,
+                                     float(maximum(bond_dims(rho))), float(sum(get_krylov_log())), sec))
+                        # a heartbeat, because one (J2, arm) trajectory is many minutes and the CSV
+                        # cannot be written until `drift` is known at the end of it.
+                        (si == 1 || si % 8 == 0 || si == nsave) &&
+                            say(@sprintf("       J2=%+.2f %-11s t=%5.2f chi=%-4d %7.1fs  S(pi)=%+.5f",
+                                         j2, arm, tnow, round(Int, maximum(bond_dims(rho))), sec, sq[2]))
+                        si += 1
+                        continue
+                    end
+                    sec += @elapsed begin
+                        step!(rho, dt)
+                        apply_shift!(rho, exp(dt * shift))
+                        trb = restore_trace!(Imps, rho, L; maxdim = cap)
+                    end
+                    tnow += dt
+                end
+                disable_krylov_log()
+                # drift over the LAST QUARTER of the window, relative to the final value
+                tail = rows[max(1, ceil(Int, 3 * length(rows) / 4)):end]
+                fin  = rows[end]
+                drift = maximum(max(abs(r[2] - fin[2]), abs(r[3] - fin[3]), abs(r[4] - fin[4]))
+                                for r in tail) / max(abs(fin[2]), abs(fin[3]), abs(fin[4]), 1e-12)
+                conv = drift < 0.02
+                conv || (nbad += 1)
+                for r in rows
+                    @printf(io, "%s,%d,%s,%.10g,%g,%.10g,%g,%g,%.6f,%d,%d,%.3f,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g,%d\n",
+                            arm, L, tag, J1c[3], a1, j2, a2, dt, r[1], round(Int, r[6]),
+                            round(Int, r[7]), r[8], trb, r[5], r[2], r[3], r[4],
+                            drift, conv ? 1 : 0)
+                end
+                flush(io)
+                say(@sprintf("  J2=%+.2f %-11s chi=%-4d kry=%-7d %7.1fs  S(0)=%+.5f S(pi)=%+.5f S(2pi/N)=%+.5f  drift=%.3f %s",
+                             j2, arm, round(Int, fin[6]), round(Int, fin[7]), fin[8],
+                             fin[2], fin[3], fin[4], drift, conv ? "" : "<-- UNCONVERGED"))
+            end
+        end
+    end
+    say("wrote " * out)
+    nbad == 0 || say(@sprintf("  ⚠ %d of %d (J2, arm) points did NOT reach a steady state at tmax = %g; they are flagged converged=0 and must NOT be read as NESS values.",
+                              nbad, length(j2s) * length(arms), tmax))
     return out
 end
 
@@ -536,8 +680,14 @@ if abspath(PROGRAM_FILE) == @__FILE__
         ok &= certify_lr(FIG6;       shape = (cl,))
         ok || error("long-range certification FAILED -- no curve from this file is trustworthy")
     end
+    # ⚠ `LR_CHAIN_RMAX` TRUNCATES THE INTERACTION RANGE AND SO CHANGES THE MODEL -- it is the only
+    # setting here that does. Default Inf (the paper's Fig. 4 is untruncated). MEASURED at L=16:
+    # `rmax = 8` discards 1.372e-3 of the alpha=3 weight and 1.882e-6 of the alpha=6 weight while
+    # taking the MPO virtual dimension from 242 to 130. Quote those numbers whenever it is on;
+    # "negligible" is only true relative to the chi=20 truncation error, so say which is which.
+    crmax = parse(Float64, get(ENV, "LR_CHAIN_RMAX", "Inf"))
     mode in ("fig4", "all") &&
-        protocol_lr(merge(FIG4_CHAIN, (tagname = "fig4ising",)); shape = (L,),
+        protocol_lr(merge(FIG4_CHAIN, (tagname = "fig4ising", rmax = crmax)); shape = (L,),
                     tmax = tmax, dt = dt, cap = cap, nsave = ns, maxiter = mi)
     mode in ("fig4sq", "all") && begin
         LY = parse(Int, get(ENV, "LR_LY", "4"))
@@ -547,4 +697,13 @@ if abspath(PROGRAM_FILE) == @__FILE__
     mode in ("fig6", "all") &&
         protocol_lr(merge(FIG6, (tagname = "fig6xyz",)); shape = (L,),
                     tmax = tmax, dt = dt, cap = cap, nsave = ns, maxiter = mi)
+    mode in ("fig5", "all") && begin
+        # ⚠ A LONGER WINDOW THAN THE DYNAMICS FIGURES, because this one has to REACH the NESS rather
+        # than trace a transient; `steady_lr` gates on that instead of assuming it.
+        j2s = [parse(Float64, s) for s in split(get(ENV, "LR_J2S", "0.0,0.25,0.5,0.75,1.0,1.5,2.0"), ",")]
+        steady_lr(FIG4_CHAIN; shape = (L,), j2s = j2s,
+                  tmax = parse(Float64, get(ENV, "LR_STEADY_TMAX", "8.0")),
+                  dt = dt, cap = cap, nsave = parse(Int, get(ENV, "LR_STEADY_NSAVE", "33")),
+                  maxiter = mi)
+    end
 end
