@@ -494,8 +494,7 @@ function protocol_lr(P; shape = (16,), tmax::Float64 = 4.0, dt::Float64 = 0.05,
                                   for q in (0.0, pi, 2pi / L)], ","))
                     flush(io)
                     (si <= 3 || si % 10 == 0) &&
-                        say(@sprintf("     t=%5.2f  chi=%-4d kry=%-8d %7.1fs  " *
-                                     "<sx>=%+.5f <sy>=%+.5f <sz>=%+.5f  Czz1=%+.5f",
+                        say(@sprintf("     t=%5.2f  chi=%-4d kry=%-8d %7.1fs  <sx>=%+.5f <sy>=%+.5f <sz>=%+.5f  Czz1=%+.5f",
                                      tnow, chi, kry, sec, sx, sy, sz, cc[3]))
                     si += 1
                     continue

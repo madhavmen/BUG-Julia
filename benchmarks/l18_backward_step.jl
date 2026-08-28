@@ -217,8 +217,7 @@ function main()
                         sprint(showerror, e)[1:min(end, 160)])
             end
         end
-        @printf("   raw-amp prediction from the shift alone: exp(%+.4f*dt)  <- amp_max must match" *
-                " this, amp_phys is the witness\n", -S0.shift)
+        @printf("   raw-amp prediction from the shift alone: exp(%+.4f*dt)  <- amp_max must match this, amp_phys is the witness\n", -S0.shift)
         println("      dt      arm             amp_max   amp_phys     |Tr-1|   err_exact     " *
                 "krylov      secs   chi   dev_vs_bug")
         flush(stdout)
@@ -243,13 +242,11 @@ function main()
                        maximum(abs.(r.prof[1:S.L] .- exv))
                 # `amp_phys > 1` is the violation; a trailing `PURITY+` marks it so a long ladder
                 # does not have to be read digit by digit.
-                @printf("   %6.3f   %-12s  %9.6f  %9.6f  %9.2e  %9.2e  %9d  %8.1f  %4d   " *
-                        "%.3e%s%s\n",
+                @printf("   %6.3f   %-12s  %9.6f  %9.6f  %9.2e  %9.2e  %9d  %8.1f  %4d   %.3e%s%s\n",
                         dt, arm, r.amp, r.aphys, r.dtr, aerr, r.kry, r.wall, r.chi, dev,
                         r.aphys > 1 + 1e-9 ? "  PURITY+" : "",
                         r.died == 0 ? "" : "   DIED@$(r.died)")
-                @printf(csv, "%s,%d,%s,%d,%d,%g,%g,%d,%.8g,%.8g,%.8g,%.6e,%.6e,%d,%.4f,%d,%d," *
-                        "%.6e\n",
+                @printf(csv, "%s,%d,%s,%d,%d,%g,%g,%d,%.8g,%.8g,%.8g,%.6e,%.6e,%d,%.4f,%d,%d,%.6e\n",
                         nm, S.d, arm, S.L, CAP, g, dt, nsteps, r.amp, exp(-dt * S.shift), r.aphys,
                         r.dtr, aerr, r.kry, r.wall, r.chi, r.died, dev)
                 flush(csv)

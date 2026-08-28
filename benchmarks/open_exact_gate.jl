@@ -136,8 +136,7 @@ function check_dense_vs_analytic(N, gamma)
     p = S.params
     Lsup = dense_lindblad_super(S.L, p.Jm, p.gammas; delta = p.delta, hz = p.hz, Jzz = p.Jzz)
     v0 = fused_dense_state(S.psi0)
-    say(@sprintf("B  dense Liouvillian vs the ANALYTIC free-fermion ODE   (xx_open, N = %d, " *
-                 "gamma = %.3f)", S.L, gamma))
+    say(@sprintf("B  dense Liouvillian vs the ANALYTIC free-fermion ODE   (xx_open, N = %d, gamma = %.3f)", S.L, gamma))
     say("      t        max|dSz|    |Tr-1| (dense)")
     ok = true
     # Powers of two times T/4, so ONE `exp` covers all of them -- see `propagators`.
