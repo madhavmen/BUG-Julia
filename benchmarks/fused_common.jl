@@ -49,6 +49,12 @@ function fused_space()
     c = 1 / sqrt(2)
     CUP = zeros(Float64, 4, 4)
     CUP[1, 1] = c; CUP[4, 1] = c; CUP[1, 4] = c; CUP[4, 4] = c
+    # ⛔ THIS DICT IS Float64 AND CANNOT BE PROMOTED. MEASURED 2026-08-28: changing it to
+    # `ComplexF64` to hold a `(I - sigma^y)/2` projector throws
+    # `InexactError: Float64(0.0 + 0.5im)` from inside `_getLocalSpace_no_symmetry` -- Telum builds
+    # the local space real, and no caller can opt out. A complex one-site operator is therefore
+    # built as a LINEAR COMBINATION of the real ones already here (see `py_projector`), which needs
+    # no new local space and so keeps `Q4`'s index identities.
     ops = Dict{Symbol, SparseMatrixCSC{Float64, Int}}(
         :I   => sparse(kron(_I2, _I2)),
         :Kp  => sparse(kron(_SP, _I2)), :Km => sparse(kron(_SM, _I2)),
@@ -56,10 +62,186 @@ function fused_space()
         :Bp  => sparse(kron(_I2, _SP)), :Bm => sparse(kron(_I2, _SM)),
         :Bz  => sparse(kron(_I2, _SZ)),
         :JMP => sparse(kron(_SZ, _SZ)),
+        # ── BOUNDARY jump terms (arXiv:2104.11479). ADDITIVE: nothing existing reads them. ────
+        #
+        # ⛔ THESE ARE THE FIRST OPERATORS HERE THAT TEST THE BRA-LEG TRANSPOSE, and `JMP` above
+        # CANNOT. `rho B` is `kron(I, transpose(B))`, but `JMP`'s `B = S^z` is real SYMMETRIC, so
+        # `transpose(S^z) = S^z` and the correct and incorrect conventions COINCIDE EXACTLY.
+        # Dephasing therefore validates the layout, `|I>>`, the zero-body constant and the on-site
+        # trick (§3.5) while leaving this one thing unpinned. For `sigma^+ rho sigma^-` they
+        # differ, and the wrong choice is a generator that still looks like a Lindbladian but does
+        # not preserve the trace:
+        #
+        #     sigma^+ rho sigma^-  ->  kron(_SP, transpose(_SM)) = kron(_SP, _SP)
+        #     sigma^- rho sigma^+  ->  kron(_SM, transpose(_SP)) = kron(_SM, _SM)
+        #
+        # `benchmarks/dissipative_xx.jl`'s `calibrate()` pins it against a dense Liouvillian.
+        :JP  => sparse(kron(_SP, _SP)),      # sigma^+ rho sigma^-   (gain: pumps UP)
+        :JM  => sparse(kron(_SM, _SM)),      # sigma^- rho sigma^+   (loss: pumps DOWN)
+        # ⛔ `PX` EXISTS BECAUSE `<sigma^x> = +1` IS NOT A FUSED BASIS STATE. The dissipative
+        # Heisenberg protocol (Hryniuk & Szymanska, Comms Phys 2026 9:45) starts from the product
+        # state `|+x><+x|`, whose local superket is `vec((I + sigma^x)/2) = (1,1,1,1)/2` -- a
+        # uniform superposition over all four fused indices, so `fused_product_state` (which picks
+        # ONE index per site) cannot build it.
+        #
+        # It is reachable instead as a KET-SIDE multiplication applied to `|I>>`:
+        # `kron((I+sx)/2, I) * vec(I) = vec((I+sx)/2)`. That keeps the state a PRODUCT (chi = 1),
+        # which the fused layout is chosen for in the first place.
+        #
+        # ⚠ REAL SYMMETRIC ON PURPOSE, like `CUP`. `site_apply!` contracts leg 1 and therefore
+        # applies the TRANSPOSE -- the convention that silently swapped `JP`/`JM` and froze the
+        # boundary-driven model. `(I + sigma^x)/2` is its own transpose, so this operator acts the
+        # same either way and cannot be caught by that trap.
+        :PX  => sparse(kron((_I2 .+ _SP .+ _SM) ./ 2, _I2)),
+        # ⛔ `Kx` IS SAFE TO MEASURE WITH AND `Ky` CANNOT EXIST HERE. `site_apply!` contracts leg 1,
+        # i.e. applies the TRANSPOSE. `sigma^x` is real SYMMETRIC, so `kron(sigma^x, I)` is its own
+        # transpose and reads back the observable it names. `sigma^y` is ANTIsymmetric
+        # (`sigma^y' = -sigma^y`) AND imaginary, so it would (a) come back sign-flipped and (b) not
+        # fit this `Float64` dict at all. Get `<sigma^y>` from `-i(<sigma^+> - <sigma^->)` instead,
+        # and VERIFY it on the start state where `<sx>=1, <sy>=<sz>=0` are known exactly.
+        :Kx  => sparse(kron(_SP .+ _SM, _I2)),
         :CUP => sparse(CUP))
     return _getLocalSpace_no_symmetry(ops, ("s", "s", "op"))
 end
 const Q4 = fused_space()
+
+# ⛔ ONE LOCAL SPACE FOR THE WHOLE FUSED STACK. `Q4` is a single `_getLocalSpace_no_symmetry`
+# object and tensors built from a SECOND such call do not share its index identities, so a driver
+# that made its own d=4 space could not contract its MPO against `identity_superket`'s state. The
+# jump operators are therefore added HERE rather than in the driver that needs them.
+
+"""
+    fused_boundary_lindblad(L; J, eps_L, eps_R, mu_L, mu_R) -> (mpo, shift)
+
+The Liouvillian of the BOUNDARY-DISSIPATED XX chain (arXiv:2104.11479) as a fused-site MPO:
+
+    H     = J sum_k (sigma^+_k sigma^-_{k+1} + h.c.)
+    L_1,2 = sqrt(eps_L (1 +- mu_L)/2) sigma^{+,-}_1 ,   L_3,4 = the same at site N
+
+⛔ WHY THIS MODEL IS WORTH A SECOND LINDBLADIAN BUILDER. `PLAN-open-systems.md` §0 lists the
+`exact ref` column for every OPEN model as "—": XX open, Heisenberg square open and the LGT are all
+validated against published TRENDS (diffusion, Zeno slowing), never against a number. This one is
+EXACTLY SOLVABLE by third quantization -- an `N x N` non-Hermitian matrix, `O(N^3)`, nothing of
+size `4^N` -- so it turns that column into a real error. See `xx_boundary_*` in
+`tests/common/free_fermion.jl`, whose gap reproduces the paper's `O(N^-3)` closed form to a ratio
+of 0.9994 at N=60.
+
+It is also the COMPLEX-FREQUENCY model: `lambda = B + 2J cos(theta)` with `theta` complex, so every
+mode is an oscillation TIMES a decay -- which neither a Hermitian real-time quench (real spectrum)
+nor imaginary time (completely monotone) can supply.
+
+⛔ THE HOPPING IS `J`, FIXED BY THE REFERENCE AND NOT BY THE PAPER'S PROSE. The paper writes
+`H = J sum (sx sx + sy sy)`, and `sx sx + sy sy = 2(sigma^+ sigma^- + h.c.)` in PAULI conventions;
+what the reference actually requires is that the Jordan-Wigner single-particle matrix have
+off-diagonal `J`, matching `xx_boundary_structure_matrix`. `PairVertex(Kp, Km, 0.5)` carries a
+built-in `1/2`, so the coupling entry is `2J`.
+
+⛔ THE ANTICOMMUTATOR NEEDS NO NEW OPERATOR. With `G+- = eps(1 +- mu)/2`,
+`(L^+)'L^+ = n_dn` and `(L^-)'L^- = n_up`, and `n_dn = I/2 - S^z`, `n_up = I/2 + S^z`:
+
+    G+ n_dn + G- n_up = (eps/2) I - eps*mu*S^z
+
+so `-1/2{.,rho}` is `+(eps*mu/2) S^z` on EACH of the ket and bra legs plus an IDENTITY part
+`-eps/4` on each. The identity part is a zero-body term `pair_mpo` cannot hold and is returned as
+`shift`, exactly as `fused_lindblad` does for dephasing -- §3.2's FAULT 1, which cost a whole
+diagnostic ladder the first time it was dropped.
+
+⛔ `jump_transpose` EXISTS BECAUSE THE LOCAL-OPERATOR CONVENTION IS NOT OBVIOUS AND GETTING IT
+BACKWARDS FREEZES THE STATE COMPLETELY RATHER THAN TILTING IT.
+
+`site_apply!` contracts the operator's LEG 1, which applies the TRANSPOSE -- MEASURED: applying
+`Q4.JP` (a raising operator) to `|I>>` gives `<S^z_1> = -0.5`, and `Q4.JM` gives `+0.5`. (`Q4.CUP`
+is written symmetric on purpose to dodge exactly this, which is the tell that the convention was
+already known to be ambiguous.) If `pair_mpo` shares that convention then `JP`/`JM` are exchanged
+inside the MPO, and the consequence is NOT a sign error in a profile:
+
+    correct   G_1 u = e1/sqrt2 + (0.5,0,0,-0.5)/sqrt2 = (1.5,0,0,-0.5)/sqrt2  -> d<S^z_1>/dt = +0.5
+    swapped   G_1 u = e4/sqrt2 + (0.5,0,0,-0.5)/sqrt2 = (0.5,0,0,+0.5)/sqrt2  -> d<S^z_1>/dt =  0
+
+The jump term becomes LOSS while the anticommutator stays GAIN's, so the two ends balance exactly,
+`|I>>` becomes a genuine FIXED POINT, and the run reports a profile of EXACTLY zero with `chi = 1`
+and `Tr rho = 1.0000000000` -- identically for every integrator and at every `dt`. That reads as a
+dead sweep, not as a swapped operator, which is where the diagnosis went first.
+
+⚠ THE FLAG IS SETTLED BY MEASUREMENT, NOT BY READING THE CONTRACTION -- AND THE DEFAULT IS NOW
+`true`, WHICH IS THE SETTING THAT REPRODUCES THE ANALYTIC REFERENCE.
+
+⛔ DO NOT SETTLE IT WITH `fused_freeze_probe.jl` GATE 1.5 / GATE 5. Those form the perturbed state
+`p = rho0 + eta*Kz_1*rho0` and read `2^L <p|W|p>/eta`, and they return the SAME constant
+(`-149999.5`) for BOTH settings -- a value that scales as `1/eta`, i.e. `eta` never entered. A gate
+whose answer does not move when its scanned variable moves has measured nothing, and both of those
+rungs were quoted as evidence against the swap before anyone checked that they varied.
+
+✅ SETTLED INSTEAD BY STEPPING, in `benchmarks/fused_jump_convention.jl` GATE 10a/10b, against the
+`xx_boundary_sz` Lyapunov profile (`J = eps_L = eps_R = 1`, `mu = +-1`, `dt = 0.01`):
+
+    jump_transpose   tdvp2 L=2      tdvp2 L=3      bug_rsvd L=3    dt-halving at T=0.1
+    false            4.975e-03      4.975e-03      4.975e-03       4.742485e-02 at EVERY dt
+    true             1.067e-16      2.541e-16      1.656e-07       at the 1e-14 floor
+
+The `false` column is not "less accurate" -- it is the profile of a state that never moved, and its
+error is IDENTICAL at every step size, which is the fingerprint. `true` reproduces the reference to
+roundoff for `tdvp2` and to the rSVD sampling level for `bug_rsvd`.
+
+⚠ GATE 10b's ratios are NOT an order measurement. At L=3 with `D=128` nothing truncates and the
+horizon `T=0.1` is short, so the error sits on the roundoff floor and the "ratios" are noise --
+see the standing note that a dt-order test at full rank measures roundoff, not the scheme. It is
+conclusive for the question it was asked (moving vs frozen) and for nothing else.
+"""
+function fused_boundary_lindblad(L::Int; J::Float64 = 1.0,
+                                 eps_L::Float64 = 1.0, eps_R::Float64 = 1.0,
+                                 mu_L::Float64 = 1.0, mu_R::Float64 = -1.0,
+                                 jump_transpose::Bool = true)
+    L >= 2 || throw(ArgumentError("fused_boundary_lindblad needs at least two sites"))
+    PV = RSVDCBEBondUpdate.PairVertex
+    Hk = zeros(ComplexF64, L, L); Hb = zeros(ComplexF64, L, L)
+    for k in 1:(L - 1)
+        Hk[k, k + 1] = -im * 2J          # the 2 cancels PairVertex's built-in 0.5
+        Hb[k, k + 1] = +im * 2J
+    end
+    verts = PV[PV(Q4.Kp, Q4.Km, 0.5), PV(Q4.Km, Q4.Kp, 0.5),
+               PV(Q4.Bp, Q4.Bm, 0.5), PV(Q4.Bm, Q4.Bp, 0.5)]
+    Js = Any[Hk, Hk, Hb, Hb]
+    # ⚠ ONE-BODY TERMS RIDE THE END BONDS: `O_1 (x) I_2` on bond (1,2) and `I_{L-1} (x) O_L` on
+    # bond (L-1, L) -- the distribute-over-bonds trick §3.6 records, and the LAST SITE NEEDS ITS
+    # OWN vertex because bond `j` only ever reaches site `j+1`.
+    # ⛔ NEVER PUSH A VERTEX WHOSE COUPLING MATRIX IS IDENTICALLY ZERO. At the fully-polarised
+    # drive `mu_L = +1, mu_R = -1` -- the default, and the one that makes the profile asymmetric
+    # enough to be diagnostic -- `gp(eps_R, mu_R)` and `gm(eps_L, mu_L)` are EXACTLY 0, so two of
+    # the twelve coupling matrices are all-zero. Pushing them anyway asks `pair_mpo` to open and
+    # carry channels that contribute nothing, and the channel bookkeeping (`alive`, `rowof`,
+    # `colof`) is indexed by vertex.
+    #
+    # ⚠ MEASURED: each one-body operator works ALONE. `benchmarks/fused_freeze_probe.jl` GATE 7
+    # builds a single-vertex MPO per operator and steps it: `Kz` moves the state (6.2e-04), `JP`
+    # and `JM` move it (5.9e-04). (`JMP` does not, and that is CORRECT physics rather than a
+    # defect: `kron(Sz,Sz)*u = 0.25*u`, so pure dephasing leaves the maximally mixed state
+    # invariant.) It is only the ASSEMBLED operator that freezes, which is what points at the
+    # zero-weight vertices rather than at any single term.
+    one_body!(op, wl, wr) = begin
+        if wl != 0
+            A = zeros(ComplexF64, L, L); A[1, 2] = wl
+            push!(verts, PV(op, Q4.I, 1.0)); push!(Js, A)
+        end
+        if wr != 0
+            B = zeros(ComplexF64, L, L); B[L - 1, L] = wr
+            push!(verts, PV(Q4.I, op, 1.0)); push!(Js, B)
+        end
+    end
+    gp(e, m) = e * (1 + m) / 2
+    gm(e, m) = e * (1 - m) / 2
+    # ⚠ `jump_transpose` EXCHANGES THE TWO JUMP OPERATORS, because `kron(Sp,Sp)' = kron(Sm,Sm)`
+    # exactly -- so "apply the transpose" and "swap JP with JM" are the SAME operation here, and
+    # the swap is expressible without introducing a transposed tensor. See the docstring.
+    Jgain = jump_transpose ? Q4.JM : Q4.JP
+    Jloss = jump_transpose ? Q4.JP : Q4.JM
+    one_body!(Jgain, gp(eps_L, mu_L), gp(eps_R, mu_R))
+    one_body!(Jloss, gm(eps_L, mu_L), gm(eps_R, mu_R))
+    one_body!(Q4.Kz, eps_L * mu_L / 2, eps_R * mu_R / 2)
+    one_body!(Q4.Bz, eps_L * mu_L / 2, eps_R * mu_R / 2)
+    return pair_mpo(L, Vector{AbstractMatrix}(Js), verts; Iloc = Q4.I),
+           -(eps_L + eps_R) / 2
+end
 
 "A product state over fused sites; `idxs[j]` in 1..4. Mirrors `_product_state_none`."
 function fused_product_state(idxs::Vector{Int})
@@ -106,11 +288,154 @@ function identity_superket(L::Int)
     return p
 end
 
+"""
+    rho0_plusx(L) -> SymMPS
+
+`rho = (|+x><+x|)^{(x)L}`, the start state of the dissipative Heisenberg protocol, with `Tr rho = 1`.
+
+⛔ IT IS NOT A FUSED BASIS STATE, so `fused_product_state` cannot build it -- see `Q4.PX`. It is
+built by applying the ket-side `(I + sigma^x)/2` to every site of `|I>>`, which keeps `chi = 1`.
+
+⚠ THE SCALE IS THE PART THAT BITES. `identity_superket` is NORMALISED, i.e. it represents
+`vec(I)/2^(L/2)`, so applying `PX` per site gives `rho/2^(L/2)` and the result must be scaled BACK
+by `2^(L/2)`. Getting this wrong does not look like a scale error: `restore_trace!` sees a huge
+deficit and projects the state onto `|I>>`, which reads as a DEAD INTEGRATOR -- exactly the failure
+that cost a full diagnostic round on the maximally-mixed start. The assertion below is the guard.
+"""
+function rho0_plusx(L::Int)
+    p = identity_superket(L)
+    for j in 1:L
+        site_apply!(p, j, Q4.PX)
+    end
+    apply_shift!(p, 2.0^(L / 2))
+    tr = real(trace_rho(identity_superket(L), p, L))
+    abs(tr - 1) < 1e-10 || error("rho0_plusx: Tr rho = $tr, expected 1")
+    return p
+end
+
+"""
+    py_projector() -> TLArray
+
+`transpose((I - sigma^y)/2)` as a fused ket-side operator, built by COMBINING the real operators
+already in `Q4`.
+
+⛔ IT CANNOT LIVE IN `Q4`. That dict is `Float64` and Telum's `_getLocalSpace_no_symmetry` builds
+the local space real; asking it for a complex entry throws `InexactError: Float64(0.0 + 0.5im)`
+(measured). And a SECOND local-space call is not a workaround -- its tensors would not share `Q4`'s
+index identities, so they could not contract against `identity_superket`'s state. Combining existing
+`Q4` members sidesteps both: same space, same indices, complex coefficients.
+
+The identity is checked by construction: `Q4.PX == (Q4.I + Q4.Kp + Q4.Km)/2` holds for the real
+case, so the same recipe with `-i`/`+i` gives the `sigma^y` pole.
+
+⛔ THE TRANSPOSE IS DELIBERATE. `site_apply!` contracts leg 1 and so applies `M'`. `PX` and `CUP`
+are real SYMMETRIC, so there the distinction is invisible -- but `P_y = (I + i s^+ - i s^-)/2` is
+HERMITIAN AND NOT SYMMETRIC, and `transpose(P_y)` is the projector onto the OPPOSITE pole. Storing
+the naive `P_y` would prepare `<sigma^y> = +1` while every label says `-1`: not a crash, the whole
+figure reflected. `rho0_minusy` ASSERTS the sign rather than trusting this comment.
+"""
+py_projector() = to_concrete(0.5 * (Q4.I - im * Q4.Kp + im * Q4.Km))
+
+"""
+    rho0_minusy(L) -> SymMPS
+
+`rho = (|-y><-y|)^{(x)L}`, the start state of the paper's LONG-RANGE figures (Figs 4 and 6 of
+Hryniuk & Szymanska: "starting from the product state `<sigma^y> = -1`").
+
+Same construction as [`rho0_plusx`](@ref) -- apply the single-site projector to every site of
+`|I>>`, then undo `identity_superket`'s `2^(L/2)` normalisation -- but with [`py_projector`](@ref).
+
+⛔ THE TWO ASSERTIONS ARE THE WHOLE POINT AND MUST NOT BE RELAXED. `<sigma^y>` is the ONE Pauli
+component that can detect a transpose slip here: `sigma^x` is real symmetric and `sigma^z` diagonal,
+so both read back the same number under either convention.
+"""
+function rho0_minusy(L::Int)
+    p = identity_superket(L)
+    PY = py_projector()
+    for j in 1:L
+        site_apply!(p, j, PY)
+    end
+    apply_shift!(p, 2.0^(L / 2))
+    Imps = identity_superket(L)
+    tr = real(trace_rho(Imps, p, L))
+    abs(tr - 1) < 1e-10 || error("rho0_minusy: Tr rho = $tr, expected 1")
+    sy = pauli_1site(Imps, p, L, 1; tr = tr)[2]
+    abs(sy + 1) < 1e-10 || error("rho0_minusy: <sigma^y_1> = $sy, expected -1 " *
+                                 "(a transposed Q4.PY prepares the +y pole)")
+    return p
+end
+
 "`Tr(rho)`, and with `at = j` the `Tr(S^z_j rho)`. `S^z` is Hermitian so it may sit on `<<I|`."
 function trace_rho(Imps, rho, L::Int; at::Int = 0)
     o = copy(Imps)
     at > 0 && site_apply!(o, at, Q4.Kz)
     return 2.0^(L / 2) * overlap(o, rho)
+end
+
+"""
+    trace_op(Imps, rho, L, ops) -> ComplexF64
+
+`Tr(O_{j1} O_{j2} ... rho)` for `ops = [(j1, M1), (j2, M2), ...]`, each `M` a KET-side fused
+operator from `Q4` and each site DISTINCT. Generalises [`trace_rho`](@ref) to the two-site
+correlators the dissipative-Heisenberg protocol reports.
+
+⚠ THE TWO TRANSPOSES CANCEL HERE, AND THE REASON IS WORTH KEEPING. `site_apply!` contracts leg 1
+and so applies `M'` (transpose) -- the convention that silently swapped `JP`/`JM` and froze the
+boundary-driven model. But this path then takes an OVERLAP, which contributes a second dagger:
+
+    site_apply!(|I>>, j, kron(A, I))  ->  superket of A^T
+    overlap(that, rho)                 =  Tr((A^T)^dag rho)  =  Tr(conj(A) rho)
+
+and every `S^+`/`S^-`/`S^z` in `Q4` is REAL, so `conj(A) = A` and `trace_op` returns the operator
+it names. ⛔ THAT IS A DERIVATION, NOT A MEASUREMENT -- and this is precisely the class of trap
+that has twice produced smooth, plausible, wrong curves in this stack. `certify_obs` in
+`dissipative_heisenberg.jl` pins it against a dense Liouvillian, and it does so with `sigma^y`
+INCLUDED, because `sigma^y` is the only one of the three that can detect the error: `sigma^x` is
+real symmetric and `sigma^z` diagonal, so both give the same answer under either convention.
+"""
+function trace_op(Imps, rho, L::Int, ops)
+    js = [j for (j, _) in ops]
+    length(unique(js)) == length(js) || throw(ArgumentError(
+        "trace_op needs DISTINCT sites (two ops on one site would compose as (M1*M2)'), got $js"))
+    o = copy(Imps)
+    for (j, M) in ops
+        1 <= j <= L || throw(ArgumentError("site $j out of range 1..$L"))
+        site_apply!(o, j, M)
+    end
+    return 2.0^(L / 2) * overlap(o, rho)
+end
+
+"""
+    pauli_1site(Imps, rho, L, j; tr) -> (sx, sy, sz)
+
+Pauli expectations `<sigma^a_j>` at one site, all three real, normalised by `tr = Tr(rho)`.
+
+⛔ `sigma^y` COMES FROM `-i(<sigma^+> - <sigma^->)` AND CANNOT COME FROM A `Ky` OPERATOR: `Q4` is a
+`Float64` dict and `sigma^y` is imaginary, so it does not fit -- see `fused_space`.
+⚠ `2 *` ON `sigma^z` ONLY. `Kz` is `S^z = sigma^z/2`, while `Kx = S^+ + S^- = sigma^x` and
+`Kp/Km = sigma^{+,-}` already carry Pauli normalisation. Applying one blanket factor to all three
+is the easy way to get two curves that disagree by exactly 2 and look merely "off by a constant".
+"""
+function pauli_1site(Imps, rho, L::Int, j::Int; tr::Float64)
+    sp = trace_op(Imps, rho, L, [(j, Q4.Kp)]) / tr
+    sm = trace_op(Imps, rho, L, [(j, Q4.Km)]) / tr
+    return (real(trace_op(Imps, rho, L, [(j, Q4.Kx)]) / tr),
+            real(-im * (sp - sm)),
+            2 * real(trace_op(Imps, rho, L, [(j, Q4.Kz)]) / tr))
+end
+
+"""
+    pauli_2site(Imps, rho, L, j, k; tr) -> (xx, yy, zz)
+
+`<sigma^a_j sigma^a_k>` for `a = x, y, z`, sites distinct.
+
+`sigma^y sigma^y` expands into FOUR two-site terms, since
+`sigma^y_j sigma^y_k = -(s^+_j s^+_k - s^+_j s^-_k - s^-_j s^+_k + s^-_j s^-_k)`.
+"""
+function pauli_2site(Imps, rho, L::Int, j::Int, k::Int; tr::Float64)
+    o(a, b) = trace_op(Imps, rho, L, [(j, a), (k, b)]) / tr
+    yy = -(o(Q4.Kp, Q4.Kp) - o(Q4.Kp, Q4.Km) - o(Q4.Km, Q4.Kp) + o(Q4.Km, Q4.Km))
+    return (real(o(Q4.Kx, Q4.Kx)), real(yy), 4 * real(o(Q4.Kz, Q4.Kz)))
 end
 
 """
@@ -188,8 +513,35 @@ function fused_lindblad(L::Int, Jm::AbstractMatrix, gammas::Vector{Float64};
     return pair_mpo(L, Vector{AbstractMatrix}(Js), verts; Iloc = Q4.I), -sum(gammas) / 4
 end
 
-"The omitted zero-body term, as an exact scalar on the state."
-apply_shift!(p, z::Number) = (p[1] = to_concrete(ComplexF64(z) * p[1]); p)
+"""
+The omitted zero-body term, as an exact scalar on the state.
+
+⛔ THE SCALAR GOES ON THE ORTHOGONALITY CENTRE, NOT ON SITE 1, AND THAT IS A CORRECTNESS FIX RATHER
+THAN A STYLE ONE. Scaling ANY single tensor scales the whole product, so the STATE is right either
+way -- `fused_jump_convention.jl` GATE 10c confirms it by the trace, which is linear and contracts
+every site: `Tr(0.001*a)/Tr(a) = 0.00100000` exactly. What site 1 breaks is the CANONICAL FORM.
+
+`norm(psi::SymMPS) = norm(psi[psi.center])` (`symmetric_mps.jl`) is the Frobenius norm of the
+centre tensor ALONE, which equals the state norm only while every other tensor is an isometry.
+Scaling site 1 while the centre sits elsewhere leaves site 1 non-isometric and the centre
+untouched, so `norm` silently returns the OLD value: GATE 10c measured `norm(0.001*a)/norm(a) = 1.0`
+against a true ratio of 0.001. Putting the scalar on the centre keeps the invariant, so `norm`
+stays honest and nothing downstream has to know.
+
+⚠ THIS IS WHAT `fused_freeze_probe.jl` GATE 8 ACTUALLY FOUND. It reported "add_mps normalises its
+arguments" from `|b|/|a| = 1` -- but that ratio came from `norm`, before `add_mps` was ever called.
+`add_mps` is fine (GATE 10c: `Tr(a+b) = 1.001000000000`, exact); the misreading was the norm.
+
+⚠ THE FALLBACK TO SITE 1 IS DELIBERATE. `SymMPS.center` is a plain field with no invariant enforced
+by the type, so a path that leaves it out of range would turn a scalar multiply into a `BoundsError`
+in every caller. Falling back reproduces the OLD behaviour exactly, which makes this change unable
+to be worse than what it replaces.
+"""
+apply_shift!(p, z::Number) = begin
+    c = (1 <= p.center <= length(p)) ? p.center : 1
+    p[c] = to_concrete(ComplexF64(z) * p[c])
+    p
+end
 
 """
     normalise_trace!(Imps, rho, L) -> tr_before
@@ -315,10 +667,31 @@ L = 2 it is 2 and would not.
 re-truncated afterwards. That truncation can itself shed trace -- which is exactly the shared,
 cap-driven mechanism `tdvp2` suffers too -- so the CALLER still logs the trace it measured.
 """
-function restore_trace!(Imps, rho, L::Int; maxdim::Int = 0, cutoff::Float64 = 1e-12)
+function restore_trace!(Imps, rho, L::Int; maxdim::Int = 0, cutoff::Float64 = 1e-12,
+                        max_deficit::Float64 = 0.5)
     tr = real(trace_rho(Imps, rho, L))
     eps = 1.0 - tr
     abs(eps) < 1e-15 && return tr
+    # ⛔ A LARGE DEFICIT IS NOT A TRUNCATION ERROR -- IT IS A WRONG STATE, AND CORRECTING IT
+    # SILENTLY DESTROYS THE RUN. A Lindbladian conserves the trace EXACTLY, so what this function
+    # repairs is the O(truncation) leak a Galerkin projection plus an SVD leaves behind: small by
+    # construction. When `eps` is O(1) the "minimal correction along |I>>" is no longer minimal --
+    # it OVERWHELMS the physical state and projects it back onto the identity superket.
+    #
+    # MEASURED, and it cost a full diagnostic round: starting from `rho = identity_superket(L)`
+    # instead of `identity_superket(L)/2^(L/2)` puts `Tr rho = 2^(L/2) = 16` at L = 8, so
+    # `eps = -15` and `rho <- rho + (-15/16) rho = rho/16` -- a state that is STILL exactly `|I>>`
+    # and now has `Tr = 1`. The run then reports `<S^z_j>` EXACTLY zero at every site and time,
+    # `chi = 1`, `Tr = 1.0000000000`, IDENTICALLY for tdvp2 / bug_rsvd / bug_par, and the same
+    # error at every `dt` (observed order 0.00). Every one of those symptoms reads as a dead
+    # INTEGRATOR, which is where the diagnosis went first and why this guard now exists.
+    abs(eps) <= max_deficit || error(
+        "restore_trace!: Tr rho = $tr, deficit $eps exceeds max_deficit=$max_deficit. This is " *
+        "NOT a truncation leak -- correcting it would project the state onto |I>>. Check the " *
+        "INITIAL state: the maximally mixed state is `identity_superket(L)/2^(L/2)`, not " *
+        "`identity_superket(L)` (whose trace is 2^(L/2)); a pure `rho0_product` already has " *
+        "Tr = 1. Also check that the zero-body `shift` from the Lindbladian builder is being " *
+        "applied each step.")
     corr = copy(Imps)
     apply_shift!(corr, eps / 2.0^(L / 2))
     out = add_mps(rho, corr)
