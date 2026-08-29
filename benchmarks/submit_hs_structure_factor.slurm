@@ -39,7 +39,8 @@ cd "$ROOT"
 # the binding constraint.
 T=32.0
 DT=0.05
-SCHEME=bug_decoupled
+# ⛔ ONE BUG SCHEME EVERYWHERE. `bug_decoupled` no longer exists.
+SCHEME=bug_interleaved
 
 # One ring size per task. L=8 duplicates the local run deliberately: it is the cheap task that
 # proves the cluster environment reproduces the identity gate before the expensive ones are

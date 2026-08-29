@@ -97,7 +97,11 @@ println("="^80)
 @printf("\n  %-24s %12s %12s %12s   %s\n", "arm", "dt=1e-2", "dt=1e-3", "dt=1e-4", "ratios")
 for (nm, st) in ["tdvp_cbe1s" => (p, t) -> tdvp_cbe1s_step!(p, MPO, t; maxdim = D,
                                                             trunc_thresh = 1e-14, maxiter = MI),
-                 "cbe_bug"    => bug()]
+# ⛔ ONE NAME FOR THE SWEEP: `bug_interleaved`. This is the sweep behind the competitive
+# OAT / XX / TFIM results and the square-Heisenberg advantage -- it was labelled `cbe_bug`
+# here and `bug_interleaved` in the L=16 campaign, so the SAME arm wore two names across
+# CSVs and could not be joined between campaigns without a lookup nobody applies.
+                 "bug_interleaved"    => bug()]
     es = [one_step(dt, st)[1] for dt in (1e-2, 1e-3, 1e-4)]
     @printf("  %-24s %12.3e %12.3e %12.3e   %8.1f %8.1f\n",
             nm, es[1], es[2], es[3], es[1] / es[2], es[2] / es[3])

@@ -43,8 +43,15 @@ OUTDIR = sys.argv[2] if len(sys.argv) > 2 else os.path.join(HERE, "results")
 # One colour per integrator, one linestyle per maxdim, held fixed across every figure so the
 # same scheme is the same colour everywhere.
 COLOR = {
-    "bug_decoupled":   "#1f77b4",
+    "bug_decoupled":   "#1f77b4",   # RETIRED -- see LABEL note; kept so old CSVs still plot
     "bug_interleaved": "#d62728",
+    # The KRYLOV-DEPTH arms of the SAME `bug_interleaved` sweep. Shades of its colour on purpose:
+    # they are one method at different depths, and giving them unrelated colours would present a
+    # tuning axis as four competing integrators.
+    "bug_interleaved_m0":   "#f4a3a3",
+    "bug_interleaved_m3":   "#e06666",
+    "bug_interleaved_tol4": "#a83232",
+    "bug_interleaved_tol6": "#7a1f1f",
     "tdvp_cbe1s":      "#2ca02c",
     "tdvp2":           "#7f4fc0",
     "dmrg_cbe1s":      "#1f77b4",
@@ -55,12 +62,23 @@ COLOR = {
     "jan_bug_centre":  "#8c564b",
 }
 LABEL = {
-    # `bug_interleaved` is labelled plainly "CBE-BUG": it is the only ordering plotted
-    # (`bug_decoupled` is in DROP_SCHEMES, and the two agree to 8 digits), so the qualifier
-    # distinguished it from nothing on the figure. If `bug_decoupled` is ever re-enabled, both
-    # labels need the ordering back or the legend will show two identical names.
-    "bug_decoupled":   "CBE-BUG (decoupled)",
+    # `bug_interleaved` is labelled plainly "CBE-BUG" -- it is now the ONLY BUG scheme in the
+    # study, used identically in the closed suite and every open-system driver.
+    #
+    # ⛔ `bug_decoupled` IS RETIRED, NOT MERELY UNPLOTTED. Its flag lived on the K-step path, which
+    # was removed with `kaug`/`rexpand` on 2026-08-24; after that both branches called
+    # `cbe_bug_step!` with IDENTICAL arguments. The old note here read "the two agree to 8 digits"
+    # and treated that as a measurement -- it was not, they had become the same run. Kept in the
+    # maps only so previously-collected CSVs still render.
+    "bug_decoupled":   "CBE-BUG (retired: same run as interleaved)",
     "bug_interleaved": "CBE-BUG",
+    # ⚠ SAME SWEEP, DIFFERENT KRYLOV DEPTH -- the labels say so, because a legend listing them
+    # beside `2-site TDVP` would otherwise read as five competing methods rather than one method
+    # and a tuning axis.
+    "bug_interleaved_m0":   "CBE-BUG (m=0)",
+    "bug_interleaved_m3":   "CBE-BUG (m=3)",
+    "bug_interleaved_tol4": "CBE-BUG (adaptive 1e-4)",
+    "bug_interleaved_tol6": "CBE-BUG (adaptive 1e-6)",
     "tdvp_cbe1s":      "1-site TDVP-CBE",
     "tdvp2":           "2-site TDVP",
     "dmrg_cbe1s":      "1-site DMRG-CBE",

@@ -175,10 +175,44 @@ energy(psi, mpo) = real(mpo_energy(psi, mpo)) / max(norm(psi)^2, eps())
 
 # One step of each integrator, behind one signature so the loops below are shared.
 function stepper(scheme::String, mpo, maxdim::Int, cutoff::Float64)
-    if scheme == "bug_decoupled"
+    # ⛔ ONE BUG SCHEME ACROSS EVERY RUN, AND IT IS `bug_interleaved`.
+    #
+    # `cbe_bug`'s sweep IS the interleaved ordering -- CBE expands bond `i`, then bond `i`'s frame
+    # is built and the environment pushed through it immediately, so bond `i+1`'s selection sees
+    # the widening at bond `i` (`sweeps/cbe_bug.jl:447`, the reference's own ordering,
+    # `TDVPSweepCBE1Si.m:30/:34`). The DECOUPLED variant is the one that no longer exists: the
+    # `decoupled` flag lived on the K-step path, and the K-step, `kaug` and `rexpand` were removed
+    # on 2026-08-24. `bug_decoupled` and `bug_interleaved` had since been calling `cbe_bug_step!`
+    # with IDENTICAL arguments -- two entries producing one curve, which doubles the array and
+    # reads as agreement between methods in a plot. `bug_decoupled` is therefore gone and
+    # `bug_interleaved` is the canonical arm.
+    #
+    # ⚠ THE SUFFIXED ARMS ARE THE SAME SWEEP, NOT OTHER SCHEMES. They differ only in the KRYLOV
+    # DEPTH knobs, which is a separate axis (how many Krylov vectors the basis update keeps) and
+    # not a different integrator. Anything comparing BUG against `tdvp2` / `tdvp_cbe1s` must use
+    # the unsuffixed `bug_interleaved`, so the comparison is between methods and not between
+    # tunings.
+    if scheme == "bug_interleaved"
+        # LIBRARY DEFAULTS: `krylov_basis = 30` (ceiling), `krylov_tol = 1e-6` (Saad stopping
+        # rule). Passed by omission on purpose -- pinning them here would silently fork this arm
+        # from the library the day a default changes.
         return (p, tau) -> cbe_bug_step!(p, mpo, tau; maxdim = maxdim, trunc_thresh = cutoff)
-    elseif scheme == "bug_interleaved"
-        return (p, tau) -> cbe_bug_step!(p, mpo, tau; maxdim = maxdim, trunc_thresh = cutoff)
+    elseif scheme == "bug_interleaved_m0"
+        # m = 0: no Krylov growth frame at all, the cheapest arm.
+        return (p, tau) -> cbe_bug_step!(p, mpo, tau; krylov_basis = 0, krylov_tol = 0.0,
+                                         maxdim = maxdim, trunc_thresh = cutoff)
+    elseif scheme == "bug_interleaved_m3"
+        return (p, tau) -> cbe_bug_step!(p, mpo, tau; krylov_basis = 3, krylov_tol = 0.0,
+                                         maxdim = maxdim, trunc_thresh = cutoff)
+    elseif scheme == "bug_interleaved_tol4"
+        # ⚠ ADAPTIVE: `krylov_basis` is the CEILING and `krylov_tol` the stopping rule. A ceiling
+        # of 0 would disable the adaptivity entirely, so these arms must carry a real ceiling or
+        # they silently become `m = 0` while still being labelled adaptive.
+        return (p, tau) -> cbe_bug_step!(p, mpo, tau; krylov_basis = 30, krylov_tol = 1e-4,
+                                         maxdim = maxdim, trunc_thresh = cutoff)
+    elseif scheme == "bug_interleaved_tol6"
+        return (p, tau) -> cbe_bug_step!(p, mpo, tau; krylov_basis = 30, krylov_tol = 1e-6,
+                                         maxdim = maxdim, trunc_thresh = cutoff)
     elseif scheme == "tdvp_cbe1s"
         return (p, tau) -> tdvp_cbe1s_step!(p, mpo, tau;
                                             maxdim = maxdim, trunc_thresh = cutoff)
@@ -214,8 +248,14 @@ info_fields(info) = (
     hasproperty(info, :krylov_dim)    ? info.krylov_dim    : 0,
 )
 
-const ALL_SCHEMES = ("bug_decoupled", "bug_interleaved", "tdvp_cbe1s", "tdvp2",
-                     "jan_bug", "jan_bug_centre")
+# ⛔ `bug_interleaved` FIRST AND UNSUFFIXED: it is THE BUG scheme, used identically in every run in
+# this study (closed suite and open systems alike). The suffixed arms are the SAME sweep at
+# different Krylov depths and belong to the depth study, not to the method comparison -- run them
+# by naming them explicitly (ARGS[5]) rather than sweeping them into the headline array.
+const ALL_SCHEMES = ("bug_interleaved", "tdvp_cbe1s", "tdvp2", "jan_bug", "jan_bug_centre")
+"The Krylov-depth arms of the SAME `bug_interleaved` sweep; name them explicitly to run them."
+const DEPTH_SCHEMES = ("bug_interleaved_m0", "bug_interleaved_m3",
+                       "bug_interleaved_tol4", "bug_interleaved_tol6")
 # ARGS[5], if given, is a comma-separated subset -- so a scheme added later can be run on its own
 # instead of re-running four that are already measured. The output path gets a tag in that case so
 # it cannot clobber the full run's CSV.

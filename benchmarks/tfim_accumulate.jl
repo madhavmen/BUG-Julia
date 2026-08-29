@@ -98,7 +98,11 @@ function study(title, sym, mpo_f, psi0_f, exact_f, measure, dt, nsteps, sample, 
                      "tdvp_cbe1s" => p -> tdvp_cbe1s_step!(p, mpo, tau; maxdim = D,
                                                            trunc_thresh = 1e-14,
                                                            maxiter = maxiter),
-                     "cbe_bug"    => p -> cbe_bug_step!(p, mpo, tau; maxdim = D,
+# ⛔ ONE NAME FOR THE SWEEP: `bug_interleaved`. This is the sweep behind the competitive
+# OAT / XX / TFIM results and the square-Heisenberg advantage -- it was labelled `cbe_bug`
+# here and `bug_interleaved` in the L=16 campaign, so the SAME arm wore two names across
+# CSVs and could not be joined between campaigns without a lookup nobody applies.
+                     "bug_interleaved"    => p -> cbe_bug_step!(p, mpo, tau; maxdim = D,
                                                         trunc_thresh = 1e-14,
                                                         maxiter = maxiter, exact = true)]
         trace(nm, st, psi0, nsteps, sample, n -> exact_f(n * dt), measure, mpo)

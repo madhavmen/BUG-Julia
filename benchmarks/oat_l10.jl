@@ -50,7 +50,7 @@ const DT      = length(ARGS) >= 2 ? parse(Float64, ARGS[2]) : 0.01
 # 4π is ONE full revival cycle: `cos^(L-1)(t/2)` returns to `+1` there (at 2π it is at `-1` for
 # even `L`, the negative revival). The paper's 12π is three of these.
 const TMAX    = length(ARGS) >= 3 ? parse(Float64, ARGS[3]) : 4π
-const ALL_SCHEMES = ("tdvp_cbe1s", "tdvp2", "cbe_bug")
+const ALL_SCHEMES = ("tdvp_cbe1s", "tdvp2", "bug_interleaved")
 const SCHEMES = length(ARGS) >= 4 && ARGS[4] != "all" ?
     Tuple(String.(split(ARGS[4], ","))) : ALL_SCHEMES
 const MAXDIMS = length(ARGS) >= 5 ?
@@ -219,7 +219,14 @@ function stepper(scheme::String, mpo, maxdim::Int)
     elseif scheme == "tdvp2"
         return (p, tau) -> tdvp2_step!(p, mpo, tau; maxdim = maxdim, trunc_thresh = CUTOFF,
                                        maxiter = MAXITER)
-    elseif scheme == "cbe_bug"
+    elseif scheme == "bug_interleaved" || scheme == "cbe_bug"
+        # ⛔ ONE BUG SCHEME, ONE NAME, ACROSS EVERY CAMPAIGN: `bug_interleaved`. This driver used to
+        # call it `cbe_bug`, which is a THIRD label for the arm the closed suite and the
+        # open-system drivers both call `bug_interleaved` -- and a scheme wearing different names
+        # in different CSVs cannot be joined across campaigns without a lookup nobody remembers to
+        # apply. The old name stays as an ALIAS so previously-collected data and saved commands
+        # still resolve.
+        #
         # Package defaults for everything the sweep is not being scanned on -- including
         # `krylov_basis`/`krylov_tol`, which is the axis that actually moves OAT (2.13e-02 at one
         # power of `H` against ~1e-14 at the defaults). Pin nothing here that a user would not.
