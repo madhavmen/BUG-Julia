@@ -929,3 +929,93 @@ integrator. `plot_dissip_heis.py` panel (d) is labelled SELF-convergence for thi
 carries the connected part, so a too-hard truncation keeps a smooth `⟨σᵃ(t)⟩` and a perfect
 `Tr ρ = 1` while `Cᵃᵃ_d` decays for a purely numerical reason. Check peak `χ` against `DH_CAP`
 before reading panels (b) and (c).
+
+## 8. THE LONG-RANGE RTE CAMPAIGN — `dissipative_longrange.jl` (2026-08-29)
+
+Same paper (Hryniuk & Szymańska, Comms Phys 2026 **9**:45), same operator algebra, **different
+coupling matrix and nothing else**. Three integrators — 2-site TDVP, 1-site CBE-TDVP
+(arXiv:2208.10972, the published baseline), CBE-BUG — on the paper's own protocols.
+
+| mode | model | geometry | their figure |
+|---|---|---|---|
+| `fig3` | nearest-neighbour XYZ + spin decay | chain | Fig. 3a–c |
+| `fig4` | Eq. (6), diagonal `σᶻσᶻ`, α = 3 and 6 | chain | Fig. 4a,b |
+| `fig4sq` | Eq. (6) | 4×4 open patch | Fig. 4c,d |
+| `fig6` | Eq. (7), **non-diagonal** XYZ, `rmax = 4` | chain | Fig. 6c,d |
+| `fig5` | Eq. (6), **steady state**, Kac-normalised, swept over `J₂` | chain | Fig. 5 |
+
+`pair_mpo` weights each `PairVertex` by an arbitrary `J[i,j]` over every pair `i<j`, so a power law
+is an **exact** MPO with **no exponential fitting and no extra channels** — `nn(c)` becomes
+`c .* D` with `D[i,j] = d_ij^(-α)`. The cost shows up as bond dimension: **242** at L=16 for the
+untruncated double power law, 66 for Fig. 6 where the paper itself truncates at r=4.
+
+### 8.1 ✅ Certified against a dense Liouvillian, and why the `⟨σʸ⟩` start matters
+
+`certify_lr` builds an independent dense Liouvillian at L=3–4 from the *same* site positions and
+compares 1- and 2-site observables:
+
+    Eq. (6):  dt 0.05 -> 2.4875e-05,  0.025 -> 6.1025e-06,  0.0125 -> 2.1877e-06   (order 4.08, 2.79)
+    Eq. (7):  dt 0.05 -> 6.6311e-06,  0.025 -> 1.8643e-06,  0.0125 -> 5.3103e-07   (order 3.56, 3.51)
+
+⛔ The start is `⟨σʸ⟩ = −1`, which makes this **strictly stronger** than the Néel-start gate:
+`σᶻ` is diagonal and `σˣ` is real symmetric, so both read back the same number whether
+`site_apply!` applies `M` or `M'`. `σʸ` is the only one of the three that can catch the transpose,
+and here it is large from `t = 0`. `rho0_minusy` additionally *asserts* its own sign, because
+`P_y` is Hermitian but not symmetric and the naive form silently prepares the **+y** pole.
+
+### 8.2 ⛔ Fig. 5 is a CLAIM about a steady state, so it is gated
+
+`steady_lr` reports `drift` — the largest change in `S_zz(q)` over the last quarter of the window,
+relative to its final value. Above 2% the point is written `converged=0`, drawn **hollow**, and
+excluded from the plotted line. An unconverged transient traces a smooth, entirely plausible curve
+against `J₂`; nothing else in the output would distinguish it from a NESS.
+
+`kac = true` **here and nowhere else**: the Kac factor rescales energy and therefore *time* with
+`N`, so switching it on for the dynamics figures would shift every curve along `t` against theirs.
+
+`szz_at` is shared by `protocol_lr` and `steady_lr` so the two cannot drift into different
+normalisations. Its `t=0` value is `1/N` for **every** `q` (product state, `(σᶻ)² = I`) — the
+cheapest available check that the prefactor and the q-grid are right; measured `0.1666666667` at
+L=6.
+
+### 8.3 Cost, measured — and two ways it was misread
+
+L=16 chain, tdvp2, MPO dim 242, against a recorded cap-32/maxiter-16 baseline:
+
+| config | s/step | speedup | `krylov` | `d⟨σᵃ⟩` |
+|---|---|---|---|---|
+| cap 32, maxiter 16 | 214.4 | 1.00× | 1856 | — |
+| cap 20, maxiter 16 | 132.8 | 1.61× | 1856 | 4.4e-06 |
+| **cap 20, maxiter 8** | **59.8** | **3.59×** | **928** | **4.4e-06 — identical** |
+
+Halving the Krylov depth changed the observables by **nothing** (the 4.4e-06 is entirely the cap):
+`arnoldi_expv` exits on breakdown only, so the other 8 vectors were burned for free. ⚠ Measured,
+not assumed — §7 records the opposite case, where too few vectors survived every other check.
+
+`rmax` is the one lever that changes the model, so it was priced and **declined**: 242 → 98 in MPO
+dim bought 18% of the wall clock and cost **15.6×** in `d⟨σˣ⟩`. The χ-dependent linear algebra
+dominates, not the MPO bond.
+
+⛔ **Two misreadings of this table, both mine, both worth keeping:**
+
+1. **The probe measured 2 steps from a product state**, where χ is still climbing 1→20, and so
+   priced the cheapest steps of the run and called them typical. Production is ~198 s/step at
+   χ = 20. **A cost probe must run past the rank-growth transient.**
+2. That 3.3× was then blamed on BLAS threading and "fixed" — costing a restart. Total CPU demand
+   was **4.27 cores of 12**; the box was never the constraint, and raising `OPENBLAS_NUM_THREADS`
+   to 4 made it *worse* (31.5 s/step vs 20.4) by thrashing threads on χ=20, d=4 tensors. The tell
+   that the machine was innocent: **`krylov` was 464 per step in both readings** — identical work,
+   different wall clock.
+
+⇒ **`krylov` is the cost axis; `seconds` is a sanity check.** The four figures run concurrently
+(`benchmarks/run_dissipative_l16.ps1`), which makes wall clock non-comparable by construction. For
+publication wall-clock, run one job at a time.
+
+### 8.4 ⛔ No SU(2) or U(1) arm here either — and it is the fused space, not the couplings
+
+Exactly as §7.2. `Jx ≠ Jy` in Eq. (7) opens the `S⁺S⁺`/`S⁻S⁻` channel and kills U(1) at the
+Hamiltonian level, but that is not the binding constraint: `fused_space()` builds the d=4 site
+through `_getLocalSpace_no_symmetry`, so **every fused superket in this repo is `:none` whatever
+the couplings are**. The campaign's symmetry axis is carried by the *closed* models — Heisenberg
+chain, cylinder, kagome. Say so explicitly rather than letting a missing `sym` column read as an
+oversight.

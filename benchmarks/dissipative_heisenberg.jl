@@ -620,14 +620,15 @@ if abspath(PROGRAM_FILE) == @__FILE__
     mode in ("all", "certify")  && certify()
     mode in ("all", "obs")      && certify_obs()
     mode in ("all", "spectrum") && spectrum()
+
     mode == "protocol" && protocol(;
         L     = parse(Int,     get(ENV, "DH_L",  "16")),
-        dt    = parse(Float64, get(ENV, "DH_DT", "0.01")),
-        cap   = parse(Int,     get(ENV, "DH_CAP", "128")),
+        dt    = parse(Float64, get(ENV, "DH_DT", "0.05")),
+        cap   = parse(Int,     get(ENV, "DH_CAP", "20")),
         tmax  = parse(Float64, get(ENV, "DH_TMAX", "4.0")),
         # ⚠ `nsave` MUST NOT EXCEED `tmax/dt + 1`, or two checkpoints fall inside one step and the
         # save loop emits duplicate rows at the same `t` -- harmless arithmetically, but it makes a
         # smoke run look like it produced more data than it did.
-        nsave = parse(Int,     get(ENV, "DH_NSAVE", "41")),
-        maxiter = parse(Int,   get(ENV, "DH_MAXITER", "16")))
+        nsave = parse(Int,     get(ENV, "DH_NSAVE", "21")),
+        maxiter = parse(Int,   get(ENV, "DH_MAXITER", "8")))
 end

@@ -457,8 +457,20 @@ function protocol_lr(P; shape = (16,), tmax::Float64 = 4.0, dt::Float64 = 0.05,
     # ⛔ `maxiter` IS THE DOMINANT COST, NOT A SAFETY MARGIN. `arnoldi_expv` exits on BREAKDOWN
     # only, so EVERY solve burns the full budget -- there is no early convergence exit. MEASURED on
     # the L=8 smoke of the Fig-3 model at `maxiter = 30`: 70 s PER STEP and `krylov = 755` per step,
-    # which is ~30 matvecs x ~25 solves. Dropping to 16 is a straight ~2x on the whole run.
+    # which is ~30 matvecs x ~25 solves. At L=16, `maxiter` 16 -> 8 halved `krylov` (1856 -> 928 per
+    # 2 steps) and changed the observables by NOTHING -- both deviate 4.4e-06 from the cap-32 run,
+    # i.e. entirely from the cap. The Arnoldi space had already converged inside 8 vectors.
     # ⚠ `certify` keeps 30, because there the question is exactness at L = 3-4 where cost is free.
+    # ⚠ MEASURE IT, DO NOT ASSUME IT: [[krylov-depth-is-a-hidden-error-source]] is the opposite case,
+    # where too few vectors survived every other check. Depth was proven harmless HERE, on THIS
+    # model, at THIS dt.
+    #
+    # ⛔ AND PRICE A STEP PAST THE RANK-GROWTH TRANSIENT. A 2-step probe from a product state reports
+    # 59.8 s/step here; the same settings cost ~198 s/step once `chi` has reached the cap, because
+    # the first steps are run at chi = 1..20 and are not the work the run is made of. That factor of
+    # 3.3 was briefly misread as a BLAS-threading problem, and "fixing" it cost a restart: total CPU
+    # demand was 4.27 cores of 12, so the box was never the constraint. `krylov` is the honest cost
+    # axis -- it was 464 per step in BOTH readings, which is what said the work had not changed.
     base = (maxdim = cap, trunc_thresh = 1e-12, maxiter = maxiter, hermitian = false)
     rs = (exact = false, dex = 8, dover = 4, comp_ratio = 1.0,
           krylov_basis = 3, krylov_tol = 0.0, growth = growth)
@@ -663,15 +675,26 @@ if abspath(PROGRAM_FILE) == @__FILE__
     mode = isempty(ARGS) ? "certify" : ARGS[1]
     L    = parse(Int,     get(ENV, "LR_L", "16"))
     dt   = parse(Float64, get(ENV, "LR_DT", "0.05"))
-    # ⚠ `cap = 32` IS DELIBERATELY CLOSE TO THE PAPER'S OWN BOND DIMENSION. Both its t-VMC+MPO and
-    # its t-MPS curves in Fig. 3 are run at `chi = 20`, so a comparison at 32 is if anything more
-    # generous than theirs -- and it keeps the FULL `t in [0,4]` window the figures show, which
-    # pushing the cap would have cost. Truncating the time axis to afford a bigger cap would make
-    # the figure non-comparable for the sake of a rank the paper never used.
-    cap  = parse(Int,     get(ENV, "LR_CAP", "32"))
+    # ⛔ THESE DEFAULTS ARE THE ONES THE PUBLISHED FIGURES WERE RUN AT. They used to be cap=32,
+    # nsave=41, maxiter=16, so a bare `julia dissipative_longrange.jl fig4` reproduced a DIFFERENT
+    # configuration from the one that made the curves -- the quietest kind of irreproducibility,
+    # because both runs succeed and only the numbers differ.
+    #
+    #   cap = 20      the paper's OWN bond dimension: its t-VMC+MPO and its t-MPS curves are both
+    #                 chi = 20, so this is a like-for-like comparison rather than a generous one,
+    #                 and it keeps the full `t in [0,4]` window the figures show.
+    #   maxiter = 8   MEASURED to change the observables by NOTHING against maxiter = 16 (both give
+    #                 the same 4.4e-06 deviation, which is entirely the cap) while halving `krylov`
+    #                 from 1856 to 928 per 2 steps. `arnoldi_expv` exits on BREAKDOWN ONLY, so the
+    #                 other 8 vectors were burned for free. ⚠ Do not generalise this to other
+    #                 models -- it was measured here, not assumed.
+    #   nsave = 21    each save point costs L(L-1)/2 = 120 two-site contractions for `S_zz(q)`, and
+    #                 that work is INVISIBLE in the `seconds` column, which times only the step.
+    #                 21 points over t in [0,4] is still Delta t = 0.2.
+    cap  = parse(Int,     get(ENV, "LR_CAP", "20"))
     tmax = parse(Float64, get(ENV, "LR_TMAX", "4.0"))
-    ns   = parse(Int,     get(ENV, "LR_NSAVE", "41"))
-    mi   = parse(Int,     get(ENV, "LR_MAXITER", "16"))
+    ns   = parse(Int,     get(ENV, "LR_NSAVE", "21"))
+    mi   = parse(Int,     get(ENV, "LR_MAXITER", "8"))
     cl   = parse(Int,     get(ENV, "LR_CERT_L", "4"))
 
     if mode in ("certify", "all")
