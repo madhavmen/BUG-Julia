@@ -131,12 +131,31 @@ is here to show it is NOT the explanation.
 """
 function run_arm(arm::Symbol, psi0, W, D::Int, N::Int)
     psi = copy(psi0)
+    chi0 = maximum(bond_dims(psi))
     opts = CBEBugOptions(; maxdim = D, trunc_thresh = 1e-12, exact = (arm === :full))
     t0 = time()
     info = (arm === :full ? cbe_dmrg! : rsvd_cbe_dmrg!)(psi, W; opts = opts,
                                                         n_sweeps = NSWEEPS, etol = ETOL,
                                                         grow_iters = GROW)
     sec = time() - t0
+    # ⛔ THE FREEZE DETECTOR, AND IT EXISTS BECAUSE A FROZEN SOLVE REPORTS `converged = true`.
+    # MEASURED on the C=3 (4x3) cylinder at J2 = 0.5: both selections returned exactly -0.375 per
+    # site -- the DIMER PRODUCT energy -- at bond dimension 1 after two sweeps, while exact
+    # diagonalisation of the same cluster gives -0.4670250922. The state never left its start.
+    #
+    # ⚠ AND IT IS NOT THE "EXPANSION CORRECTLY FOUND NOTHING" CASE. That would need the start to
+    # be an eigenstate, so that P_perp(H*Theta) vanishes; MEASURED, the dimer state there has
+    # residual ||Hv - <H>v|| = 6.8e-01, and the IDENTICAL residual at J2 = 0.3 where the solver
+    # converges perfectly. There was a direction to find and the expansion did not find it, so
+    # this is a defect and must never be quoted as a data point.
+    #
+    # The signature is "rank never grew AND stopped almost immediately". Both halves are needed:
+    # a genuinely rank-1 ground state would also not grow, and a hard problem may stop early at a
+    # rank it legitimately reached.
+    if maximum(bond_dims(psi)) <= chi0 && length(info.energies) <= 3
+        @printf("  ⛔ FROZEN: %s never left its start state (chi %d -> %d in %d sweeps). This is a solver failure, not a result -- retry from a different start.\n",
+                String(arm), chi0, maximum(bond_dims(psi)), length(info.energies))
+    end
     # Re-measured on the returned state rather than taken from the sweep's best Ritz value: the
     # sweep value is a bound in the space that solve used, and `solve!` may truncate afterwards.
     E = real(mpo_energy(copy(psi), W)) / max(norm(psi)^2, eps())

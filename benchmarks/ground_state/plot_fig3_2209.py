@@ -115,6 +115,9 @@ def main():
             ax.plot([p[0] for p in pts], [p[1] for p in pts], "-", color="k", lw=2.2,
                     alpha=0.8, zorder=1,
                     label="exact (ED, same cluster)" if gi == 0 else None)
+    # ⛔ RE-BUILD THE LEGEND: it was drawn before these lines existed, so the exact curve -- the
+    # one the whole right panel is scored against -- was on the plot but absent from the key.
+    ax.legend(fontsize=7.5, loc="upper left")
 
     # Right panel: deviation from EXACT where we have it, else the two selections against each
     # other. A variational solve cannot sit below exact, so anything at or under zero is a bug and
