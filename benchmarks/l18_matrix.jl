@@ -28,6 +28,9 @@
 # so an interrupted laptop run continues instead of restarting. Delete the file to force a
 # recompute, or narrow the grid with the ARMS / MODES / SYMS / MAXDIMS / CUTOFFS variables.
 
+# ⚠ PORTED from the REMOVED `cbe_lubich_sweep` to `cbe_bug_step!` (2026-08-29). The two are
+# different algorithms -- notably `grow_iters` accumulates here instead of re-ranking -- so
+# numbers recorded before that date are NOT comparable to what this file now produces.
 using BUGJulia.BondUpdateBUG
 using BUGJulia.RSVDCBEBondUpdate
 using BUGJulia.RSVDCBEBondUpdate: RealTime, ImaginaryTime, GroundState
@@ -177,7 +180,7 @@ function make_advance(arm::String, h, gates, maxdim::Int, cutoff::Float64)
     elseif arm in ("bug_cbe_lubich", "bug_cbe_rsvd_lubich")
         ex = arm == "bug_cbe_lubich"
         return (psi, tau, n) -> for _ in 1:n
-            cbe_lubich_sweep(psi, h, tau; maxdim = maxdim, trunc_thresh = cutoff, exact = ex,
+            cbe_bug_step!(psi, h, tau; maxdim = maxdim, trunc_thresh = cutoff, exact = ex,
                              maxiter = MAXITER)
         end
     end
@@ -366,7 +369,7 @@ function run_ground_arm(sym, arm, md, ct)
                       "energies" => info.energies, "E" => e, "E0" => jsonsafe(E0),
                       "err" => jsonsafe(e - E0), "maxbd" => maximum(info.max_bond_dims),
                       "sweeps" => length(info.energies),
-                      "matvecs" => sum(info.krylov_dims), "seconds" => time() - t0)
+                      "matvecs" => info.krylov_dims, "seconds" => time() - t0)
     save()
     @printf("  ground %-5s %-22s chi=%-4d ct=%-8.0e  E-E0=%-11.3e maxbd=%-4d %6.1fs\n",
             sym, arm, md, ct, e - E0, maximum(info.max_bond_dims), time() - t0)

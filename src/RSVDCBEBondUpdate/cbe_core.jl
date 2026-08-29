@@ -529,7 +529,7 @@ Keywords:
 
 THE K/L ODEs ARE NEVER SOLVED. This routine supplies the DIRECTIONS those solves would
 have found -- one application of `H`, sketched -- and the per-bond Galerkin update in
-[`cbe_lubich_sweep`](@ref) then builds the Krylov basis on the expanded bond and takes
+`cbe_lubich_sweep` (REMOVED) then builds the Krylov basis on the expanded bond and takes
 the step in it. So there is no `expv` per bond on a one-site object, only the `O(χ²)`
 matrix-free 0-site Krylov, and no rank-4 tensor anywhere.
 """

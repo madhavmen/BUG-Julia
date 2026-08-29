@@ -22,6 +22,9 @@
 # (D) is the symmetric-blocks question: it is possible for the dimension bookkeeping to
 # look right while the sectors offered are useless, so sectors are printed, not just dims.
 
+# ⚠ PORTED from the REMOVED `cbe_lubich_sweep` to `cbe_bug_step!` (2026-08-29). The two are
+# different algorithms -- notably `grow_iters` accumulates here instead of re-ranking -- so
+# numbers recorded before that date are NOT comparable to what this file now produces.
 using LinearAlgebra, Printf
 using BUGJulia.BondUpdateBUG
 using BUGJulia.RSVDCBEBondUpdate
@@ -101,9 +104,9 @@ end
 println("\n=== per-step CBE-BUG trace (expanded is PRE-truncation) ===")
 psi3 = domain_wall_state(L)
 for k in 1:8
-    info = cbe_lubich_sweep(psi3, h, -im * DT; maxdim = 64, trunc_thresh = 1e-12)
+    info = cbe_bug_step!(psi3, h, -im * DT; maxdim = 64, trunc_thresh = 1e-12)
     @printf("%2d expanded=%-22s kept=%-22s centre=%d n_new=%d\n", k,
-            string(info.expanded), string(bond_dims(psi3)), info.centre_rank,
+            string(info.expanded), string(bond_dims(psi3)), info.root_rank,
             sum(info.n_new))
     flush(stdout)
 end

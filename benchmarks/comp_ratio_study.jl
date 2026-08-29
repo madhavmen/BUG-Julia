@@ -17,6 +17,9 @@
 # free-fermion profile, so the accuracy number is absolute rather than relative to a
 # reference simulation.
 
+# ⚠ PORTED from the REMOVED `cbe_lubich_sweep` to `cbe_bug_step!` (2026-08-29). The two are
+# different algorithms -- notably `grow_iters` accumulates here instead of re-ranking -- so
+# numbers recorded before that date are NOT comparable to what this file now produces.
 using LinearAlgebra, Printf
 using BUGJulia.BondUpdateBUG
 using BUGJulia.RSVDCBEBondUpdate
@@ -40,7 +43,7 @@ function run(; comp_ratio, dex, sulz_cap)
     nsteps = round(Int, TMAX / DT)
     t0 = time()
     for _ in 1:nsteps
-        cbe_lubich_sweep(psi, h, -im * DT; comp_ratio = comp_ratio, dex = dex,
+        cbe_bug_step!(psi, h, -im * DT; comp_ratio = comp_ratio, dex = dex,
                             sulz_cap = sulz_cap, maxdim = MAXD, trunc_thresh = 1e-12)
     end
     return perr(psi, TMAX), bond_dims(psi), time() - t0

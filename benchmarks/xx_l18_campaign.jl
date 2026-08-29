@@ -17,6 +17,9 @@
 # not time-integration order. Reporting a rank comparison at a dt where one method is still
 # dt-limited would be measuring the wrong thing.
 
+# ⚠ PORTED from the REMOVED `cbe_lubich_sweep` to `cbe_bug_step!` (2026-08-29). The two are
+# different algorithms -- notably `grow_iters` accumulates here instead of re-ranking -- so
+# numbers recorded before that date are NOT comparable to what this file now produces.
 using LinearAlgebra, Printf
 using BUGJulia.BondUpdateBUG
 using BUGJulia.RSVDCBEBondUpdate
@@ -91,7 +94,7 @@ function run_cbe(; dt, maxdim, dex, tmax, sample_every)
     maxex = 0
     peak = 0
     for k in 1:nsteps
-        info = cbe_lubich_sweep(psi, h, -im * dt; dex = dex, maxdim = maxdim,
+        info = cbe_bug_step!(psi, h, -im * dt; dex = dex, maxdim = maxdim,
                                    trunc_thresh = 1e-12)
         maxex = max(maxex, maximum(info.expanded; init = 0))
         peak = max(peak, info.peak_elements)
@@ -182,7 +185,7 @@ function phase_centre()
     for ce in (true, false)
         psi = domain_wall_state(L)
         for _ in 1:40
-            cbe_lubich_sweep(psi, h, -im * 0.05; maxdim = 64, trunc_thresh = 1e-12,
+            cbe_bug_step!(psi, h, -im * 0.05; maxdim = 64, trunc_thresh = 1e-12,
                                 centre_expand = ce)
         end
         @printf("centre_expand=%-5s  err=%.4e  maxbond=%d  centre=%d\n",
