@@ -44,7 +44,7 @@ vector's CONTRIBUTION to `exp(tau*H)*v0` falls below `tol` (see [`_kry_contribut
 the recursion breaks down, or when `maxdepth` is reached.
 
 ⛔ NO SVD PER ITERATION. The vectors are accumulated whole and split ONCE by the caller. A
-selection inside the loop -- which is what `cbe_lubich_sweep`'s `grow_iters` does, re-running the
+selection inside the loop -- which is what the REMOVED `cbe_lubich_sweep`'s `grow_iters` does, re-running the
 CBE ranking on every pass -- re-truncates by budget at each step and throws away exactly the
 directions the next application of `H` needs: MEASURED on OAT it bought 1.8x and then saturated
 flat (2.13e-02 -> 1.16e-02) no matter how many passes were allowed.
@@ -270,7 +270,7 @@ Keywords beyond the [`cbe_expand`](@ref) ones (`dex`, `growth`, `dover`, `comp_r
     exactly (CBE already spans one power), so the first genuine addition is `m = 2`.
 
     ⛔ ONE SVD, AT THE END -- see [`_krylov_frame`](@ref). Selecting inside the loop (which is what
-    `cbe_lubich_sweep`'s `grow_iters` does) re-truncates by budget every pass and discards exactly
+    the REMOVED `cbe_lubich_sweep`'s `grow_iters` does) re-truncates by budget every pass and discards exactly
     what the next application of `H` needs: measured 1.8x and then flat on OAT.
   - `root` -- which bond takes the Galerkin step. Default `L/2`, a fixed point of the reflection
     `b -> L - b` on an even chain, so the sweep is already spatially symmetric there.
@@ -299,6 +299,25 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        krylov_basis::Int = 30,
                        krylov_tol::Float64 = 1e-6,
                        krylov_grow::Bool = false,
+                       # ⛔ `grow_iters` IS THE SINGLE-KNOB SPELLING OF THE GROWTH PATH, and it is
+                       # this sweep's OWN mechanism -- not an import from the retired
+                       # `cbe_lubich_sweep`. `grow_iters = n` means `krylov_grow = true` with `n`
+                       # growth passes; `grow_iters = 0` is the ordinary one-SVD Krylov frame.
+                       # The count was always there, spelled as two parameters: `_grow_frame`
+                       # loops `for k in 1:krylov_basis`, so `krylov_basis` IS the pass count once
+                       # `krylov_grow` is on. Two knobs meaning one thing is how a scan ends up
+                       # reporting a growth study that never grew.
+                       #
+                       # ⛔ THE TWO PATHS ARE NOT THE SAME ALGORITHM, so do not read `grow_iters`
+                       # as lubich's. There the pass RE-RUNS THE CBE SELECTION, re-truncating by
+                       # budget and discarding exactly what the next application of `H` needs --
+                       # MEASURED on OAT it bought 1.8x and then went flat (2.13e-02 -> 1.16e-02)
+                       # however many passes it was allowed. Here the rule is ACCUMULATE, NEVER
+                       # RE-RANK: nothing already accepted is touched and the space only grows.
+                       # ⚠ Its cost is invisible in `krylov_dims` (each pass is a `cbe_expand`,
+                       # whose operator work lives in `sketch_h_*`); `n_grow` counts the passes
+                       # for exactly that reason.
+                       grow_iters::Union{Nothing, Int} = nothing,
                        split_cutoff::Float64 = 1e-14,
                        split_maxdim::Int = 0,
                        truncate::Bool = true,
@@ -368,6 +387,20 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     c = root === nothing ? max(1, min(L - 1, L ÷ 2)) : root
     1 <= c <= L - 1 || throw(ArgumentError("root must be a bond in 1:$(L - 1), got $c"))
 
+
+    # ── `grow_iters` RESOLVES ONTO THE TWO KNOBS IT IS SHORTHAND FOR ────────────────────────────
+    # `nothing` leaves `krylov_grow`/`krylov_basis` exactly as passed, so every existing call and
+    # every recorded number is untouched. An explicit value WINS over both, and contradicting them
+    # is refused rather than silently resolved -- `grow_iters = 4, krylov_grow = false` is a caller
+    # who believes something false about the run they are about to do, and a scan that quietly
+    # picked one of the two would report a growth study that never grew.
+    if grow_iters !== nothing
+        grow_iters >= 0 || throw(ArgumentError("grow_iters must be >= 0, got $grow_iters"))
+        (krylov_grow && grow_iters == 0) && throw(ArgumentError(
+            "grow_iters = 0 disables the growth path but krylov_grow = true was also passed"))
+        krylov_grow = grow_iters > 0
+        krylov_grow && (krylov_basis = grow_iters)
+    end
 
     cut = max(trunc_thresh, 1e-14)
     # `krylov_tol = 0` falls back to `tau_trunc/10`; the DEFAULT is an explicit `1e-6`.
@@ -442,7 +475,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     assuming `[I 0]` is not. (Same reasoning as `_expanding_krylov`'s `embed_ops`.)
 
     ⛔ ACCUMULATE, NEVER RE-RANK. Jan's bookkeeping is "new kept = old kept PLUS expanded", and
-    that word is load-bearing: `cbe_lubich_sweep`'s `grow_iters` re-runs the CBE SELECTION each
+    that word is load-bearing: the REMOVED `cbe_lubich_sweep`'s `grow_iters` re-runs the CBE SELECTION each
     pass, which re-truncates by budget and discards exactly what the next application of `H`
     needs -- MEASURED on OAT it bought 1.8x and then went flat. Nothing here touches the vectors
     already accepted; the space only ever grows.
@@ -479,10 +512,17 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                  one_site_h(mpo, i + 1, push_left_channels(lch, mpo, V, i), rch)
             acc.nmv += 1
             w = apply_one_site(H1, vs[end])
+            # ⛔ EVERY NAME ASSIGNED HERE MUST BE ONE `cbe_bug_step!`'s BODY DOES NOT USE. This is a
+            # nested closure, so an assignment to a name that is already a local of the enclosing
+            # function does NOT shadow it -- it REBINDS IT. `ov` was written `c` and silently
+            # overwrote the ROOT BOND INDEX (line ~387) with a Gram-Schmidt overlap, so the whole
+            # `krylov_grow`/`grow_iters` path died on `i < c` with `isless(::Int64, ::ComplexF64)`
+            # -- and would have evolved about the wrong root had the types happened to compare.
+            # The loop index is `t` and not `i` for exactly this reason; `c` was the one missed.
             for _pass in 1:2, (t, u) in pairs(vs)
-                c = tensor_inner(u, w)
-                Hm[t, k] += c
-                w = to_concrete(w - c * u)
+                ov = tensor_inner(u, w)
+                Hm[t, k] += ov
+                w = to_concrete(w - ov * u)
             end
             b = norm(w)
             b <= _KRY_BREAKDOWN && break
@@ -503,19 +543,24 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             # It is also unnecessary work. One side here is ALREADY an isometry -- it is the
             # opposite CBE frame -- so only the other side needs factorising, and the core is then
             # a single overlap rather than a product of four SVD outputs.
+            # `spl`/`core`, not `res`/`S0`: both of those ARE locals of the enclosing
+            # `cbe_bug_step!` (the root split and the root core), and this closure would rebind
+            # them rather than shadow them -- see the note on `ov` above. They survive today only
+            # because the body happens to rewrite both after the sweeps and before reading them,
+            # which is an ordering no signature enforces.
             fr = if side === :left
-                res = svd(vs[end], (1, 2), "bU,L", "bU,R"; cutoff = 0.0)
-                U0  = to_concrete(res.U)
-                S0  = to_concrete(contract(U0', (1, 2), vs[end], (1, 2)))      # (bU, g)
-                BondFrame(U0, S0, V,
+                spl  = svd(vs[end], (1, 2), "bU,L", "bU,R"; cutoff = 0.0)
+                U0   = to_concrete(spl.U)
+                core = to_concrete(contract(U0', (1, 2), vs[end], (1, 2)))     # (bU, g)
+                BondFrame(U0, core, V,
                           vs[end].inds[1], vs[end].inds[2], vs[end].inds[3],
                           V.inds[2], V.inds[3],
                           leg_dim(U0, 3), copy(vs[end].spaces[3]))
             else
-                res = svd(vs[end], (1,), "bV,L", "bV,R"; cutoff = 0.0)
-                V0  = to_concrete(res.Vd)
-                S0  = to_concrete(contract(vs[end], (2, 3), V0', (2, 3)))      # (g, bV)
-                BondFrame(V, S0, V0,
+                spl  = svd(vs[end], (1,), "bV,L", "bV,R"; cutoff = 0.0)
+                V0   = to_concrete(spl.Vd)
+                core = to_concrete(contract(vs[end], (2, 3), V0', (2, 3)))     # (g, bV)
+                BondFrame(V, core, V0,
                           V.inds[1], V.inds[2], V.inds[3],
                           vs[end].inds[2], vs[end].inds[3],
                           leg_dim(V, 3), copy(V.spaces[3]))
