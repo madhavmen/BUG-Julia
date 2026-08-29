@@ -84,8 +84,22 @@ def main():
     # large one means the record or the broadening is not adequate.
     Spos = np.clip(S, 0.0, None)
     eps19 = ws[np.argmax(Spos, axis=1)]
+    # ⛔ argmax OF NOTHING IS NOT A DISPERSION POINT. At q = Gamma the weight is ~1e-18 (S^z_tot
+    # commutes with H, so it vanishes identically) and `argmax` then returns wherever the
+    # roundoff happens to peak. The paper says the same of its own figure -- "the value at
+    # q = Gamma is not accurate, as there is essentially zero [weight]". Mask any q carrying less
+    # than 1e-6 of the largest weight on the path, so those points are ABSENT rather than drawn
+    # as if they were measurements.
+    peak = Spos.max(axis=1)
+    weak = peak < 1e-6 * peak.max()
+    eps19 = np.where(weak, np.nan, eps19)
     denom = Spos.sum(axis=1)
     w20 = np.where(denom > 0, (Spos * ws[None, :]).sum(axis=1) / np.maximum(denom, 1e-300), np.nan)
+    # Eq. (20) needs the SAME mask as Eq. (19): it is a ratio whose denominator is the total
+    # weight, so at q = Gamma it divides ~1e-18 by ~1e-18 and returns a confident-looking number
+    # made entirely of roundoff. Masking one extractor and not the other would have left that
+    # point on the figure through the orange curve alone.
+    w20 = np.where(weak, np.nan, w20)
     negfrac = np.abs(np.clip(S, None, 0.0)).sum() / max(np.abs(S).sum(), 1e-300)
 
     fig = plt.figure(figsize=(15, 9))
@@ -125,17 +139,30 @@ def main():
     iM = int(np.argmin(np.abs(dist - [t[0] for t in ticks][2]))) if len(ticks) > 2 else nq // 2
     sel = slice(max(0, iM - 5), min(nq, iM + 1))
     dq = dist[sel] - dist[iM]
-    ax.plot(dq, eps19[sel], "o", color="tab:blue", label=r"$\epsilon(q)$")
-    if len(dq) > 2:
-        # The paper omits eps(q = M) from the fits; do the same.
-        m = dq != 0
-        if m.sum() > 1:
-            p = np.polyfit(dq[m], eps19[sel][m], 1)
-            ax.plot(dq, np.polyval(p, dq), "-", color="tab:blue",
-                    label=r"$vq+\Delta$: $v$=%.2f $\Delta$=%.2f" % (abs(p[0]), p[1]))
-            p0 = np.sum(dq[m] * eps19[sel][m]) / max(np.sum(dq[m] ** 2), 1e-30)
-            ax.plot(dq, p0 * dq, "--", color="tab:red",
-                    label=r"$\Delta\equiv0$: $v$=%.2f" % abs(p0))
+    ev = eps19[sel]
+    ax.plot(dq, ev, "o", color="tab:blue", label=r"$\epsilon(q)$")
+    # ⛔ ONLY FIT A VELOCITY IF THE MOMENTUM GRID CAN RESOLVE ONE, and refuse loudly otherwise.
+    # The velocity is the SLOPE of eps(q) near M, so it needs several DISTINCT eps values inside
+    # a window that is actually near M. On a 3-column cylinder the allowed q_x are spaced 2*pi/3
+    # and eps(q) is flat across the whole selection -- fitting that returned "v = 0.00", which is
+    # not a small velocity, it is no measurement at all. A number like that on a figure outlives
+    # every caveat in the text.
+    m = (dq != 0) & np.isfinite(ev)
+    spread = np.ptp(ev[m]) if m.sum() > 1 else 0.0
+    if m.sum() > 2 and spread > 1e-3 and abs(dq[m]).max() < 1.0:
+        p = np.polyfit(dq[m], ev[m], 1)
+        ax.plot(dq, np.polyval(p, dq), "-", color="tab:blue",
+                label=r"$vq+\Delta$: $v$=%.2f $\Delta$=%.2f" % (abs(p[0]), p[1]))
+        p0 = np.sum(dq[m] * ev[m]) / max(np.sum(dq[m] ** 2), 1e-30)
+        ax.plot(dq, p0 * dq, "--", color="tab:red",
+                label=r"$\Delta\equiv0$: $v$=%.2f" % abs(p0))
+    else:
+        ax.text(0.5, 0.45,
+                "no velocity fit:\n%d usable $q$ points, spread %.1e over $|q-q_M|\\leq$%.2f\n"
+                "the grid ($2\\pi/L_x$) cannot resolve a slope at this size" %
+                (int(m.sum()), spread, abs(dq).max() if len(dq) else 0.0),
+                ha="center", va="center", transform=ax.transAxes, fontsize=8.5,
+                bbox=dict(boxstyle="round", fc="mistyrose", ec="crimson"))
     ax.set_xlabel(r"$q - q_M$"); ax.set_ylabel(r"$\omega / J$")
     ax.set_title("c) dispersion near M")
     ax.legend(fontsize=8); ax.grid(alpha=0.3)
@@ -170,23 +197,44 @@ def main():
         mv = np.array([float(r["matvec"]) for r in rows])
         base = mv[names.index("tdvp2")] if "tdvp2" in names else mv[0]
         xs = np.arange(len(names))
-        ax.bar(xs, mv / base, color=["0.6", "tab:orange", "tab:green"][:len(names)])
-        for i, r in enumerate(rows):
-            ax.text(i, mv[i] / base, "%d\n%.0fs" % (mv[i], float(r["seconds"])),
-                    ha="center", va="bottom", fontsize=8)
+        sec = np.array([float(r["seconds"]) for r in rows])
+        sbase = sec[names.index("tdvp2")] if "tdvp2" in names else sec[0]
+        w = 0.38
+        ax.bar(xs - w / 2, mv / base, w, color="0.55", label="operator applications")
+        ax.bar(xs + w / 2, sec / sbase, w, color="tab:green", label="wall clock")
+        for i in range(len(names)):
+            ax.text(xs[i] - w / 2, mv[i] / base, "%d" % mv[i], ha="center", va="bottom",
+                    fontsize=7.5)
+            ax.text(xs[i] + w / 2, sec[i] / sbase, "%.0fs" % sec[i], ha="center", va="bottom",
+                    fontsize=7.5)
         ax.set_xticks(xs); ax.set_xticklabels(names)
         ax.axhline(1.0, color="k", ls=":", lw=1)
-        ax.set_ylabel("operator applications / tdvp2")
+        ax.set_ylim(0, 1.35)
+        ax.set_ylabel("relative to tdvp2")
         ax.set_title("f) cost on the same correlator")
-        # Agreement between arms: same physics or not.
+        ax.legend(fontsize=7.5, loc="upper right")
+        # ⛔ THE TWO BARS DO NOT MEASURE THE SAME THING, AND THE GAP IS NOT A BUG.
+        # `krylov_dims` counts `apply_one_site` calls only; BUG's expansion work lives inside
+        # `cbe_expand`/`sketch_h_*` and is INVISIBLE to it, so the operator-application bar
+        # UNDERSTATES BUG. Wall clock is the complete measure and is the one to quote.
+        ax.text(0.02, 0.97,
+                "matvec undercounts BUG:\ncbe_expand work is not in krylov_dims\n-> quote wall clock",
+                transform=ax.transAxes, fontsize=7, va="top",
+                bbox=dict(boxstyle="round", fc="lightyellow", ec="0.6"))
+        # Agreement between arms: same physics, or a speedup that bought a different answer.
         if "tdvp2" in arms:
-            for a, (w2, S2, _) in arms.items():
+            devs = []
+            for a in arms:
                 if a == "tdvp2":
                     continue
-                dev = np.abs(S2 - arms["tdvp2"][1]).max() / max(np.abs(arms["tdvp2"][1]).max(), 1e-300)
-                ax.text(0.02, 0.95 - 0.08 * list(arms).index(a),
-                        "max|dS| vs tdvp2, %s: %.2e" % (a, dev),
-                        transform=ax.transAxes, fontsize=8, va="top")
+                # `dev`, not `d`: `d` is the results DIRECTORY, and shadowing it here turned the
+                # output path into a float at the very last line of the script.
+                dev = np.abs(arms[a][1] - arms["tdvp2"][1]).max() / \
+                    max(np.abs(arms["tdvp2"][1]).max(), 1e-300)
+                devs.append("%s %.1e" % (a, dev))
+            ax.text(0.02, 0.60, "max|dS| vs tdvp2:\n" + "\n".join(devs),
+                    transform=ax.transAxes, fontsize=7.5, va="top",
+                    bbox=dict(boxstyle="round", fc="honeydew", ec="0.6"))
     else:
         ax.text(0.5, 0.5, "run more than one arm\nfor the cost comparison",
                 ha="center", va="center", transform=ax.transAxes)
