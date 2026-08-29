@@ -317,6 +317,25 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # ⚠ Its cost is invisible in `krylov_dims` (each pass is a `cbe_expand`,
                        # whose operator work lives in `sketch_h_*`); `n_grow` counts the passes
                        # for exactly that reason.
+                       #
+                       # ⛔ `grow_iters = 1` GROWS NOTHING -- THE MINIMUM USEFUL VALUE HERE IS 2.
+                       # `_grow_frame` breaks on `k == krylov_basis` BEFORE it reaches the
+                       # re-expansion, so one pass builds a second Krylov vector and never widens
+                       # a frame. MEASURED (L=16 chain, 10 imaginary-time steps): `n_grow` is 0 at
+                       # `grow_iters = 1` against 114 at 2 and 203 at 3. It is not an error -- it
+                       # is a slower spelling of `krylov_grow = false, krylov_basis = 1` -- but a
+                       # scan that starts its growth axis at 1 reports its first point as "growth
+                       # on" when nothing grew. ⚠ AND `GroundState.solve!` HAS A DIFFERENT
+                       # `grow_iters` WITH DIFFERENT SEMANTICS: it drives `_expanding_krylov`,
+                       # where 1 IS viable and is the documented default. Same name, two paths.
+                       #
+                       # ⛔ `grow_iters = 0` IS NOT A CONTROLLED BASELINE FOR THE OTHERS. It only
+                       # clears `krylov_grow`; `krylov_basis` keeps whatever it had, which is the
+                       # DEFAULT 30. So `grow_iters = 0` against `grow_iters = 2` compares a
+                       # 30-vector fixed-width builder with a 2-vector growth path and changes two
+                       # things at once. To isolate growth, hold the width: pass
+                       # `krylov_grow = false, krylov_basis = n` as the control against
+                       # `grow_iters = n`.
                        grow_iters::Union{Nothing, Int} = nothing,
                        split_cutoff::Float64 = 1e-14,
                        split_maxdim::Int = 0,

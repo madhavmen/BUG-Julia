@@ -26,6 +26,10 @@ import matplotlib.pyplot as plt
 VMC_INF = {0.0: (-0.545321, 7e-6), 0.125: (-0.51235, 2.0e-4)}
 ED_TORUS36 = {0.0: -0.5603734, 0.125: -0.515564}
 
+# Both the DMRG and the ED drivers write energies as `%.10f`, so a difference below this is not
+# resolvable from the files and must not be plotted as if it were.
+CSV_RES = 1e-10
+
 ARM_STYLE = {"full": dict(marker="o", ls="-", label="CBE-DMRG, full complement"),
              "rsvd": dict(marker="s", ls="--", label="CBE-DMRG, rSVD sketch")}
 
@@ -38,6 +42,20 @@ def load(d):
                 r["_file"] = os.path.basename(f)
                 rows.append(r)
     return rows
+
+
+def load_exact(d):
+    """Exact ground energies of the SAME cluster, keyed (Lx, Ly, torus, J2).
+
+    At these sizes this -- not the thermodynamic-limit star -- is the reference a single run is
+    scored against, so the deviation panel is against ED wherever ED exists.
+    """
+    ex = {}
+    for f in sorted(glob.glob(os.path.join(d, "paper2209_exact_*.csv"))):
+        with open(f) as fh:
+            for r in csv.DictReader(fh):
+                ex[(int(r["Lx"]), int(r["Ly"]), r["torus"] == "1", round(float(r["J2"]), 4))] = r
+    return ex
 
 
 def main():
@@ -86,24 +104,70 @@ def main():
     ax.grid(alpha=0.3)
     ax.legend(fontsize=7.5, loc="upper left")
 
-    # Right panel: the two selections against each other. They are variational bounds on the SAME
-    # space, so the lower one is the better state; a visible gap means neither has converged.
+    # Exact ground energies of the same clusters, where available. Drawn as a black line on the
+    # left panel: at these sizes THIS is the reference, and the gap to it is the accuracy claim.
+    exact = load_exact(d)
     for gi, (lx, ly, tor) in enumerate(geos):
-        f = {float(r["J2"]): float(r["E_site"]) for r in rows
-             if int(r["Lx"]) == lx and int(r["Ly"]) == ly and r["arm"] == "full"
-             and (r["torus"] == "1") == tor}
-        s = {float(r["J2"]): float(r["E_site"]) for r in rows
-             if int(r["Lx"]) == lx and int(r["Ly"]) == ly and r["arm"] == "rsvd"
-             and (r["torus"] == "1") == tor}
-        common = sorted(set(f) & set(s))
-        if common:
-            axd.semilogy(common, [abs(f[j] - s[j]) + 1e-18 for j in common],
-                         marker="o", ms=5, color=colors[gi % len(colors)],
-                         label="C=%d, L=%d" % (ly, lx))
-    axd.axhline(1e-8, color="k", ls=":", lw=1, label="agreement target")
+        pts = sorted((j2, float(r["E0_site"]), int(r["dimer_is_gs"]))
+                     for (a, b, t, j2), r in exact.items()
+                     if a == lx and b == ly and t == tor)
+        if pts:
+            ax.plot([p[0] for p in pts], [p[1] for p in pts], "-", color="k", lw=2.2,
+                    alpha=0.8, zorder=1,
+                    label="exact (ED, same cluster)" if gi == 0 else None)
+
+    # Right panel: deviation from EXACT where we have it, else the two selections against each
+    # other. A variational solve cannot sit below exact, so anything at or under zero is a bug and
+    # anything far above it is a solve that did not converge -- including a FROZEN one.
+    drew = False
+    for gi, (lx, ly, tor) in enumerate(geos):
+        for arm, st in ARM_STYLE.items():
+            pts = []
+            for r in rows:
+                if (int(r["Lx"]), int(r["Ly"])) != (lx, ly) or r["arm"] != arm:
+                    continue
+                if (r["torus"] == "1") != tor:
+                    continue
+                k = (lx, ly, tor, round(float(r["J2"]), 4))
+                if k in exact:
+                    pts.append((float(r["J2"]),
+                                float(r["E_site"]) - float(exact[k]["E0_site"])))
+            if pts:
+                pts.sort()
+                drew = True
+                # ⛔ FLOOR AT THE CSV's OWN RESOLUTION, NOT AT ZERO. Both files store %.10f, so
+                # when the rounded values agree the difference is exactly 0 and a tiny epsilon
+                # would draw it at 1e-18 -- claiming eight orders of magnitude more precision
+                # than the data carries. Everything on the floor line means "equal to the last
+                # digit written", which is all that can be said.
+                axd.semilogy([p[0] for p in pts], [max(abs(p[1]), CSV_RES) for p in pts],
+                             marker=st["marker"], ls=st["ls"],
+                             color=colors[gi % len(colors)],
+                             mfc="none" if arm == "rsvd" else colors[gi % len(colors)],
+                             ms=6, label="C=%d, L=%d -- %s" % (ly, lx, arm))
+    if drew:
+        axd.axhline(CSV_RES, color="k", ls=":", lw=1,
+                    label=r"CSV resolution ($10^{-10}$/site)")
+        axd.set_ylim(CSV_RES / 3, None)
+        axd.set_ylabel(r"$|E_{\rm DMRG} - E_{\rm exact}| / N$")
+        axd.set_title("accuracy against exact diagonalisation\n"
+                      "(on the dotted line = equal to the last digit stored)")
+    else:
+        for gi, (lx, ly, tor) in enumerate(geos):
+            f = {float(r["J2"]): float(r["E_site"]) for r in rows
+                 if int(r["Lx"]) == lx and int(r["Ly"]) == ly and r["arm"] == "full"
+                 and (r["torus"] == "1") == tor}
+            s = {float(r["J2"]): float(r["E_site"]) for r in rows
+                 if int(r["Lx"]) == lx and int(r["Ly"]) == ly and r["arm"] == "rsvd"
+                 and (r["torus"] == "1") == tor}
+            common = sorted(set(f) & set(s))
+            if common:
+                axd.semilogy(common, [abs(f[j] - s[j]) + 1e-18 for j in common],
+                             marker="o", ms=5, color=colors[gi % len(colors)],
+                             label="C=%d, L=%d" % (ly, lx))
+        axd.set_ylabel(r"$|E_{\rm full} - E_{\rm rSVD}| / N$")
+        axd.set_title("selection A/B (no ED available)")
     axd.set_xlabel(r"$J_2 / J_1$")
-    axd.set_ylabel(r"$|E_{\rm full} - E_{\rm rSVD}| / N$")
-    axd.set_title("selection A/B: full complement vs rSVD")
     axd.grid(alpha=0.3, which="both")
     axd.legend(fontsize=8)
 
