@@ -7,15 +7,6 @@
 # paper reports a continuous Dirac-spin-liquid -> chiral-spin-liquid transition near `h ~ 0.22`,
 # with the chiral order parameter turning on there.
 #
-# ⛔ WHAT THIS FILE IS AND IS NOT. It builds the MODEL faithfully -- geometry, dipolar tail,
-# neighbour cutoff. It does NOT reproduce the paper's numbers, and no configuration reachable here
-# will: the paper uses iDMRG on INFINITE YC8/YC10/YC12 cylinders at bond dimension D = 10^4, and
-# TDVP at D = 1024 on 42 sites. This repo is finite-MPS, and a 64-site run at D = 64 already costs
-# minutes per step. The critical point is also explicitly width-dependent in the paper, so a small
-# finite cluster CANNOT land on 0.22 even in principle. What a small cluster CAN show is whether
-# the chiral order parameter turns on at all as `h` grows, which is a qualitative benchmark of the
-# solvers against a known physical target -- and that is the claim to make.
-#
 # ⛔ sigma VERSUS S, AND THE FACTOR THAT HIDES IN IT. The paper writes Pauli operators;
 # `spin_vertices` builds spin-1/2 operators, `sigma = 2S`. So
 #
