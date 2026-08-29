@@ -119,8 +119,23 @@ function _dimer_state_projected(L::Int)
             th = to_concrete((1.0 / nn) * th)
         end
         res = svd(th, (1, 2); cutoff = 1e-14, Nkeep = 4, get_lists = true)
-        psi[i] = res.U
-        psi[i + 1] = to_concrete(res.S * res.Vd)
+        # ⛔ RESTORE THE BOND TAG. `svd` labels the bond it creates with Telum's DEFAULT (`svdL`),
+        # discarding `L,$(i+1)`. Writing that back unretagged hands every caller a state whose ODD
+        # bonds -- exactly this loop's range -- are tagged `svdL`, and that is a live landmine
+        # rather than a cosmetic one: `move_right!` does `res.S * res.Vd` where `S` is
+        # `(svdL, svdR)` and `Vd` is `(svdR, <leg 3 of psi[i]>)`, so an incoming `svdL` on leg 3
+        # puts `svdL` into one TLArray twice and Telum asserts
+        #     Duplicate TLIndex with non-empty itag: TLIndex(svdL, '+', 0, 0, false)
+        # ⚠ IT ONLY BIT `:U1`/`:none`, because `dimer_state` reaches here only when the mode is not
+        # `:SU2` -- which is why every BUG result in this repo had been `:SU2` or `:none` and the
+        # U(1) arms of `logtime_suite.jl` returned `E = NaN, mv = 0, chi = 0` at every size. The
+        # state itself was always CORRECT (with `truncate = false` the U(1) step succeeds at
+        # `chi = 8` and neighbouring tags agree, so it contracts fine); only the labelling was
+        # wrong. Every other `psi[...] = <svd result>` in `src` already retags -- this was the one
+        # that did not.
+        bt = "L,$(i + 1)"
+        psi[i] = to_concrete(setitag(res.U, 3, bt))
+        psi[i + 1] = to_concrete(setitag(to_concrete(res.S * res.Vd), 1, bt))
         psi.center = i + 1
     end
     n = norm(psi)

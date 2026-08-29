@@ -21,7 +21,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=16G
-#SBATCH --array=0-12
+#SBATCH --array=0-16
 #SBATCH --output=/home/madhav.menon/benchmarks/cbe_l16_%A_%a.log
 #SBATCH --error=/home/madhav.menon/benchmarks/cbe_l16_%A_%a.err
 
@@ -35,18 +35,26 @@ T=5.0
 DT=0.05
 BETA=20.0
 
-SCHEMES=(bug_decoupled bug_interleaved tdvp_cbe1s tdvp2 jan_bug jan_bug_centre)
+# ⛔ ONE BUG SCHEME FOR THE METHOD COMPARISON: `bug_interleaved`, first in the list.
+# `bug_decoupled` is gone -- it and `bug_interleaved` had been the SAME RUN since the K-step /
+# `kaug` / `rexpand` removal on 2026-08-24, and two entries producing one curve read as agreement
+# between methods in a plot.
+# The trailing `bug_interleaved_*` entries are that SAME sweep at different KRYLOV DEPTHS -- a
+# separate axis, kept in the array so the depth study runs alongside, never mixed into the method
+# comparison. 8 schemes => array 0-16 (1 GSE task + 8 ITE + 8 RTE).
+SCHEMES=(bug_interleaved tdvp_cbe1s tdvp2 jan_bug jan_bug_centre          bug_interleaved_m0 bug_interleaved_m3 bug_interleaved_tol4)
+NS=${#SCHEMES[@]}
 
 i=${SLURM_ARRAY_TASK_ID}
 if [ "$i" -eq 0 ]; then
   PHASE=gse
   SUBSET=""
-elif [ "$i" -le 6 ]; then
+elif [ "$i" -le "$NS" ]; then
   PHASE=ite
   SUBSET=${SCHEMES[$((i - 1))]}
 else
   PHASE=rte
-  SUBSET=${SCHEMES[$((i - 7))]}
+  SUBSET=${SCHEMES[$((i - NS - 1))]}
 fi
 
 echo "task $i -> phase=$PHASE scheme=${SUBSET:-<all-dmrg-arms>}"

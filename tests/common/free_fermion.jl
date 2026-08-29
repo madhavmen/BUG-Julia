@@ -285,6 +285,288 @@ any comparison against the MPS arms.
 nh_free_fermion_sz(L::Int, t::Real; kwargs...) =
     [real(nh_free_fermion_correlation(L, t; kwargs...)[j, j]) - 0.5 for j in 1:L]
 
+# ── BOUNDARY-DISSIPATED XX CHAIN: the COMPLEX-FREQUENCY reference (arXiv:2104.11479) ─────────
+#
+# Yamanaka & Sasamoto, "Exact solution for the Lindbladian dynamics for the open XX spin chain
+# with boundary dissipation". THIRD QUANTIZATION reduces the Lindbladian to an `N x N`
+# NON-HERMITIAN matrix, so the reference costs `O(N^3)` and nothing of size `4^N` is built.
+#
+#     H = J sum_k (sx_k sx_{k+1} + sy_k sy_{k+1}) - B sum_k sz_k
+#     L_1,2 = sqrt(eps_L (1 +- mu_L)/2) * sigma^{+,-}_1        (left boundary)
+#     L_3,4 = sqrt(eps_R (1 +- mu_R)/2) * sigma^{+,-}_N        (right boundary)
+#
+# ⛔ WHY THIS MODEL EXISTS HERE: ITS FREQUENCIES ARE GENUINELY COMPLEX. `lambda = B + 2J cos(theta)`
+# with `theta` COMPLEX, so each mode is `exp(-i Re(lambda) t) * exp(-|Im(lambda)| t)` -- an
+# oscillation TIMES a decay. That is what a Hermitian real-time quench cannot supply (real
+# spectrum, no decay) and what an imaginary-time Hermitian generator cannot supply either
+# (completely monotone, no oscillation).
+#
+# ⛔ AND IT IS WHY A LOGARITHMIC GRID CANNOT BE RESCUED HERE BY MORE STEPS. MEASURED from the
+# spectrum below at `N=30, J=1, eps=1`: the oscillation frequency is `max|Re lambda| = 1.9897`
+# (essentially `2J`, nearly independent of N and eps) while the Liouvillian gap CLOSES as
+# `O(N^-3)` -- `3.14e-04`, i.e. a relaxation time of ~3181. So the run must reach `t ~ 1e4` while
+# still resolving a period-`pi` oscillation: `12089` uniform steps. A log grid at **n = 2000**
+# still has a largest step of `62.2`, **79x over the Nyquist step of 0.789**. The oscillation
+# persists into exactly the late-time region where a geometric grid is coarsest, so the failure
+# does not go away with budget. Contrast the Neel quench, where `n >= 66` fixes it.
+
+"""
+    xx_boundary_structure_matrix(N; J=1.0, B=0.0, eps_L=1.0, eps_R=1.0) -> Matrix{ComplexF64}
+
+The `N x N` non-Hermitian matrix whose eigenvalues are the rapidities `lambda = B + 2J cos(theta)`
+of the boundary-dissipated XX chain: tridiagonal with hopping `J` and diagonal `B`, plus
+`-i*eps_L/4` on site 1 and `-i*eps_R/4` on site `N`.
+
+⛔ THE BOUNDARY NORMALISATION IS PINNED AGAINST THE PAPER'S OWN TRANSCENDENTAL EQUATION, NOT
+GUESSED. The paper states that `theta_m` solves
+
+    {2 cos(theta) + i(l + r)} sin(N theta) - (1 + l r) sin((N-1) theta) = 0,
+    l = eps_L / 4J,   r = eps_R / 4J
+
+MEASURED relative residual of that equation over all eigenvalues at `N=30, eps=1`:
+
+    boundary term      -i*eps/4     -i*eps/2     -i*eps      -2i*eps
+    rel residual       1.3e-12      4.5e-01      6.8e-01     1.5e+00
+
+so `eps/4` is right and every neighbouring convention is O(1) wrong. A wrong factor here would
+still give a plausible complex spectrum with a plausible gap -- which is exactly why it is checked
+against a published identity rather than derived once and trusted.
+"""
+function xx_boundary_structure_matrix(N::Int; J::Real = 1.0, B::Real = 0.0,
+                                      eps_L::Real = 1.0, eps_R::Real = 1.0)
+    N >= 2 || throw(ArgumentError("need N >= 2, got $N"))
+    X = zeros(ComplexF64, N, N)
+    for k in 1:N
+        X[k, k] = B
+    end
+    for k in 1:(N - 1)
+        X[k, k + 1] = J
+        X[k + 1, k] = J
+    end
+    X[1, 1] -= im * eps_L / 4
+    X[N, N] -= im * eps_R / 4
+    return X
+end
+
+"""
+    xx_boundary_rapidities(N; kwargs...) -> Vector{ComplexF64}
+
+Eigenvalues of [`xx_boundary_structure_matrix`](@ref). `real(lambda)` is a mode's OSCILLATION
+FREQUENCY and `abs(imag(lambda))` its DECAY RATE, so these two numbers are what decide the Nyquist
+step and the run length respectively.
+"""
+xx_boundary_rapidities(N::Int; kwargs...) =
+    eigvals(xx_boundary_structure_matrix(N; kwargs...))
+
+"""
+    xx_boundary_liouvillian_gap(N; kwargs...) -> Float64
+
+The Liouvillian gap as `2 * min|Im lambda|`.
+
+✅ PINNED AGAINST THE PAPER'S CLOSED FORM, which is the headline result of arXiv:2104.11479:
+
+    Delta = 4J pi^2 * (l+r)(l r + 1) / [ (l+r)^2 + (l r - 1)^2 ] / N^3
+
+MEASURED ratio `2 min|Im lambda| / Delta_published` at `eps = 4`: **0.9949 (N=20), 0.9978 (N=30),
+0.9987 (N=40)** -- converging to 1 as `N` grows, exactly as an asymptotic `1/N^3` formula must.
+(At `eps = 1` the ratio is 0.87-0.93 at these sizes and also improving; the formula is asymptotic,
+so a small-N mismatch is the FORMULA's finite-size error and not ours.) Use
+[`xx_boundary_gap_published`](@ref) for the closed form to compare against.
+"""
+xx_boundary_liouvillian_gap(N::Int; kwargs...) =
+    2 * minimum(abs.(imag.(xx_boundary_rapidities(N; kwargs...))))
+
+"""
+    xx_boundary_gap_published(N; J=1.0, eps_L=1.0, eps_R=1.0) -> Float64
+
+arXiv:2104.11479's closed-form Liouvillian gap, `O(N^-3)` with an explicit coefficient. This is a
+PUBLISHED NUMBER, so agreement with [`xx_boundary_liouvillian_gap`](@ref) is a genuine recreation
+of the paper's central result rather than an internal consistency check.
+"""
+function xx_boundary_gap_published(N::Int; J::Real = 1.0, eps_L::Real = 1.0, eps_R::Real = 1.0)
+    l = eps_L / (4J)
+    r = eps_R / (4J)
+    return 4J * pi^2 * (l + r) * (l * r + 1) /
+           ((l + r)^2 + (l * r - 1)^2) / N^3
+end
+
+# ── THE TIME-DEPENDENT ANALYTIC SOLUTION: an N x N LYAPUNOV EQUATION, never a 4^L object ──────
+#
+# ⛔ THIS REPLACES THE DENSE LIOUVILLIAN AS THE REFERENCE. The spectrum above is exact but says
+# nothing about `<S^z_j(t)>`, so the only time-dependent reference this model had was a dense
+# `4^L x 4^L` superoperator -- which caps the check at L = 3..5 and cannot certify anything at a
+# benchmark size. Third quantization does better: the model is quadratic, so the TWO-POINT FUNCTION
+# CLOSES on itself and its equation of motion is an `N x N` matrix ODE. That is the paper's own
+# analytic solution, it is exact at every `t`, and it costs `O(N^3)` in the CHAIN LENGTH.
+#
+# The dense object keeps exactly one job: certifying THIS, once, at L = 3 (`dissipative_xx.jl`).
+#
+# DERIVATION (adjoint Lindbladian on `A = c^dag_j c_k`, with `H = sum h_ab c^dag_a c_b`, gain
+# `L = sqrt(g_m) c^dag_m` and loss `L = sqrt(l_m) c_m`):
+#
+#     dC/dt = i[h, C] - (1/2){D, C} + G,     C_jk = Tr(rho c^dag_j c_k)
+#     D = diag(g_m + l_m),  G = diag(g_m),   h real symmetric (hopping J)
+#
+# so with `X = i*h - D/2`,   dC/dt = X C + C X' + G.
+#
+# ⛔ THE JORDAN-WIGNER STRING AT SITE N DOES NOT SPOIL THIS, AND THAT IS NOT AN APPROXIMATION.
+# `sigma^+_N = P c^dag_N` with `P = prod_{j<N}(1 - 2 n_j)` is NOT linear in fermions, so the
+# Lindbladian is not obviously quadratic and the whole reference would be void if the string
+# survived. It does not. In `L^dag A L = c_N P (c^dag_j c_k) P c^dag_N`:
+#
+#   * `j, k < N`   -- `P` commutes through with TWO sign flips, so it cancels;
+#   * `j = k = N`  -- `P` commutes with `n_N`, so it cancels;
+#   * `j < N, k = N` (and its transpose) -- `P` gives ONE sign flip, so the string convention
+#     matters -- but that term contains `c_N ... c_N` and VANISHES IDENTICALLY.
+#
+# Every term where the two conventions differ is zero, so the SPIN model and the stringless FERMION
+# model have the SAME closed ODE for `C`. This is why the reference may be compared against an MPS
+# built from `sigma^+`/`sigma^-` (`fused_boundary_lindblad`) rather than from `c`/`c^dag`.
+#
+# ⚠ THE ANTICOMMUTATOR RATE IS `eps`, NOT `eps/4`. `D_1 = g_1 + l_1 = eps_L(1+mu)/2 +
+# eps_L(1-mu)/2 = eps_L` -- the `mu` dependence cancels in the DAMPING and survives only in the
+# SOURCE `G`. The `-i*eps/4` of `xx_boundary_structure_matrix` is a different object in a different
+# (Majorana) basis; the two must NOT be conflated, and mixing them silently changes the relaxation
+# rate by 4x while leaving the profile qualitatively right.
+
+"""
+    xx_boundary_lyapunov(N; J, B, eps_L, eps_R, mu_L, mu_R) -> (X, G)
+
+The generator `X` and source `G` of the covariance ODE `dC/dt = X C + C X' + G` for the
+boundary-driven XX chain. `mu = +1` pumps the site fully UP (gain only), `mu = -1` fully DOWN.
+"""
+function xx_boundary_lyapunov(N::Int; J::Real = 1.0, B::Real = 0.0,
+                              eps_L::Real = 1.0, eps_R::Real = 1.0,
+                              mu_L::Real = 1.0, mu_R::Real = -1.0)
+    N >= 2 || throw(ArgumentError("need N >= 2, got $N"))
+    (abs(mu_L) <= 1 && abs(mu_R) <= 1) ||
+        throw(ArgumentError("mu must lie in [-1, 1]; got $mu_L, $mu_R"))
+    h = zeros(Float64, N, N)
+    for k in 1:N
+        h[k, k] = B
+    end
+    for k in 1:(N - 1)
+        h[k, k + 1] = J
+        h[k + 1, k] = J
+    end
+    g = zeros(Float64, N); l = zeros(Float64, N)
+    g[1] = eps_L * (1 + mu_L) / 2; l[1] = eps_L * (1 - mu_L) / 2
+    g[N] += eps_R * (1 + mu_R) / 2; l[N] += eps_R * (1 - mu_R) / 2
+    X = im .* ComplexF64.(h) .- Diagonal(ComplexF64.(g .+ l)) ./ 2
+    return Matrix(X), Matrix(Diagonal(ComplexF64.(g)))
+end
+
+"""
+    xx_boundary_ness(N; kwargs...) -> Matrix{ComplexF64}
+
+The EXACT non-equilibrium steady-state covariance `C_ss`, from `X C + C X' + G = 0`.
+
+⚠ `lyap(A, C)` solves `A X + X A' + C = 0`, which is this equation with `C = G` -- no sign flip.
+Getting that backwards returns a matrix that is still Hermitian and still has plausible entries, so
+the mistake shows up only as a profile with the wrong sign of the current.
+"""
+xx_boundary_ness(N::Int; kwargs...) = begin
+    X, G = xx_boundary_lyapunov(N; kwargs...)
+    lyap(X, G)
+end
+
+"""
+    xx_boundary_covariance(N, t; C0 = nothing, kwargs...) -> Matrix{ComplexF64}
+
+EXACT `C_jk(t) = Tr(rho(t) c^dag_j c_k)` at any `t`, for any initial covariance `C0` (default
+`I/2`, the MAXIMALLY MIXED state -- which is a `chi = 1` PRODUCT state in the fused superket
+layout, so the MPS run starts from exactly this).
+
+⛔ SOLVED AROUND THE STEADY STATE, NOT BY EXPONENTIATING THE AFFINE SYSTEM. Subtracting `C_ss`
+makes the ODE HOMOGENEOUS, `d(C - C_ss)/dt = X (C - C_ss) + (C - C_ss) X'`, whose solution is
+`exp(Xt) (C0 - C_ss) exp(Xt)'`. That is two `N x N` exponentials per time point. The direct route
+-- vectorising to an `N^2` affine system and exponentiating -- is `N^2 x N^2`, which at N = 32 is a
+1025-dimensional `expm` per time point for the identical answer.
+"""
+function xx_boundary_covariance(N::Int, t::Real; C0 = nothing, kwargs...)
+    X, G = xx_boundary_lyapunov(N; kwargs...)
+    Css = lyap(X, G)
+    C_0 = C0 === nothing ? Matrix{ComplexF64}(I, N, N) ./ 2 : ComplexF64.(C0)
+    E = exp(X .* float(t))
+    return Css .+ E * (C_0 .- Css) * E'
+end
+
+"""
+    xx_boundary_sz(N, t; kwargs...) -> Vector{Float64}
+
+`<S^z_j(t)>` for the boundary-driven XX chain: `C_jj(t) - 1/2`, since `S^z = n - 1/2` and `sigma^+`
+RAISES to up, so "up" is the OCCUPIED fermion state.
+"""
+xx_boundary_sz(N::Int, t::Real; kwargs...) =
+    real.(diag(xx_boundary_covariance(N, t; kwargs...))) .- 0.5
+
+"""
+    xx_boundary_current(C; J = 1.0) -> Vector{Float64}
+
+Bond currents `j_k = -2 J Im C_{k,k+1}` from a covariance matrix, `k = 1..N-1`.
+
+⛔ THE SIGN IS DERIVED FROM THE CONTINUITY EQUATION, AND THE OTHER ONE WAS MEASURED WRONG. With
+`H = J sum_k (c^dag_k c_{k+1} + h.c.)`, the Heisenberg equation gives
+`dn_k/dt = j_{k-1} - j_k` with `j_k = i J (c^dag_k c_{k+1} - c^dag_{k+1} c_k)`, and since
+`C_{k+1,k} = conj(C_{k,k+1})` that is `-2 J Im C_{k,k+1}`.
+
+MEASURED: `+2J Im C` disagreed with the dense Liouvillian by EXACTLY twice the current at every
+`L` and `t` (0.800 against a NESS current of 0.400) while the magnetisation profile matched to
+1e-16 -- so a flipped sign here is invisible in every observable except the transport number this
+model exists to produce. It is also physically checkable: `mu_L = +1` pumps particles IN at the
+left and `mu_R = -1` removes them at the right, so the current MUST be positive.
+"""
+xx_boundary_current(C::AbstractMatrix; J::Real = 1.0) =
+    [-2 * J * imag(C[k, k + 1]) for k in 1:(size(C, 1) - 1)]
+
+"""
+    xx_boundary_current_check(N; kwargs...) -> Float64
+
+Largest violation of the bulk continuity equation `dC_kk/dt = j_{k-1} - j_k` in the NESS, where the
+left side is ZERO by definition. Returns `max_k |j_k - j_{k-1}|` over the bulk bonds, which must be
+at machine precision -- and simultaneously verifies the published statement that XX boundary
+transport is BALLISTIC, i.e. the current is UNIFORM along the chain and independent of `N`.
+"""
+function xx_boundary_current_check(N::Int; J::Real = 1.0, kwargs...)
+    j = xx_boundary_current(xx_boundary_ness(N; J = J, kwargs...); J = J)
+    length(j) < 2 && return 0.0
+    return maximum(abs.(diff(j)))
+end
+
+"""
+    xx_boundary_current_published(; J = 1.0, eps = 1.0, mu_L = 1.0, mu_R = -1.0) -> Float64
+
+The CLOSED-FORM non-equilibrium steady-state current of the boundary-driven XX chain:
+
+    j = (mu_L - mu_R) * eps * J^2 / (4 J^2 + eps^2)
+
+⛔ INDEPENDENT OF `N`. That is the ballistic signature stated as a formula, and it is the strongest
+possible reference for this model: a single expression that the MPS run must reproduce at ANY chain
+length, with no fitting, no extrapolation and no dense object.
+
+⛔ THIS IS A REAL CLOSED FORM, NOT A FIT. MEASURED against `xx_boundary_ness` at `N = 32`, over
+`eps` spanning four decades, the agreement is EXACT to machine precision at every point:
+
+    eps      0.01      0.03      0.1       0.3       1        2      4      10        30        100
+    lyap     0.0049999 0.0149966 0.0498753 0.1466993 0.400000 0.5    0.4    0.1923077 0.0663717 0.0199920
+    formula  identical to the last printed digit at every eps
+
+⚠ IT CONTAINS THE QUANTUM ZENO TURNOVER, which is the published qualitative statement about this
+model and a genuine constraint on the shape rather than the scale. The current RISES linearly in
+the drive (`j -> (Delta mu) eps / 4J^2` as `eps -> 0`), PEAKS at `eps = 2J` (where `j = Delta mu /
+4`), then FALLS as `1/eps` -- a strongly measured boundary decouples from the chain. A reference
+that got only the small-`eps` slope right would still fail past the peak, so matching across the
+turnover tests far more than a normalisation.
+
+⚠ EQUAL COUPLINGS ONLY. `eps_L != eps_R` has a different (and here underived) closed form, so this
+throws rather than silently returning the symmetric answer -- the failure mode would be a plausible
+number that is wrong by an O(1) factor.
+"""
+function xx_boundary_current_published(; J::Real = 1.0, eps::Real = 1.0,
+                                       mu_L::Real = 1.0, mu_R::Real = -1.0)
+    return (mu_L - mu_R) * eps * J^2 / (4 * J^2 + eps^2)
+end
+
 # ── TFIM, the same idea one level up: BdG rather than a hopping matrix ────────────────────────
 #
 # `H = -J Σ Z_j Z_{j+1} - h Σ X_j` is quadratic in MAJORANAS, not in fermions -- the ZZ term

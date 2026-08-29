@@ -164,7 +164,11 @@ for nm in (WHICH == "all" ? ("chain", "square", "kagome") : (WHICH,))
                           ("tdvp_cbe1s", (p, t) -> tdvp_cbe1s_step!(p, W, t; maxdim = CAP,
                                         hermitian = false,
                                         trunc_thresh = 1e-10, maxiter = MI)),
-                          ("cbe_bug", (p, t) -> cbe_bug_step!(p, W, t; exact = true,
+# ⛔ ONE NAME FOR THE SWEEP: `bug_interleaved`. This is the sweep behind the competitive
+# OAT / XX / TFIM results and the square-Heisenberg advantage -- it was labelled `cbe_bug`
+# here and `bug_interleaved` in the L=16 campaign, so the SAME arm wore two names across
+# CSVs and could not be joined between campaigns without a lookup nobody applies.
+                          ("bug_interleaved", (p, t) -> cbe_bug_step!(p, W, t; exact = true,
                                         krylov_basis = 3, krylov_tol = 0.0, maxdim = CAP,
                                         hermitian = false,
                                         trunc_thresh = 1e-10, maxiter = MI)))

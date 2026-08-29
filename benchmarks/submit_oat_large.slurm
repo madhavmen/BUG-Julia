@@ -46,7 +46,8 @@ WARMUP=1             # obsolete since `kaug`; kept at 1 so nothing is graded awa
 SYM=Z2               # the paper's own symmetry (global spin flip), not U(1)
 # (the KAUG slot is gone -- the union it selected is now the only behaviour, see oat_l10.jl)
 
-SCHEMES=(tdvp_cbe1s tdvp2 cbe_bug)
+# ⛔ ONE BUG SCHEME, ONE NAME, EVERYWHERE: `bug_interleaved`.
+SCHEMES=(tdvp_cbe1s tdvp2 bug_interleaved)
 
 # MAXDIMS BRACKET THE EXACT CEILING, which is `min(n, L-n)+1` and differs per L. Below it every
 # scheme is rank-starved and the errors are O(1) -- those arms are in the figure to show WHERE the

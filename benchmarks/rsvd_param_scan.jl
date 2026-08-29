@@ -189,7 +189,11 @@ what makes the grid a fair comparison rather than two separate tunings.
 function run_arm(scheme::String, kw::NamedTuple, seed::Integer)
     psi = copy(M.psi0)
     rng = MersenneTwister(UInt32(seed))
-    step! = scheme == "cbe_bug" ?
+# ⛔ ONE NAME FOR THE SWEEP: `bug_interleaved`. This is the sweep behind the competitive
+# OAT / XX / TFIM results and the square-Heisenberg advantage -- it was labelled `cbe_bug`
+# here and `bug_interleaved` in the L=16 campaign, so the SAME arm wore two names across
+# CSVs and could not be joined between campaigns without a lookup nobody applies.
+    step! = scheme == "bug_interleaved" ?
         (p, tau) -> cbe_bug_step!(p, M.mpo, tau; maxdim = MAXDIM, trunc_thresh = 1e-12,
                                   maxiter = MAXITER, rng = rng, kw...) :
         (p, tau) -> tdvp_cbe1s_step!(p, M.mpo, tau; maxdim = MAXDIM, trunc_thresh = 1e-12,
@@ -235,7 +239,7 @@ const BASE = (dex = 0, growth = 1.5, comp_ratio = 1.0)
 
 function phase0(io)
     println("\nPHASE 0 -- saturation gate: does the exact SVD differ from the sketch?\n")
-    for scheme in ("tdvp_cbe1s", "cbe_bug"), ex in (false, true)
+    for scheme in ("tdvp_cbe1s", "bug_interleaved"), ex in (false, true)
         kw = merge(BASE, (exact = ex,))
         emit(io, scheme, 0, ex ? "exact-svd" : "sketch", kw, 0x5EED, run_arm(scheme, kw, 0x5EED))
     end
@@ -245,7 +249,7 @@ end
 
 function phase1(io)
     println("\nPHASE 1 -- noise floor: seed spread IS the resolution of every other number.\n")
-    for scheme in ("tdvp_cbe1s", "cbe_bug")
+    for scheme in ("tdvp_cbe1s", "bug_interleaved")
         errs = Float64[]
         for k in 1:P.nseeds
             seed = UInt32(0x5EED + 977k)          # spread apart, not consecutive
@@ -263,7 +267,7 @@ end
 function phase2(io)
     println("\nPHASE 2 -- budget scan. maxdim = $MAXDIM, tight enough that arms saturate it,")
     println("so dex measures WHICH directions survive at fixed rank, not how many.\n")
-    for scheme in ("tdvp_cbe1s", "cbe_bug")
+    for scheme in ("tdvp_cbe1s", "bug_interleaved")
         for g in (1.1, 1.25, 1.5, 2.0)
             kw = (dex = 0, growth = g, comp_ratio = 1.0)
             emit(io, scheme, 2, @sprintf("growth=%.2f", g), kw, 0x5EED, run_arm(scheme, kw, 0x5EED))

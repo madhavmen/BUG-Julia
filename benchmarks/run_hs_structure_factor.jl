@@ -28,13 +28,15 @@ include(joinpath(HERE, "hs_structure_factor.jl"))
 const L      = length(ARGS) >= 1 ? parse(Int, ARGS[1])     : 8
 const TMAX   = length(ARGS) >= 2 ? parse(Float64, ARGS[2]) : 8.0
 const DT     = length(ARGS) >= 3 ? parse(Float64, ARGS[3]) : 0.05
-const SCHEME = length(ARGS) >= 4 ? String(ARGS[4])         : "bug_decoupled"
+const SCHEME = length(ARGS) >= 4 ? String(ARGS[4])         : "bug_interleaved"
 const MAXDIM = 256
 const CUT    = 1e-8
 
+# ⛔ ONE BUG SCHEME ACROSS EVERY RUN: `bug_interleaved`. `bug_decoupled` is GONE -- its flag lived
+# on the K-step path, removed with `kaug`/`rexpand` on 2026-08-24, after which the two branches
+# here called `cbe_bug_step!` with IDENTICAL arguments. This driver even DEFAULTED to the dead
+# name, so its whole campaign was labelled with an ordering that no longer exists.
 stepper(name, mpo) =
-    name == "bug_decoupled"   ? (p, t) -> cbe_bug_step!(p, mpo, t; maxdim = MAXDIM,
-                                                        trunc_thresh = CUT) :
     name == "bug_interleaved" ? (p, t) -> cbe_bug_step!(p, mpo, t; maxdim = MAXDIM,
                                                         trunc_thresh = CUT) :
     name == "tdvp2"           ? (p, t) -> tdvp2_step!(p, mpo, t; maxdim = MAXDIM,

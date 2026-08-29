@@ -64,7 +64,7 @@ const P = parse_params((
     # Which half-sweep truncation the matrix's x-axis is: "split" (the SVD that splits the
     # stacked Krylov frame) or "cbe" (the SVDs inside cbe_expand). Both always present.
     grid_axis    = "split",
-    schemes      = "cbe_bug,tdvp_cbe1s,tdvp2",
+    schemes      = "bug_interleaved,tdvp_cbe1s,tdvp2",
     sample_every = 0.25,
     symmetry     = "U1",
     maxiter      = 0,        # 0 = derive the Krylov depth from ‖H‖·dt/2
@@ -184,10 +184,14 @@ package default.
 function stepper(scheme::String, tau_trunc::Float64, split_cutoff::Float64,
                  close::Bool, dt::Float64; cbe_cut::Float64 = 0.0)
     m = depth_for(dt)
-    if startswith(scheme, "cbe_bug")
-        # A bare "cbe_bug" is the PACKAGE DEFAULTS, not a pinned depth -- so the scheme named
-        # after the package reports what the package actually does.
-        name = scheme == "cbe_bug" ? "mdef" : scheme[length("cbe_bug_") + 1:end]
+    # ⚠ `cbe_bug` is accepted as a LEGACY ALIAS so saved commands and old CSV tags still
+    # resolve; the canonical name is `bug_interleaved`.
+    scheme = replace(scheme, r"^cbe_bug" => "bug_interleaved")
+    if startswith(scheme, "bug_interleaved")
+        # A bare "bug_interleaved" is the PACKAGE DEFAULTS, not a pinned depth -- so the scheme
+        # named after the package reports what the package actually does.
+        name = scheme == "bug_interleaved" ? "mdef" :
+               scheme[length("bug_interleaved_") + 1:end]
         haskey(SWEEPS, name) || error("unknown sweep $(repr(name)); have $(keys(SWEEPS))")
         s = SWEEPS[name]
         # `cbe_cut <= 0` keeps the package defaults, so the split-axis runs are unchanged and
@@ -327,7 +331,7 @@ function main()
         io = open_out(@sprintf("heis_split_L%d_dt%g_T%g.csv", P.L, P.dt, P.t_max))
         try
             for sc in parse_list(P.splits, Float64)
-                run_arm(io, "split", "cbe_bug", 0.0, sc, false, P.dt, profs)
+                run_arm(io, "split", "bug_interleaved", 0.0, sc, false, P.dt, profs)
             end
         finally; close(io); end
 
@@ -356,7 +360,7 @@ function main()
         # separately; a shared filename means the second launch truncates the first's data,
         # which is how the default arm's grid nearly went missing once already.
         for sw in parse_syms(P.grid_sweeps)
-            sch = "cbe_bug_$sw"
+            sch = "bug_interleaved_$sw"
             # WHICH HALF-SWEEP TRUNCATION THE x-AXIS IS, and it is NOT the same knob for every
             # sweep -- picking the wrong one scans a variable the sweep never reads.
             #

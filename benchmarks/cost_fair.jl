@@ -55,7 +55,11 @@ function pareto(title, mpo, psi0, T, dts, D, maxiter, exact_at, measure)
                                               trunc_thresh = 1e-12, maxiter = maxiter)),
                      "tdvp_cbe1s" => (t) -> ((p) -> tdvp_cbe1s_step!(p, mpo, t; maxdim = D,
                                               trunc_thresh = 1e-12, maxiter = maxiter)),
-                     "cbe_bug"    => (t) -> ((p) -> cbe_bug_step!(p, mpo, t; maxdim = D,
+# ⛔ ONE NAME FOR THE SWEEP: `bug_interleaved`. This is the sweep behind the competitive
+# OAT / XX / TFIM results and the square-Heisenberg advantage -- it was labelled `cbe_bug`
+# here and `bug_interleaved` in the L=16 campaign, so the SAME arm wore two names across
+# CSVs and could not be joined between campaigns without a lookup nobody applies.
+                     "bug_interleaved"    => (t) -> ((p) -> cbe_bug_step!(p, mpo, t; maxdim = D,
                                               trunc_thresh = 1e-12, maxiter = maxiter))]
         for dt in dts
             n = round(Int, T / dt)

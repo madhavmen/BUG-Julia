@@ -32,7 +32,7 @@
 # cap stops being enough and the error appears with no warning.
 #
 # MEASURED, L=20 SU(2) Heisenberg, imaginary time, depth needed for ~1e-14 in the HALF-SWEEP
-# basis (`benchmarks/krylov_depth_scan.jl`):
+# basis (`benchmarks/imaginary_time/krylov_depth_scan.jl`):
 #
 #     dt      0.1     1       5
 #     m       3       8       16

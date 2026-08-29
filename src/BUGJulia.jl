@@ -51,6 +51,35 @@ using PrecompileTools: @setup_workload, @compile_workload
                     BondUpdateBUG.sz_expectation(p, 3)
                     RSVDCBEBondUpdate.mpo_energy(copy(p), mpo)
                 end
+                # ⛔ THE TWO BASELINE SWEEPS BELONG IN THE WORKLOAD TOO, AND LEAVING THEM OUT
+                # CORRUPTED A MEASUREMENT RATHER THAN MERELY COSTING TIME. Any driver that ran
+                # `tdvp2` or `tdvp_cbe1s` first had that arm absorb its own specialisation:
+                # measured on an L=8 campaign smoke run, `tdvp2` 61.6 s against `cbe_bug` 2.7 s,
+                # where the true ratio is far smaller. A benchmark driver's own warmup loop fixes
+                # its numbers, but only if whoever wrote it remembered -- precompiling the arms
+                # removes the trap instead of documenting it.
+                #
+                # ⚠ BOTH `hermitian` BRANCHES ARE COMPILED. `hermitian = false` selects Arnoldi and
+                # a full Hessenberg projection -- a genuinely different code path, and the one every
+                # open-system run takes. Compiling only the Hermitian branch would leave the fused
+                # `d = 4` drivers paying full JIT while looking covered.
+                for herm in (true, false)
+                    p = copy(psi)
+                    RSVDCBEBondUpdate.tdvp2_step!(p, mpo, ComplexF64(-0.05im);
+                                                  maxdim = 8, trunc_thresh = 1e-10,
+                                                  maxiter = 5, hermitian = herm)
+                    q = copy(psi)
+                    RSVDCBEBondUpdate.tdvp_cbe1s_step!(q, mpo, ComplexF64(-0.05im);
+                                                       maxdim = 8, trunc_thresh = 1e-10,
+                                                       maxiter = 5, hermitian = herm)
+                    p = copy(psi)
+                    RSVDCBEBondUpdate.cbe_bug_step!(p, mpo, ComplexF64(-0.05im);
+                                                    exact = false, parallel = true,
+                                                    dex = 4, dover = 4, comp_ratio = 1.0,
+                                                    krylov_basis = 3, krylov_tol = 0.0,
+                                                    maxdim = 8, trunc_thresh = 1e-10,
+                                                    maxiter = 5, tol = 0.0, hermitian = herm)
+                end
             end
             BondUpdateBUG.set_symmetry!(:U1)     # leave the global where it started
         catch

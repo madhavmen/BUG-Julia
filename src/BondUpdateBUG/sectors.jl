@@ -90,7 +90,24 @@ function fusion_basis(t, leg_a::Int = 1, leg_b::Int = 2; tag::AbstractString = "
     F = to_concrete(getIdentity((t, leg_a), (t, leg_b); itag = tag)')
     # getIdentity's output is always (input_a, input_b, fused), whatever
     # leg numbers the inputs had, so the split is on (1,2) -- NOT (leg_a, leg_b).
-    return to_concrete(svd(F, (1, 2); cutoff = 0.0).U)
+    U = to_concrete(svd(F, (1, 2); cutoff = 0.0).U)
+    # ⛔ THE SVD RELABELS THE BOND, SO `tag` MUST BE REAPPLIED -- WITHOUT THIS THE KEYWORD IS INERT.
+    # `itag` reaches `getIdentity`, and then `svd(...).U` overwrites the bond with Telum's DEFAULT
+    # (`svdL`), so every caller's tag was silently discarded. MEASURED:
+    # `fusion_basis(t, 1, 2; tag = "cbeG")` returned legs `3,L | 3,S | svdL`.
+    #
+    # ⛔ AND THAT BROKE `cbe_bug` UNDER U(1) ENTIRELY -- chain AND cylinder, every BUG arm, while
+    # `tdvp2` (which never calls `cbe_expand`) was fine. Both CBE probes ask for a DISTINCT tag
+    # (`full_local_basis` "cbeF", `sector_graded_sketch` "cbeG") precisely so the probe's fused leg
+    # cannot collide with a frame's bond leg -- which is ALSO `svdL`, because the BUG frame splits
+    # take default tags too. `cbe_core.jl:130` then contracts the two into one TLArray and Telum
+    # refuses it: "Duplicate TLIndex with non-empty itag: TLIndex(svdL, '+', 0, 0, false)".
+    #
+    # ⚠ SAFE FOR EVERY EXISTING CALLER, audited: `reachable_sectors` and `sectors.jl`'s reach
+    # computation read only `.spaces[end]` and never look at tags; the two CBE probes WANT the
+    # distinct tag; and the probe's tag never reaches an `oplus`, because the preselection SVDs
+    # create their own bond legs (`_TAG_L`/`_TAG_R`) afterwards.
+    return to_concrete(setitag(U, 3, tag))
 end
 
 """
