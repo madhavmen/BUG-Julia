@@ -81,10 +81,60 @@ using PrecompileTools: @setup_workload, @compile_workload
                                                     maxiter = 5, tol = 0.0, hermitian = herm)
                 end
             end
+            # ⛔ SU(2) IS A SEPARATE BLOCK BECAUSE IT IS A SEPARATE COMPILATION, and leaving it out
+            # meant the whole non-abelian campaign paid full JIT while the workload looked complete.
+            # MEASURED before this block existed: one `cbe_bug_step!` at L=12 SU(2) took 4314 s in a
+            # freshly precompiled process, against sub-second for the U(1) path the workload did
+            # cover. The fused/reduced-multiplet code is a different specialisation of Telum's
+            # block-sparse kernels, so compiling `:U1` teaches the cache nothing about it.
+            #
+            # ⚠ THE START STATE DIFFERS TOO: `neel_state` is not an SU(2) singlet, so the S = 0
+            # sector this campaign works in is reached with `dimer_state`.
+            BondUpdateBUG.set_symmetry!(:SU2)
+            let psi = BondUpdateBUG.dimer_state(6),
+                mpo = RSVDCBEBondUpdate.heisenberg_su2_mpo(6)
+                for herm in (true, false)
+                    p = copy(psi)
+                    RSVDCBEBondUpdate.cbe_bug_step!(p, mpo, ComplexF64(-0.05im);
+                                                   exact = false, dex = 4, dover = 4,
+                                                   krylov_basis = 3, krylov_tol = 0.0,
+                                                   maxdim = 8, trunc_thresh = 1e-10,
+                                                   maxiter = 5, tol = 0.0, hermitian = herm)
+                end
+                # The growth path is its own specialisation -- `_grow_frame` rebuilds `H1` and
+                # re-expands between Lanczos vectors, which the fixed-width builder never calls.
+                let p = copy(psi)
+                    RSVDCBEBondUpdate.cbe_bug_step!(p, mpo, ComplexF64(-0.05im);
+                                                   exact = false, dex = 4, dover = 4,
+                                                   grow_iters = 2, krylov_tol = 0.0,
+                                                   maxdim = 8, trunc_thresh = 1e-10,
+                                                   maxiter = 5, tol = 0.0)
+                end
+                RSVDCBEBondUpdate.tdvp2_step!(copy(psi), mpo, ComplexF64(-0.05im);
+                                              maxdim = 8, trunc_thresh = 1e-10, maxiter = 5)
+                RSVDCBEBondUpdate.tdvp_cbe1s_step!(copy(psi), mpo, ComplexF64(-0.05im);
+                                                   maxdim = 8, trunc_thresh = 1e-10, maxiter = 5)
+                # The ground-state entry point: a different reduction (`LowestEigen`) through the
+                # same expanding-Krylov core, and the one this campaign starts every run with.
+                for ex in (true, false)
+                    RSVDCBEBondUpdate.GroundState.solve!(copy(psi), mpo;
+                        opts = RSVDCBEBondUpdate.CBEBugOptions(; maxdim = 8, dex = 4,
+                                                               maxiter = 5, exact = ex),
+                        n_sweeps = 2, grow_iters = 1)
+                end
+            end
             BondUpdateBUG.set_symmetry!(:U1)     # leave the global where it started
-        catch
+        catch err
             # A broken workload must not break the package; the cost is only that the first
             # call in each process pays its own JIT again.
+            #
+            # ⛔ BUT IT MUST NOT BE SILENT EITHER. Swallowing this bare meant a workload that had
+            # stopped covering anything -- a renamed function, a changed keyword -- looked exactly
+            # like a working one, and the only symptom was runs mysteriously taking minutes again.
+            # Precompilation prints this, so the next `Pkg.precompile` says which entry point fell
+            # out of the cache.
+            @warn "BUGJulia precompile workload did not complete; first call in each process " *
+                  "will pay full JIT (SU(2) measured at ~4300 s)" exception = err
         end
     end
 end
