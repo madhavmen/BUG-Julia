@@ -673,6 +673,12 @@ promote them into the headline without being asked.
 
 ### 7.1 What the grid argument actually rests on
 
+⚠ **THE FIGURE IS DRAWN ON THE DISSIPATIVE *HEISENBERG* CHAIN, NOT ON MODEL 3.** `spectrum()` here
+is `dissipative_heisenberg.jl`'s, and the two numbers below are that model's. Model 3 makes the
+same argument with its own, sharper constants (a QUADRATIC observable ⇒ Nyquist step `π/4`, not
+`π/2`; measured at N=30, `n = 2000` log steps overshoot by 79×) — see `submit_dissipative_xx.slurm`.
+Attributing 10.55/14.29 to the boundary-driven XX chain would be wrong.
+
 `spectrum()` + `plot_spectrum.py`. `−H` is Hermitian ⇒ `max|Im λ| = 0.000e+00` ⇒ every mode is a
 monotone decay, nothing can alias, and a log grid's exponentially growing steps cost nothing.
 `L` is non-Hermitian ⇒ `max|Im λ| = 10.55 (L=3), 14.29 (L=4)` ⇒ decaying **oscillations**.

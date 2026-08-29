@@ -49,8 +49,10 @@ drift would be invisible: `plot_logtime.py` reads the columns it defines.
 before/after verification) and [`fusion_tag_probe.jl`](fusion_tag_probe.jl) (the five-line question
 that found the cause).
 
-**Figures** — `plot_logtime.py`, `plot_logtime_traj.py`, `plot_xx_chigrowth.py`, and
-`plot_spectrum.py`, which carries the "why model 3 cannot use a log grid" claim on its own.
+**Figures** — `plot_logtime.py`, `plot_logtime_traj.py` and `plot_xx_chigrowth.py` plot the CSVs
+the drivers here write. `plot_spectrum.py` draws the "why an open system cannot use a log grid"
+figure, but ⚠ its CSV comes from `benchmarks/dissipative_heisenberg.jl spectrum`, **outside this
+folder** — see the grid-argument note below before quoting its numbers for model 3.
 
 **Cluster** — `submit_logtime_suite.slurm`, `submit_dissipative_xx.slurm`,
 `submit_bug_knob_study.slurm`. All three `cd` to the repo root and take paths from there.
@@ -108,12 +110,24 @@ cheaper, say which one you are quoting and why.
 For models 1–2 the generator `−H` is Hermitian, so `max|Im λ| = 0` — every mode is a monotone
 decay, nothing can alias, and a log grid's exponentially growing steps cost nothing.
 
-For model 3 the Lindbladian is non-Hermitian: `max|Im λ| = 10.55 (L=3), 14.29 (L=4)`, decaying
-*oscillations*. The sharp form of the claim is **not** "the log grid aliases" — that invites "then
-use more log points". It is that Nyquist caps the **largest** step at 0.22–0.30 no matter how many
-points there are, while a log grid spends its resolution at small `t`. It needs ~100 steps where a
-uniform grid needs ~21–27. The log grid is not merely wrong here, it is worse than the thing it was
-meant to beat.
+For model 3 the Lindbladian is non-Hermitian, so its modes are decaying **oscillations** and
+Nyquist caps the *largest* step no matter how many points a grid has. The sharp form of the claim
+is therefore **not** "the log grid aliases" — that invites "then use more log points". It is that a
+log grid spends its resolution at small `t`, so satisfying Nyquist at large `t` forces it to a step
+count *worse than uniform*. It is not merely wrong here, it is worse than the thing it was meant to
+beat.
+
+⚠ **Model 3's observable is QUADRATIC in the modes**, so it beats pairs of rapidities together: the
+fastest angular frequency is `2 max|Im μ| ~ 4J` and the Nyquist step is `π/4`, **not** `π/2`.
+Measured at N=30: `n = 2000` log steps overshoot by **79×** and `n = 12` by **8406×**, against
+~12,000 *uniform* steps to reach `t_max`.
+
+⚠ `plot_spectrum.py` draws this argument, but on the **dissipative Heisenberg** chain
+(`max|Im λ| = 10.55` at L=3, `14.29` at L=4) — a *different* open model, whose uniform dissipation
+gives it an N-independent gap ≈ 0.50 and a steady state at `t ≈ 6`. Its producer is
+`benchmarks/dissipative_heisenberg.jl spectrum`, outside this folder. Do not attribute those two
+numbers to the boundary-driven XX chain; its gap closes as `N⁻³` and it reaches no steady state at
+all here.
 
 ### ⛔ Model 3 has two regimes — never quote one alone
 
