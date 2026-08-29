@@ -119,7 +119,8 @@ function geometry(mode::String)
 end
 
 """
-    run_arm(arm, psi0, W, D) -> (E_site, chi_mult, chi_state, matvec, sweeps, grow, seconds)
+    run_arm(arm, psi0, W, D, N)
+        -> (E_site, chi_mult, chi_state, matvec, sweeps, grow, seconds, psi)
 
 One ground-state solve through the BUG update flow. `arm` is `:full` (the COMPLETE complement --
 `cbe_dmrg!`, `exact = true`) or `:rsvd` (the sketched selection -- `rsvd_cbe_dmrg!`).
@@ -149,18 +150,26 @@ function run_arm(arm::Symbol, psi0, W, D::Int, N::Int)
     # converges perfectly. There was a direction to find and the expansion did not find it, so
     # this is a defect and must never be quoted as a data point.
     #
-    # The signature is "rank never grew AND stopped almost immediately". Both halves are needed:
-    # a genuinely rank-1 ground state would also not grow, and a hard problem may stop early at a
-    # rank it legitimately reached.
-    if maximum(bond_dims(psi)) <= chi0 && length(info.energies) <= 3
-        @printf("  ⛔ FROZEN: %s never left its start state (chi %d -> %d in %d sweeps). This is a solver failure, not a result -- retry from a different start.\n",
-                String(arm), chi0, maximum(bond_dims(psi)), length(info.energies))
+    # ⛔ THE TEST MUST ALSO REQUIRE THAT THE START WAS A PRODUCT STATE (`chi0 <= 2`), and leaving
+    # that out made this fire on EVERY ROW once continuation was switched on. Under continuation
+    # the start is the previous parameter's CONVERGED state, so "rank did not grow and it stopped
+    # in two sweeps" is exactly what SUCCESS looks like -- the detector was written against a cold
+    # chi = 1 start and the start changed under it. A warning that fires on every row is worse
+    # than none: it trains the reader to ignore the one row that matters.
+    #
+    # So the signature is: started at product rank, STAYED at product rank, stopped almost at
+    # once. A genuinely rank-<= 2 ground state would also trip it, which is why the message says
+    # to check against a reference rather than asserting the number is wrong.
+    chi1 = maximum(bond_dims(psi))
+    if chi0 <= 2 && chi1 <= chi0 && length(info.energies) <= 3
+        @printf("  ⛔ FROZEN: %s never left its product start (chi %d -> %d in %d sweeps) -- check against the reference before using this row.\n",
+                String(arm), chi0, chi1, length(info.energies))
     end
     # Re-measured on the returned state rather than taken from the sweep's best Ritz value: the
     # sweep value is a bound in the space that solve used, and `solve!` may truncate afterwards.
     E = real(mpo_energy(copy(psi), W)) / max(norm(psi)^2, eps())
     return (E / N, maximum(bond_dims(psi)), maximum(state_bond_dims(psi)),
-            sum(info.krylov_dims), length(info.energies), sum(info.grow_passes), sec)
+            sum(info.krylov_dims), length(info.energies), sum(info.grow_passes), sec, psi)
 end
 
 function main()
@@ -185,6 +194,8 @@ function main()
     run_arm(:rsvd, dimer_state(8), heisenberg_su2_mpo(8), 8, 8)
     println("(warm-up done)\n")
 
+    # Converged state per arm, carried across the J2 sweep -- see the note at the call site.
+    carried = Dict{Symbol, Any}()
     open(out, "w") do io
         println(io, join(COLS, ","))
         # ⛔ THE SQUARE LATTICE HAS NO `J2` IN THIS PAPER -- Sec. II calls it "the same Hamiltonian
@@ -211,7 +222,22 @@ function main()
             end
 
             for arm in (:full, :rsvd)
-                E, chim, chis, mv, swp, gr, sec = run_arm(arm, psi0, W, D, N)
+                # ⛔ ADIABATIC CONTINUATION: each J2 starts from the PREVIOUS J2's converged
+                # state, not from a fresh dimer. This is what escapes the freeze documented on
+                # `run_arm`, and it is also cheaper. MEASURED on the C=3 cylinder, cold against
+                # continued, every point scored against exact diagonalisation:
+                #
+                #   J2 = 0.5   cold -0.3750000000 (FROZEN)   continued -0.4670250922 (exact)
+                #   all nine   continued exact to <= 4.3e-11, in 2-3 sweeps against 6-7 cold
+                #
+                # ⚠ CONTINUATION CAN PROPAGATE A BAD STATE: a frozen point would seed the next
+                # and the error would run silently down the sweep. That is what the freeze
+                # detector in `run_arm` and the ED column are for -- do not run a continued sweep
+                # without a reference, and do not reorder `J2S` so the sweep starts at a
+                # degenerate point.
+                start = get(carried, arm, psi0)
+                E, chim, chis, mv, swp, gr, sec, psiE = run_arm(arm, start, W, D, N)
+                carried[arm] = psiE
                 dev = isnan(anchor) ? NaN : E - anchor
                 bound = chim >= D ? 1 : 0
                 @printf(io, "%s,%s,SU2,%s,%.4f,%d,%d,%d,%d,%d,%d,%.10f,%.10f,%s,%.3e,%d,%d,%d,%d,%d,%.2f,%s\n",
