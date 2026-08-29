@@ -320,7 +320,8 @@ This is the reference arm. It forms the rank-4 two-site object (cost `d*chi` per
 the sketch's `~1.2*budget`), which is exactly what the randomised version exists to avoid --
 so it is the thing to measure against, not a better default.
 """
-cbe_dmrg!(psi::SymMPS, h::XXZChain; opts::CBEBugOptions = CBEBugOptions(), kwargs...) =
+cbe_dmrg!(psi::SymMPS, h::Union{XXZChain, MPO}; opts::CBEBugOptions = CBEBugOptions(),
+          kwargs...) =
     solve!(psi, h; opts = _with_exact(opts, true), kwargs...)
 
 """
@@ -329,20 +330,20 @@ cbe_dmrg!(psi::SymMPS, h::XXZChain; opts::CBEBugOptions = CBEBugOptions(), kwarg
 RSVD-CBE-DMRG: the sketched expansion, and [`solve!`](@ref)'s default. Named so the A/B
 against [`cbe_dmrg!`](@ref) reads as two arms of one comparison at the call site.
 """
-rsvd_cbe_dmrg!(psi::SymMPS, h::XXZChain; opts::CBEBugOptions = CBEBugOptions(), kwargs...) =
+rsvd_cbe_dmrg!(psi::SymMPS, h::Union{XXZChain, MPO}; opts::CBEBugOptions = CBEBugOptions(),
+               kwargs...) =
     solve!(psi, h; opts = _with_exact(opts, false), kwargs...)
 
 # `CBEBugOptions` is a kwdef struct with no mutation, so switch one field by rebuilding. Kept
 # private: callers should set `exact` in the options directly, and the two names above exist to
 # make the comparison legible rather than to add a second way to configure it.
+#
+# ⛔ COPIED OVER `fieldnames`, NOT BY HAND. The hand-written version listed all twenty fields, and
+# a field added to `CBEBugOptions` later would not have appeared in it -- so BOTH named arms would
+# have silently reverted that field to its default while every explicitly-set option around it
+# came through, which reads as the option having no effect rather than as a lost copy.
 _with_exact(o::CBEBugOptions, e::Bool) = CBEBugOptions(;
-    dt = o.dt, n_steps = o.n_steps, dex = o.dex, growth = o.growth, dover = o.dover,
-    comp_ratio = o.comp_ratio, sulz_cap = o.sulz_cap, preselect_only = o.preselect_only,
-    centre_expand = o.centre_expand, maxdim = o.maxdim, trunc_thresh = o.trunc_thresh,
-    normalize = o.normalize, maxiter = o.maxiter, tol = o.tol, s_iters = o.s_iters,
-    s_reorth = o.s_reorth,
-    exact = e, seed = o.seed, record_magnetisation = o.record_magnetisation,
-    observe = o.observe)
+    (f => (f === :exact ? e : getfield(o, f)) for f in fieldnames(CBEBugOptions))...)
 
 export GroundStateInfo, solve!, cbe_dmrg!, rsvd_cbe_dmrg!
 

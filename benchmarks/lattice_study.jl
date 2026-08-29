@@ -11,7 +11,10 @@
 #
 # ── ON THE FAIRNESS OF THE COMPARISON, which is subtler than it first looks ────────────────
 #
-# `cbe_bug` does NOT have `grow_iters` -- that knob lives on `cbe_lubich_sweep`. Both schemes
+# `cbe_bug` DOES have `grow_iters` (2026-08-29); `cbe_lubich_sweep` has been REMOVED. ⚠ The two
+# were never the same algorithm: lubich's pass RE-RAN the CBE selection (measured 1.8x then flat
+# on OAT), while `cbe_bug`'s ACCUMULATES AND NEVER RE-RANKS -- do not carry numbers across. Both
+# schemes
 # already call the SAME `expv` Lanczos solver with the same `maxiter`, `tol` and `reorth`. What
 # differs is where the Krylov content sits:
 #

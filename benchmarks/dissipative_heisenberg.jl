@@ -538,7 +538,31 @@ function protocol(; L::Int = 16, tmax::Float64 = 4.0, dt::Float64 = 0.01, cap::I
     W, shift = xyz_decay_lindblad(L)
     Imps = identity_superket(L)
     kw = (maxdim = cap, trunc_thresh = 1e-12, maxiter = maxiter, hermitian = false)
-    rs = (exact = false, dover = 4, growth = growth)
+    # ⛔ `krylov_basis` AND `dex` ARE NOT OPTIONAL HERE -- LEAVING THEM AT THEIR DEFAULTS MADE THE
+    # BUG ARMS 14x SLOWER THAN THEY NEED TO BE, AND `krylov` COULD NOT SEE IT.
+    #
+    # `cbe_bug_step!` defaults to `krylov_basis = 30, krylov_tol = 1e-6, dex = 0`. This driver used
+    # to set none of them, so each half-sweep built up to 30 Arnoldi vectors PER SITE -- and on a
+    # NON-Hermitian Lindbladian (`hermitian = false`) there is no tridiagonal shortcut, so
+    # reorthogonalisation is O(m^2). MEASURED, L=10, cap 20, dt 0.05, 4 steps, vs `tdvp2 = 1.00x`:
+    #
+    #     kb=30 tol=1e-6 (the old default)   47.78 s/step   6.89x   d<s^a> 5.42e-04
+    #     kb=5  tol=0                        19.08 s/step   2.75x          4.33e-04
+    #     kb=3  tol=0                        12.46 s/step   1.80x          7.11e-04
+    #     kb=3  tol=0  dex=8                  3.40 s/step   0.49x          7.11e-04   <-- this
+    #     kb=2  tol=0                         5.96 s/step   0.86x          1.55e-03
+    #     kb=0  (CBE frame alone)             1.13 s/step   0.16x          3.91e-02
+    #
+    # `dex = 8` is 3.7x faster than `dex = 0` at the SAME accuracy to every digit. Below `kb = 3`
+    # accuracy falls off a cliff (kb=0 is 55x worse), which is the documented "not enough Krylov
+    # vectors is a real and easily-missed source of error" -- it does NOT look like a basis problem,
+    # because it survives more budget and more rank.
+    #
+    # ⛔ NONE OF THIS SHOWS IN `krylov`, WHICH READ 32 FOR EVERY ROW ABOVE. `get_krylov_log()` sees
+    # only the root Galerkin solve; the half-sweep basis construction is where the time goes. Do not
+    # use `krylov` as a cost proxy for a BUG arm -- use wall clock on an otherwise idle box.
+    rs = (exact = false, dover = 4, growth = growth,
+          dex = 8, krylov_basis = 3, krylov_tol = 0.0)
     steppers = Dict{String, Function}(
         "tdvp2"      => (p, h) -> tdvp2_step!(p, W, ComplexF64(h); kw...),
         "tdvp_cbe1s" => (p, h) -> tdvp_cbe1s_step!(p, W, ComplexF64(h); kw...),

@@ -22,7 +22,7 @@ Contents, in dependency order:
     arXiv:2606.28169) and one rank-3 `(bra, mpo, ket)` environment per link (Eq. 1.8), from
     which the effective Hamiltonians follow as a single contraction (Eq. 1.7). This is the
     representation the parallel-BUG sweep of that paper is written in, and it is what
-    `cbe_lubich_sweep` runs on; `henv.jl` is kept as the independent witness that the two
+    `cbe_bug_step!` runs on; `henv.jl` is kept as the independent witness that the two
     are one operator (`test_mpo.jl` pins them elementwise). Unlike the factored form it is
     site-dependent, so it is not restricted to a uniform nearest-neighbour term list.
 
@@ -30,7 +30,8 @@ Contents, in dependency order:
     expansion (sector-graded sketch, preselection, final selection); Part II drives it from
     a bond frame and solves the local problem in the expanded basis (`_expanding_krylov`),
     plus the shared `CBEBugOptions` / `CBEBugRunInfo`.
-  - `cbe_lubich.jl` — `cbe_lubich_sweep`: basis sweep + one centre-bond Galerkin step, on
+  - `zero_site_core.jl` — the zero-site Galerkin generator, `_frame_from`, and the truncation
+    sweeps. ⛔ `cbe_lubich_sweep` was REMOVED 2026-08-29; only this shared core remains, on
     the environment-dressed effective `H`.
   - `modes/` — `GroundState` alone. A THIN submodule: it fixes the reduction applied to the
     Krylov tridiagonal and adds no algorithm of its own.
@@ -92,18 +93,18 @@ include("multiplets.jl")
 include("cbe_core.jl")
 # The Hamiltonian as a genuine MPO (rank-4 `W^[i]`) plus its rank-3 environments, i.e. the
 # objects arXiv:2606.28169 Eqs. (1.3), (1.7) and (1.8) name. It provides a METHOD for every
-# verb `cbe_lubich_sweep` uses -- `boundary_channels`, `left/right_env_stack`,
+# verb `cbe_bug_step!` uses -- `boundary_channels`, `left/right_env_stack`,
 # `push_left/right_channels`, `apply_h_two_site`, `sketch_h_*`, `cbe_expand`,
 # `zero_site_h` -- so the sweep runs on either representation unchanged and the channel
 # path in `henv.jl` stays as the independent witness that the two are one operator.
 # After `cbe_core.jl`, since it adds methods to `cbe_expand` and the sketches.
 include("mpo.jl")
-include("cbe_lubich.jl")
+include("zero_site_core.jl")
 # Jan BUG: the full KLS step at EVERY bond across the whole chain -- CBE for the basis update and
 # the 0-site S step taken as well, then QR'd with `R` discarded so no evolution accumulates -- and
 # at the far bond the S step is KEPT, which is the step. One truncation after the sweep,
 # direction alternating between steps. MPO-only, so a long-range or site-dependent H needs a
-# different `MPO` and nothing else. After `cbe_lubich.jl`, whose `_frame_from` /
+# different `MPO` and nothing else. After `zero_site_core.jl`, whose `_frame_from` /
 # `_absorb_left!` / `_absorb_right!` it reuses.
 
 # models/ -- the BENCHMARK HAMILTONIANS, and the MPO machinery Haldane-Shastry needs that
@@ -137,6 +138,10 @@ include("models/haldane_shastry.jl")
 #                            ordering is the whole content -- see the file's header for why the
 #                            SHORT direction is the one that wraps.
 include("models/square_cylinder.jl")
+# models/triangular_cylinder.jl  the square cylinder plus one diagonal per
+# plaquette -- the FRUSTRATED lattice of the set, and the one whose bond
+# dimension at fixed accuracy is highest.
+include("models/triangular_cylinder.jl")
 # models/kagome.jl           the KAGOME cylinder -- corner-sharing triangles, coordination 4, and
 #                            the frustrated lattice whose Heisenberg antiferromagnet is a
 #                            spin-liquid candidate. Coupling matrix only, like the square one.
@@ -183,7 +188,7 @@ include("tdvp1_cbe/variants.jl")
 #                          K-step basis updates with `R` discarded, environments NOT frozen,
 #                          one Galerkin update at the root bond.
 #
-# After `jan_bug.jl` and `cbe_lubich.jl`, whose `_relink`, `_frame_from`, `_absorb_left!`,
+# After `jan_bug.jl` and `zero_site_core.jl`, whose `_relink`, `_frame_from`, `_absorb_left!`,
 # `_absorb_right!`, `truncate_sweep!` and `_state_stored` they reuse rather than reimplement,
 # and after `tdvp2/` for `tensor_elements`.
 include("sweeps/expansion.jl")
@@ -221,7 +226,7 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        sketch_h_left, sketch_h_right,
        sector_graded_sketch, full_local_basis,
        CBEExpansion, cbe_expand,
-       CBEBugInfo, cbe_lubich_sweep, truncate_sweep!, truncate_recursive!,
+       truncate_sweep!, truncate_recursive!,
        CBEBugOptions, CBEBugRunInfo, tfim_mpo,
        sketch_bond_left, sketch_bond_right, cbe_expand_bond,
        cbe_bond_update,
@@ -240,6 +245,8 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        spin_vertices,
        haldane_shastry_couplings, haldane_shastry_mpo,
        square_cylinder_couplings, square_cylinder_mpo, square_cylinder_bonds,
+       triangular_cylinder_couplings, triangular_cylinder_mpo,
+       triangular_cylinder_bonds, triangular_coordination,
        kagome_cylinder_couplings, kagome_cylinder_mpo, kagome_bonds, kagome_triangles,
        breathing_kagome_positions, breathing_kagome_couplings, breathing_kagome_mpo,
        heisenberg_chain_mpo, heisenberg_ring_couplings, heisenberg_ring_mpo,
