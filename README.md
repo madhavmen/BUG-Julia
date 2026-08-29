@@ -171,6 +171,12 @@ to read the diagnostics, the Krylov-depth result (§6b), and the gotchas.
 📁 **[examples/README.md](examples/README.md)** — the three example scripts, their parameters,
 the CSV columns, and what the randomised sketch does and does not affect.
 
+📊 **[benchmarks/imaginary_time/README.md](benchmarks/imaginary_time/README.md)** — the three-model
+campaign: Heisenberg chain and cylinder on logarithmic imaginary-time grids, and a boundary-driven
+open XX chain on a uniform one. Every arm scored against an analytic reference, and the caveats
+that have to travel with the numbers (`matvec` is not a cost proxy for BUG; model 3 has two
+regimes; no open model here has a symmetry arm).
+
 ## Retired paths
 
 `exploratory/` holds the global-sweep discarded BUG and the pre-refactor ITensors tree. None of

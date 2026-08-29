@@ -75,7 +75,8 @@ function fused_space()
         #     sigma^+ rho sigma^-  ->  kron(_SP, transpose(_SM)) = kron(_SP, _SP)
         #     sigma^- rho sigma^+  ->  kron(_SM, transpose(_SP)) = kron(_SM, _SM)
         #
-        # `benchmarks/dissipative_xx.jl`'s `calibrate()` pins it against a dense Liouvillian.
+        # `benchmarks/imaginary_time/dissipative_xx.jl`'s `calibrate()` pins it against a dense
+        # Liouvillian.
         :JP  => sparse(kron(_SP, _SP)),      # sigma^+ rho sigma^-   (gain: pumps UP)
         :JM  => sparse(kron(_SM, _SM)),      # sigma^- rho sigma^+   (loss: pumps DOWN)
         # ⛔ `PX` EXISTS BECAUSE `<sigma^x> = +1` IS NOT A FUSED BASIS STATE. The dissipative
