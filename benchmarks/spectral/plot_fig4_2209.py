@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """Fig. 4 of arXiv:2209.00739 -- S(q,omega) of the square-lattice Heisenberg model.
 
-Panels follow the paper: the BZ path, the spectrum along it, the dispersion near M, the
-dispersion against linear spin-wave theory, and frequency cuts at high-symmetry momenta. A sixth
-panel carries the integrator comparison, which is this repository's question rather than theirs.
+Panels follow the paper: the BZ path, the spectrum along it, the dispersion against linear
+spin-wave theory, and frequency cuts at high-symmetry momenta. A fifth panel carries the
+integrator comparison, which is this repository's question rather than theirs.
+
+⛔ THE "DISPERSION NEAR M" VELOCITY PANEL IS GONE. The velocity is the SLOPE of eps(q) near M, and
+on a 3-column cylinder the allowed q_x are spaced 2*pi/3 with eps(q) flat across the whole
+selection -- the fit refused itself ("5 usable q points, spread 0.0e+00") and the panel rendered as
+an empty box holding a red error message. A panel that can never carry a measurement at these sizes
+is not a caveat worth a sixth of the figure. The velocity belongs to the L=20 chain, where there is
+an EXACT number (v = pi/2) to score against; see `plot_fig45_2209.py` panel e).
 
 eps(q) is Eq. (19), argmax_w S(q,w) -- the paper's preferred extractor ("using Eq. (19) yields a
 more accurate method of obtaining the dispersion relation"). <w>(q) is Eq. (20), the first moment,
@@ -34,11 +41,39 @@ def lswt_square(qx, qy, J=1.0):
 
     w_q = z J S sqrt(1 - gamma_q^2) with z = 4, S = 1/2, gamma_q = (cos qx + cos qy)/2,
     i.e. 2 J sqrt(1 - gamma^2). At q = (pi, 0) this is 2J, the textbook LSWT value that quantum
-    corrections renormalise upward. The paper rescales SWT "by a common factor"; it is drawn
-    UNSCALED here so the raw comparison is visible.
+    corrections renormalise upward. The paper rescales SWT "by a common factor" and so does this
+    figure -- see `lswt_scale`.
     """
     g = (np.cos(qx) + np.cos(qy)) / 2.0
     return 2.0 * J * np.sqrt(np.maximum(0.0, 1.0 - g ** 2))
+
+
+# Literature quantum renormalisation of the LSWT magnon energy for the S=1/2 square-lattice
+# Heisenberg AFM. Series expansion and QMC both put it near 1.18 (Singh & Gelfand PRB 52 R15695;
+# Sandvik & Singh PRL 86 528; Ronnow et al. PRL 87 037202). It is the number the FITTED scale below
+# is checked against -- NOT a factor applied to the curve, which would assume the answer.
+ZC_LIT = {"square": 1.18}
+
+
+def lswt_scale(eps, wl):
+    """Single common factor Z minimising ||Z*w_LSWT - eps||, and the mask it was fitted on.
+
+    ⛔ LSWT AT S=1/2 IS NOT SUPPOSED TO MATCH IN MAGNITUDE, so an unscaled curve tests nothing that
+    a reader can act on -- it sits uniformly below the data and every panel looks equally wrong.
+    What LSWT can certify is the SHAPE of the branch, and that is only visible once the one free
+    overall factor is removed. The paper does exactly this ("rescaled by a common factor").
+
+    ⛔ THE FACTOR IS FITTED, NOT SET TO THE LITERATURE Z_c. Fitting leaves Z as a MEASUREMENT that
+    can be scored against 1.18; hard-coding 1.18 would draw a curve that agrees by construction and
+    could never disagree. Z is reported on the figure for that reason.
+
+    Fitted only where LSWT is nonzero: at Gamma and M the magnon energy vanishes, those points
+    carry no scale information, and including them would just add zeros to both sums.
+    """
+    m = np.isfinite(eps) & (wl > 1e-9)
+    if m.sum() < 2:
+        return None, m
+    return float(np.sum(wl[m] * eps[m]) / np.sum(wl[m] ** 2)), m
 
 
 def load_sqw(path):
@@ -102,11 +137,21 @@ def main():
     w20 = np.where(weak, np.nan, w20)
     negfrac = np.abs(np.clip(S, None, 0.0)).sum() / max(np.abs(S).sum(), 1e-300)
 
+    # ONE common factor, fitted once and used by BOTH LSWT panels, so the two cannot disagree.
+    wl = lswt_square(qx, qy)
+    Zfit, zmask = lswt_scale(eps19, wl)
+    if Zfit is None:
+        wl_s, zlab = wl, "LSWT (unscaled -- too few points to fit a scale)"
+    else:
+        wl_s, zlab = Zfit * wl, r"LSWT $\times\,Z$=%.2f" % Zfit
+
+    # 5 panels, not 6: the bottom row is INSET BY ONE COLUMN so the two rows stay centred on each
+    # other rather than leaving a hole where the deleted velocity panel used to be.
     fig = plt.figure(figsize=(15, 9))
-    gs = fig.add_gridspec(2, 3, hspace=0.32, wspace=0.28)
+    gs = fig.add_gridspec(2, 6, hspace=0.32, wspace=0.85)
 
     # (a) the path through the BZ
-    ax = fig.add_subplot(gs[0, 0])
+    ax = fig.add_subplot(gs[0, 0:2])
     ax.plot(qx, qy, "-", color="0.6", lw=1)
     ax.scatter(qx[exact], qy[exact], s=26, c="tab:blue", label=r"$q_y$ allowed", zorder=3)
     ax.scatter(qx[~exact], qy[~exact], s=18, facecolors="none", edgecolors="tab:red",
@@ -121,10 +166,10 @@ def main():
     ax.legend(fontsize=8); ax.set_aspect("equal"); ax.grid(alpha=0.3)
 
     # (b) the spectrum along the path
-    ax = fig.add_subplot(gs[0, 1])
+    ax = fig.add_subplot(gs[0, 2:4])
     im = ax.pcolormesh(dist, ws, Spos.T, shading="auto", cmap="magma")
     ax.plot(dist, eps19, "o-", ms=3, lw=1.2, color="cyan", label=r"$\epsilon(q)$ Eq. (19)")
-    ax.plot(dist, lswt_square(qx, qy), "--", lw=1.4, color="w", label="LSWT (unscaled)")
+    ax.plot(dist, wl_s, "--", lw=1.4, color="w", label=zlab)
     for x, lab in ticks:
         ax.axvline(x, color="w", lw=0.6, alpha=0.5)
     ax.set_xticks([t[0] for t in ticks])
@@ -134,62 +179,44 @@ def main():
     ax.legend(fontsize=8, loc="upper right")
     fig.colorbar(im, ax=ax, pad=0.02)
 
-    # (c) dispersion near M, fitted to v q + Delta as in the paper
-    ax = fig.add_subplot(gs[0, 2])
-    iM = int(np.argmin(np.abs(dist - [t[0] for t in ticks][2]))) if len(ticks) > 2 else nq // 2
-    sel = slice(max(0, iM - 5), min(nq, iM + 1))
-    dq = dist[sel] - dist[iM]
-    ev = eps19[sel]
-    ax.plot(dq, ev, "o", color="tab:blue", label=r"$\epsilon(q)$")
-    # ⛔ ONLY FIT A VELOCITY IF THE MOMENTUM GRID CAN RESOLVE ONE, and refuse loudly otherwise.
-    # The velocity is the SLOPE of eps(q) near M, so it needs several DISTINCT eps values inside
-    # a window that is actually near M. On a 3-column cylinder the allowed q_x are spaced 2*pi/3
-    # and eps(q) is flat across the whole selection -- fitting that returned "v = 0.00", which is
-    # not a small velocity, it is no measurement at all. A number like that on a figure outlives
-    # every caveat in the text.
-    m = (dq != 0) & np.isfinite(ev)
-    spread = np.ptp(ev[m]) if m.sum() > 1 else 0.0
-    if m.sum() > 2 and spread > 1e-3 and abs(dq[m]).max() < 1.0:
-        p = np.polyfit(dq[m], ev[m], 1)
-        ax.plot(dq, np.polyval(p, dq), "-", color="tab:blue",
-                label=r"$vq+\Delta$: $v$=%.2f $\Delta$=%.2f" % (abs(p[0]), p[1]))
-        p0 = np.sum(dq[m] * ev[m]) / max(np.sum(dq[m] ** 2), 1e-30)
-        ax.plot(dq, p0 * dq, "--", color="tab:red",
-                label=r"$\Delta\equiv0$: $v$=%.2f" % abs(p0))
-    else:
-        ax.text(0.5, 0.45,
-                "no velocity fit:\n%d usable $q$ points, spread %.1e over $|q-q_M|\\leq$%.2f\n"
-                "the grid ($2\\pi/L_x$) cannot resolve a slope at this size" %
-                (int(m.sum()), spread, abs(dq).max() if len(dq) else 0.0),
-                ha="center", va="center", transform=ax.transAxes, fontsize=8.5,
-                bbox=dict(boxstyle="round", fc="mistyrose", ec="crimson"))
-    ax.set_xlabel(r"$q - q_M$"); ax.set_ylabel(r"$\omega / J$")
-    ax.set_title("c) dispersion near M")
-    ax.legend(fontsize=8); ax.grid(alpha=0.3)
-
-    # (d) dispersion vs LSWT
-    ax = fig.add_subplot(gs[1, 0])
+    # (c) dispersion vs LSWT, rescaled by the SAME fitted factor panel b) uses
+    ax = fig.add_subplot(gs[0, 4:6])
     ax.plot(dist, eps19, "o-", ms=4, label=r"$\epsilon(q)$ Eq. (19)")
     ax.plot(dist, w20, "s--", ms=3, alpha=0.7, label=r"$\langle\omega\rangle(q)$ Eq. (20)")
-    ax.plot(dist, lswt_square(qx, qy), "-", color="k", lw=1.4, label="LSWT (unscaled)")
+    ax.plot(dist, wl_s, "-", color="k", lw=1.4, label=zlab)
     ax.set_xticks([t[0] for t in ticks])
     ax.set_xticklabels([r"$\Gamma$" if t[1] == "G" else t[1] for t in ticks])
     ax.set_ylabel(r"$\omega / J$")
-    ax.set_title("d) magnon dispersion")
+    ax.set_title("c) magnon dispersion")
     ax.legend(fontsize=8); ax.grid(alpha=0.3)
+    # The fitted factor is the quantitative content of this panel, so it is REPORTED and scored
+    # against the literature value rather than left for the reader to judge by eye. A residual is
+    # given too: rescaling can only fix the magnitude, and if the SHAPE disagrees the residual says
+    # so where an overlaid curve would just look approximately right.
+    if Zfit is not None:
+        zc = ZC_LIT.get("square")
+        resid = float(np.sqrt(np.mean((eps19[zmask] - wl_s[zmask]) ** 2)))
+        msg = (r"fitted $Z$ = %.3f  (%d $q$ points)" "\n"
+               r"literature $Z_c \approx$ %.2f  $\rightarrow$ %+.0f%%" "\n"
+               r"rms residual after scaling: %.3f $J$") % (
+                   Zfit, int(zmask.sum()), zc, 100.0 * (Zfit / zc - 1.0), resid)
+        ok = abs(Zfit / zc - 1.0) < 0.25
+        ax.text(0.02, 0.03, msg, transform=ax.transAxes, fontsize=7.5, va="bottom",
+                bbox=dict(boxstyle="round", fc="honeydew" if ok else "mistyrose",
+                          ec="0.6" if ok else "crimson"))
 
-    # (e) frequency cuts at the high-symmetry momenta
-    ax = fig.add_subplot(gs[1, 1])
+    # (d) frequency cuts at the high-symmetry momenta
+    ax = fig.add_subplot(gs[1, 1:3])
     for x, lab in ticks:
         i = int(np.argmin(np.abs(dist - x)))
         nm = r"$\Gamma$" if lab == "G" else lab
         ax.plot(ws, Spos[i], lw=1.4, label="%s  ($S_{max}$=%.1e)" % (nm, Spos[i].max()))
     ax.set_xlabel(r"$\omega / J$"); ax.set_ylabel(r"$S(q,\omega)$")
-    ax.set_title("e) cuts at high-symmetry $q$")
+    ax.set_title("d) cuts at high-symmetry $q$")
     ax.legend(fontsize=8); ax.grid(alpha=0.3)
 
-    # (f) the integrator comparison -- this repository's question
-    ax = fig.add_subplot(gs[1, 2])
+    # (e) the integrator comparison -- this repository's question
+    ax = fig.add_subplot(gs[1, 3:5])
     cost = os.path.join(d, "fig4_cost_%s.csv" % geo)
     if os.path.exists(cost) and len(arms) > 1:
         rows = list(csv.DictReader(open(cost)))
@@ -211,7 +238,7 @@ def main():
         ax.axhline(1.0, color="k", ls=":", lw=1)
         ax.set_ylim(0, 1.35)
         ax.set_ylabel("relative to tdvp2")
-        ax.set_title("f) cost on the same correlator")
+        ax.set_title("e) cost on the same correlator")
         ax.legend(fontsize=7.5, loc="upper right")
         # ⛔ THE TWO BARS DO NOT MEASURE THE SAME THING, AND THE GAP IS NOT A BUG.
         # `krylov_dims` counts `apply_one_site` calls only; BUG's expansion work lives inside
