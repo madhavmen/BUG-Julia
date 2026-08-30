@@ -116,6 +116,47 @@ REF_LABEL = {"square": "LSWT (unscaled)", "triangle": "LSWT (unscaled)",
              "chain": r"des Cloizeaux--Pearson $\omega_L=\frac{\pi}{2}|\sin q|$ (exact)"}
 
 
+def load_g0(path):
+    """Equal-time correlator from `fig45_G_*.csv`: -> (dx, dy, G0) relative to the SOURCE site.
+
+    The G file is the only place the real-space geometry survives, and it is what makes a 2D
+    S(q) possible at all: the Sqw file carries S(q) only ON THE PATH, which cannot show whether
+    the ordering peak sits where it should or merely somewhere along one line through the zone.
+
+    ⛔ THE SOURCE SITE IS FOUND FROM THE DATA, NOT ASSUMED. `G(c,0) = <(S^z_c)^2> = 1/4` is the
+    largest equal-time value by construction, so `argmax` locates it without re-deriving
+    `centre_site` here -- a second copy of that rule is a second thing that can disagree with the
+    driver. Positions are already CARTESIAN in the file (`rx`,`ry`), so the triangular 120-degree
+    basis needs no special case.
+    """
+    rx, ry, g0 = [], [], []
+    with open(path, encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            if abs(float(r["t"])) > 1e-12:
+                continue
+            rx.append(float(r["rx"]))
+            ry.append(float(r["ry"]))
+            g0.append(float(r["ReG"]))
+    rx = np.array(rx); ry = np.array(ry); g0 = np.array(g0)
+    c = int(np.argmax(np.abs(g0)))
+    return rx - rx[c], ry - ry[c], g0
+
+
+def static_sq_grid(dx, dy, g0, lim=2.2 * np.pi, n=241):
+    """S(q) on a 2D q-grid, by the SAME cosine convention as Eq. (14).
+
+    S(q) = sum_x cos(q.x) G(x, t=0). Real by construction, and identical to the driver's Eq. (4)
+    value on the path -- the panel is a different VIEW of the number the driver already reports,
+    not a second definition of it.
+    """
+    u = np.linspace(-lim, lim, n)
+    QX, QY = np.meshgrid(u, u)
+    S = np.zeros_like(QX)
+    for k in range(len(g0)):
+        S += g0[k] * np.cos(QX * dx[k] + QY * dy[k])
+    return u, S
+
+
 def load_sqw(path):
     q, lab, dist, allowed, sq, w, S = [], [], [], [], [], [], []
     with open(path, encoding="utf-8") as f:
@@ -340,6 +381,17 @@ def main():
     # they were.
     wup = dcp_upper(qxs) if lat == "chain" else None
 
+    # ⛔ INTERPOLATED q ARE NOT DRAWN ANYWHERE. They are not momenta of this cylinder: the
+    # transform there is not a spectral function, argmax is not an excitation energy, and the
+    # positivity theorem does not apply to them. Drawing them invites reading a flat or a
+    # negative stretch as physics. Every panel below uses the `_e` (exact-only) arrays.
+    exq   = np.array(d["allowed"], dtype=bool)
+    dq_e  = np.asarray(d["dists"])[exq]
+    Sq_e  = np.asarray(d["Sq"])[exq]
+    S_e   = np.asarray(d["S"])[exq]
+    eps_e, mom_e, lswt_e = eps[exq], mom[exq], lswt[exq]
+    wup_e = wup[exq] if wup is not None else None
+
     fig, ax = plt.subplots(2, 4, figsize=(23.0, 10.2))
 
     # a) the path, with the allowed momenta marked
@@ -349,8 +401,6 @@ def main():
     a.plot(qs[:, 0], qs[:, 1], "-", color="0.6", lw=1, zorder=1)
     a.scatter(qs[al, 0], qs[al, 1], s=34, color="#1f77b4", zorder=3,
               label=r"$q$ allowed (exact)")
-    a.scatter(qs[~al, 0], qs[~al, 1], s=28, facecolors="none", edgecolors="#d62728", zorder=3,
-              label=r"$q$ interpolated")
     for x, l in zip(d["dists"], d["labels"]):
         if l:
             i = d["dists"].index(x)
@@ -362,13 +412,13 @@ def main():
 
     # b) the spectrum
     a = ax[0][1]
-    im = a.pcolormesh(d["dists"], d["ws"], np.clip(d["S"], 0, None).T,
+    im = a.pcolormesh(dq_e, d["ws"], np.clip(S_e, 0, None).T,
                       shading="auto", cmap="magma")
     fig.colorbar(im, ax=a)
-    a.plot(d["dists"], eps, "-o", ms=3, color="cyan", lw=1.2, label=r"$\epsilon(q)$ Eq. (19)")
-    a.plot(d["dists"], lswt, "--", color="white", lw=1.4, label=REF_LABEL[lat])
-    if wup is not None:
-        a.plot(d["dists"], wup, "--", color="#7fdbff", lw=1.4,
+    a.plot(dq_e, eps_e, "-o", ms=3, color="cyan", lw=1.2, label=r"$\epsilon(q)$ Eq. (19)")
+    a.plot(dq_e, lswt_e, "--", color="white", lw=1.4, label=REF_LABEL[lat])
+    if wup_e is not None:
+        a.plot(dq_e, wup_e, "--", color="#7fdbff", lw=1.4,
                label=r"$\omega_U=\pi|\sin(q/2)|$")
     a.set_xticks(xt); a.set_xticklabels(xl)
     for x in xt:
@@ -379,61 +429,33 @@ def main():
 
     # c) the STATIC structure factor -- the paper's Fig. 5 a)
     a = ax[0][2]
-    a.plot(d["dists"], d["Sq"], "-o", ms=4, color="#2ca02c")
-    for x, ok in zip(d["dists"], d["allowed"]):
-        if not ok:
-            a.axvspan(x, x, color="#d62728", alpha=0.0)
-    a.scatter([x for x, ok in zip(d["dists"], d["allowed"]) if ok],
-              [s for s, ok in zip(d["Sq"], d["allowed"]) if ok],
-              s=48, color="#2ca02c", zorder=4, label="exact momenta")
+    a.plot(dq_e, Sq_e, "-o", ms=5, color="#2ca02c", label="exact momenta")
     a.set_xticks(xt); a.set_xticklabels(xl)
     a.set_ylabel(r"$S(q)$  (equal time)")
     a.set_title("c) static structure factor\n"
                 "the ordering peak lives here", fontsize=11)
     a.grid(alpha=0.3); a.legend(fontsize=8)
-    if lat == "triangle":
-        nex = sum(1 for ok in d["allowed"] if ok)
-        a.text(0.5, 0.955, f"XC wrapping: {nex}/{len(d['allowed'])} path points are exact "
-                           f"momenta.\n$K=(4\\pi/3,0)$ has $q_y=0$, so it is exact at every "
-                           f"even $C$.",
-               transform=a.transAxes, ha="center", va="top", fontsize=8,
-               bbox=dict(fc="#eef7ee", ec="#2ca02c"))
 
     # d) dispersion against LSWT
     a = ax[0][3]
-    a.plot(d["dists"], eps, "-o", ms=4, label=r"$\epsilon(q)$ Eq. (19)")
-    a.plot(d["dists"], mom, "--s", ms=4, alpha=0.8, label=r"$\langle\omega\rangle(q)$ Eq. (20)")
-    a.plot(d["dists"], lswt, "-", color="k", lw=1.6, label=REF_LABEL[lat])
-    if wup is not None:
-        a.plot(d["dists"], wup, "-", color="#888888", lw=1.4,
+    a.plot(dq_e, eps_e, "-o", ms=4, label=r"$\epsilon(q)$ Eq. (19)")
+    a.plot(dq_e, mom_e, "--s", ms=4, alpha=0.8, label=r"$\langle\omega\rangle(q)$ Eq. (20)")
+    a.plot(dq_e, lswt_e, "-", color="k", lw=1.6, label=REF_LABEL[lat])
+    if wup_e is not None:
+        a.plot(dq_e, wup_e, "-", color="#888888", lw=1.4,
                label=r"$\omega_U$ (upper edge)")
-        a.fill_between(d["dists"], lswt, wup, color="#cccccc", alpha=0.35, zorder=0,
+        a.fill_between(dq_e, lswt_e, wup_e, color="#cccccc", alpha=0.35, zorder=0,
                        label="two-spinon continuum")
     sw = swt_report(d, eps, lswt, lat)
     if sw:
-        a.plot(d["dists"], sw["Z"] * lswt, ":", color="#d62728", lw=1.8,
+        a.plot(dq_e, sw["Z"] * lswt_e, ":", color="#d62728", lw=1.8,
                label=rf"LSWT $\times Z$, $Z={sw['Z']:.3f}$")
     a.set_xticks(xt); a.set_xticklabels(xl)
     a.set_ylabel(r"$\omega/J$")
     a.set_title("d) two-spinon continuum" if lat == "chain" else "d) magnon dispersion")
     a.legend(fontsize=8); a.grid(alpha=0.3)
-    if sw:
-        gp = "  ".join(f"$\\epsilon({k})$={v:.3f}" if np.isfinite(v) else f"$\\epsilon({k})$=n/a"
-                       for k, v in sw["gaps"].items())
-        verdict = ("shape OK" if sw["corr"] > 0.9 and sw["rel"] < 0.25 else
-                   "⚠ SHAPE DISAGREES")
-        # The chain's reference is EXACT, so its tolerance is not the 2D one. `Z` is expected a
-        # little above 1 (the Gaussian window pushes the argmax off the divergent edge) and `Z`
-        # BELOW 1 is a failure, not a renormalisation -- there is no weight under `w_L` to find.
-        note = (f"$Z$ slightly $>1$ EXPECTED (window pushes the peak off the edge); "
-                f"$Z<1$ = weight below an exact edge"
-                if lat == "chain" else
-                "$Z\\neq1$ is EXPECTED ($Z_c$>1 square, <1 triangle)")
-        a.text(0.02, 0.97,
-               f"vs {'dCP' if lat == 'chain' else 'LSWT'}: $Z$={sw['Z']:.3f}, "
-               f"corr={sw['corr']:.3f}, rel.resid={sw['rel']:.3f}\n{gp}   [{verdict}]\n{note}",
-               transform=a.transAxes, va="top", fontsize=7,
-               bbox=dict(fc="#eef3fb" if "OK" in verdict else "#ffecec", ec="#999"))
+    # The Z verdict, the per-point gaps and the chain's "Z>1 is expected, Z<1 is a failure" caveat
+    # all go to stdout at the end of main() instead of onto the panel.
     if wup is not None:
         # ⛔ A BOUND, CHECKED, NOT A CURVE DRAWN AND ADMIRED. Two-spinon states carry ~72.9% of the
         # total S(q,w) weight and four-spinon states most of the rest, so a few percent above
@@ -445,15 +467,13 @@ def main():
         tot = float(Sc.sum())
         mask = np.asarray(d["ws"])[None, :] > wup[:, None]
         frac = float(Sc[mask].sum()) / tot if tot > 0 else float("nan")
-        a.text(0.98, 0.02, f"weight above $\\omega_U$: {100 * frac:.1f}%\n"
-                           "(4-spinon + window; $\\gg$10% is a bug)",
-               transform=a.transAxes, ha="right", va="bottom", fontsize=7,
-               bbox=dict(fc="#fffbe6", ec="#999"))
+    # ⛔ REPORTED ON STDOUT, NOT PAINTED ON THE PANEL -- figures carry curves and legends only.
     if (~live).any():
-        a.text(0.02, 0.02, f"{int((~live).sum())} of {len(live)} q masked:\n"
-                           "spectral weight below 1e-6 of peak",
-               transform=a.transAxes, fontsize=7.5, va="bottom",
-               bbox=dict(fc="#fffbe6", ec="#999"))
+        print(f"  {int((~live).sum())} of {len(live)} q dropped from the dispersion "
+              f"(interpolated, or spectral weight below 1e-6 of the peak)")
+    if wup is not None:
+        print(f"  weight above the upper two-spinon edge w_U: {100 * frac:.1f}% "
+              f"(4-spinon + window; >>10% would be a bug)")
 
     # e) the magnon velocity -- the paper's Fig. 4 c) / Fig. 5 c)
     a = ax[1][0]
@@ -482,10 +502,6 @@ def main():
             nm, vex = ex
             a.plot(xs, vex * xs, "--", color="k", lw=1.8, label=rf"exact ${nm}$: $v={vex:.4f}$")
             err = 100.0 * abs(vz - vex) / vex
-            a.text(0.02, 0.97, f"$\\Delta\\equiv0$ fit vs exact: {err:.1f}%\n"
-                               "finite $L$ and the Eq. (12) window both bias this UP",
-                   transform=a.transAxes, va="top", fontsize=7.5,
-                   bbox=dict(fc="#eef3fb" if err < 15 else "#ffecec", ec="#999"))
         a.legend(fontsize=8); a.grid(alpha=0.3)
         # ⛔ NO QMC REFERENCE LINE IS DRAWN. The paper compares the square-lattice velocity against
         # QMC (its Fig. 4 c, green) but quotes the number only as a line in the figure; the value
@@ -523,18 +539,12 @@ def main():
         a.set_ylabel(f"relative to {names[ref]}")
         a.set_title("g) cost on the same correlator")
         a.legend(fontsize=8)
-        a.text(0.02, 0.97, "matvec UNDERCOUNTS bug:\ncbe_expand work is not in\nkrylov_dims "
-                           "-> quote wall clock",
-               transform=a.transAxes, va="top", fontsize=7.5,
-               bbox=dict(fc="#fffbe6", ec="#999"))
         # Agreement between arms, on the spectrum itself.
         if len(arms) > 1:
             base = arms.get("tdvp2", arms[main_arm])["S"]
             txt = "max|dS| vs tdvp2:\n" + "\n".join(
                 f"{k} {np.abs(v['S'] - base).max():.1e}" for k, v in sorted(arms.items())
                 if k != "tdvp2")
-            a.text(0.02, 0.55, txt, transform=a.transAxes, va="top", fontsize=7.5,
-                   bbox=dict(fc="#eefaf0", ec="#999"))
     else:
         a.axis("off")
         a.text(0.5, 0.5, "no cost file", ha="center")
@@ -546,13 +556,9 @@ def main():
                  f"positivity {pos['status']}: {100 * pos['agg']:.1f}% negative weight "
                  f"at the {pos['n']} exact $q$",
                  fontsize=14, color="crimson" if pos["status"] == "FAIL" else "black")
-    # A failed positivity gate is stamped ACROSS the figure, not filed in a corner. The panels
-    # below it look like a spectrum whatever the weight does, and a reader who scrolls past one
-    # line of stdout would quote a dispersion built from impossible weight.
-    if pos["status"] == "FAIL":
-        fig.text(0.5, 0.5, "S(q,ω) < 0  —  NOT A SPECTRAL FUNCTION",
-                 ha="center", va="center", fontsize=46, color="crimson", alpha=0.16,
-                 rotation=18, weight="bold", zorder=1000)
+    # The failed gate lives in the SUPTITLE (crimson) rather than as an overlay across the panels:
+    # the figure carries curves and legends only. The non-zero exit code below is the machine-
+    # readable half of the same statement.
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     out = os.path.join(RES, f"fig45_{lat}_{tag}.png")
     fig.savefig(out, dpi=150)

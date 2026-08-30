@@ -35,6 +35,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# ⛔ STDOUT HERE IS cp1252. Now that the derived numbers are PRINTED rather than drawn, any label
+# carrying "Γ" or "→" raises UnicodeEncodeError and kills the script after the figure is written --
+# a crash that looks like a plotting bug and is an encoding one. Same guard as plot_fig45_2209.py.
+sys.stdout.reconfigure(errors="replace")
+
 
 def lswt_square(qx, qy, J=1.0):
     """Linear spin-wave magnon energy of the square-lattice Heisenberg AFM.
@@ -194,12 +199,15 @@ def main():
         idx = list(range(a, b + 1))
         rk, _ = shape_rank(Spos, idx)
         if rk <= 1:
-            nm_a = "Γ" if labs[a] == "G" else labs[a]
-            nm_b = "Γ" if labs[b] == "G" else labs[b]
-            flat_seg.append(f"{nm_a}→{nm_b}")
+            # ASCII: this string is only ever PRINTED now, and stdout here is cp1252.
+            flat_seg.append(f"{labs[a]}->{labs[b]}")
             eps19[idx] = np.nan
             w20[idx] = np.nan
 
+    # Interpolated q are not momenta of this cylinder, so they are not extracted from and not
+    # drawn -- only q_y = 2*pi*n/Ly is a quantum number here.
+    eps19 = np.where(exact, eps19, np.nan)
+    w20 = np.where(exact, w20, np.nan)
     negfrac = np.abs(np.clip(S, None, 0.0)).sum() / max(np.abs(S).sum(), 1e-300)
 
     # ONE common factor, fitted once and used by BOTH LSWT panels, so the two cannot disagree.
@@ -219,8 +227,6 @@ def main():
     ax = fig.add_subplot(gs[0, 0:2])
     ax.plot(qx, qy, "-", color="0.6", lw=1)
     ax.scatter(qx[exact], qy[exact], s=26, c="tab:blue", label=r"$q_y$ allowed", zorder=3)
-    ax.scatter(qx[~exact], qy[~exact], s=18, facecolors="none", edgecolors="tab:red",
-               label=r"$q_y$ interpolated", zorder=3)
     for xx, lab in [(0, r"$\Gamma$"), (np.pi, "X"), (np.pi, "M")]:
         pass
     ax.annotate(r"$\Gamma$", (0, 0), fontsize=13, xytext=(4, 4), textcoords="offset points")
@@ -232,7 +238,7 @@ def main():
 
     # (b) the spectrum along the path
     ax = fig.add_subplot(gs[0, 2:4])
-    im = ax.pcolormesh(dist, ws, Spos.T, shading="auto", cmap="magma")
+    im = ax.pcolormesh(dist[exact], ws, Spos[exact].T, shading="auto", cmap="magma")
     ax.plot(dist, eps19, "o-", ms=3, lw=1.2, color="cyan", label=r"$\epsilon(q)$ Eq. (19)")
     ax.plot(dist, wl_s, "--", lw=1.4, color="w", label=zlab)
     for x, lab in ticks:
@@ -258,26 +264,19 @@ def main():
     # against the literature value rather than left for the reader to judge by eye. A residual is
     # given too: rescaling can only fix the magnitude, and if the SHAPE disagrees the residual says
     # so where an overlaid curve would just look approximately right.
+    # ⛔ REPORTED ON STDOUT, NOT PAINTED ON THE PANEL. The figures carry curves and legends only;
+    # every derived number goes to the log, where it can be diffed between runs instead of being
+    # re-read off an image.
     if Zfit is not None:
         zc = ZC_LIT.get("square")
         resid = float(np.sqrt(np.mean((eps19[zmask] - wl_s[zmask]) ** 2)))
-        msg = (r"fitted $Z$ = %.3f  (%d $q$ points)" "\n"
-               r"literature $Z_c \approx$ %.2f  $\rightarrow$ %+.0f%%" "\n"
-               r"rms residual after scaling: %.3f $J$") % (
-                   Zfit, int(zmask.sum()), zc, 100.0 * (Zfit / zc - 1.0), resid)
-        ok = abs(Zfit / zc - 1.0) < 0.25
-        ax.text(0.02, 0.03, msg, transform=ax.transAxes, fontsize=7.5, va="bottom",
-                bbox=dict(boxstyle="round", fc="honeydew" if ok else "mistyrose",
-                          ec="0.6" if ok else "crimson"))
+        print("LSWT scale [%s]: fitted Z = %.3f over %d q   literature Z_c = %.2f (%+.0f%%)   "
+              "rms residual after scaling %.3f J"
+              % (geo, Zfit, int(zmask.sum()), zc, 100.0 * (Zfit / zc - 1.0), resid))
     if flat_seg:
-        ax.text(0.98, 0.97,
-                "NO DISPERSION on " + ", ".join(flat_seg) + "\n"
-                "$S(q,\\omega)$ has ONE shape there, so\n"
-                "$\\arg\\max_\\omega$ is constant by construction\n"
-                "($L_x{=}%d$ leaves $%d$ independent channel%s)" %
-                (LX_COLS, max(LX_COLS // 2, 0), "" if LX_COLS // 2 == 1 else "s"),
-                transform=ax.transAxes, ha="right", va="top", fontsize=7.5,
-                bbox=dict(boxstyle="round", fc="mistyrose", ec="crimson"))
+        print("NO DISPERSION on %s: S(q,w) has one shape there, so argmax_w is constant by "
+              "construction (Lx=%d leaves %d independent channel(s)). Those q are masked."
+              % (", ".join(flat_seg), LX_COLS, max(LX_COLS // 2, 0)))
 
     # (d) frequency cuts at the high-symmetry momenta
     ax = fig.add_subplot(gs[1, 1:3])
@@ -297,13 +296,12 @@ def main():
         nm = r"$\Gamma$" if lab == "G" else lab
         smax = Spos[i].max()
         if smax <= floor:
-            dead.append("%s ($S_{max}$=%.0e)" % (nm, smax))
+            dead.append("%s (S_max=%.0e)" % (lab, smax))   # printed, not drawn -> plain text
             continue
         ax.plot(ws, Spos[i] / smax, lw=1.4, label="%s  ($S_{max}$=%.1e)" % (nm, smax))
     if dead:
-        ax.text(0.5, 0.14, "no weight, not drawn:  " + ",  ".join(dead),
-                transform=ax.transAxes, ha="center", va="center", fontsize=8,
-                bbox=dict(boxstyle="round", fc="mistyrose", ec="crimson"))
+        print("cuts carrying no weight, not drawn: %s   (normalising roundoff by its own maximum "
+              "would manufacture a full-height peak)" % ",  ".join(dead))
     ax.set_xlabel(r"$\omega / J$"); ax.set_ylabel(r"$S(q,\omega)\,/\,S_{max}$")
     ax.set_title("d) cuts at high-symmetry $q$, each $/S_{max}$")
     ax.legend(fontsize=8); ax.grid(alpha=0.3)
@@ -337,10 +335,6 @@ def main():
         # `krylov_dims` counts `apply_one_site` calls only; BUG's expansion work lives inside
         # `cbe_expand`/`sketch_h_*` and is INVISIBLE to it, so the operator-application bar
         # UNDERSTATES BUG. Wall clock is the complete measure and is the one to quote.
-        ax.text(0.02, 0.97,
-                "matvec undercounts BUG:\ncbe_expand work is not in krylov_dims\n-> quote wall clock",
-                transform=ax.transAxes, fontsize=7, va="top",
-                bbox=dict(boxstyle="round", fc="lightyellow", ec="0.6"))
         # Agreement between arms: same physics, or a speedup that bought a different answer.
         if "tdvp2" in arms:
             devs = []
@@ -352,9 +346,6 @@ def main():
                 dev = np.abs(arms[a][1] - arms["tdvp2"][1]).max() / \
                     max(np.abs(arms["tdvp2"][1]).max(), 1e-300)
                 devs.append("%s %.1e" % (a, dev))
-            ax.text(0.02, 0.60, "max|dS| vs tdvp2:\n" + "\n".join(devs),
-                    transform=ax.transAxes, fontsize=7.5, va="top",
-                    bbox=dict(boxstyle="round", fc="honeydew", ec="0.6"))
     else:
         ax.text(0.5, 0.5, "run more than one arm\nfor the cost comparison",
                 ha="center", va="center", transform=ax.transAxes)
