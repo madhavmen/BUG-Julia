@@ -81,8 +81,8 @@ function main()
     open(out, "w") do io
         println(io, "Lx,Ly,N,torus,J2,E0,E0_site,gap,dimer_site,dimer_is_gs")
         for J2 in J2S
-            Jm = triangular_cylinder_couplings(LX, LY; J2 = J2, periodic_y = true,
-                                               periodic_x = TOR)
+            Jm = triangular_cylinder_couplings(LX, LY; J2 = J2, geometry = :xc,
+                                               periodic_y = true, periodic_x = TOR)
             E0, gap, dE = ground(Jm, L)
             isdimer = abs(E0 - dE) < 1e-9
             @printf("%-7.3f %14.10f %14.10f %11.3e %12.8f%s\n",

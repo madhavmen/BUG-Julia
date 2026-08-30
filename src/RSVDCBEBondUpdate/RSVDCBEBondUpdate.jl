@@ -247,6 +247,7 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        square_cylinder_couplings, square_cylinder_mpo, square_cylinder_bonds,
        triangular_cylinder_couplings, triangular_cylinder_mpo,
        triangular_cylinder_bonds, triangular_coordination,
+       triangular_site_position, triangular_wrap_vector,
        kagome_cylinder_couplings, kagome_cylinder_mpo, kagome_bonds, kagome_triangles,
        breathing_kagome_positions, breathing_kagome_couplings, breathing_kagome_mpo,
        heisenberg_chain_mpo, heisenberg_ring_couplings, heisenberg_ring_mpo,

@@ -46,7 +46,7 @@ PRE = sys.argv[3] if len(sys.argv) > 3 else ""
 
 # The depth each sweep name pins. `mdef` is the package default (cap 30 + tol 1e-6) and is
 # deliberately NOT called "m=30": the tolerance usually stops it well short of the cap.
-ORDER = ["m0", "m2", "m3", "mdef"]
+ORDER = ["m0", "m2", "m3", "m4", "mdef"]
 LABEL = {"m0": "m = 0\n(one power of H)", "m2": "m = 2", "m3": "m = 3",
          "mdef": "package default\n(cap 30, tol 1e-6)"}
 
@@ -54,7 +54,7 @@ LABEL = {"m0": "m = 0\n(one power of H)", "m2": "m = 2", "m3": "m = 3",
 def load(path):
     """Final-time row per (tau_trunc, split_cutoff). The last sample is the accumulated answer."""
     rows = {}
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         for r in csv.DictReader(fh):
             key = (float(r["tau_trunc"]), float(r["split_cutoff"]))
             t = float(r["t"])
@@ -224,11 +224,11 @@ def main():
         print(f"no heis_grid{PRE}_*_L{L}_*.csv in {RES}")
         return 1
     print("sweeps found:", ", ".join(sorted(data)))
-    panel(data, "err_prof", f"Error vs the two truncations, per Krylov depth -- Heisenberg L={L}",
+    panel(data, "err_prof", f"Error vs the two truncations, per Krylov depth -- L={L} {PRE or 'chain'}",
           f"knob_cube_err_L{L}{PRE}.png")
-    panel(data, "maxbond", f"Bond dimension -- the price paid -- Heisenberg L={L}",
+    panel(data, "maxbond", f"Bond dimension -- the price paid -- L={L} {PRE or 'chain'}",
           f"knob_cube_chi_L{L}{PRE}.png", log=False, fmt="{:.0f}")
-    panel(data, "krylov", f"Operator applications -- Heisenberg L={L}",
+    panel(data, "krylov", f"Operator applications -- L={L} {PRE or 'chain'}",
           f"knob_cube_cost_L{L}{PRE}.png", log=True, fmt="{:.0f}")
     gradients(data)
     pareto(data)

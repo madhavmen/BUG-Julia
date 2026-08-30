@@ -205,7 +205,7 @@ function main()
         # labels -- rows that look like a flat J2 dependence and are actually one number repeated.
         for J2 in (SQUARE ? [0.0] : J2S)
             W = SQUARE ? square_cylinder_mpo(Lx, Ly) :
-                triangular_cylinder_mpo(Lx, Ly; J2 = J2,
+                triangular_cylinder_mpo(Lx, Ly; J2 = J2, geometry = :xc,
                                         periodic_y = true, periodic_x = torus)
             psi0 = dimer_state(N)            # the S = 0 sector, which is where the ground state is
             a = get(ANCHORS, J2, nothing)

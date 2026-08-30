@@ -506,18 +506,22 @@ Keywords:
     that set it.
   - `dover` -- oversampling for the preselection. `nothing` gives `ceil(0.2*dex)`, i.e.
     `Dpre = ceil(1.2*dex)` as in the reference.
-  - `comp_ratio` -- the sketch's complement/isometry split (`CompRatio`). **Default `1.0`,
-    i.e. the sketch is drawn ENTIRELY from the frame's orthogonal complement -- the
-    discarded space.**
+  - `comp_ratio` -- the sketch's complement/isometry split (`CompRatio`). `1.0` draws the
+    sketch ENTIRELY from the frame's orthogonal complement -- the discarded space; `0.5`
+    restores the reference's split; `nothing` drops the split entirely (probe drawn from
+    the full randomised fusion basis, with the exact `P_perp` still applied downstream in
+    preselection, so orthogonality is not at risk either way).
 
-    ⚠️ THIS DEPARTS FROM THE REFERENCE DELIBERATELY. `RSVDpreBE0SiQS.m:339` reads "do not
+    ⚠️ THE DEFAULT IS PER CALLER, AND THEY DISAGREE ON PURPOSE. `cbe_expand` itself and both
+    TDVP arms (`tdvp_cbe1s_sweep!`, `tdvp1_cbe_sweep!`) default to `0.5`, the reference's
+    split; `cbe_bug_step!` and `dmrg_cbe1s_sweep!` default to `1.0`. Do not "unify" them
+    from this docstring -- the `1.0` callers are the two that were MEASURED (see
+    `dmrg_cbe1s_sweep!`), and `growth = 2.0` is already an example of one arm's constant
+    being adopted everywhere without a measurement to back it.
+
+    ⚠️ `1.0` DEPARTS FROM THE REFERENCE DELIBERATELY. `RSVDpreBE0SiQS.m:339` reads "do not
     project into complement space, 1-site components are also important for bond update",
     i.e. the MATLAB explicitly rejects the pure-complement choice and splits the probe.
-    The default here is `1.0` because one knob that is either on or off is easier to reason
-    about than a continuum, and the complement is the part that finds NEW directions.
-    `0.5` restores the reference's split; `nothing` drops the split entirely (probe drawn
-    from the full randomised fusion basis, with the exact `P_perp` still applied downstream
-    in preselection, so orthogonality is not at risk either way).
   - `sulz_cap` -- keep the expanded rank at or below `2r`. **Default `false`, which applies
     NO bound** -- growth is limited by `room` (a hard local-space limit) and by `maxdim` at
     the truncation. Note that neither setting reproduces the reference, which caps the

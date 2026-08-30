@@ -79,19 +79,44 @@ is the method; `exact = true` forms the full fused basis and is the A/B referenc
 
 Leaves the orthogonality centre at site 1, so consecutive sweeps chain with no extra
 canonicalisation.
+
+## Two defaults that differ from the other CBE sweeps, and the measurement behind each
+
+Both were set on the square 5x4 `N = 20` cylinder at `D = 128` (`benchmarks/ground_state/`),
+scored against the exact `S^z = 0` sparse ground state, `E0/N = -0.649788994793`.
+
+`restol = 1e-6`, not the `1e-10` the TDVP arms use. Accuracy is FLAT across that axis
+(`dev/site` 5.023e-07 / 5.039e-07 / 5.037e-07 at `1e-6` / `1e-8` / `1e-10`) while the local
+eigensolve cost halves (2704 vs 5467 matvec) -- a free 2x.
+
+⚠️ THE SAME KNOB POINTS THE OPPOSITE WAY IN A TIME INTEGRATOR, so do not copy this to
+`tdvp_cbe1s_sweep!`. DMRG re-solves every site on the next sweep, so an over-tight local
+tolerance is thrown away; a time step gets ONE shot per site and the Krylov depth is the
+accuracy -- see the `krylov-depth-is-a-hidden-error-source` finding.
+
+`comp_ratio = 1.0`, not the reference's `0.5`. Best on BOTH deterministic columns here:
+`dev/site` 5.037e-07 vs 5.080e-07 (`0.5`) and 5.303e-07 (`0.25`), and fewest matvec
+(5467 vs 5585 / 5720). It also agrees with `cbe_bug_step!`, which already used `1.0`.
+
+⚠️ `dex` STAYS AT `0` (i.e. the `growth` schedule) EVEN THOUGH `dex = 8` MEASURED FASTER
+here (74.3 s vs 183.6 s at `dex = 16`, same energy). `dex` is an ABSOLUTE per-side budget,
+so a value tuned at one cap does not scale: `err_fnl` was already 0.556 at `D = 128`,
+meaning the expansion was discarding half its ranked candidates, and it starves harder at
+larger `D`. The reference's own rule is proportional (`Dex = ceil(rDex*Nkeep)`, a fraction
+of the CAP). Set `dex` at the DRIVER, where the cap is known; do not bake it in here.
 """
 function dmrg_cbe1s_sweep!(psi::SymMPS, mpo::MPO;
                            dex::Int = 0,
                            growth::Float64 = 2.0,
                            dover::Union{Nothing, Int} = nothing,
-                           comp_ratio::Union{Float64, Nothing} = 0.5,
+                           comp_ratio::Union{Float64, Nothing} = 1.0,
                            sulz_cap::Bool = false,
                            preselect_only::Bool = false,
                            exact::Bool = false,
                            maxdim::Int = 200,
                            trunc_thresh::Float64 = 1e-12,
                            maxiter::Int = 30,
-                           restol::Float64 = 1e-10,
+                           restol::Float64 = 1e-6,
                            seed_expanded::Bool = false,
                            rng::AbstractRNG = MersenneTwister(0x5EED))
     L = length(psi)
