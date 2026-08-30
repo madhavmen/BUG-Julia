@@ -136,10 +136,24 @@ def load_sqw(path):
 
 
 def masked_dispersion(d):
-    """eps(q) [Eq. 19] and <w>(q) [Eq. 20], both NaN where the weight is roundoff (rule 1)."""
+    """eps(q) [Eq. 19] and <w>(q) [Eq. 20], NaN at roundoff weight (rule 1) AND at every
+    interpolated q.
+
+    ⛔ INTERPOLATED q ARE NEVER USED FOR A QUANTITATIVE EXTRACTION. Only q_y = 2*pi*n/Ly is a
+    quantum number of the cylinder; every other point on the path is a Fourier coefficient of a
+    momentum the lattice does not have. At such a q the transform is not a spectral function -- it
+    is not required to be positive, `argmax_w` is not an excitation energy, and a first moment is a
+    moment of something that is partly negative. MEASURED on the untruncated square 3x4: negative
+    weight is EXACTLY 0.0000 at all 15 exact q and averages 0.102 (max 0.354) at the 20 interpolated
+    ones. Feeding those into eps(q) is what made the dispersion look bimodal against LSWT.
+
+    Everything downstream keys off the NaNs this puts in `eps`/`mom` -- the velocity fit, the
+    spin-wave report and the dispersion panels -- so the policy is enforced in ONE place.
+    """
     S = np.clip(d["S"], 0.0, None)
     tot = S.sum(axis=1)
-    live = tot > WEIGHT_FLOOR * max(tot.max(), 1e-300)
+    exact = np.asarray(d["allowed"], dtype=bool)
+    live = (tot > WEIGHT_FLOOR * max(tot.max(), 1e-300)) & exact
     eps = np.where(live, d["ws"][np.argmax(S, axis=1)], np.nan)
     with np.errstate(invalid="ignore", divide="ignore"):
         mom = np.where(live, (S * d["ws"]).sum(axis=1) / np.where(tot > 0, tot, np.nan), np.nan)
@@ -217,6 +231,56 @@ def velocity_fit(d, eps, lat, npts=6):
 # reference -- and both are masked by the S^z_tot selection rule at q = 0 only. A gap opening at
 # q = pi is a genuine failure: that is where the antiferromagnetic weight lives.
 SWT_ZERO_POINTS = {"square": ["Γ"], "triangle": ["Γ", "K"], "chain": ["Γ", "π", "2π"]}
+
+
+def positivity_gate(S, allowed, warn=1e-3, fail=1e-2):
+    """S(q,w) >= 0 is EXACT, not a tolerance -- the hardest gate this pipeline has.
+
+    S(q,w) = sum_n |<n|S^z_q|Om>|^2 delta(w - E_n + E_0) is a sum of squared moduli. It cannot be
+    negative for any q or any w. So negative weight is never "a bit of noise": it means the object
+    being transformed has stopped being a correlation function, and nothing downstream of it -- the
+    dispersion, the LSWT comparison, the velocity -- carries information. This gate runs BEFORE the
+    spin-wave verdict and suppresses it, because a shape disagreement computed from a corrupted
+    spectrum would otherwise be read as a statement about the physics.
+
+    ⛔ THE GATE RUNS ONLY AT q THAT ARE GENUINE QUANTUM NUMBERS. Positivity is a theorem about
+    eigenstates of the translation operator. On a cylinder only q_y = 2*pi*n/Ly qualifies; every
+    INTERPOLATED q on the path is a Fourier coefficient of a lattice that has no such momentum, so
+    the object there is not a spectral function and NOTHING requires it to be positive. Judging
+    those points would be scoring the pipeline against a condition that does not apply to them.
+
+    ⛔ WEIGHTED PER q, NOT COUNTED PER CELL. The old headline counted the FRACTION OF GRID CELLS
+    below zero, which is dominated by the empty region of the (q,w) plane and by q = Gamma, where
+    S^z_tot commutes with H so the weight is ~1e-16 and the sign is pure roundoff -- Gamma alone
+    reported 0.484.
+
+    MEASURED 2026-08-30, and why the threshold can be this tight. Square 3x4 (N=12, D=64 = full
+    rank 2^6, untruncated), split by whether q is exact:
+
+        exact q         negfrac 0.0000   mean = median = max, over 15 q
+        interpolated q  negfrac 0.1024 mean, 0.354 max
+
+    IDENTICALLY ZERO where the theorem applies -- which validates the transform, the protocol and
+    the S^z normalisation outright. Square 5x4 (N=20, D=64 against full rank 1024) then gives 0.139
+    mean at those SAME exact q. The cap, and nothing else, is what breaks positivity.
+    """
+    Sp = np.clip(S, 0.0, None)
+    Sn = np.abs(np.clip(S, None, 0.0))
+    ex = np.asarray(allowed, dtype=bool)
+    live = (Sp.max(axis=1) > 1e-3 * Sp.max())
+    tot_q = Sp.sum(axis=1) + Sn.sum(axis=1)
+    frac_q = np.where(tot_q > 0, Sn.sum(axis=1) / np.maximum(tot_q, 1e-300), 0.0)
+
+    gated = ex & live                       # the only points the theorem covers
+    other = (~ex) & live                    # reported for context, never scored
+    ctx = float(frac_q[other].mean()) if other.any() else float("nan")
+    if not gated.any():
+        return dict(agg=float("nan"), med=float("nan"), worst=float("nan"), n=0,
+                    interp=ctx, status="EMPTY", cells=float((S < 0).sum()) / S.size)
+    agg = float(Sn[gated].sum() / max(Sp[gated].sum() + Sn[gated].sum(), 1e-300))
+    return dict(agg=agg, med=float(np.median(frac_q[gated])), worst=float(frac_q[gated].max()),
+                n=int(gated.sum()), interp=ctx, cells=float((S < 0).sum()) / S.size,
+                status="PASS" if agg < warn else ("MARGINAL" if agg < fail else "FAIL"))
 
 
 def swt_report(d, eps, lswt, lat):
@@ -473,16 +537,41 @@ def main():
         a.axis("off")
         a.text(0.5, 0.5, "no cost file", ha="center")
 
-    neg = float((d["S"] < 0).sum()) / d["S"].size
+    pos = positivity_gate(d["S"], d["allowed"])
+    bad = pos["status"] in ("FAIL", "MARGINAL")
     fig.suptitle(f"arXiv:2209.00739 Fig.{'4' if lat == 'square' else '5'} -- "
-                 f"{lat} lattice $S(q,\\omega)$   [{tag}; negative-weight fraction {neg:.3e}]",
-                 fontsize=14)
+                 f"{lat} lattice $S(q,\\omega)$   [{tag}]   "
+                 f"positivity {pos['status']}: {100 * pos['agg']:.1f}% negative weight "
+                 f"at the {pos['n']} exact $q$",
+                 fontsize=14, color="crimson" if pos["status"] == "FAIL" else "black")
+    # A failed positivity gate is stamped ACROSS the figure, not filed in a corner. The panels
+    # below it look like a spectrum whatever the weight does, and a reader who scrolls past one
+    # line of stdout would quote a dispersion built from impossible weight.
+    if pos["status"] == "FAIL":
+        fig.text(0.5, 0.5, "S(q,ω) < 0  —  NOT A SPECTRAL FUNCTION",
+                 ha="center", va="center", fontsize=46, color="crimson", alpha=0.16,
+                 rotation=18, weight="bold", zorder=1000)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     out = os.path.join(RES, f"fig45_{lat}_{tag}.png")
     fig.savefig(out, dpi=150)
     print("wrote", out)
-    print(f"negative-weight fraction {neg:.3e}")
-    if sw:
+    print(f"positivity gate [{lat} {tag}]: {pos['status']}   "
+          f"negative fraction {pos['agg']:.4f} at the {pos['n']} EXACT q "
+          f"(median {pos['med']:.4f}, worst {pos['worst']:.4f})"
+          f"   [interpolated q, not scored: {pos['interp']:.4f}]")
+    if pos["status"] == "FAIL":
+        print("  ⛔ S(q,w) = sum_n |<n|S^z_q|Om>|^2 delta(...) CANNOT be negative. This row is "
+              "NOT USABLE:")
+        print("     the spectrum, the dispersion and the velocity below it are all built on it.")
+        print("     Negative weight here tracks the EVOLUTION CAP -- 3x4 at D=64 is full rank and "
+              "gives 0.000.")
+    if sw and bad:
+        # ⛔ THE SPIN-WAVE VERDICT IS SUPPRESSED, NOT JUST CAVEATED. Reporting "shape does not track
+        # LSWT" next to a failed positivity gate invites the reading that the PHYSICS disagrees,
+        # when the only thing established is that the input was not a spectral function.
+        print("  SWT check SUPPRESSED -- positivity failed, so a shape disagreement here would say "
+              "nothing about the physics.")
+    elif sw:
         print(f"SWT check [{lat} {tag}]: Z={sw['Z']:.4f}  corr={sw['corr']:.4f}  "
               f"rel.resid={sw['rel']:.4f}  over {sw['n']} q-points")
         for k, v in sw["gaps"].items():
@@ -493,6 +582,11 @@ def main():
               "  ⚠ VERDICT: shape does NOT track LSWT -- investigate before quoting the spectrum")
         print("  (Z != 1 is expected: quantum corrections renormalise LSWT up on the square, "
               "down on the triangle.)")
+    # Non-zero exit IS the gate. Safe here: run_2209_campaign.sh calls the plotter WITHOUT
+    # `|| exit 1`, so a failing row is flagged without aborting the chi ladder -- and that ladder
+    # is precisely the experiment that decides whether the cap is the cause.
+    if pos["status"] == "FAIL":
+        sys.exit(3)
 
 
 if __name__ == "__main__":
