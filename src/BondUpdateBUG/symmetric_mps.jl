@@ -513,6 +513,27 @@ correlator) and duplicating a function whose whole point is a silent-failure tra
 one copy being fixed.
 """
 function apply_sz!(psi::SymMPS, j::Int)
+    # ⛔ UNDER `:SU2` THE TWO `getsub` FILTERS BELOW DEGRADE `S^z` TO `(1/2) * I` WITH NO ERROR,
+    # by the SAME label coincidence documented in `product_state`: `SECTOR_UP` is `((1,),)` and so
+    # is `SECTOR_SU2_HALF`, so the `up` filter selects the WHOLE physical leg, while
+    # `SECTOR_DOWN = ((-1,),)` is a label SU(2) does not have and selects nothing. The result is
+    # `0.5 * psi` -- a perfectly valid state, which is why nothing downstream trips.
+    #
+    # What that does to a structure factor: `G(x,t)` collapses to `0.25` for EVERY site and time,
+    # so `G(c,0) = 0.25` still PASSES its sum rule by coincidence and only `sum_i G(i,0) = 0`
+    # catches it (it would read `0.25*N`). One gate away from a published-looking flat spectrum.
+    #
+    # This is not a missing feature. `S^z` is the `m = 0` component of a rank-1 tensor operator,
+    # not an SU(2) scalar: it takes the state out of its total-spin sector, and an `:SU2` MPS
+    # stores reduced matrix elements on multiplets and has nowhere to put the result. The SU(2)
+    # route is the VECTOR correlator `<S.S> = 3 x <S^z S^z>` via a Wigner-Eckart reduced matrix
+    # element -- a different observable and a different code path, exactly the factor of 3 that
+    # arXiv:2209.00739 Eq. (5) drops.
+    symmetry_mode() === :SU2 && throw(ArgumentError(
+        "apply_sz! is not available under :SU2 -- S^z is the m=0 component of a rank-1 tensor " *
+        "operator, not a scalar, so it leaves the total-spin sector an :SU2 MPS is built on. " *
+        "Without this guard the sector filters silently return (1/2)*psi. Use :U1 for any S^z " *
+        "observable (the S(q,w) drivers already force it), or implement the vector correlator."))
     canonical!(psi, j)
     A = psi[j]
     up = to_concrete(getsub(A, 2, s -> s == SECTOR_UP   ? Colon() : nothing;

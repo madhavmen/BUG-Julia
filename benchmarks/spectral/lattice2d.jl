@@ -97,11 +97,44 @@ triangular_lattice(wrap::Symbol = :xc) =
     Lattice2D("triangle", (1.0, 0.0), (-0.5, SQRT3 / 2), wrap, 0.02,
               [(0.0, 0.0), (pi, pi / SQRT3), (4pi / 3, 0.0), (0.0, 0.0)], ["Γ", "M", "K", "Γ"])
 
+"""
+Open Heisenberg chain, run as `Lx = L`, `Ly = 1`. NOT a geometry from arXiv:2209.00739 -- it is
+here because it is the ONLY size in this campaign whose DYNAMICAL structure factor has a published
+closed form, and the S(q,w) pipeline itself is otherwise checked only against LSWT, which at
+S = 1/2 is not expected to match in magnitude on either 2D lattice.
+
+The anchor is the two-spinon continuum (des Cloizeaux & Pearson, Phys. Rev. 128, 2131):
+
+    lower edge  w_L(q) = (pi/2) J |sin q|          the spinon branch, where the weight piles up
+    upper edge  w_U(q) = pi J |sin(q/2)|           the two-spinon boundary
+
+`eps(q) = argmax_w S` must sit ON w_L (just above it -- the exact two-spinon lineshape has an
+inverse-square-root edge singularity there), and the ENTIRE spectral weight must lie between the
+two curves. Weight above `w_U` is not "a bit of broadening": it is either the Gaussian window
+leaking or the integrator putting weight where the model has none.
+
+⛔ `eta2 = 0.03` IS BORROWED FROM THE SQUARE, NOT QUOTED. The paper's Eq. (12) values are for its
+own two lattices; there is no chain number to copy. It is recorded here so the chain's broadening
+matches an arm that has already been run, and it must not be cited as the paper's choice.
+
+⚠ THE WRAP VECTOR IS `(0,0)` AND SO EVERY `q` REPORTS `:exact`. That is not a bug being papered
+over: an open chain has no identification, so no `q` is forbidden by wrapping. The only limit is
+finite-`L` Fourier resolution `2*pi/L`, which is exactly the status of the OPEN direction on the
+cylinders too -- `allowed_q` has never described that direction and does not start to here.
+
+The path runs `Gamma -> pi -> 2*pi` rather than stopping at `pi`, so the traverse covers a full
+period and `S(q)` MUST come back symmetric about `pi`. That symmetry is free of any reference and
+is the cheapest available check that the Fourier transform and the site positions agree.
+"""
+chain_lattice() = Lattice2D("chain", (1.0, 0.0), (0.0, 0.0), :open, 0.03,
+    [(0.0, 0.0), (pi, 0.0), (2pi, 0.0)], ["Γ", "π", "2π"])
+
 lattice(name::AbstractString) =
     name == "square"      ? square_lattice() :
     name == "triangle"    ? triangular_lattice(:xc) :
     name == "triangle_yc" ? triangular_lattice(:yc) :
-    error("unknown lattice $name (square | triangle | triangle_yc)")
+    name == "chain"       ? chain_lattice() :
+    error("unknown lattice $name (square | triangle | triangle_yc | chain)")
 
 """
     geom_key(name, Lx, Ly) -> String

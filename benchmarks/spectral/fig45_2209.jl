@@ -181,10 +181,34 @@ function static_structure_factor(G::Matrix{ComplexF64}, qs::Vector{NTuple{2, Flo
             for q in qs]
 end
 
+"Open Heisenberg chain, `Jm[i,i+1] = 1`. Same matrix `benchmarks/ground_state/gate_l20.jl` builds;
+written out rather than included because that file is a standalone gate with its own `ARGS`."
+function chain_couplings_1d(L::Int)
+    Jm = zeros(L, L)
+    for i in 1:(L - 1)
+        Jm[i, i + 1] = 1.0
+    end
+    return Jm
+end
+
 # ⛔ `LAT.wrap` AND THE COUPLING MATRIX MUST COME FROM THE SAME SYMBOL -- see `lattice2d.jl`.
-couplings() = LATNAME == "square" ?
-    square_cylinder_couplings(LX, LY; periodic_y = true) :
-    triangular_cylinder_couplings(LX, LY; J2 = J2, geometry = LAT.wrap, periodic_y = true)
+#
+# ⛔ THIS DISPATCHES ON `LAT.name` WITH AN ERROR FALLTHROUGH, NOT ON `!= "square"`. The earlier
+# ternary sent EVERY non-square name into the triangular builder, so adding the chain to
+# `lattice()` would have silently evolved a triangular cylinder under a chain's label and a
+# chain's Brillouin-zone path. The energy would have looked plausible and the spectrum would have
+# been of a different Hamiltonian.
+function couplings()
+    LAT.name == "square"   && return square_cylinder_couplings(LX, LY; periodic_y = true)
+    LAT.name == "triangle" && return triangular_cylinder_couplings(LX, LY; J2 = J2,
+                                                                   geometry = LAT.wrap,
+                                                                   periodic_y = true)
+    if LAT.name == "chain"
+        LY == 1 || throw(ArgumentError("the chain is Lx=L, Ly=1; got Ly=$LY"))
+        return chain_couplings_1d(LX)
+    end
+    error("no coupling builder for lattice '$(LAT.name)'")
+end
 
 function main()
     mkpath(OUT)

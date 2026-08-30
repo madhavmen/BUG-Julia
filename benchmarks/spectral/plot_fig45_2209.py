@@ -77,7 +77,41 @@ def lswt_triangular(qx, qy, J=1.0):
     return 1.5 * J * np.sqrt(np.maximum(0.0, (1.0 - g) * (1.0 + 2.0 * g)))
 
 
-LSWT = {"square": lswt_square, "triangle": lswt_triangular}
+def dcp_lower(qx, qy=None, J=1.0):
+    """w_L(q) = (pi/2) J |sin q|  -- des Cloizeaux & Pearson, Phys. Rev. 128, 2131 (1962).
+
+    THE CHAIN'S REFERENCE IS EXACT, WHICH IS THE WHOLE REASON IT IS RUN. `lswt_square` and
+    `lswt_triangular` are LINEAR spin-wave theory and are not expected to match at S = 1/2 (see
+    the block below); this is the thermodynamic-limit lower boundary of the two-spinon continuum
+    of the S = 1/2 Heisenberg chain, and the peak of S(q,w) sits ON it.
+
+    ⛔ IT IS AN EDGE, NOT A BRANCH. The chain has no magnon: the exact two-spinon lineshape
+    (Bougourzi, Couture & Kacir, PRB 54 R12669; Karbach et al., PRB 55 12510) has an
+    inverse-square-root singularity at `w_L` and a tail up to `w_U`, so `eps(q) = argmax_w S`
+    tracks `w_L` from ABOVE by roughly the Gaussian width, and `<w>(q)` Eq. (20) sits well above
+    it by construction. A fitted `Z` slightly greater than 1 is the CORRECT result here, not a
+    scale error, and `Z < 1` means weight below the edge -- which the model forbids.
+    """
+    return 0.5 * np.pi * J * np.abs(np.sin(np.atleast_1d(qx)))
+
+
+def dcp_upper(qx, qy=None, J=1.0):
+    """w_U(q) = pi J |sin(q/2)|  -- the upper two-spinon boundary.
+
+    Used as a HARD BOUND, not a fit: with J1-only and no field, spectral weight above `w_U` is
+    outside the two-spinon continuum entirely. A little leaks there from the Eq. (12) Gaussian
+    window and from four-spinon states (~2% of the total weight); a lot means the integrator is
+    putting weight where the model has none, or the time axis is scaled wrong.
+    """
+    return np.pi * J * np.abs(np.sin(np.atleast_1d(qx) / 2.0))
+
+
+LSWT = {"square": lswt_square, "triangle": lswt_triangular, "chain": dcp_lower}
+
+# What the reference curve on panels b) and d) actually IS. The chain's is exact and the two 2D
+# ones are not, and captioning all three "LSWT" would hide precisely that difference.
+REF_LABEL = {"square": "LSWT (unscaled)", "triangle": "LSWT (unscaled)",
+             "chain": r"des Cloizeaux--Pearson $\omega_L=\frac{\pi}{2}|\sin q|$ (exact)"}
 
 
 def load_sqw(path):
@@ -125,7 +159,15 @@ def ticks(d):
 #             K -> Gamma, as this has the most allowed q values in the linear region of SWT")
 # ⛔ THE ANCHOR ITSELF IS EXCLUDED. "We omit the value of eps(q = M) in the fits" -- it carries the
 # largest finite-size effect, and on a finite system the spectrum is never gapless there.
-VELOCITY = {"square": ("M", "before"), "triangle": ("K", "after")}
+# ⛔ THE CHAIN'S ENTRY HAS A KNOWN ANSWER AND IS THEREFORE A TEST, NOT A MEASUREMENT REPORT. The
+# spinon velocity is `v = pi*J/2 = 1.570796` exactly (des Cloizeaux--Pearson), so the fitted slope
+# out of Gamma is scored against a number rather than eyeballed. Fitting AWAY from Gamma matches
+# the two 2D rows: the anchor itself is excluded, and here it must be -- `S^z_tot` commutes with
+# `H`, so `q = 0` carries no weight at all and `eps(Gamma)` is masked, never zero.
+VELOCITY = {"square": ("M", "before"), "triangle": ("K", "after"), "chain": ("Γ", "after")}
+
+"Exact velocities, where one exists. Printed beside the fit so the reader is not left to judge."
+VELOCITY_EXACT = {"chain": ("π/2", np.pi / 2)}
 
 
 def velocity_fit(d, eps, lat, npts=6):
@@ -171,7 +213,10 @@ def velocity_fit(d, eps, lat, npts=6):
 #   * Z far from 1 (a factor of 2, a factor of 3): wrong J convention, wrong Eq.-(5) factor of 3,
 #     or a time axis off by a constant
 #   * correlation with LSWT near zero: the peak-tracking is following noise, not a magnon
-SWT_ZERO_POINTS = {"square": ["Γ"], "triangle": ["Γ", "K"]}
+# The chain is gapless at q = 0 AND q = pi (|sin q| vanishes at both), so BOTH are nodes of the
+# reference -- and both are masked by the S^z_tot selection rule at q = 0 only. A gap opening at
+# q = pi is a genuine failure: that is where the antiferromagnetic weight lives.
+SWT_ZERO_POINTS = {"square": ["Γ"], "triangle": ["Γ", "K"], "chain": ["Γ", "π", "2π"]}
 
 
 def swt_report(d, eps, lswt, lat):
@@ -222,7 +267,12 @@ def main():
     d = arms[main_arm]
     xt, xl = ticks(d)
     eps, mom, live = masked_dispersion(d)
-    lswt = LSWT[lat](np.array([q[0] for q in d["qs"]]), np.array([q[1] for q in d["qs"]]))
+    qxs = np.array([q[0] for q in d["qs"]])
+    lswt = LSWT[lat](qxs, np.array([q[1] for q in d["qs"]]))
+    # The chain alone has a second reference curve: the continuum's UPPER boundary. `None`
+    # everywhere else, and every use below is guarded, so the 2D panels are byte-for-byte what
+    # they were.
+    wup = dcp_upper(qxs) if lat == "chain" else None
 
     fig, ax = plt.subplots(2, 4, figsize=(23.0, 10.2))
 
@@ -250,7 +300,10 @@ def main():
                       shading="auto", cmap="magma")
     fig.colorbar(im, ax=a)
     a.plot(d["dists"], eps, "-o", ms=3, color="cyan", lw=1.2, label=r"$\epsilon(q)$ Eq. (19)")
-    a.plot(d["dists"], lswt, "--", color="white", lw=1.4, label="LSWT (unscaled)")
+    a.plot(d["dists"], lswt, "--", color="white", lw=1.4, label=REF_LABEL[lat])
+    if wup is not None:
+        a.plot(d["dists"], wup, "--", color="#7fdbff", lw=1.4,
+               label=r"$\omega_U=\pi|\sin(q/2)|$")
     a.set_xticks(xt); a.set_xticklabels(xl)
     for x in xt:
         a.axvline(x, color="w", lw=0.6, alpha=0.5)
@@ -284,26 +337,52 @@ def main():
     a = ax[0][3]
     a.plot(d["dists"], eps, "-o", ms=4, label=r"$\epsilon(q)$ Eq. (19)")
     a.plot(d["dists"], mom, "--s", ms=4, alpha=0.8, label=r"$\langle\omega\rangle(q)$ Eq. (20)")
-    a.plot(d["dists"], lswt, "-", color="k", lw=1.6, label="LSWT (unscaled)")
+    a.plot(d["dists"], lswt, "-", color="k", lw=1.6, label=REF_LABEL[lat])
+    if wup is not None:
+        a.plot(d["dists"], wup, "-", color="#888888", lw=1.4,
+               label=r"$\omega_U$ (upper edge)")
+        a.fill_between(d["dists"], lswt, wup, color="#cccccc", alpha=0.35, zorder=0,
+                       label="two-spinon continuum")
     sw = swt_report(d, eps, lswt, lat)
     if sw:
         a.plot(d["dists"], sw["Z"] * lswt, ":", color="#d62728", lw=1.8,
                label=rf"LSWT $\times Z$, $Z={sw['Z']:.3f}$")
     a.set_xticks(xt); a.set_xticklabels(xl)
     a.set_ylabel(r"$\omega/J$")
-    a.set_title("d) magnon dispersion")
+    a.set_title("d) two-spinon continuum" if lat == "chain" else "d) magnon dispersion")
     a.legend(fontsize=8); a.grid(alpha=0.3)
     if sw:
         gp = "  ".join(f"$\\epsilon({k})$={v:.3f}" if np.isfinite(v) else f"$\\epsilon({k})$=n/a"
                        for k, v in sw["gaps"].items())
         verdict = ("shape OK" if sw["corr"] > 0.9 and sw["rel"] < 0.25 else
                    "⚠ SHAPE DISAGREES")
+        # The chain's reference is EXACT, so its tolerance is not the 2D one. `Z` is expected a
+        # little above 1 (the Gaussian window pushes the argmax off the divergent edge) and `Z`
+        # BELOW 1 is a failure, not a renormalisation -- there is no weight under `w_L` to find.
+        note = (f"$Z$ slightly $>1$ EXPECTED (window pushes the peak off the edge); "
+                f"$Z<1$ = weight below an exact edge"
+                if lat == "chain" else
+                "$Z\\neq1$ is EXPECTED ($Z_c$>1 square, <1 triangle)")
         a.text(0.02, 0.97,
-               f"vs LSWT: $Z$={sw['Z']:.3f}, corr={sw['corr']:.3f}, "
-               f"rel.resid={sw['rel']:.3f}\n{gp}   [{verdict}]\n"
-               f"$Z\\neq1$ is EXPECTED ($Z_c$>1 square, <1 triangle)",
+               f"vs {'dCP' if lat == 'chain' else 'LSWT'}: $Z$={sw['Z']:.3f}, "
+               f"corr={sw['corr']:.3f}, rel.resid={sw['rel']:.3f}\n{gp}   [{verdict}]\n{note}",
                transform=a.transAxes, va="top", fontsize=7,
                bbox=dict(fc="#eef3fb" if "OK" in verdict else "#ffecec", ec="#999"))
+    if wup is not None:
+        # ⛔ A BOUND, CHECKED, NOT A CURVE DRAWN AND ADMIRED. Two-spinon states carry ~72.9% of the
+        # total S(q,w) weight and four-spinon states most of the rest, so a few percent above
+        # `w_U` is physical; a large fraction means the time axis or the Fourier convention is
+        # wrong. Reported as a number so the panel cannot be read as a pass by eye.
+        # `d["S"]` is (n_q, n_omega) -- panel b) transposes it for pcolormesh, so the mask is
+        # built in THAT orientation and not the plotted one.
+        Sc = np.clip(np.asarray(d["S"]), 0, None)
+        tot = float(Sc.sum())
+        mask = np.asarray(d["ws"])[None, :] > wup[:, None]
+        frac = float(Sc[mask].sum()) / tot if tot > 0 else float("nan")
+        a.text(0.98, 0.02, f"weight above $\\omega_U$: {100 * frac:.1f}%\n"
+                           "(4-spinon + window; $\\gg$10% is a bug)",
+               transform=a.transAxes, ha="right", va="bottom", fontsize=7,
+               bbox=dict(fc="#fffbe6", ec="#999"))
     if (~live).any():
         a.text(0.02, 0.02, f"{int((~live).sum())} of {len(live)} q masked:\n"
                            "spectral weight below 1e-6 of peak",
@@ -328,8 +407,19 @@ def main():
         a.plot(xs, vz * xs, "-", color="#d62728", lw=1.6,
                label=rf"$\Delta\equiv 0$:  $v={vz:.3f}$")
         a.set_xlabel(rf"$|q-{anchor}|$"); a.set_ylabel(r"$\omega/J$")
-        a.set_title(f"e) magnon velocity near ${anchor}$\n"
+        a.set_title(f"e) {'spinon' if lat == 'chain' else 'magnon'} velocity near ${anchor}$\n"
                     f"(${anchor}$ itself omitted, as in the paper)", fontsize=11)
+        # An EXACT velocity, where the model has one, is drawn and SCORED. This is the only panel
+        # in the set that compares a measured number against a known number rather than a shape.
+        ex = VELOCITY_EXACT.get(lat)
+        if ex is not None:
+            nm, vex = ex
+            a.plot(xs, vex * xs, "--", color="k", lw=1.8, label=rf"exact ${nm}$: $v={vex:.4f}$")
+            err = 100.0 * abs(vz - vex) / vex
+            a.text(0.02, 0.97, f"$\\Delta\\equiv0$ fit vs exact: {err:.1f}%\n"
+                               "finite $L$ and the Eq. (12) window both bias this UP",
+                   transform=a.transAxes, va="top", fontsize=7.5,
+                   bbox=dict(fc="#eef3fb" if err < 15 else "#ffecec", ec="#999"))
         a.legend(fontsize=8); a.grid(alpha=0.3)
         # ⛔ NO QMC REFERENCE LINE IS DRAWN. The paper compares the square-lattice velocity against
         # QMC (its Fig. 4 c, green) but quotes the number only as a line in the figure; the value
