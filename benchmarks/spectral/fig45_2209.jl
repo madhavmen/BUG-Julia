@@ -42,7 +42,7 @@
 #       results/fig45_Sqw_<lat>_<Lx>x<Ly>_<arm>.csv   S(q,w) on the path
 #       results/fig45_cost_<lat>_<Lx>x<Ly>.csv        the integrator comparison
 
-using LinearAlgebra, Printf
+using LinearAlgebra, Printf, Serialization
 using LurCGT, Telum
 using BUGJulia
 using BUGJulia.BondUpdateBUG
@@ -235,21 +235,82 @@ function main()
     # because a wrong |Om> gives a wrong dispersion with no truncation error to blame it on.
     # `F_DGS` therefore defaults to a CONVERGED cap regardless of DCAP; set it equal to DCAP only
     # to deliberately reproduce the paper's single-chi protocol.
-    psi0 = neel_state(N)                    # half filling = the S^z = 0 sector
-    tgs = @elapsed gs = rsvd_cbe_dmrg1s!(psi0, W; n_sweeps = 60, etol = 1e-12,
-                                         maxdim = DGS, trunc_thresh = 1e-12,
-                                         maxiter = 30, restol = 1e-10,
-                                         dex = RSVD_KNOBS.dex, dover = RSVD_KNOBS.dover,
-                                         comp_ratio = RSVD_KNOBS.comp_ratio,
-                                         growth = RSVD_KNOBS.growth)
+    # ⚠ THE GROUND STATE DOES NOT DEPEND ON `DCAP`, so a campaign that sweeps the EVOLUTION cap
+    # re-solves a bit-identical state for every cap. MEASURED 2026-08-30 (square 5x4, N=20,
+    # DGS=512): the solve owns ~51 min of a run whose first arm then took 8313 s. `run_2209_
+    # campaign.sh` loops `for D in 64 128` OUTSIDE the geometry list and repeats the same three
+    # geometries again in `knobs` and `cube`, so 15 of the campaign's solves are redundant.
+    #
+    # ⛔ THE KEY CARRIES EVERY INPUT THAT CHANGES THE STATE and is stored INSIDE the payload, not
+    # just in the filename -- a filename cannot catch a file written by an older coupling builder,
+    # and `couplings()` has already been wrong once (see the block above it). On load the energy is
+    # RECOMPUTED against THIS run's own `W` and must reproduce the stored one; that is what makes
+    # the cache safe rather than merely fast. A cache miss is silent-wrong physics if unchecked.
+    # ⛔ EVERY cache path is wrapped: a truncated, corrupt or version-skewed `.jls` must fall back
+    # to solving, never take the campaign down with it. `F_GS_CACHE=0` disables the whole thing.
+    gskey = (LATNAME, LX, LY, N, J2, DGS, :U1, RSVD_KNOBS.dex, RSVD_KNOBS.dover,
+             RSVD_KNOBS.comp_ratio, RSVD_KNOBS.growth)
+    gsfile = joinpath(OUT, "gs_$(LATNAME)_$(LX)x$(LY)_" *
+                           "J2$(replace(@sprintf("%.4f", J2), "." => "p"))_Dgs$(DGS).jls")
+    usecache = get(ENV, "F_GS_CACHE", "1") == "1"
+
+    psi0   = nothing
+    cached = false
+    if usecache && isfile(gsfile)
+        try
+            blob = Serialization.deserialize(gsfile)
+            if blob.key != gskey
+                @printf("  GS cache %s REJECTED -- key mismatch, re-solving\n", basename(gsfile))
+            else
+                cand = blob.psi
+                Ec   = real(mpo_energy(copy(cand), W)) / max(norm(cand)^2, eps())
+                if abs(Ec - blob.E0) < 1e-8 * max(1.0, abs(blob.E0))
+                    psi0, cached = cand, true
+                else
+                    @printf("  GS cache %s REJECTED -- E0 %.10f vs stored %.10f, re-solving\n",
+                            basename(gsfile), Ec, blob.E0)
+                end
+            end
+        catch err
+            @printf("  GS cache %s UNREADABLE (%s) -- re-solving\n", basename(gsfile), string(err))
+        end
+    end
+
+    tgs, nsw, conv = 0.0, 0, true
+    if psi0 === nothing
+        psi0 = neel_state(N)                # half filling = the S^z = 0 sector
+        tgs = @elapsed gs = rsvd_cbe_dmrg1s!(psi0, W; n_sweeps = 60, etol = 1e-12,
+                                             maxdim = DGS, trunc_thresh = 1e-12,
+                                             maxiter = 30, restol = 1e-10,
+                                             dex = RSVD_KNOBS.dex, dover = RSVD_KNOBS.dover,
+                                             comp_ratio = RSVD_KNOBS.comp_ratio,
+                                             growth = RSVD_KNOBS.growth)
+        nsw, conv = length(gs.energies), gs.converged
+    end
     E0 = real(mpo_energy(copy(psi0), W)) / max(norm(psi0)^2, eps())
     chi0 = maximum(state_bond_dims(psi0))
-    @printf("ground state: E0=%.10f  E0/N=%.10f  chi=%d  conv=%s  sweeps=%d  %.1fs\n",
-            E0, E0 / N, chi0, string(gs.converged), length(gs.energies), tgs)
+    if cached
+        @printf("ground state: E0=%.10f  E0/N=%.10f  chi=%d  REUSED from %s (solve skipped)\n",
+                E0, E0 / N, chi0, basename(gsfile))
+    else
+        @printf("ground state: E0=%.10f  E0/N=%.10f  chi=%d  conv=%s  sweeps=%d  %.1fs\n",
+                E0, E0 / N, chi0, string(conv), nsw, tgs)
+    end
     # ⛔ A GROUND STATE THAT NEVER GREW IS THE FROZEN-START FAILURE, not a rank-1 ground state.
-    (chi0 <= 2 && length(gs.energies) <= 3) &&
-        error("ground state FROZE at the product start (chi=$chi0 in $(length(gs.energies)) " *
-              "sweeps) -- nothing below is physics; see gate_l20.jl")
+    # This also runs on the CACHE path -- a frozen state that once got serialised must not be
+    # trusted a second time just because it came off disk.
+    (chi0 <= 2 && (cached || nsw <= 3)) &&
+        error("ground state FROZE at the product start (chi=$chi0) -- nothing below is physics; " *
+              "see gate_l20.jl")
+
+    if usecache && !cached
+        try
+            Serialization.serialize(gsfile, (key = gskey, psi = psi0, E0 = E0))
+            @printf("  cached ground state -> %s\n", basename(gsfile))
+        catch err
+            @printf("  WARNING ground state not cached (%s)\n", string(err))
+        end
+    end
     println()
 
     # ⛔ THE BUG SETTINGS COME FROM THE chi=128 SCAN WHEN ONE EXISTS, and the driver says which.
