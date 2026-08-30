@@ -9,8 +9,14 @@
 # The paper's protocol, quoted:
 #   Eq. (5)   G(x,t) = 3 <Om| S^z_x(t) S^z_c |Om>   -- "We drop the factor of 3 in this work."
 #   Eq. (6)   G(x,t) = e^{i E0 t} <Om| S^z_x e^{-iHt} S^z_c |Om>
-#   Eq. (2)   S(q,w) = (1/N) sum_x int dt/2pi e^{i(wt - q.x)} G(x,t)
+#   Eq. (2)   S(q,w) = (1/N) sum_x int dt/2pi e^{i(wt - q.x)} G(x,t)   -- the DEFINITION
+#   Eq. (14)  S(q,w) = 1/(pi sqrt(N)) int_0^inf dt sum_x cos(q.x)[cos(wt) ReG - sin(wt) ImG]
+#             -- what is actually EVALUATED. Sec. IID: truncating Eq. (2) leaves an unphysical
+#             imaginary part, and Eq. (14) "enforces reality" instead of discarding it afterwards.
 #   Eq. (12)  Gaussian damping e^{-eta^2 t^2};  eta^2 = 0.03 square, 0.02 triangular (120-deg)
+#   Sec. IID  RELIABILITY = POSITIVITY: "the spectral function must be positive for all
+#             frequencies ... choose eta as small as possible so that [it] is positive",
+#             with the reliable window T_max ~ 1/eta. See `F_ETA2`.
 #   Eq. (19)  eps(q) := argmax_w S(q,w)
 #   Eq. (20)  <w>(q) := int w S dw / int S dw
 #   Sec. IIE  single-site TDVP, dt = 0.1, Tmax = 40, chi = 512, U(1) zero-magnetisation sector
@@ -73,6 +79,12 @@ const OUT  = normpath(joinpath(@__DIR__, "..", "results", get(ENV, "F_OUT", ""))
 
 const LAT = lattice(LATNAME)
 const N   = LX * LY
+# Eq. (12) Gaussian broadening. ⚠ THIS IS A PHYSICS KNOB, NOT COSMETIC SMOOTHING. Sec. IID makes it
+# the reliability criterion: "we choose eta as small as possible so that the spectral function is
+# positive", and the reliable window is then T_max ~ 1/eta. So when the positivity gate fails, this
+# is the first thing to raise -- ahead of the bond dimension. Defaults to the lattice's published
+# value (eta^2 = 0.03 square, 0.02 triangle).
+const ETA2 = parse(Float64, get(ENV, "F_ETA2", string(LAT.eta2)))
 
 """
     correlator(psi0, E0, step!, nt, dt) -> (ts, G, cost)
@@ -131,15 +143,28 @@ end
 """
     structure_factor_2d(G, ts, qs; eta2, ws) -> Matrix
 
-`S(q,w)` by Eq. (2), with Eq. (12) damping and NO reflection assumption:
+`S(q,w)` by **Eq. (14)** -- the paper's own cosine transform -- with Eq. (12) Gaussian damping:
 
-    F(q,t) = sum_i e^{-i q.(r_i - r_c)} G[i,t]
-    S(q,w) = (1/N) Re int_0^inf dt [ e^{iwt} F(q,t) + e^{-iwt} conj(F(-q,t)) ] W(t)
+    S(q,w) = 1/(pi*sqrt(N)) int_0^inf dt sum_x cos(q.x) [ cos(w t) Re G(x,t) - sin(w t) Im G(x,t) ]
 
-⛔ THE `F(-q,t)` TERM IS WHY THIS IS NOT `2*Re(...)`. Doubling needs `F(-q,t) = F(q,t)`, i.e.
-inversion symmetry about `c`; on a finite cylinder with an even side there is no site at the exact
-centre, so that symmetry is broken and the doubling mixes real and imaginary parts -- giving an
-`S(q,w)` that is neither positive nor band-limited and looks like a broken integrator.
+⛔ EQ. (14), NOT EQ. (2). Sec. IID: "One issue with just naively truncating Eq. (2) is that S(q,w)
+generically will acquire a non-zero imaginary part that is not physical. From there, one could only
+look at the real part, or the magnitude, but we propose an alternative that ENFORCES REALITY."
+Eq. (14) is that alternative: the cosine transform in space and the `cos/sin` pairing in time make
+`S` real BY CONSTRUCTION, instead of real by discarding an imaginary part afterwards. It rests on
+the Eq. (13) properties `G(-x,t) = G(x,t)` and `G(x,-t) = conj(G(x,t))`.
+
+⚠ THE NORMALISATION IS `1/(pi*sqrt(N))`, NOT `1/N`. The previous `1/L` left every intensity off by
+a constant `2*pi/sqrt(N)`; MEASURED as a uniform `int S dw / S(q) = 0.2988 +- 0.011` across 34 q,
+which is the signature of a missing constant rather than a broken transform. Dispersions and the
+SIGN structure are untouched by it -- so switching to Eq. (14) does NOT fix negative weight.
+
+⚠ WHAT DOES FIX NEGATIVE WEIGHT IS `eta`, and that is the paper's own procedure: "we use a
+physically motivated criterion, namely that the spectral function must be positive for all
+frequencies ... we choose eta as small as possible so that the spectral function is positive. The
+maximum time T_max for which the correlation function is reliable is approximated by T_max ~
+1/eta." So a positivity failure is first a statement about the RELIABLE TIME WINDOW, and only
+then about the bond dimension. `F_ETA2` overrides the lattice default so eta can be scanned.
 
 ⛔ POSITIONS ARE CARTESIAN (`lattice2d.jl`). On the triangular lattice the integer `(x,y)` are
 coefficients in a 120-degree basis; transforming against them computes the structure factor of a
@@ -157,16 +182,18 @@ function structure_factor_2d(G::Matrix{ComplexF64}, ts::Vector{Float64},
     Wt = [exp(-eta2 * t^2) for t in ts]                       # Eq. (12), Gaussian
 
     S = zeros(Float64, length(qs), length(ws))
+    norm14 = 1.0 / (pi * sqrt(L))
     for (iq, (qx, qy)) in enumerate(qs)
-        Fp = [sum(G[i, n] * cis(-(qx * dr[i][1] + qy * dr[i][2])) for i in 1:L) for n in 1:nt]
-        Fm = [sum(G[i, n] * cis(+(qx * dr[i][1] + qy * dr[i][2])) for i in 1:L) for n in 1:nt]
+        # sum_x cos(q.x) G(x,t). The COSINE (not `cis`) is Eq. (14): it uses G(-x,t) = G(x,t) up
+        # front instead of forming F(+q) and F(-q) and hoping they agree.
+        Fc = [sum(G[i, n] * cos(qx * dr[i][1] + qy * dr[i][2]) for i in 1:L) for n in 1:nt]
         for (iw, om) in enumerate(ws)
-            acc = 0.0 + 0.0im
+            acc = 0.0
             for n in 1:nt
-                wt = (n == 1 ? 0.5 : 1.0) * Wt[n] * dt       # t=0 shared by the two half-lines
-                acc += wt * (cis(om * ts[n]) * Fp[n] + cis(-om * ts[n]) * conj(Fm[n]))
+                wt = (n == 1 ? 0.5 : 1.0) * Wt[n] * dt       # t=0 is the endpoint of the half-line
+                acc += wt * (cos(om * ts[n]) * real(Fc[n]) - sin(om * ts[n]) * imag(Fc[n]))
             end
-            S[iq, iw] = real(acc) / L
+            S[iq, iw] = acc * norm14
         end
     end
     return S
@@ -227,7 +254,7 @@ function main()
     @printf("\n%s\nFig.%s  %s cylinder  Lx(length)=%d Ly(circumference)=%d  N=%d  J2=%.3f\n",
             "="^100, LATNAME == "square" ? "4" : "5", LATNAME, LX, LY, N, J2)
     @printf("U(1) S^z=0; centre c=%d at r=%s; dt=%.3f Tmax=%.1f (%d steps) D=%d eta2=%.3f\n",
-            c, string(round.(site_position(LAT, c, LY); digits = 3)), DT, TMAX, nt, DCAP, LAT.eta2)
+            c, string(round.(site_position(LAT, c, LY); digits = 3)), DT, TMAX, nt, DCAP, ETA2)
     full = geometry_report(stdout, LAT, LX, LY)
     @printf("  MPO virtual dim max %d\n%s\n", maximum(mpo_virtual_dims(W)), "="^100)
 
@@ -383,7 +410,7 @@ function main()
             end
         end
 
-        S  = structure_factor_2d(G, ts, qs; eta2 = LAT.eta2, ws = ws)
+        S  = structure_factor_2d(G, ts, qs; eta2 = ETA2, ws = ws)
         Sq = static_structure_factor(G, qs)
         open(joinpath(OUT, "fig45_Sqw_$(tag)_$(arm).csv"), "w") do io
             println(io, "iq,qx,qy,label,dist,allowed,Sq,w,S")

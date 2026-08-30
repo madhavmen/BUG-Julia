@@ -76,6 +76,45 @@ def lswt_scale(eps, wl):
     return float(np.sum(wl[m] * eps[m]) / np.sum(wl[m] ** 2)), m
 
 
+def shape_rank(Spos, idx, tol=1e-3):
+    """How many INDEPENDENT spectral shapes a set of q actually carries.
+
+    ⛔ A DISPERSION CAN ONLY BE EXTRACTED WHERE S(q,w) CHANGES SHAPE WITH q. On a short cylinder it
+    often does not, and then `argmax_w` returns the same number at every q -- a flat line that
+    looks like a measured dispersion and is not one.
+
+    MEASURED on the square 3x4 (Lx = 3 columns), along the whole Gamma->X segment:
+
+        S(q,w) = (1 - cos q_x) * f(w)        to 3.8e-6
+
+    which is FORCED, not accidental. With the source on the centre column the displacements are
+    dx in {-1,0,+1}; inversion about the centre gives g(-1,t) = g(+1,t); and because S^z_tot
+    commutes with H the column sums obey g(0,t) + 2 g(1,t) = 0 at EVERY t. Hence
+    F(q,t) = g(0,t) + 2 cos(q_x) g(1,t) = g(0,t) (1 - cos q_x): one time-dependence, one scalar
+    prefactor, zero q information. Lx columns leave Lx//2 independent channels after that
+    constraint -- 1 at Lx=3, 2 at Lx=5, 18 at the paper's Lx=36.
+
+    So this returns the numerical rank of the L2-NORMALISED spectra (normalised so that the
+    amplitude prefactor, which does vary, cannot masquerade as shape variation). Rank 1 means the
+    segment carries no dispersion at all and must not be drawn as one.
+
+    ⛔ ROUNDOFF q MUST BE DROPPED BEFORE THE RANK IS TAKEN. At q = Gamma the weight is ~1e-17
+    (S^z_tot commutes with H), and its NORMALISED shape is whatever the roundoff happened to be --
+    a direction unrelated to every other q. Including it adds a spurious second singular value, so
+    a segment that genuinely carries one shape reports rank 2 and the mask silently never fires.
+    """
+    if len(idx) < 2:
+        return 0, np.array([])
+    M = Spos[idx]
+    nrm = np.linalg.norm(M, axis=1)
+    keep = nrm > 1e-6 * np.linalg.norm(Spos, axis=1).max()
+    if keep.sum() < 2:
+        return 0, np.array([])
+    M = M[keep] / nrm[keep][:, None]
+    sv = np.linalg.svd(M, compute_uv=False)
+    return int((sv > tol * sv[0]).sum()), sv
+
+
 def load_sqw(path):
     rows = list(csv.DictReader(open(path)))
     iqs = sorted({int(r["iq"]) for r in rows})
@@ -104,6 +143,13 @@ def main():
         geo, arm = base.rsplit("_", 1)
         arms[arm] = load_sqw(f)
     geo = base.rsplit("_", 1)[0]
+    # Number of COLUMNS along the open direction. It is what bounds how many independent spectral
+    # shapes the path can carry (see `shape_rank`), so it is quoted on the figure rather than left
+    # for the reader to infer from a filename.
+    try:
+        LX_COLS = int(geo.split("x")[0])
+    except (ValueError, IndexError):
+        LX_COLS = 0
 
     ref = arms.get("bug") or list(arms.values())[0]
     ws, S, meta = ref
@@ -135,6 +181,25 @@ def main():
     # made entirely of roundoff. Masking one extractor and not the other would have left that
     # point on the figure through the orange curve alone.
     w20 = np.where(weak, np.nan, w20)
+
+    # ⛔ A SEGMENT WHOSE SPECTRA ALL HAVE THE SAME SHAPE CARRIES NO DISPERSION, AND DRAWING ONE
+    # THERE INVENTS A MEASUREMENT. See `shape_rank`: at Lx=3 the Gamma->X segment is exactly
+    # (1 - cos q_x) * f(w), so every point returns the same argmax and the curve comes out flat at
+    # a value that has nothing to do with the magnon. Masked, and named on the figure, so the
+    # absence is visible rather than silently plotted.
+    labs = [meta[i + 1][2] for i in range(nq)]
+    bounds = [i for i in range(nq) if labs[i]]
+    flat_seg = []
+    for a, b in zip(bounds[:-1], bounds[1:]):
+        idx = list(range(a, b + 1))
+        rk, _ = shape_rank(Spos, idx)
+        if rk <= 1:
+            nm_a = "Γ" if labs[a] == "G" else labs[a]
+            nm_b = "Γ" if labs[b] == "G" else labs[b]
+            flat_seg.append(f"{nm_a}→{nm_b}")
+            eps19[idx] = np.nan
+            w20[idx] = np.nan
+
     negfrac = np.abs(np.clip(S, None, 0.0)).sum() / max(np.abs(S).sum(), 1e-300)
 
     # ONE common factor, fitted once and used by BOTH LSWT panels, so the two cannot disagree.
@@ -204,15 +269,43 @@ def main():
         ax.text(0.02, 0.03, msg, transform=ax.transAxes, fontsize=7.5, va="bottom",
                 bbox=dict(boxstyle="round", fc="honeydew" if ok else "mistyrose",
                           ec="0.6" if ok else "crimson"))
+    if flat_seg:
+        ax.text(0.98, 0.97,
+                "NO DISPERSION on " + ", ".join(flat_seg) + "\n"
+                "$S(q,\\omega)$ has ONE shape there, so\n"
+                "$\\arg\\max_\\omega$ is constant by construction\n"
+                "($L_x{=}%d$ leaves $%d$ independent channel%s)" %
+                (LX_COLS, max(LX_COLS // 2, 0), "" if LX_COLS // 2 == 1 else "s"),
+                transform=ax.transAxes, ha="right", va="top", fontsize=7.5,
+                bbox=dict(boxstyle="round", fc="mistyrose", ec="crimson"))
 
     # (d) frequency cuts at the high-symmetry momenta
     ax = fig.add_subplot(gs[1, 1:3])
+    # ⛔ NORMALISED BY EACH CUT'S OWN MAXIMUM, as the paper does: "We divide the values by the
+    # maximum intensity S_max to view all three points on the same axis." Without it the M cut
+    # (weight 1.0) flattens every other curve onto the axis -- at 3x4 the Gamma cut is ~1e-17 and
+    # simply cannot be seen beside it. S_max is kept in the legend so the normalisation never
+    # hides HOW MUCH weight a momentum actually carries.
+    # ⛔ AND A ROUNDOFF CUT IS NEVER NORMALISED. Dividing the Gamma cut (S_max ~ 1e-17, pure
+    # roundoff because S^z_tot commutes with H) by its own maximum rescales noise to O(1) and puts
+    # a full-height fake peak on the panel -- the normalisation MANUFACTURES the signal it is
+    # supposed to reveal. Such cuts are named as carrying no weight instead of being drawn.
+    floor = 1e-6 * Spos.max()
+    dead = []
     for x, lab in ticks:
         i = int(np.argmin(np.abs(dist - x)))
         nm = r"$\Gamma$" if lab == "G" else lab
-        ax.plot(ws, Spos[i], lw=1.4, label="%s  ($S_{max}$=%.1e)" % (nm, Spos[i].max()))
-    ax.set_xlabel(r"$\omega / J$"); ax.set_ylabel(r"$S(q,\omega)$")
-    ax.set_title("d) cuts at high-symmetry $q$")
+        smax = Spos[i].max()
+        if smax <= floor:
+            dead.append("%s ($S_{max}$=%.0e)" % (nm, smax))
+            continue
+        ax.plot(ws, Spos[i] / smax, lw=1.4, label="%s  ($S_{max}$=%.1e)" % (nm, smax))
+    if dead:
+        ax.text(0.5, 0.14, "no weight, not drawn:  " + ",  ".join(dead),
+                transform=ax.transAxes, ha="center", va="center", fontsize=8,
+                bbox=dict(boxstyle="round", fc="mistyrose", ec="crimson"))
+    ax.set_xlabel(r"$\omega / J$"); ax.set_ylabel(r"$S(q,\omega)\,/\,S_{max}$")
+    ax.set_title("d) cuts at high-symmetry $q$, each $/S_{max}$")
     ax.legend(fontsize=8); ax.grid(alpha=0.3)
 
     # (e) the integrator comparison -- this repository's question
