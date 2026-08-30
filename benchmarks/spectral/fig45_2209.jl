@@ -63,7 +63,13 @@ const J2   = parse(Float64, get(ENV, "F_J2",   "0.0"))
 const NPTS = parse(Int,     get(ENV, "F_NPTS", "12"))
 const BUGM = parse(Int,     get(ENV, "F_BUG_M", "3"))
 const ARMS = split(get(ENV, "F_ARMS", "tdvp2,cbe1s,bug"), ',')
-const OUT  = joinpath(@__DIR__, "..", "results")
+# `F_OUT` is a subdirectory UNDER results/, so a study's CSVs and its figures stay together
+# instead of accumulating in one flat directory where a `fig45_*` glob picks up every campaign
+# ever run. Empty default = results/ itself, so every existing invocation is unchanged.
+# ⛔ `plot_fig45_2209.py` READS THE SAME VARIABLE. Set it once in the environment for the run and
+# the plotter lands beside its own data; set it for only one of the two and the plotter silently
+# globs a DIFFERENT study's CSVs and captions them with this run's tag.
+const OUT  = normpath(joinpath(@__DIR__, "..", "results", get(ENV, "F_OUT", "")))
 
 const LAT = lattice(LATNAME)
 const N   = LX * LY

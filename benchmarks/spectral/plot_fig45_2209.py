@@ -45,7 +45,9 @@ import matplotlib.pyplot as plt
 sys.stdout.reconfigure(errors="replace")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RES = os.path.join(HERE, "..", "results")
+# Subdirectory under results/, shared with `fig45_2209.jl` -- see the note at its `OUT`. Keeping
+# one study's CSVs and figures together is what stops a `fig45_*` glob from mixing campaigns.
+RES = os.path.normpath(os.path.join(HERE, "..", "results", os.environ.get("F_OUT", "")))
 
 SQRT3 = np.sqrt(3.0)
 
