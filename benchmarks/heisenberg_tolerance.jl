@@ -40,6 +40,7 @@ using LinearAlgebra, Printf
 
 include(joinpath(@__DIR__, "..", "examples", "common.jl"))   # parse_params, krylov_depth, steppers
 include(joinpath(@__DIR__, "exact_sparse.jl"))               # heisenberg_sparse, neel_vector, expv_sparse
+include(joinpath(@__DIR__, "..", "tests", "common", "free_fermion.jl"))  # xx_free_fermion_sz (EXACT, any L)
 
 const P = parse_params((
     phase        = "tau",
@@ -49,6 +50,25 @@ const P = parse_params((
                              # are the largest in the study -- extend only once χ(t) is known.
     dt           = 0.05,
     J            = 1.0,
+    # ⛔ `delta` SELECTS THE MODEL **AND** THE REFERENCE, and the two are not independent.
+    #
+    #   delta = 1   XXX / isotropic HEISENBERG. Bethe gives the SPECTRUM, so there is no closed
+    #               form for `exp(-iHt)|psi>`; the reference is sparse Krylov ED, which caps this
+    #               driver at L ~ 20 (the Sz=0 sector is C(20,10) = 184,756).
+    #   delta = 0   the **XX** point. Free fermions under Jordan-Wigner, so
+    #               `xx_free_fermion_sz` is EXACT AND ANALYTIC AT ANY L -- L = 50 included, where
+    #               no ED of any kind exists.
+    #
+    # ⚠ delta = 0 IS THE XX MODEL, NOT THE HEISENBERG MODEL. They are different Hamiltonians with
+    # different exact anchors: Bethe's E/L = -0.4331 and the des Cloizeaux-Pearson spinon velocity
+    # pi/2 belong to delta = 1 ONLY. Labelling a delta = 0 figure "Heisenberg" invites a reader to
+    # score it against the wrong number, which is the same class of error as the chain that was
+    # once evolved under a triangular coupling builder while carrying a chain's label.
+    delta        = 1.0,
+    # `neel` = |up dn up dn ...>, `domainwall` = |up..up dn..dn>. Both are Sz = 0 z-basis product
+    # states, so both are representable under :U1 and both have an EXACT t=0 energy (see
+    # `product_energy`). ⛔ Neither is representable under :SU2 -- `product_state` throws.
+    init         = "neel",
     maxdim       = 0,        # 0 = UNCAPPED. A cap would floor the τ_trunc scan at the cap's own
                              # error and hide the knee this study exists to find.
     taus         = "1e-4,1e-5,1e-6,1e-7,1e-8,1e-10,1e-12,1e-14",
@@ -69,14 +89,35 @@ const P = parse_params((
     symmetry     = "U1",
     maxiter      = 0,        # 0 = derive the Krylov depth from ‖H‖·dt/2
     exact_cbe    = true,     # full SVD, not the randomised sketch (Jan's point 3)
+    # ⛔ THE 1-SITE CBE BASELINE WAS RUNNING ON PACKAGE DEFAULTS WHILE `cbe_bug` GOT TUNED ONES,
+    # WHICH IS NOT A COMPARISON. `tdvp_cbe1s_step!` was called with `maxdim`/`trunc_thresh`/
+    # `maxiter` only, so it silently kept `comp_ratio = 0.5` and `exact = false` (the randomised
+    # sketch) while the BUG arm ran `exact = exact_cbe` (a full SVD) with `dover = 4` and
+    # `comp_ratio = 1.0`. The two arms were therefore using DIFFERENT CBE machinery, and neither
+    # the accuracy nor the cost gap between them meant anything.
+    #
+    # ⚠ `dex = 0` is NOT "no expansion" -- `cbe_core.jl:635` reads `dex <= 0` as "use the
+    # `growth` schedule", i.e. `budget = ceil(growth*dmax) - r`. So the old baseline was expanding;
+    # it was expanding under a different rule.
+    #
+    # Defaults here MATCH the BUG arm's, so `tdvp_cbe1s` is a fair baseline out of the box, and
+    # each knob stays scannable for the tuning pass.
+    cbe1s_dover      = 4,
+    cbe1s_comp_ratio = 1.0,
+    cbe1s_growth     = 2.0,
+    # `-1` = inherit `exact_cbe`, so the two arms cannot silently diverge on the sketch/SVD choice.
+    cbe1s_exact      = -1,
 ))
 
 const OUTDIR = joinpath(@__DIR__, "results")
 
-# ‖H_XXZ‖ ≤ Σ_bonds ‖S·S‖ = (L-1)·(3/4)·J. The extremal many-body eigenvalues are ~0.44·J·L, so
-# this over-estimates by ~2x -- which costs Krylov depth and never accuracy, the right direction
-# to be wrong in.
-const HNORM = 0.75 * P.J * (P.L - 1)
+# ‖H_XXZ‖ ≤ Σ_bonds ‖h_bond‖. The XXZ bond operator has eigenvalues {Δ/4, Δ/4, -Δ/4 ± 1/2}, so
+# ‖h_bond‖ = Δ/4 + 1/2 -- which is 3/4 at Δ=1 (the value this was hard-coded to) and 1/2 at Δ=0.
+# The extremal many-body eigenvalues are ~0.44·J·L, so this over-estimates by ~2x -- which costs
+# Krylov depth and never accuracy, the right direction to be wrong in.
+# ⛔ HARD-CODING 3/4 HERE WOULD OVER-DEEPEN EVERY Δ=0 KRYLOV SOLVE BY 50%, quietly making the XX
+# arm look more expensive than it is in exactly the cost comparison this driver exists to make.
+const HNORM = (P.delta / 4 + 0.5) * P.J * (P.L - 1)
 
 parse_list(s, T) = T[parse(T, strip(x)) for x in split(s, ',') if !isempty(strip(x))]
 parse_syms(s) = String[strip(x) for x in split(s, ',') if !isempty(strip(x))]
@@ -95,17 +136,39 @@ the integrator's step size. A reference that stepped with `dt` would share the s
 and could conceal a dt-dependent error rather than measure it -- which matters here because
 phase `dt` varies exactly that.
 """
-function exact_profiles(L::Int, J::Float64, t_max::Float64, sample_every::Float64)
-    H, states, idx = heisenberg_sparse(L; J = J, delta = 1.0)
-    v = neel_vector(L, idx)
+function exact_profiles(L::Int, J::Float64, t_max::Float64, sample_every::Float64,
+                        delta::Float64, init::String, occ::Vector{Int})
     nsamp = round(Int, t_max / sample_every)
+    ts = [k * sample_every for k in 0:nsamp]
+
+    if delta == 0.0
+        # ✅ ANALYTIC AND EXACT AT ANY L. Jordan-Wigner makes the XX point of the XXZ family
+        # quadratic, so the single-particle propagator `exp(-i h t)` is an L x L matrix
+        # exponential and
+        #     <Sz_j(t)> = Σ_{k occupied} |[exp(-i h t)]_{jk}|² - 1/2
+        # is exact -- no many-body Hilbert space, no truncation, no solver tolerance. This is
+        # what makes L = 50 scoreable at all: the Sz=0 sector there is C(50,25) = 1.26e14.
+        #
+        # ⚠ Each sample is an INDEPENDENT exponential from t = 0, not a product of steps, so the
+        # reference cannot accumulate error along the sample grid the way a stepped one would.
+        return ts, [xx_free_fermion_sz(L, t; J = J, occupied = occ) for t in ts]
+    end
+
+    # Δ ≠ 0: interacting, so there is no explicit closed form for `exp(-iHt)|psi>` even though
+    # the model is Bethe-integrable -- the Bethe ansatz gives the SPECTRUM, and the overlaps of a
+    # product state with every Bethe state are themselves a 2^L problem. Sparse Krylov ED in the
+    # Sz = 0 sector is exact to solver tolerance, and is what caps this branch's size.
+    L <= 20 || error("delta=$delta needs the ED reference, infeasible at L=$L " *
+                     "(the Sz=0 sector is C($L,$(L÷2))). Use delta=0 for an analytic reference.")
+    H, states, idx = heisenberg_sparse(L; J = J, delta = delta)
+    v = init == "neel" ? neel_vector(L, idx) : domain_wall_vector(L, states, idx)
     profs = Vector{Vector{Float64}}(undef, nsamp + 1)
     profs[1] = magnetisation_dense(v, L, states)
     for k in 1:nsamp
         v = expv_sparse(H, ComplexF64(-im * sample_every), v; m = 30, tol = 1e-12)
         profs[k + 1] = magnetisation_dense(v, L, states)
     end
-    return [k * sample_every for k in 0:nsamp], profs
+    return ts, profs
 end
 
 """
@@ -116,13 +179,43 @@ for every scheme at every time and would grade nothing at all. A sum over all si
 one site, so it is not accidentally sensitive to where the front happens to be at a sample time.
 Starts at 1/2 for the Néel state and decays as the order melts.
 """
-staggered(p::Vector{Float64}) = sum((-1)^(j + 1) * p[j] for j in eachindex(p)) / length(p)
+function staggered(p::Vector{Float64})
+    L = length(p)
+    if P.init == "neel"
+        return sum((-1)^(j + 1) * p[j] for j in 1:L) / L
+    end
+    # ⛔ THE STAGGERED SUM IS THE WRONG SCALAR FOR A DOMAIN WALL -- it is ~0 at t=0 and would
+    # grade nothing. The matched signal is the magnetisation still held left of the wall minus
+    # that held right of it: it starts at exactly 1/2, like the Néel staggered sum, and decays as
+    # the wall melts, so the two start states produce directly comparable curves.
+    return (sum(p[1:(L ÷ 2)]) - sum(p[(L ÷ 2 + 1):L])) / L
+end
 
 # ── the run ───────────────────────────────────────────────────────────────────────────────
 
 set_symmetry!(Symbol(P.symmetry))
-const W    = xxz_mpo(P.L; J = P.J, delta = 1.0)
-const PSI0 = neel_state(P.L)
+const W    = xxz_mpo(P.L; J = P.J, delta = P.delta)
+const PSI0 = P.init == "neel"       ? neel_state(P.L) :
+             P.init == "domainwall" ? domain_wall_state(P.L) :
+             error("unknown init $(repr(P.init)) -- use neel or domainwall")
+
+# The z-basis spin pattern of the start state, as ±1. Drives both the exact t=0 energy and the
+# occupied-site list the analytic reference needs, so the two cannot disagree about the state.
+const SPINS = P.init == "neel" ? [isodd(j) ? 1 : -1 for j in 1:P.L] :
+                                 [j <= P.L ÷ 2 ? 1 : -1 for j in 1:P.L]
+# Occupied fermion sites: up spin is an occupied fermion (Sz = n - 1/2).
+const OCC = [j for j in 1:P.L if SPINS[j] > 0]
+
+"""
+Exact energy of a z-basis product state: only `S^z S^z` survives, since `S^x S^x + S^y S^y` flips
+two spins and takes the state out of itself. So `E = J·Δ·Σ_bonds s_i s_{i+1} / 4`, with no
+tolerance in it -- an exact gate at any `Δ` and either start state.
+
+At `Δ = 0` this is `0` for EVERY product state, which is a weaker gate than the `Δ = 1` case: it
+would pass even if the sign of `J` or the spin pattern were wrong. `preflight` therefore also
+gates the t=0 PROFILE against the reference, which does see the pattern.
+"""
+product_energy() = P.J * P.delta * sum(SPINS[j] * SPINS[j + 1] for j in 1:(P.L - 1)) / 4
 
 """
 `⟨S^z_j⟩` for every site, NORMALISED.
@@ -207,8 +300,12 @@ function stepper(scheme::String, tau_trunc::Float64, split_cutoff::Float64,
                                          truncate = close,
                                          maxdim = CAP, trunc_thresh = tau_trunc, maxiter = m)
     elseif scheme == "tdvp_cbe1s"
+        ex = P.cbe1s_exact < 0 ? P.exact_cbe : P.cbe1s_exact > 0
         return (p, tau) -> tdvp_cbe1s_step!(p, W, tau; maxdim = CAP,
-                                            trunc_thresh = tau_trunc, maxiter = m)
+                                            trunc_thresh = tau_trunc, maxiter = m,
+                                            exact = ex, dover = P.cbe1s_dover,
+                                            comp_ratio = P.cbe1s_comp_ratio,
+                                            growth = P.cbe1s_growth)
     elseif scheme == "tdvp2"
         return (p, tau) -> tdvp2_step!(p, W, tau; maxdim = CAP,
                                        trunc_thresh = tau_trunc, maxiter = m)
@@ -264,6 +361,13 @@ function run_arm(io, phase, scheme, tau_trunc, split_cutoff, close, dt, profs;
     flush(stdout)
 end
 
+# ⛔ EVERY OUTPUT NAME CARRIES `maxdim` AND `maxiter`. They are state-determining inputs, so two
+# runs that differ only in the rank cap or the Krylov depth are DIFFERENT experiments and must not
+# share a filename -- see the note in phase `grid`.
+capstr()  = P.maxdim  > 0 ? string(P.maxdim)  : "inf"
+iterstr() = P.maxiter > 0 ? string(P.maxiter) : "auto"
+knobtag() = string("_D", capstr(), "_m", iterstr())
+
 open_out(name) = begin
     mkpath(OUTDIR)
     io = open(joinpath(OUTDIR, name), "w")
@@ -286,19 +390,33 @@ function preflight(profs)
     s0, sr = staggered(sz_profile(copy(PSI0))), staggered(profs[1])
     @printf("t=0 staggered: mps %.12f  exact %.12f  (diff %.2e)\n", s0, sr, abs(s0 - sr))
     abs(s0 - sr) < 1e-12 || error("t=0 mismatch -- the MPS and the reference are not the same state")
-    e0, ref = real(mpo_energy(copy(PSI0), W)) / norm(copy(PSI0))^2, -(P.L - 1) / 4
-    @printf("t=0 energy:    %.12f  exact -(L-1)/4 = %.12f  (diff %.2e)\n\n", e0, ref, abs(e0 - ref))
+    e0, ref = real(mpo_energy(copy(PSI0), W)) / norm(copy(PSI0))^2, product_energy()
+    @printf("t=0 energy:    %.12f  exact = %.12f  (diff %.2e)\n", e0, ref, abs(e0 - ref))
     abs(e0 - ref) < 1e-10 || error("t=0 energy mismatch -- the MPO is not this Hamiltonian")
+    # ⛔ THE t=0 PROFILE GATE IS NOT REDUNDANT WITH THE ENERGY GATE, AND AT Δ=0 IT IS THE ONLY
+    # ONE THAT BINDS. `product_energy()` is identically 0 for EVERY product state at Δ=0, so the
+    # energy check there would pass with the spin pattern reversed, the wall in the wrong place,
+    # or `occupied` mismatched against `SPINS`. The profile sees all three.
+    p0, r0 = sz_profile(copy(PSI0)), profs[1]
+    @printf("t=0 profile:   max|mps - exact| = %.2e over %d sites\n\n",
+            maximum(abs.(p0 .- r0)), P.L)
+    maximum(abs.(p0 .- r0)) < 1e-12 ||
+        error("t=0 profile mismatch -- the MPS start state and the reference's `occupied` " *
+              "list describe different states")
 end
 
 function main()
-    @printf("Heisenberg XXZ Δ=1, Néel quench -- L=%d  %s  J=%g  T=%g  dt=%g  maxdim=%s\n",
-            P.L, P.symmetry, P.J, P.t_max, P.dt, P.maxdim > 0 ? string(P.maxdim) : "UNCAPPED")
+    @printf("XXZ Δ=%g (%s), %s quench -- L=%d  %s  J=%g  T=%g  dt=%g  maxdim=%s\n",
+            P.delta, P.delta == 0 ? "XX / free fermions" : P.delta == 1 ? "isotropic Heisenberg" : "anisotropic",
+            P.init, P.L, P.symmetry, P.J, P.t_max, P.dt,
+            P.maxdim > 0 ? string(P.maxdim) : "UNCAPPED")
+    @printf("reference: %s\n", P.delta == 0 ? "EXACT ANALYTIC free fermions (valid at any L)" :
+                               "sparse Krylov ED, Sz=0 sector (caps L at ~20)")
     @printf("phase=%s  exact_cbe=%s  krylov depth=%d (bound %.1e)\n",
             P.phase, P.exact_cbe, depth_for(P.dt), krylov_bound(HNORM, P.dt, depth_for(P.dt)))
     print("building the exact reference (C($(P.L),$(P.L÷2)) states) ... "); flush(stdout)
     t0 = time_ns()
-    _, profs = exact_profiles(P.L, P.J, P.t_max, P.sample_every)
+    _, profs = exact_profiles(P.L, P.J, P.t_max, P.sample_every, P.delta, P.init, OCC)
     @printf("%d samples, %.1f s\n", length(profs), (time_ns() - t0) / 1e9)
     preflight(profs)
 
@@ -306,7 +424,7 @@ function main()
     if P.phase == "tau"
         # 0a / 0b. Is there a knee, and where? Closing truncation ON at τ_trunc, half-sweep split
         # left at its shipped 1e-14 -- i.e. today's configuration, with the one knob swept.
-        io = open_out(@sprintf("heis_tau_L%d_dt%g_T%g.csv", P.L, P.dt, P.t_max))
+        io = open_out(@sprintf("heis_tau_L%d_dt%g_T%g%s.csv", P.L, P.dt, P.t_max, knobtag()))
         try
             for tau in parse_list(P.taus, Float64), s in schemes
                 run_arm(io, "tau", s, tau, 1e-14, true, P.dt, profs)
@@ -316,7 +434,7 @@ function main()
     elseif P.phase == "dt"
         # 0c / 0d. The calibration curve τ_trunc*(dt): where each τ_trunc's line leaves the
         # common envelope is where truncation takes over from time integration.
-        io = open_out(@sprintf("heis_dt_L%d_T%g.csv", P.L, P.t_max))
+        io = open_out(@sprintf("heis_dt_L%d_T%g%s.csv", P.L, P.t_max, knobtag()))
         try
             for dt in parse_list(P.dts, Float64), tau in parse_list(P.dt_taus, Float64), s in schemes
                 run_arm(io, "dt", s, tau, 1e-14, true, dt, profs)
@@ -328,7 +446,7 @@ function main()
         # ONLY rank control in the step. Loosest cutoff FIRST: with nothing closing the step the
         # rank can only ratchet up, so the first arm is what tells us whether T and the cap are
         # affordable for the rest.
-        io = open_out(@sprintf("heis_split_L%d_dt%g_T%g.csv", P.L, P.dt, P.t_max))
+        io = open_out(@sprintf("heis_split_L%d_dt%g_T%g%s.csv", P.L, P.dt, P.t_max, knobtag()))
         try
             for sc in parse_list(P.splits, Float64)
                 run_arm(io, "split", "bug_interleaved", 0.0, sc, false, P.dt, profs)
@@ -374,8 +492,15 @@ function main()
             axis = P.grid_axis
             axis in ("split", "cbe") || error("grid_axis must be split or cbe, got $(repr(axis))")
             @printf("=== sweep %s  (%s)  x-axis = %s ===\n", sw, sch, axis); flush(stdout)
-            io = open_out(@sprintf("heis_grid%s_%s_L%d_dt%g_T%g.csv",
-                                   axis == "cbe" ? "cbe" : "", sw, P.L, P.dt, P.t_max))
+            # ⛔ `maxdim` AND `maxiter` ARE PART OF THE FILENAME. Without them a chi=128 grid
+            # silently OVERWRITES the chi=64 one -- same L, same dt, same T, same sweep -- and a
+            # convergence ladder over (chi x Krylov depth) collapses onto whichever run finished
+            # last. `maxdim` is carried as a COLUMN, so the surviving file still looks internally
+            # consistent; nothing flags that eight ninths of the campaign is gone. This is the
+            # same failure the 2209 driver guards against in `tag`, and the same one the
+            # one-CSV-per-sweep note below was added for.
+            io = open_out(@sprintf("heis_grid%s_%s_L%d_dt%g_T%g%s.csv",
+                                   axis == "cbe" ? "cbe" : "", sw, P.L, P.dt, P.t_max, knobtag()))
             try
                 for tau in parse_list(P.taus, Float64), x in parse_list(P.grid_splits, Float64)
                     @printf("  -> arm tau=%g %s=%g ...\n", tau, axis, x); flush(stdout)

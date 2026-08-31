@@ -62,14 +62,44 @@ these sizes is not the deliverable and must not be quoted as one.
 """
 function build(model::String; smoke::Bool = false)
     if model == "chain"
-        set_symmetry!(:SU2)
-        L = smoke ? 8 : 16
-        W = heisenberg_su2_mpo(L)
+        # ── THE CHAIN IS THE ONLY MODEL HERE WITH AN ANALYTIC REFERENCE AT **ANY** L ────────
+        # `bethe_xxx_open_energy` is exact and converges at production sizes -- MEASURED
+        # residual 9.2e-15 at L=18 and 6.5e-14 at L=50, with E/L marching monotonically to the
+        # thermodynamic limit 1/4 - ln2 = -0.443147180560. That is why the chain, and not a
+        # cylinder, carries the large-L comparison: sparse ED stops near L=20, so at L=50 the
+        # only alternative to Bethe would be OUR OWN finest run, which measures nothing.
+        sym   = Symbol(get(ENV, "KSYM", "SU2"))
+        L     = parse(Int,     get(ENV, "KL",  smoke ? "8" : "16"))
+        D     = parse(Int,     get(ENV, "KD",  "64"))
+        tmax  = parse(Float64, get(ENV, "KT",  "30.0"))
+        dtu   = parse(Float64, get(ENV, "KDT", "0.0"))   # > 0 => UNIFORM grid of this dt
+        start = get(ENV, "KSTART", sym === :SU2 ? "dimer" : "domainwall")
+        set_symmetry!(sym)
+        # ⛔ ONE MPO PER SYMMETRY, AND THEY ARE NOT INTERCHANGEABLE. `heisenberg_su2_mpo` is a
+        # genuine non-abelian MPO; `xxz_mpo(delta=1)` is the same Hamiltonian in an abelian
+        # basis. Passing the SU(2) MPO to a U(1) state (or the reverse) does not throw.
+        W = sym === :SU2 ? heisenberg_su2_mpo(L) : xxz_mpo(L; J = 1.0, delta = 1.0)
+        # ⛔ THE START STATE IS DICTATED BY THE SYMMETRY, NOT A FREE CHOICE. `product_state`
+        # THROWS under :SU2 (a definite-Sz product state spans many total-spin sectors), and the
+        # dimer covering is the S = 0 start that is representable on both sides. The domain wall
+        # is Sz = 0, so under U(1) it cools into the same singlet ground state that Bethe scores.
+        psi0 = start == "dimer"      ? dimer_state(L) :
+               start == "domainwall" ? product_state([fill(:up, L ÷ 2); fill(:down, L ÷ 2)]) :
+               error("unknown KSTART $(repr(start)) -- use dimer or domainwall")
         e, _, res = bethe_xxx_open_energy(L)
-        res < 1e-12 || error("Bethe residual $res")
-        return (; name = "chain", W = W, psi0 = dimer_state(L), L = L, herm = true,
+        # ⛔ ASSERT THE RESIDUAL. `bethe_xxx_open_energy` returns (E, lambda, residual) and a
+        # non-converged root solve returns a plausible-looking energy; an earlier bug sat at
+        # residual 1e-14 while the energy was 0.24 wrong.
+        res < 1e-12 || error("Bethe residual $res at L=$L -- reference not converged")
+        # ⚠ UNIFORM vs LOG GRID IS A REAL DIFFERENCE, NOT A FORMATTING ONE. A log grid reaches
+        # a given beta in ~12 steps and is what the cooling studies use; a uniform dt is what a
+        # per-step cost comparison needs, because arms must take the SAME number of steps for
+        # matvec counts to be comparable. `KDT > 0` selects uniform.
+        steps = dtu > 0 ? fill(dtu, round(Int, tmax / dtu)) : log_steps(0.05, tmax, 12)
+        return (; name = "chain_$(sym)_$(start)_L$(L)_D$(D)",
+                W = W, psi0 = psi0, L = L, herm = true,
                 obs = p -> real(mpo_energy(copy(p), W)) / max(norm(p)^2, eps()),
-                eref = e, steps = log_steps(0.05, 30.0, 12), imag_time = true, D = 64)
+                eref = e, steps = steps, imag_time = true, D = D)
     elseif model == "cylinder"
         set_symmetry!(:SU2)
         Ly = 4; Lx = smoke ? 3 : 4; L = Lx * Ly

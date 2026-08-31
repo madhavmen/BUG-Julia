@@ -260,17 +260,23 @@ def plot_grid():
     #              it collides with. That is a wrong number in a figure, not a missing one.
     #   x-axis  -- `split_cutoff` and the cbe cutoff are DIFFERENT truncations; the CSV carries
     #              both columns and only one of them varies per run.
+    #   maxdim  -- SAME ARGUMENT AS `L`, ONE AXIS FURTHER, and it was missing. A chi ladder
+    #              (64/128/256) at one L pools into a single key without it, and because
+    #              `final()` keys on (root, x) alone the chi=256 row OVERWRITES the chi=64 row it
+    #              collides with -- producing a heatmap that looks complete and mixes three caps.
     by_key = defaultdict(list)
     for r in allrows:
         xaxis = "cbe" if float(r.get("cbe_cutoff", 0) or 0) > 0 else "split"
-        by_key[(r["scheme"], r["L"], xaxis)].append(r)
-    for key in sorted(by_key, key=lambda k: (k[1], k[2],
+        by_key[(r["scheme"], r["L"], r.get("maxdim", "0"), xaxis)].append(r)
+    for key in sorted(by_key, key=lambda k: (k[1], k[2], k[3],
                                              DRAW_ORDER.index(k[0]) if k[0] in DRAW_ORDER else 99)):
         _one_grid(key, by_key[key])
     for L in sorted({k[1] for k in by_key}):
-        for xaxis in sorted({k[2] for k in by_key if k[1] == L}):
-            sel = {k[0]: v for k, v in by_key.items() if k[1] == L and k[2] == xaxis}
-            _grid_compare(sel, L, xaxis)
+        for D in sorted({k[2] for k in by_key if k[1] == L}):
+            for xaxis in sorted({k[3] for k in by_key if k[1] == L and k[2] == D}):
+                sel = {k[0]: v for k, v in by_key.items()
+                       if k[1] == L and k[2] == D and k[3] == xaxis}
+                _grid_compare(sel, L, D, xaxis)
 
 
 SWEEP_LABEL = {
@@ -288,7 +294,7 @@ XLABEL = {"split": "half-sweep  split_cutoff  (SVD of the evolved 1-site tensor)
 
 
 def _one_grid(key, rows):
-    sch, L, xaxis = key
+    sch, L, D, xaxis = key
     dt = rows[0]["dt"]
     xcol = "cbe_cutoff" if xaxis == "cbe" else "split_cutoff"
     fin = final(rows, lambda r: (r["tau_trunc"], r[xcol]))
@@ -304,7 +310,7 @@ def _one_grid(key, rows):
     chi = grid_of("maxbond")
     logerr = [[math.log10(max(v, FLOOR)) if v == v else float("nan") for v in row] for row in err]
 
-    fig, axes = plt.subplots(1, 3, figsize=(16.5, 5.0))
+    fig, axes = plt.subplots(1, 4, figsize=(21.5, 5.0))
     ticks = [f"{v:.0e}" for v in splits]
     yticks = [f"{v:.0e}" for v in roots]
 
@@ -344,13 +350,43 @@ def _one_grid(key, rows):
           "Flat lines = the half-sweeps are inert.\nSeparated lines = the root-out pass governs.")
     a3.legend(fontsize=7.5, frameon=False, ncol=2, title="root-out thresh", title_fontsize=8)
 
+    # ── PANEL 4: HOW THE RANK GOT THERE ───────────────────────────────────────────────────
+    # ⛔ THE FINAL chi IN PANEL 2 CANNOT DISTINGUISH "grew smoothly and saturated" FROM "hit the
+    # cap on step 3 and sat there", and those have opposite meanings for whether the cap binds.
+    # Only the best and worst error configurations are drawn: the whole grid would be 64 curves,
+    # and the question this panel answers is what the accuracy EXTREMES do differently.
+    a4 = axes[3]
+    scored = sorted(((fin[k]["err_prof"], k) for k in fin if fin[k]["err_prof"] == fin[k]["err_prof"]))
+    if scored:
+        traj = defaultdict(list)
+        for r in rows:
+            traj[(r["tau_trunc"], r[xcol])].append((r["t"], r["maxbond"]))
+        for (e, k), lab, col in ((scored[0], "best", "#1a7f37"), (scored[-1], "worst", "#c1440e")):
+            pts = sorted(traj.get(k, []))
+            if not pts:
+                continue
+            a4.plot([t for t, _ in pts], [c for _, c in pts], "o-", ms=3.5, lw=1.6, color=col,
+                    label=f"{lab}:  root={k[0]:.0e}  {xaxis}={k[1]:.0e}\n"
+                          f"        err={e:.2e}  final $\chi$={pts[-1][1]:.0f}")
+        cap = float(D) if D not in (None, "", "0") else 0.0
+        if cap > 0:
+            a4.axhline(cap, ls="--", lw=1.2, color="#555")
+            a4.text(0.02, cap, f" cap {cap:.0f}", va="bottom", ha="left", fontsize=7.5,
+                    color="#555", transform=a4.get_yaxis_transform())
+        style(a4, "$t$", r"$\chi(t)$",
+              "Rank GROWTH, best vs worst error.\nFlat at the cap = the cap is what sets the error.")
+        a4.legend(fontsize=7, frameon=False, loc="lower right")
+
+    capstr = f", $\chi\leq${D}" if D not in (None, "", "0") else ", uncapped"
     fig.suptitle(f"6B  {SWEEP_LABEL.get(sch, sch)} — root-out threshold × {xaxis} cutoff, "
-                 f"closing pass ON  (L={L}, dt={dt}).  Cyan = both equal.",
+                 f"closing pass ON  (L={L}{capstr}, dt={dt}).  Cyan = both equal.",
                  fontsize=10, y=1.0)
-    save(fig, f"heis_grid_{xaxis}_{sch}_L{L}.png")
+    # ⛔ `D` IN THE PNG NAME for the same reason it is in the key: without it the chi=256 figure
+    # overwrites the chi=64 one and the ladder silently becomes one panel.
+    save(fig, f"heis_grid_{xaxis}_{sch}_L{L}_D{D}.png")
 
 
-def _grid_compare(by_scheme, L, xaxis):
+def _grid_compare(by_scheme, L, D, xaxis):
     """The three half-sweep structures on ONE pair of axes.
 
     ⛔ THIS IS THE PLOT THAT ANSWERS THE QUESTION, and the per-sweep heatmaps are the evidence
@@ -393,9 +429,12 @@ def _grid_compare(by_scheme, L, xaxis):
     style(a2, "operator applications", r"$L_\infty$ error",
           "Cost of that accuracy — the comparison that decides it")
     a1.legend(fontsize=8, frameon=False, loc="lower left")
+    capstr = f", $\chi\leq${D}" if D not in (None, "", "0") else ", uncapped"
     fig.suptitle(f"Half-sweep structures on the diagonal, {xaxis} cutoff axis, "
-                 f"same reference  (L={L})", fontsize=10.5, y=1.0)
-    save(fig, f"heis_sweeps_{xaxis}_L{L}.png")
+                 f"same reference  (L={L}{capstr})", fontsize=10.5, y=1.0)
+    # ⛔ `D` in the name: this figure is drawn once per (L, cap, axis), so without it the whole
+    # chi ladder collapses onto one PNG.
+    save(fig, f"heis_sweeps_{xaxis}_L{L}_D{D}.png")
 
 
 def _dark(im, v):
