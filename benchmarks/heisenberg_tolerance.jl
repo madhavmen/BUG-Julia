@@ -407,20 +407,100 @@ is the wasteful kind of mistake.
 One file per phase invocation, with the arm's identity in every row, so a partially-written file
 still parses and every row is self-describing.
 """
-open_prof(name) = begin
-    mkpath(OUTDIR)
-    io = open(joinpath(OUTDIR, name), "w")
-    println(io, "phase,scheme,tau_trunc,split_cutoff,cbe_cutoff,maxdim,t,site,sz_mps,sz_exact")
-    flush(io)   # header out immediately: a 0-byte file must mean "never opened", not "buffered"
-    io
+const PROF_COLS = ["phase", "scheme", "tau_trunc", "split_cutoff", "cbe_cutoff", "maxdim",
+                   "t", "site", "sz_mps", "sz_exact"]
+
+"""
+An arm's identity as it appears in a CSV row. ⛔ BUILT WITH THE SAME `%g` THE WRITER USES —
+comparing a `Float64` against a re-parsed string is how a resume silently re-runs everything.
+"""
+armkey(scheme, tau, split) = (string(scheme), @sprintf("%g", tau), @sprintf("%g", split))
+
+"""
+Split an existing CSV into (rows of arms that REACHED `t_max`, set of those arms).
+
+⛔ THIS IS WHAT MAKES A LOCAL CAMPAIGN POSSIBLE AT ALL. `open_out` used to be `open(..., "w")`,
+which TRUNCATES: any interruption inside a configuration threw away every arm it had finished, so
+the configuration restarted from zero. At chi=64 (~5.5 h per grid) that is survivable; at chi=128
+(~44 h) and chi=256 (~350 h) on a box that suspends nightly it means the configuration can NEVER
+complete, however many times it is launched.
+
+⚠ AND PARTIAL ARMS ARE DROPPED, NOT KEPT. An arm killed mid-trajectory has rows up to some t < T.
+Appending a re-run on top of them would leave TWO series for one arm, and `err_prof` grows with t,
+so the duplicate early rows make a chi(t) curve zigzag and a "latest row per arm" selector prefer
+the fragment. Compact on resume: keep only complete arms, then append.
+"""
+function partition_csv(path, cols, keyidx, tidx)
+    rows = readlines(path)
+    length(rows) >= 1 && rows[1] == join(cols, ",") || return (nothing, Set())
+
+    # PASS 1: which arms reached t_max.
+    done = Set{Tuple{String,String,String}}()
+    keyof = Vector{Union{Nothing,Tuple{String,String,String}}}(nothing, length(rows) - 1)
+    for (i, line) in enumerate(rows[2:end])
+        f = split(line, ",")
+        length(f) == length(cols) || continue
+        k = (f[keyidx[1]], f[keyidx[2]], f[keyidx[3]])
+        keyof[i] = k
+        t = tryparse(Float64, f[tidx])
+        t !== nothing && abs(t - P.t_max) < 1e-9 && push!(done, k)
+    end
+
+    # PASS 2: keep the surviving rows IN THEIR ORIGINAL ORDER.
+    # ⛔ NOT `for k in keys(by)` OVER A GROUPED Dict — Julia's Dict iteration order is arbitrary,
+    # so that rewrote the file in a different row order every time. The rows were all still there
+    # and every plot keyed by (arm, t) was unaffected, but a resume that ADDS NOTHING must leave
+    # the file BYTE-IDENTICAL: it is the only cheap check that resume is not eating data, and any
+    # consumer that reads rows in file order (a chi(t) trace) would zigzag.
+    keep = String[keep_line for (i, keep_line) in enumerate(rows[2:end])
+                  if keyof[i] !== nothing && keyof[i] in done]
+    (keep, done)
 end
 
-open_out(name) = begin
+"""
+Open an output CSV for APPEND, carrying forward every arm that already finished.
+
+Returns `(io, done)`; the caller skips any arm whose `armkey` is in `done`.
+"""
+function open_resumable(name, cols, keyidx, tidx; resume::Bool = true)
     mkpath(OUTDIR)
-    io = open(joinpath(OUTDIR, name), "w")
-    println(io, join(COLS_T, ","))
-    io
+    path = joinpath(OUTDIR, name)
+    done = Set{Tuple{String,String,String}}()
+    # ⛔ `resume=false` IS NOT A PESSIMISATION, IT IS REQUIRED for the `dt` and `krylov` phases.
+    # Their axis (dt, Krylov depth) is NOT part of `armkey`, so every arm of one scheme collides on
+    # one key. Appending there would stack a second copy of every arm on top of the first and the
+    # duplicate rows would parse as real data. Truncate instead, and resume per configuration.
+    if !resume
+        io = open(path, "w")
+        println(io, join(cols, ","))
+        flush(io)
+        return (io, done)
+    end
+    if isfile(path)
+        keep, done = partition_csv(path, cols, keyidx, tidx)
+        if keep !== nothing
+            open(path, "w") do io          # compact: header + complete arms only
+                println(io, join(cols, ","))
+                foreach(l -> println(io, l), keep)
+            end
+            isempty(done) || @printf("  resume %s: %d arms already complete, skipping them\n",
+                                     name, length(done))
+        else
+            # A header we do not recognise: an older schema. Do NOT append into it -- the columns
+            # would not line up and the file would parse as garbage rather than fail.
+            @printf("  ⚠ %s has an UNRECOGNISED header; moving it aside as .old\n", name)
+            mv(path, path * ".old"; force = true)
+        end
+    end
+    io = open(path, "a")
+    filesize(path) == 0 && println(io, join(cols, ","))
+    flush(io)   # header out immediately: a 0-byte file must mean "never opened", not "buffered"
+    (io, done)
 end
+
+# scheme, tau_trunc, split_cutoff, t  ->  column positions in each schema
+open_prof(name; resume = true) = open_resumable(name, PROF_COLS, (2, 3, 4), 7; resume = resume)
+open_out(name;  resume = true) = open_resumable(name, COLS_T,    (2, 5, 6), 11; resume = resume)
 
 """
 ⚠ `t = 0` IS A GATE, NOT A PRINTOUT, and it is cheap insurance against the two silent failures
@@ -471,10 +551,13 @@ function main()
     if P.phase == "tau"
         # 0a / 0b. Is there a knee, and where? Closing truncation ON at τ_trunc, half-sweep split
         # left at its shipped 1e-14 -- i.e. today's configuration, with the one knob swept.
-        io  = open_out(@sprintf("heis_tau_L%d_dt%g_T%g%s.csv", P.L, P.dt, P.t_max, knobtag()))
-        pio = open_prof(@sprintf("heis_tau_prof_L%d_dt%g_T%g%s.csv", P.L, P.dt, P.t_max, knobtag()))
+        io,  done = open_out(@sprintf("heis_tau_L%d_dt%g_T%g%s.csv", P.L, P.dt, P.t_max, knobtag()))
+        pio, _    = open_prof(@sprintf("heis_tau_prof_L%d_dt%g_T%g%s.csv", P.L, P.dt, P.t_max, knobtag()))
         try
             for tau in parse_list(P.taus, Float64), s in schemes
+                if armkey(s, tau, 1e-14) in done
+                    @printf("  -> arm tau=%g %s: SKIP (complete)\n", tau, s); continue
+                end
                 run_arm(io, "tau", s, tau, 1e-14, true, P.dt, profs; pio = pio)
             end
         finally; close(io); close(pio); end
@@ -482,7 +565,10 @@ function main()
     elseif P.phase == "dt"
         # 0c / 0d. The calibration curve τ_trunc*(dt): where each τ_trunc's line leaves the
         # common envelope is where truncation takes over from time integration.
-        io = open_out(@sprintf("heis_dt_L%d_T%g%s.csv", P.L, P.t_max, knobtag()))
+        # ⚠ NO PER-ARM SKIP HERE: this phase varies `dt`, which is not part of `armkey`, so two
+        # arms differing only in dt share a key. It resumes per CONFIGURATION, not per arm.
+        io, _ = open_out(@sprintf("heis_dt_L%d_T%g%s.csv", P.L, P.t_max, knobtag());
+                         resume = false)
         try
             for dt in parse_list(P.dts, Float64), tau in parse_list(P.dt_taus, Float64), s in schemes
                 run_arm(io, "dt", s, tau, 1e-14, true, dt, profs)
@@ -494,9 +580,12 @@ function main()
         # ONLY rank control in the step. Loosest cutoff FIRST: with nothing closing the step the
         # rank can only ratchet up, so the first arm is what tells us whether T and the cap are
         # affordable for the rest.
-        io = open_out(@sprintf("heis_split_L%d_dt%g_T%g%s.csv", P.L, P.dt, P.t_max, knobtag()))
+        io, done = open_out(@sprintf("heis_split_L%d_dt%g_T%g%s.csv", P.L, P.dt, P.t_max, knobtag()))
         try
             for sc in parse_list(P.splits, Float64)
+                if armkey("bug_interleaved", 0.0, sc) in done
+                    @printf("  -> arm split=%g: SKIP (complete)\n", sc); continue
+                end
                 run_arm(io, "split", "bug_interleaved", 0.0, sc, false, P.dt, profs)
             end
         finally; close(io); end
@@ -547,12 +636,18 @@ function main()
             # consistent; nothing flags that eight ninths of the campaign is gone. This is the
             # same failure the 2209 driver guards against in `tag`, and the same one the
             # one-CSV-per-sweep note below was added for.
-            io  = open_out(@sprintf("heis_grid%s_%s_L%d_dt%g_T%g%s.csv",
+            io,  done = open_out(@sprintf("heis_grid%s_%s_L%d_dt%g_T%g%s.csv",
                                     axis == "cbe" ? "cbe" : "", sw, P.L, P.dt, P.t_max, knobtag()))
-            pio = open_prof(@sprintf("heis_grid%s_%s_prof_L%d_dt%g_T%g%s.csv",
+            pio, _    = open_prof(@sprintf("heis_grid%s_%s_prof_L%d_dt%g_T%g%s.csv",
                                      axis == "cbe" ? "cbe" : "", sw, P.L, P.dt, P.t_max, knobtag()))
             try
                 for tau in parse_list(P.taus, Float64), x in parse_list(P.grid_splits, Float64)
+                    # The split-axis arm stores `x` as split_cutoff; the cbe-axis arm pins
+                    # split_cutoff at 1e-14 and varies cbe_cutoff, which is NOT in the key -- so
+                    # only the split axis can be resumed per arm.
+                    if axis == "split" && armkey(sch, tau, x) in done
+                        @printf("  -> arm tau=%g split=%g: SKIP (complete)\n", tau, x); continue
+                    end
                     @printf("  -> arm tau=%g %s=%g ...\n", tau, axis, x); flush(stdout)
                     if axis == "split"
                         run_arm(io, "grid", sch, tau, x, true, P.dt, profs; pio = pio)
@@ -577,8 +672,12 @@ function main()
         # Read it as: the depth at which the error curve LEAVES the flat floor is the cheapest
         # honest setting. A curve that is flat all the way to the smallest depth means the bound
         # is irrelevant for this model and the shallowest arm wins outright.
-        io  = open_out(@sprintf("heis_krylov_L%d_dt%g_T%g_D%s.csv", P.L, P.dt, P.t_max, capstr()))
-        pio = open_prof(@sprintf("heis_krylov_prof_L%d_dt%g_T%g_D%s.csv", P.L, P.dt, P.t_max, capstr()))
+        # ⚠ NO PER-ARM SKIP HERE either: the axis is the Krylov DEPTH, which is not part of
+        # `armkey`, so every depth of one scheme shares a key. Resumes per configuration.
+        io,  _ = open_out(@sprintf("heis_krylov_L%d_dt%g_T%g_D%s.csv", P.L, P.dt, P.t_max, capstr());
+                          resume = false)
+        pio, _ = open_prof(@sprintf("heis_krylov_prof_L%d_dt%g_T%g_D%s.csv", P.L, P.dt, P.t_max, capstr());
+                           resume = false)
         try
             for mi in parse_list(P.maxiters, Int), s in schemes
                 @printf("  -> maxiter=%d %s ...\n", mi, s); flush(stdout)
