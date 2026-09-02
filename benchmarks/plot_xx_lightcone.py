@@ -65,11 +65,12 @@ def load_prof(path):
 
 
 def load_scalar(path):
-    """-> {scheme: (ts, maxbond, err_prof, krylov)}"""
+    """-> {scheme: (ts, maxbond, err_prof, krylov, seconds)}"""
     rows = defaultdict(list)
     for r in csv.DictReader(open(path)):
         rows[r["scheme"]].append((float(r["t"]), int(r["maxbond"]),
-                                  float(r["err_prof"]), int(r["krylov"])))
+                                  float(r["err_prof"]), int(r["krylov"]),
+                                  float(r["seconds"])))
     return {s: tuple(np.array(x) for x in zip(*sorted(v))) for s, v in rows.items()}
 
 
@@ -80,13 +81,20 @@ def figure(prof_path, scalar_path, tag):
     if not present:
         return
 
-    fig = plt.figure(figsize=(17.5, 8.6))
-    gs = gridspec.GridSpec(2, 4, figure=fig, height_ratios=[1.0, 0.85],
-                           hspace=.36, wspace=.28)
+    # 12 columns so row 1 divides into 4 heatmaps (3 each) and row 2 into 3 plots (4 each).
+    fig = plt.figure(figsize=(17.5, 8.8))
+    gs = gridspec.GridSpec(2, 12, figure=fig, height_ratios=[1.0, 0.85],
+                           hspace=.40, wspace=1.9)
 
     # ── row 1, panel 1: the light cone itself, from the EXACT solution ────────────────────
-    ts, sites, _, ex = prof[present[0][0]]
-    ax = fig.add_subplot(gs[0, 0])
+    # ⛔ TAKE THE LONGEST ARM, NOT `present[0]`. Arms finish at different times and this figure is
+    # regenerated while the run is live, so the first scheme in draw order can be one that is only
+    # a quarter done. Using its time grid for every OTHER scheme's error map is a shape mismatch
+    # (MEASURED: C was (41,18) against Y of length 22) -- and had the lengths happened to agree it
+    # would have silently plotted one arm's errors against another arm's times.
+    longest = max(present, key=lambda p: len(prof[p[0]][0]))[0]
+    ts, sites, _, ex = prof[longest]
+    ax = fig.add_subplot(gs[0, 0:3])
     im = ax.pcolormesh(sites, ts, ex, cmap="RdBu_r", vmin=-.5, vmax=.5, shading="nearest")
     ax.set_title("EXACT  $\\langle S^z_j(t)\\rangle$\n(analytic free fermions)", fontsize=9.5)
     ax.set_xlabel("site $j$"); ax.set_ylabel("$t$")
@@ -102,22 +110,27 @@ def figure(prof_path, scalar_path, tag):
     lo = max(min(e[e > 0].min() for e in errs.values() if (e > 0).any()), FLOOR)
     hi = max(e.max() for e in errs.values())
     for k, (s, lab, c, w, z) in enumerate(present):
-        ax = fig.add_subplot(gs[0, k + 1])
-        im = ax.pcolormesh(sites, ts, np.log10(np.maximum(errs[s], lo)),
+        ts_s, sites_s, _, _ = prof[s]                    # this arm's OWN grid -- see above
+        ax = fig.add_subplot(gs[0, 3 * (k + 1):3 * (k + 2)])
+        im = ax.pcolormesh(sites_s, ts_s, np.log10(np.maximum(errs[s], lo)),
                            cmap="magma_r", vmin=np.log10(lo), vmax=np.log10(hi),
                            shading="nearest")
-        ax.set_title("%s\n$\\log_{10}|$MPS $-$ exact$|$" % lab, fontsize=9.5, color=c)
+        partial = "  (to t=%g)" % ts_s[-1] if len(ts_s) < len(ts) else ""
+        ax.set_title("%s%s\n$\\log_{10}|$MPS $-$ exact$|$" % (lab, partial),
+                     fontsize=9.5, color=c)
         ax.set_xlabel("site $j$")
+        ax.set_ylim(ts[0], ts[-1])                       # same t range on every panel
         if k == 0:
             ax.set_ylabel("$t$")
         fig.colorbar(im, ax=ax, fraction=.046, pad=.03)
 
     # ── row 2, left: rank growth ─────────────────────────────────────────────────────────
-    a1 = fig.add_subplot(gs[1, :2])
+    a1 = fig.add_subplot(gs[1, 0:4])
     cap = re.search(r"_D(\d+|inf)_", tag)
     for s, lab, c, w, z in present:
-        t, mb, _, _ = scal[s]
-        a1.plot(t, mb, "o-", ms=3.5, lw=w, color=c, zorder=z, label=lab)
+        t, mb, _, _, _ = scal[s]
+        a1.plot(t, mb, "o-", ms=3.5, lw=w, color=c, zorder=z,
+                label="%s   (final $\\chi$=%d)" % (lab, mb[-1]))
     if cap and cap.group(1) != "inf":
         cv = float(cap.group(1))
         a1.axhline(cv, ls="--", lw=1.2, color="#555")
@@ -130,9 +143,9 @@ def figure(prof_path, scalar_path, tag):
     a1.grid(True, lw=.4, alpha=.35)
 
     # ── row 2, right: error growth ───────────────────────────────────────────────────────
-    a2 = fig.add_subplot(gs[1, 2:])
+    a2 = fig.add_subplot(gs[1, 4:8])
     for s, lab, c, w, z in present:
-        t, _, e, kry = scal[s]
+        t, _, e, kry, _ = scal[s]
         a2.semilogy(t, np.maximum(e, FLOOR), "o-", ms=3.5, lw=w, color=c, zorder=z,
                     label="%s   (%d matvec)" % (lab, kry[-1]))
     a2.set_xlabel("$t$")
@@ -141,6 +154,25 @@ def figure(prof_path, scalar_path, tag):
                  fontsize=9.5)
     a2.legend(fontsize=8.5, frameon=False, loc="lower right")
     a2.grid(True, which="both", lw=.4, alpha=.35)
+
+    # ── row 2, right: wall clock ─────────────────────────────────────────────────────────
+    # ⚠ WALL CLOCK ON THIS MACHINE IS NOT A MEASUREMENT AND THE PANEL SAYS SO ON ITS FACE.
+    # Modern Standby suspends the box unpredictably and cannot be prevented (three fixes tried),
+    # and other jobs share the cores: the SAME grid cell, bit-identical to 4 matvecs, has been
+    # measured at 520 s and at 33867 s -- 65x. `matvec` in the middle panel is the cost axis that
+    # survives. This is drawn because it was asked for and because the SHAPE (linear vs
+    # accelerating) is still informative; the absolute values are not comparable across runs.
+    a3 = fig.add_subplot(gs[1, 8:12])
+    for s, lab, c, w, z in present:
+        t, _, _, _, secs = scal[s]
+        a3.plot(t, secs, "o-", ms=3.5, lw=w, color=c, zorder=z,
+                label="%s   (%.0f s)" % (lab, secs[-1]))
+    a3.set_xlabel("$t$"); a3.set_ylabel("cumulative step time (s)")
+    a3.set_title("Wall clock -- SHAPE ONLY, values are contention- and\n"
+                 "standby-contaminated on this box (65x measured). Cost = matvec.",
+                 fontsize=9.0)
+    a3.legend(fontsize=8.5, frameon=False, loc="upper left")
+    a3.grid(True, lw=.4, alpha=.35)
 
     fig.suptitle("XX chain ($\\Delta$=0), U(1), domain-wall quench%s   "
                  "BUG: root 1e-6 / half-sweep 1e-4 / basis 3;  TDVP: tol 1e-6;  "

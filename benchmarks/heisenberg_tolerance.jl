@@ -109,6 +109,17 @@ const P = parse_params((
     # silently overwrites the other. A chi=256 grid does not fit in one queue slot, so it has to be
     # split by row -- pass `tag=r1e-6` and the rows land in separate files to be concatenated.
     tag          = "",
+    # ⛔ THE BUG ARM'S CBE EXPANSION WAS RUNNING ON PACKAGE DEFAULTS WHILE `tdvp_cbe1s` GOT TUNED
+    # ONES — the exact fairness gap that was once fixed in the OTHER direction, now pointing the
+    # other way. `cbe_bug_step!` defaults to `growth = 2.0` (the expansion budget targets DOUBLING
+    # the bond dimension: `budget = ceil(growth*dmax) - r`) and `dover = nothing`, while the cbe1s
+    # arm is handed `dover = 4`. MEASURED at L=18, T=10, tol 1e-6: BUG settles at chi=80 where
+    # BOTH TDVP arms converge at chi=35, i.e. 2.3x the rank -- which is what a doubling budget
+    # would do. These make that testable instead of hardcoded.
+    # `bug_dover < 0` means "pass nothing", i.e. keep the package default.
+    bug_growth     = 2.0,
+    bug_dover      = -1,
+    bug_comp_ratio = 1.0,
     exact_cbe    = true,     # full SVD, not the randomised sketch (Jan's point 3)
     # ⛔ THE 1-SITE CBE BASELINE WAS RUNNING ON PACKAGE DEFAULTS WHILE `cbe_bug` GOT TUNED ONES,
     # WHICH IS NOT A COMPARISON. `tdvp_cbe1s_step!` was called with `maxdim`/`trunc_thresh`/
@@ -320,6 +331,10 @@ function stepper(scheme::String, tau_trunc::Float64, split_cutoff::Float64,
                                          split_cutoff = split_cutoff, split_maxdim = 0,
                                          root_cutoff = 0.0, root_maxdim = 0,
                                          truncate = close,
+                                         # the expansion knobs, now explicit on BOTH CBE arms
+                                         growth = P.bug_growth,
+                                         comp_ratio = P.bug_comp_ratio,
+                                         dover = P.bug_dover < 0 ? nothing : P.bug_dover,
                                          maxdim = CAP, trunc_thresh = tau_trunc, maxiter = m)
     elseif scheme == "tdvp_cbe1s"
         ex = P.cbe1s_exact < 0 ? P.exact_cbe : P.cbe1s_exact > 0
