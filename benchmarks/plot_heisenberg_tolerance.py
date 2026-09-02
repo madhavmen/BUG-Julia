@@ -419,13 +419,29 @@ def _one_grid(key, rows):
         traj = defaultdict(list)
         for r in rows:
             traj[(r["tau_trunc"], r[xcol])].append((r["t"], r["maxbond"]))
-        for (e, k), lab, col in ((scored[0], "best", "#1a7f37"), (scored[-1], "worst", "#c1440e")):
+        # ⛔ A DEGENERATE GRID MUST SAY SO, NOT DRAW ONE LINE AND LEGEND TWO.
+        # With `krylov_basis = 0` there is no stacked Krylov frame for `split_cutoff` to split, so
+        # every cell in a row is bit-identical (MEASURED: m0 gave 4.006614e-03 / 4775 matvec / chi
+        # 43 at all five splits). "best" and "worst" then name DIFFERENT cells with the SAME
+        # trajectory, the second plot paints over the first, and the figure showed a legend with a
+        # green entry and no green curve anywhere on it -- the same overpaint trap the tau-phase
+        # WIDTH/ZORDER nesting exists to avoid. Draw nested widths so a coincidence reads as a
+        # halo, and state the degeneracy in words.
+        span = scored[-1][0] / max(scored[0][0], FLOOR)
+        tied = span < 1.01
+        for (e, k), lab, col, w, z in ((scored[0], "best", "#1a7f37", 4.2, 1),
+                                       (scored[-1], "worst", "#c1440e", 1.6, 2)):
             pts = sorted(traj.get(k, []))
             if not pts:
                 continue
-            a4.plot([t for t, _ in pts], [c for _, c in pts], "o-", ms=3.5, lw=1.6, color=col,
+            a4.plot([t for t, _ in pts], [c for _, c in pts], "o-", ms=3.5, lw=w, color=col,
+                    zorder=z,
                     label=f"{lab}:  root={k[0]:.0e}  {xaxis}={k[1]:.0e}\n"
                           f"        err={e:.2e}  final $\chi$={pts[-1][1]:.0f}")
+        if tied:
+            a4.text(.03, .97, f"ALL {len(scored)} arms coincide (error spans {span:.4f}x):\n"
+                              "this knob is inert here, so the two curves are one",
+                    transform=a4.transAxes, ha="left", va="top", fontsize=7.5, color="#c1440e")
         cap = float(D) if D not in (None, "", "0") else 0.0
         if cap > 0:
             a4.axhline(cap, ls="--", lw=1.2, color="#555")
