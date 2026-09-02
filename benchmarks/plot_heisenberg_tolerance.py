@@ -155,7 +155,22 @@ def plot_knee():
     rows = load("heis_tau_*.csv")
     if not rows:
         return
-    L, dt = rows[0]["L"], rows[0]["dt"]
+    # ⛔ ONE FIGURE PER (L, dt, cap) -- NOT ONE FIGURE FOR THE WHOLE DIRECTORY.
+    # This used to `load("heis_tau_*.csv")` and then read `rows[0]["L"]`, so every tau CSV in the
+    # directory -- L=12 uncapped, L=18 capped at 64, any smoke run -- was merged into ONE axes and
+    # labelled with whichever row happened to sort first. The L=18 campaign arms were being drawn
+    # onto a figure titled L=12 and the file was written once, so one of the two datasets was
+    # simply invisible. MEASURED 2026-09-02: only `heis_knee_L12.png` ever appeared.
+    # This is the same defect that `plot_grid` guards against by keying on maxdim.
+    groups = defaultdict(list)
+    for r in rows:
+        groups[(r["L"], r["dt"], r.get("maxdim", 0))].append(r)
+    for key in sorted(groups):
+        _one_knee(key, groups[key])
+
+
+def _one_knee(key, rows):
+    L, dt, D = key
     fin = final(rows, lambda r: (r["scheme"], r["tau_trunc"]))
 
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(11.5, 4.5))
@@ -187,13 +202,32 @@ def plot_knee():
     style(a2, r"$\tau_{\rm trunc}$", r"final $\chi$",
           "0b  Rank bought. Right of the knee it is paid for nothing.")
     a1.legend(fontsize=9, frameon=False, loc="lower left")
-    # Coincidence is a RESULT here, so it is stated rather than left for the reader to infer
-    # from a line they cannot see.
-    a1.text(.98, .04, "TDVP arms coincide to all printed digits\n(drawn nested: thick under thin)",
-            transform=a1.transAxes, ha="right", va="bottom", fontsize=7.5, color="#555")
-    fig.suptitle(f"Heisenberg XXZ $\\Delta$=1, Néel quench, L={L}, dt={dt}, uncapped maxdim",
-                 fontsize=10, y=1.0)
-    save(fig, f"heis_knee_L{L}.png")
+    # ⛔ THE "THEY COINCIDE" NOTE IS NOW CHECKED AGAINST THE DATA, NOT ASSERTED. It was hardcoded
+    # from the L=12 Delta=1 study, where tdvp2 and tdvp_cbe1s really did agree to every printed
+    # digit -- and it kept printing on the L=18 Delta=0 figure, where they differ by 32%
+    # (2.99e-05 vs 3.95e-05). A caption that explains away a real gap as a drawing artifact is
+    # worse than no caption: it tells the reader not to look at the thing the figure is showing.
+    fl = {s: min(max(fin[(sc, t)]["err_prof"], FLOOR) for (sc, t) in fin if sc == s)
+          for s in {k[0] for k in fin}}
+    pair = [fl[s] for s in ("tdvp2", "tdvp_cbe1s") if s in fl]
+    if len(pair) == 2 and abs(pair[0] - pair[1]) <= 0.02 * max(pair):
+        a1.text(.98, .04, "TDVP arms coincide to all printed digits\n"
+                          "(drawn nested: thick under thin)",
+                transform=a1.transAxes, ha="right", va="bottom", fontsize=7.5, color="#555")
+    elif len(pair) == 2:
+        a1.text(.98, .04, "TDVP floors DIFFER: %.3g vs %.3g" % (pair[0], pair[1]),
+                transform=a1.transAxes, ha="right", va="bottom", fontsize=7.5, color="#555")
+    # ⛔ THE CAP IS PART OF THE TITLE BECAUSE IT CHANGES WHAT THE FIGURE MEANS. Uncapped, panel 0a
+    # measures the tolerance. Capped, every scheme bottoms out on the RANK the cap allows and the
+    # floors are a property of the cap, not of tau -- the title said "uncapped maxdim" while the
+    # campaign ran at 64, which inverts the reading of every flat curve on it.
+    # ⚠ `delta` and `init` are NOT columns in this CSV, so the model cannot be named here without
+    # asserting something unverified. It used to hardcode "Delta=1, Neel quench" and was showing
+    # Delta=0 domain-wall data. State only what the data carries.
+    cap = f"$\\chi \\leq$ {D}" if D else "uncapped $\\chi$"
+    fig.suptitle(f"tolerance scan -- L={L}, dt={dt}, {cap}"
+                 f"   (model not recorded in CSV; see the run header)", fontsize=10, y=1.0)
+    save(fig, f"heis_knee_L{L}_D{D}.png")
 
 
 # ── 0c / 0d: the dt calibration ──────────────────────────────────────────────
