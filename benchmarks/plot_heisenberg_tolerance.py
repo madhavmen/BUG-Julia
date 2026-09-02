@@ -83,6 +83,13 @@ INT_COLS = {"L", "root_trunc", "close_trunc", "maxdim", "maxbond", "krylov"}
 def load(pattern):
     rows = []
     for path in sorted(glob.glob(os.path.join(RES, pattern))):
+        # ⛔ THE PER-SITE PROFILE CSVs SIT IN THIS DIRECTORY AND MATCH THESE GLOBS.
+        # `heis_grid_m3_prof_L18_...csv` is caught by `heis_grid_*.csv` but carries one row per
+        # (t, site) and NO `L`/`err_prof` column, so it crashes the loader outright (KeyError 'L',
+        # MEASURED 2026-09-01). They are a different table, not more rows of this one --
+        # plot_heis_profiles.py owns them.
+        if "_prof_" in os.path.basename(path):
+            continue
         with open(path, newline="") as fh:
             for r in csv.DictReader(fh):
                 for k in FLOAT_COLS:
@@ -96,16 +103,33 @@ def load(pattern):
 
 
 def final(rows, key):
-    """Last sample of each arm, keyed by `key(row)` -- the arm's converged error and rank.
+    """Each arm's value AT THE COMMON FINAL TIME, keyed by `key(row)`.
 
-    Keyed on max `t` rather than on file order: a run killed mid-arm still contributes its last
-    complete sample instead of dropping out of the figure silently.
+    ⛔ ARMS THAT DID NOT REACH `t_max` ARE DROPPED, NOT CARRIED AT THEIR LAST SAMPLE. This
+    function used to keep the latest row per arm on the reasoning that a run killed mid-arm should
+    not "drop out of the figure silently". That is backwards, and it put a WRONG ANSWER in a
+    figure rather than a gap:
+
+      error GROWS with t, so a partial arm scored at t=17 is compared against complete arms scored
+      at t=20 and looks BETTER than all of them. MEASURED 2026-09-01: the mdef grid's cell
+      (root=1e-12, split=1e-5) was interrupted mid-arm and reported 3.97e-05 against a plateau of
+      1.33e-04 -- a spurious 3.3x "improvement" that then won the best-configuration panel and
+      would have been read as a real knob setting.
+
+    Dropping is not silent: the count and the time are printed, which is what the original concern
+    actually called for.
     """
-    best = {}
+    tmax = max(float(r["t"]) for r in rows)
+    best, seen = {}, set()
     for r in rows:
         k = key(r)
-        if k not in best or r["t"] > best[k]["t"]:
+        seen.add(k)
+        if abs(float(r["t"]) - tmax) < 1e-9:
             best[k] = r
+    missing = len(seen) - len(best)
+    if missing:
+        print("  %d of %d arms dropped: did not reach t=%g (partial arms are not comparable "
+              "with complete ones -- error grows with t)" % (missing, len(seen), tmax))
     return best
 
 
@@ -447,3 +471,13 @@ def _dark(im, v):
 
 for f in (plot_knee, plot_dtcal, plot_split, plot_grid):
     f()
+
+# The observable figures live in plot_heis_profiles.py and are driven from here so the campaign
+# runner keeps ONE plotting call. ⛔ The runner script must NOT be edited to add a second call --
+# bash reads a script lazily by byte offset, so inserting lines into a file it is CURRENTLY
+# EXECUTING shifts that offset and resumes it mid-token. Extending this file is the safe seam.
+try:
+    import plot_heis_profiles
+    plot_heis_profiles.main()
+except Exception as exc:                                  # never let a profile figure
+    print("profile figures skipped:", exc)                # take down the scalar ones

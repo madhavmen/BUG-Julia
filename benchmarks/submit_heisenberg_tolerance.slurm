@@ -1,37 +1,54 @@
 #!/bin/bash
-# The Heisenberg tolerance study at L = 20, dt = 0.05 -- docs/PLAN-tolerance-control.md
+# The L=18 XX (Delta=0) domain-wall chain campaign -- the error matrix across Krylov settings.
 #
-#   sbatch benchmarks/submit_heisenberg_tolerance.slurm             # all four phases, serialised
-#   sbatch --array=2 benchmarks/submit_heisenberg_tolerance.slurm   # phase `split` (6A) alone
+#   CHI=64  sbatch --time=12:00:00 benchmarks/submit_heisenberg_tolerance.slurm
+#   CHI=128 sbatch --time=96:00:00 benchmarks/submit_heisenberg_tolerance.slurm
+#   CHI=256 -- DOES NOT FIT IN ONE SLOT PER GRID. See "SPLITTING A GRID BY ROW" below.
 #
-# ORDER IS DELIBERATE AND THE ARRAY IS SERIALISED (%1).
+#   CHI=64 sbatch --array=2 ...      # one configuration (here: grid, sweep m3) alone
 #
-#   0  tau    0a/0b  err and chi vs tau_trunc      -- the knee. Run this FIRST: it sets the
-#                                                     tau_trunc every later phase uses.
-#   1  dt     0c/0d  err vs dt per tau_trunc       -- the calibration curve tau_trunc*(dt)
-#   2  split  6A     closing truncation OFF        -- the LARGEST ranks in the study
-#   3  grid   6B     root-out x half-sweep, 8x8    -- 64 arms, the longest task by count
+# Array index -> configuration, 5 per cap:
+#   0  tau    the THREE-SCHEME tolerance scan (tdvp2 / tdvp_cbe1s / bug) -- 5 taus x 3 = 15 arms
+#   1  grid mdef   \
+#   2  grid m3      |  bug only, 5 taus x 5 splits = 25 arms each. `mdef` is the package default
+#   3  grid m0      |  (what a user actually gets); m0/m2/m3 pin krylov_basis.
+#   4  grid m2     /
 #
-# ⛔ %1 IS NOT POLITENESS. `seconds` is in the CSV, and two of these sharing a node makes that
-# column a property of the machine's load. The ERROR and KRYLOV columns are contention-immune and
-# the figures use those -- but a contaminated timing column is worse than a missing one, because
-# it looks like data. One job at a time, one thread, both pinned below.
+# ⛔ THIS ARRAY IS **NOT** SERIALISED, AND THAT IS A DELIBERATE REVERSAL OF THE OLD `%1`.
+# The deliverables of the L=18 stage are `err_prof`, `maxbond` and `krylov` -- all three are
+# deterministic and contention-immune (reproduced bit-identically across independent launches).
+# `seconds` is NOT, and running five tasks per node contaminates it. That is an accepted loss here
+# because no L=18 figure plots it.
+# ⛔ THE L=50 STAGE IS THE OPPOSITE: its spec asks for WALL TIME, so it must run `--array=...%1`
+#    with `--exclusive`, one job at a time, and must NOT reuse this file's parallel settings.
 #
-# ⚠ PHASE `split` RUNS WITH NO CLOSING TRUNCATION AND NO ROOT TRUNCATION. `split_cutoff` is the
-# only rank control anywhere in the step, so at the loose end of the scan the bond dimension is
-# free to ratchet up every step. It gets the biggest memory allocation and the longest wall time,
-# and its loosest cutoff runs first so a `chi` blow-up is visible in the log before the tight
-# cutoffs have burned hours. If it OOMs, lower `t_max` rather than capping `maxdim` -- a cap would
-# put a third truncation back into the step and defeat the experiment.
+# WALL-TIME BUDGET, MEASURED not guessed. The completed chi=64 `mdef` grid ran 49 arms in 15.8 h
+# at ~796 s/arm median, so a 25-arm grid is ~5.5 h of compute. Per-arm cost goes as ~chi^3 in the
+# local solves, hence ~8x at chi=128 (~44 h/grid) and ~64x at chi=256 (~350 h/grid).
+#
+# SPLITTING A GRID BY ROW (needed at chi=256). `knobtag()` carries L, dt, T, maxdim and maxiter but
+# NOT tau/split, so two tasks running different rows of the same grid would write the SAME filename
+# and one would silently overwrite the other. Pass a distinct `tag` per row and concatenate:
+#
+#   for r in 1e-4 1e-5 1e-6 1e-7 1e-8; do
+#     CHI=256 ROW=$r sbatch --array=1-4 --time=72:00:00 benchmarks/submit_heisenberg_tolerance.slurm
+#   done
+#   # then, keeping ONE header:
+#   awk 'FNR==1 && NR!=1 {next} {print}' heis_grid_m3_L18_*_D256_mauto_r*.csv > heis_grid_m3_..._D256_mauto.csv
+#
+# THE OLD L=20 NEEL STUDY (docs/PLAN-tolerance-control.md) is one parameter change away and is not
+# deleted, only retargeted: `delta=1.0 init=neel L=20 t_max=2.5` plus phases `dt`/`split`.
+# ⚠ At delta=1 there is NO closed-form real-time reference and sparse ED caps L~20; the Delta=0
+# campaign below is scored against the EXACT analytic free-fermion profile, valid at any L.
 
-#SBATCH --job-name=heis_tol
-#SBATCH --array=0-3%1
+#SBATCH --job-name=heis_chain
+#SBATCH --array=0-4
 #SBATCH --partition=main
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=64G
-#SBATCH --time=24:00:00
-#SBATCH --output=benchmarks/results/heis_tol_%a.out
-#SBATCH --error=benchmarks/results/heis_tol_%a.err
+#SBATCH --time=12:00:00
+#SBATCH --output=benchmarks/results/heis_chain_%a.out
+#SBATCH --error=benchmarks/results/heis_chain_%a.err
 
 set -euo pipefail
 
@@ -43,17 +60,26 @@ export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OMP_NUM_THREADS=1
 
-PHASES=(tau dt split grid)
+CHI=${CHI:-64}
+ROW=${ROW:-}                 # set to ONE tau to run a single grid row (see above)
 I=${SLURM_ARRAY_TASK_ID:-0}
-PHASE=${PHASES[$I]}
+CONFIG=(tau mdef m3 m0 m2)
+WHICH=${CONFIG[$I]}
 
-echo "task $I: phase=$PHASE  L=20  dt=0.05  on $(hostname)  $(date)"
+# ⛔ maxiter=0 is the DRIVER'S DERIVED DEPTH and it is deliberately kept here. The depth study
+# showed the derived depth over-provisions (error saturates at maxiter=4) -- but it is the SHIPPED
+# behaviour and the spec asks for the error matrix at it. Changing it would make these figures
+# incomparable with the chi=64 data already collected. Vary depth in `phase=krylov` instead.
+COMMON="delta=0.0 init=domainwall L=18 t_max=20 dt=0.05 sample_every=0.5 maxiter=0 maxdim=$CHI"
+[ -n "$ROW" ] && COMMON="$COMMON taus=$ROW tag=r$ROW"
+
+echo "task $I: $WHICH  chi=$CHI  row=${ROW:-all}  on $(hostname)  $(date)"
 echo "threads: JULIA=$JULIA_NUM_THREADS OPENBLAS=$OPENBLAS_NUM_THREADS"
 
-# T = 2.5 (50 steps) is the PLAN'S STARTING VALUE, not a settled one -- Néel entanglement grows
-# linearly in t, so the affordable window is decided by the chi(t) the `tau` phase measures.
-# Raise it here once that number exists.
-julia --project=. benchmarks/heisenberg_tolerance.jl \
-      phase="$PHASE" L=20 dt=0.05 t_max=2.5
+if [ "$WHICH" = tau ]; then
+  julia --project=. benchmarks/heisenberg_tolerance.jl phase=tau $COMMON
+else
+  julia --project=. benchmarks/heisenberg_tolerance.jl phase=grid $COMMON grid_sweeps="$WHICH"
+fi
 
 echo "done $(date)"

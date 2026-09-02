@@ -71,14 +71,18 @@ const P = parse_params((
     init         = "neel",
     maxdim       = 0,        # 0 = UNCAPPED. A cap would floor the τ_trunc scan at the cap's own
                              # error and hide the knee this study exists to find.
-    taus         = "1e-4,1e-5,1e-6,1e-7,1e-8,1e-10,1e-12,1e-14",
+    # ⛔ LADDER TRUNCATED AT 1e-8 (2026-09-01). MEASURED at L=18, chi=64: rows tau <= 1e-7 are
+    # identical to THREE DIGITS across the whole plateau (1.32-1.33e-04), because chi is pinned at
+    # the cap and neither threshold can move the error below what the rank allows. The 1e-10 /
+    # 1e-12 / 1e-14 rows cost ~40% of the grid and restate one number.
+    taus         = "1e-4,1e-5,1e-6,1e-7,1e-8",
     dts          = "0.2,0.1,0.05,0.025,0.0125",
     dt_taus      = "1e-4,1e-6,1e-8,1e-10",
     splits       = "1e-4,1e-5,1e-6,1e-7,1e-8,1e-9,1e-10",
     # Phase `grid`'s half-sweep axis. Deliberately the SAME ladder as `taus`, so the matrix is
     # square and the diagonal (both thresholds equal) is a readable line through it -- that is
     # the "one tolerance governs the whole step" configuration the plan is aiming at.
-    grid_splits  = "1e-4,1e-5,1e-6,1e-7,1e-8,1e-10,1e-12,1e-14",
+    grid_splits  = "1e-4,1e-5,1e-6,1e-7,1e-8",
     # Which half-sweep structures to run the matrix for. See `SWEEPS`.
     grid_sweeps  = "m0,m3,mdef",
     # Which half-sweep truncation the matrix's x-axis is: "split" (the SVD that splits the
@@ -88,6 +92,16 @@ const P = parse_params((
     sample_every = 0.25,
     symmetry     = "U1",
     maxiter      = 0,        # 0 = derive the Krylov depth from ‖H‖·dt/2
+    # Phase `krylov`'s axis. ⛔ ONE PROCESS, NOT ONE PER DEPTH: `using BUGJulia` costs ~170 s
+    # warm, so six depths as six invocations is ~18 min of pure JIT locally and six queue slots
+    # on the cluster, for six runs that share every other input.
+    maxiters     = "2,3,4,6,8,12",
+    # ⛔ FREE SUFFIX ON EVERY OUTPUT FILE, AND IT IS WHAT MAKES CLUSTER SPLITTING POSSIBLE.
+    # `knobtag()` carries L, dt, T, maxdim and maxiter but NOT tau/split, so two tasks that run
+    # DIFFERENT ROWS of the same grid (`taus=1e-6` vs `taus=1e-7`) write the SAME filename and one
+    # silently overwrites the other. A chi=256 grid does not fit in one queue slot, so it has to be
+    # split by row -- pass `tag=r1e-6` and the rows land in separate files to be concatenated.
+    tag          = "",
     exact_cbe    = true,     # full SVD, not the randomised sketch (Jan's point 3)
     # ⛔ THE 1-SITE CBE BASELINE WAS RUNNING ON PACKAGE DEFAULTS WHILE `cbe_bug` GOT TUNED ONES,
     # WHICH IS NOT A COMPARISON. `tdvp_cbe1s_step!` was called with `maxdim`/`trunc_thresh`/
@@ -275,8 +289,9 @@ inherited, so an arm's truncation configuration is legible here and cannot drift
 package default.
 """
 function stepper(scheme::String, tau_trunc::Float64, split_cutoff::Float64,
-                 close::Bool, dt::Float64; cbe_cut::Float64 = 0.0)
-    m = depth_for(dt)
+                 close::Bool, dt::Float64; cbe_cut::Float64 = 0.0, kry_depth::Int = 0)
+    # `kry_depth > 0` overrides both `P.maxiter` and the ‖H‖·dt/2 bound, for phase `krylov`.
+    m = kry_depth > 0 ? kry_depth : depth_for(dt)
     # ⚠ `cbe_bug` is accepted as a LEGACY ALIAS so saved commands and old CSV tags still
     # resolve; the canonical name is `bug_interleaved`.
     scheme = replace(scheme, r"^cbe_bug" => "bug_interleaved")
@@ -324,8 +339,9 @@ site-resolved error the profile norm still sees.
 bit-identical work. `krylov` (operator applications) is the cost axis that survives contention.
 """
 function run_arm(io, phase, scheme, tau_trunc, split_cutoff, close, dt, profs;
-                 cbe_cut::Float64 = 0.0)
-    step!  = stepper(scheme, tau_trunc, split_cutoff, close, dt; cbe_cut = cbe_cut)
+                 cbe_cut::Float64 = 0.0, kry_depth::Int = 0, pio = nothing)
+    step!  = stepper(scheme, tau_trunc, split_cutoff, close, dt;
+                     cbe_cut = cbe_cut, kry_depth = kry_depth)
     psi    = copy(PSI0)
     nsteps = round(Int, P.t_max / dt)
     every  = max(1, round(Int, P.sample_every / dt))
@@ -341,6 +357,16 @@ function run_arm(io, phase, scheme, tau_trunc, split_cutoff, close, dt, profs;
                 maximum(abs.(prof .- profs[n])), maximum(bond_dims(psi)), norm(psi),
                 e, abs(e - e0), efnl, disc, kry, secs)
         flush(io)
+        # The site-resolved observable, for the trajectory plot. Written from the SAME `prof` the
+        # error above is computed from, so the figure and the scalar can never disagree.
+        if pio !== nothing
+            for j in 1:P.L
+                @printf(pio, "%s,%s,%g,%g,%g,%d,%.10g,%d,%.10e,%.10e\n",
+                        phase, scheme, tau_trunc, split_cutoff, cbe_cut, P.maxdim,
+                        t, j, prof[j], profs[n][j])
+            end
+            flush(pio)
+        end
     end
     emit(1, 0.0)
 
@@ -355,8 +381,9 @@ function run_arm(io, phase, scheme, tau_trunc, split_cutoff, close, dt, profs;
     end
 
     prof = sz_profile(psi)
-    @printf("  %-11s dt=%-7g tau=%-8g split=%-8g close=%-5s | err %.3e  prof %.3e  chi %-4d  kry %-7d  %.0fs\n",
-            scheme, dt, tau_trunc, split_cutoff, close, abs(staggered(prof) - staggered(profs[end])),
+    @printf("  %-11s m=%-3d dt=%-7g tau=%-8g split=%-8g close=%-5s | err %.3e  prof %.3e  chi %-4d  kry %-7d  %.0fs\n",
+            scheme, kry_depth > 0 ? kry_depth : depth_for(dt), dt, tau_trunc, split_cutoff, close,
+            abs(staggered(prof) - staggered(profs[end])),
             maximum(abs.(prof .- profs[end])), maximum(bond_dims(psi)), kry, secs)
     flush(stdout)
 end
@@ -366,7 +393,27 @@ end
 # share a filename -- see the note in phase `grid`.
 capstr()  = P.maxdim  > 0 ? string(P.maxdim)  : "inf"
 iterstr() = P.maxiter > 0 ? string(P.maxiter) : "auto"
-knobtag() = string("_D", capstr(), "_m", iterstr())
+knobtag() = string("_D", capstr(), "_m", iterstr(), isempty(P.tag) ? "" : "_" * P.tag)
+
+"""
+Per-site `<S^z_j(t)>` for one arm, MPS and exact side by side.
+
+⛔ THE MAIN CSV KEEPS ONLY `err_prof`, WHICH IS A NORM AND CANNOT BE UN-COLLAPSED. An L-infinity
+number says how far the profile is from exact but not WHERE, so a front that arrives early, a
+boundary reflection and a uniform offset all reduce to the same scalar. The observable plot needs
+the profile itself, and re-running a 40-minute arm to recover something the arm already computed
+is the wasteful kind of mistake.
+
+One file per phase invocation, with the arm's identity in every row, so a partially-written file
+still parses and every row is self-describing.
+"""
+open_prof(name) = begin
+    mkpath(OUTDIR)
+    io = open(joinpath(OUTDIR, name), "w")
+    println(io, "phase,scheme,tau_trunc,split_cutoff,cbe_cutoff,maxdim,t,site,sz_mps,sz_exact")
+    flush(io)   # header out immediately: a 0-byte file must mean "never opened", not "buffered"
+    io
+end
 
 open_out(name) = begin
     mkpath(OUTDIR)
@@ -424,12 +471,13 @@ function main()
     if P.phase == "tau"
         # 0a / 0b. Is there a knee, and where? Closing truncation ON at τ_trunc, half-sweep split
         # left at its shipped 1e-14 -- i.e. today's configuration, with the one knob swept.
-        io = open_out(@sprintf("heis_tau_L%d_dt%g_T%g%s.csv", P.L, P.dt, P.t_max, knobtag()))
+        io  = open_out(@sprintf("heis_tau_L%d_dt%g_T%g%s.csv", P.L, P.dt, P.t_max, knobtag()))
+        pio = open_prof(@sprintf("heis_tau_prof_L%d_dt%g_T%g%s.csv", P.L, P.dt, P.t_max, knobtag()))
         try
             for tau in parse_list(P.taus, Float64), s in schemes
-                run_arm(io, "tau", s, tau, 1e-14, true, P.dt, profs)
+                run_arm(io, "tau", s, tau, 1e-14, true, P.dt, profs; pio = pio)
             end
-        finally; close(io); end
+        finally; close(io); close(pio); end
 
     elseif P.phase == "dt"
         # 0c / 0d. The calibration curve τ_trunc*(dt): where each τ_trunc's line leaves the
@@ -499,21 +547,48 @@ function main()
             # consistent; nothing flags that eight ninths of the campaign is gone. This is the
             # same failure the 2209 driver guards against in `tag`, and the same one the
             # one-CSV-per-sweep note below was added for.
-            io = open_out(@sprintf("heis_grid%s_%s_L%d_dt%g_T%g%s.csv",
-                                   axis == "cbe" ? "cbe" : "", sw, P.L, P.dt, P.t_max, knobtag()))
+            io  = open_out(@sprintf("heis_grid%s_%s_L%d_dt%g_T%g%s.csv",
+                                    axis == "cbe" ? "cbe" : "", sw, P.L, P.dt, P.t_max, knobtag()))
+            pio = open_prof(@sprintf("heis_grid%s_%s_prof_L%d_dt%g_T%g%s.csv",
+                                     axis == "cbe" ? "cbe" : "", sw, P.L, P.dt, P.t_max, knobtag()))
             try
                 for tau in parse_list(P.taus, Float64), x in parse_list(P.grid_splits, Float64)
                     @printf("  -> arm tau=%g %s=%g ...\n", tau, axis, x); flush(stdout)
                     if axis == "split"
-                        run_arm(io, "grid", sch, tau, x, true, P.dt, profs)
+                        run_arm(io, "grid", sch, tau, x, true, P.dt, profs; pio = pio)
                     else
-                        run_arm(io, "grid", sch, tau, 1e-14, true, P.dt, profs; cbe_cut = x)
+                        run_arm(io, "grid", sch, tau, 1e-14, true, P.dt, profs;
+                                cbe_cut = x, pio = pio)
                     end
                 end
-            finally; close(io); end
+            finally; close(io); close(pio); end
         end
+    elseif P.phase == "krylov"
+        # WHY THIS PHASE EXISTS. `depth_for` provisions the Lanczos depth from a WORST-CASE bound
+        # ‖H‖·dt/2, and at L=8/dt=0.05 that gave depth 12 for a bound of 4.2e-22 -- fourteen
+        # orders tighter than any error in the run. ⛔ AND `lanczos_expv` EXITS ONLY ON
+        # BREAKDOWN, so every local solve pays ALL of `maxiter` matvecs whether it needed them or
+        # not. That makes an over-provisioned depth a pure multiplier on the cost of EVERY arm.
+        #
+        # ⚠ IT MULTIPLIES ALL THREE ARMS ALIKE, so it is not a knob that flatters one of them --
+        # which is exactly why it has to be tuned BEFORE any cross-arm cost claim is quoted, or
+        # every ratio is reported at a depth nobody would choose.
+        #
+        # Read it as: the depth at which the error curve LEAVES the flat floor is the cheapest
+        # honest setting. A curve that is flat all the way to the smallest depth means the bound
+        # is irrelevant for this model and the shallowest arm wins outright.
+        io  = open_out(@sprintf("heis_krylov_L%d_dt%g_T%g_D%s.csv", P.L, P.dt, P.t_max, capstr()))
+        pio = open_prof(@sprintf("heis_krylov_prof_L%d_dt%g_T%g_D%s.csv", P.L, P.dt, P.t_max, capstr()))
+        try
+            for mi in parse_list(P.maxiters, Int), s in schemes
+                @printf("  -> maxiter=%d %s ...\n", mi, s); flush(stdout)
+                run_arm(io, "krylov", s, 1e-10, 1e-14, true, P.dt, profs;
+                        kry_depth = mi, pio = pio)
+            end
+        finally; close(io); close(pio); end
+
     else
-        error("unknown phase $(repr(P.phase)) -- use tau, dt, split or grid")
+        error("unknown phase $(repr(P.phase)) -- use tau, dt, split, grid or krylov")
     end
     println("\nwrote to ", OUTDIR)
 end
