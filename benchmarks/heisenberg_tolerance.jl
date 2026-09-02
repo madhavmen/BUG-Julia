@@ -263,7 +263,19 @@ sz_profile(psi) = (p = copy(psi); magnetisation(p) ./ max(norm(p)^2, eps()))
 const COLS_T = ["phase", "scheme", "L", "dt", "tau_trunc", "split_cutoff", "cbe_cutoff",
                 "root_trunc", "close_trunc", "maxdim", "t", "stag", "stag_exact", "err_stag",
                 "err_prof", "maxbond", "norm", "energy", "dE", "err_fnl", "discarded",
-                "krylov", "seconds"]
+                "krylov", "seconds",
+                # ⛔ THE PHASE TIMERS, BECAUSE `krylov` IS NOT A COMPLETE COST AXIS.
+                # `krylov_dims` counts ONLY `apply_one_site` inside `_krylov_frame` plus the root
+                # solve (`cbe_bug.jl:748,815`); every operator application inside `cbe_expand` is
+                # invisible to it, and the sweep's own breakdown reads cbe 0.445 vs kry 0.128 --
+                # the UNCOUNTED phase is 3.5x the counted one. With `krylov_basis = 0` the frame
+                # comes from `cbe_expand` ALONE, so that arm's whole basis cost is in the blind
+                # spot: it reports 8.02x fewer matvecs than `mdef` and runs 1.45x SLOWER (24
+                # matched cells, L=18, chi=64). Reporting `krylov` alone showed its accuracy and
+                # hid its cost. These are zero/absent for tdvp2 and tdvp_cbe1s, which have no
+                # expansion phase -- which is itself the point: a matvec count is only comparable
+                # between arms that spend their work in the same counted places.
+                "t_cbe", "t_kry", "t_step"]
 
 # THE SWEEP HAS ONE STRUCTURE; ONLY THE KRYLOV DEPTH VARIES. `kstep`, `kaug` and `rexpand` were
 # removed on 2026-08-24 -- the basis-only sweep at `krylov_basis = 3` beat the K-step machinery on
@@ -369,15 +381,18 @@ function run_arm(io, phase, scheme, tau_trunc, split_cutoff, close, dt, profs;
     every  = max(1, round(Int, P.sample_every / dt))
     e0     = real(mpo_energy(copy(psi), W)) / max(norm(psi)^2, eps())
     kry, secs, efnl, disc = 0, 0.0, 0.0, 0.0
+    # Accumulated the same way as `kry`: summed over every step of the arm. Absent on the TDVP
+    # steppers, whose `info` carries no phase breakdown, so they stay at 0.
+    tcbe, tkry, tstep = 0.0, 0.0, 0.0
 
     emit(n, t) = begin
         prof = sz_profile(psi)
         s, e = staggered(prof), real(mpo_energy(copy(psi), W)) / max(norm(psi)^2, eps())
-        @printf(io, "%s,%s,%d,%g,%g,%g,%g,%d,%d,%d,%g,%.10g,%.10g,%.6e,%.6e,%d,%.10g,%.10g,%.6e,%.3e,%.3e,%d,%.2f\n",
+        @printf(io, "%s,%s,%d,%g,%g,%g,%g,%d,%d,%d,%g,%.10g,%.10g,%.6e,%.6e,%d,%.10g,%.10g,%.6e,%.3e,%.3e,%d,%.2f,%.3f,%.3f,%.3f\n",
                 phase, scheme, P.L, dt, tau_trunc, split_cutoff, cbe_cut, 0, close ? 1 : 0,
                 P.maxdim, t, s, staggered(profs[n]), abs(s - staggered(profs[n])),
                 maximum(abs.(prof .- profs[n])), maximum(bond_dims(psi)), norm(psi),
-                e, abs(e - e0), efnl, disc, kry, secs)
+                e, abs(e - e0), efnl, disc, kry, secs, tcbe, tkry, tstep)
         flush(io)
         # The site-resolved observable, for the trajectory plot. Written from the SAME `prof` the
         # error above is computed from, so the figure and the scalar can never disagree.
@@ -399,6 +414,9 @@ function run_arm(io, phase, scheme, tau_trunc, split_cutoff, close, dt, profs;
         kry  += info.krylov_dims
         hasproperty(info, :err_fnl)   && (efnl = max(efnl, info.err_fnl))
         hasproperty(info, :discarded) && (disc = max(disc, info.discarded))
+        hasproperty(info, :t_cbe)     && (tcbe += info.t_cbe)
+        hasproperty(info, :t_kry)     && (tkry += info.t_kry)
+        hasproperty(info, :t_step)    && (tstep += info.t_step)
         k % every == 0 && emit(k ÷ every + 1, k * dt)
     end
 
@@ -454,14 +472,23 @@ the fragment. Compact on resume: keep only complete arms, then append.
 """
 function partition_csv(path, cols, keyidx, tidx)
     rows = readlines(path)
-    length(rows) >= 1 && rows[1] == join(cols, ",") || return (nothing, Set())
+    isempty(rows) && return (nothing, Set())
+    # ⛔ ACCEPT A HEADER THAT IS A PREFIX OF THE CURRENT ONE. New columns are APPENDED, so a file
+    # written before they existed is still readable and its arms are still complete -- and the
+    # alternative is that adding one column moves a part-finished configuration aside as `.old`
+    # and re-runs it from zero. That would have cost 21 finished arms mid-campaign the moment the
+    # phase timers were added. Rows are matched on field COUNT against whichever header they were
+    # written with, so a short row is never mis-indexed.
+    have = split(rows[1], ",")
+    have == cols[1:min(length(have), length(cols))] || return (nothing, Set())
+    ncol = length(have)
 
     # PASS 1: which arms reached t_max.
     done = Set{Tuple{String,String,String}}()
     keyof = Vector{Union{Nothing,Tuple{String,String,String}}}(nothing, length(rows) - 1)
     for (i, line) in enumerate(rows[2:end])
         f = split(line, ",")
-        length(f) == length(cols) || continue
+        length(f) == ncol || continue
         k = (f[keyidx[1]], f[keyidx[2]], f[keyidx[3]])
         keyof[i] = k
         t = tryparse(Float64, f[tidx])
@@ -474,7 +501,13 @@ function partition_csv(path, cols, keyidx, tidx)
     # and every plot keyed by (arm, t) was unaffected, but a resume that ADDS NOTHING must leave
     # the file BYTE-IDENTICAL: it is the only cheap check that resume is not eating data, and any
     # consumer that reads rows in file order (a chi(t) trace) would zigzag.
-    keep = String[keep_line for (i, keep_line) in enumerate(rows[2:end])
+    # ⚠ PAD OLD ROWS OUT TO THE CURRENT WIDTH. The compacted file is rewritten with the CURRENT
+    # header, so rows written before a column was added would sit under a header one field wider
+    # and every consumer would mis-align. Empty trailing fields parse as missing, which is what
+    # they are.
+    pad = length(cols) - ncol
+    keep = String[pad > 0 ? keep_line * ","^pad : keep_line
+                  for (i, keep_line) in enumerate(rows[2:end])
                   if keyof[i] !== nothing && keyof[i] in done]
     (keep, done)
 end
