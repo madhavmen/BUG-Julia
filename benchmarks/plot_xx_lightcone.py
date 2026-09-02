@@ -44,6 +44,11 @@ STYLE = [("tdvp2",              "2-site TDVP",      "#33507a", 4.2, 1),
          ("bug_interleaved_m3", "CBE-BUG (m3)",     "#c1440e", 1.6, 3)]
 
 
+def fmt(x):
+    "1e-06 rather than 1.0000000000000001e-06, and without trailing zeros."
+    return "%g" % float(x)
+
+
 def load_prof(path):
     """-> {scheme: (ts, sites, sz, exact)} with sz/exact as (nt, nsite) arrays."""
     cells = defaultdict(dict)
@@ -174,10 +179,20 @@ def figure(prof_path, scalar_path, tag):
     a3.legend(fontsize=8.5, frameon=False, loc="upper left")
     a3.grid(True, lw=.4, alpha=.35)
 
-    fig.suptitle("XX chain ($\\Delta$=0), U(1), domain-wall quench%s   "
-                 "BUG: root 1e-6 / half-sweep 1e-4 / basis 3;  TDVP: tol 1e-6;  "
-                 "all arms Lanczos depth m=3" % tag.replace("_", "  "),
-                 fontsize=10.5, y=.99)
+    # ⛔ THE TOLERANCES COME FROM THE DATA, NEVER FROM A HARDCODED STRING. This read
+    # "root 1e-6 / half-sweep 1e-4" and was printed verbatim over the MATCHED run, which used
+    # half-sweep 1e-6 -- a figure whose caption asserts the opposite of what it plots. Exactly the
+    # defect fixed in plot_knee's "Delta=1, Neel, uncapped" title. `tau_trunc` and `split_cutoff`
+    # are columns; use them.
+    knobs = ""
+    if os.path.exists(scalar_path):
+        for r in csv.DictReader(open(scalar_path)):
+            if r["scheme"].startswith("bug"):
+                knobs = ("BUG: root %s / half-sweep %s;  TDVP: tol %s"
+                         % (fmt(r["tau_trunc"]), fmt(r["split_cutoff"]), fmt(r["tau_trunc"])))
+                break
+    fig.suptitle("XX chain ($\\Delta$=0), U(1), domain-wall quench%s   %s"
+                 % (tag.replace("_", "  "), knobs), fontsize=10.5, y=.99)
     out = os.path.join(RES, "heis_lightcone%s.png" % tag)
     fig.savefig(out, dpi=160, bbox_inches="tight")
     plt.close(fig)
