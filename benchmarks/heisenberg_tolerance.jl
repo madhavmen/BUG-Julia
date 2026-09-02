@@ -76,6 +76,13 @@ const P = parse_params((
     # the cap and neither threshold can move the error below what the rank allows. The 1e-10 /
     # 1e-12 / 1e-14 rows cost ~40% of the grid and restate one number.
     taus         = "1e-4,1e-5,1e-6,1e-7,1e-8",
+    # The half-sweep split the `tau` phase runs at. ⚠ DEFAULT 1e-14 IS THE HISTORIC BEHAVIOUR --
+    # that value was hardcoded into the tau phase, so every tau-phase CSV before this parameter
+    # existed was measured at 1e-14 and stays comparable. Only `cbe_bug` reads `split_cutoff` at
+    # all (tdvp2/tdvp_cbe1s prune at every site by construction), so raising this changes the BUG
+    # arm ONLY and leaves the two TDVP arms bit-identical -- which is what makes a three-scheme
+    # comparison at one root tolerance but a looser BUG half-sweep meaningful rather than muddled.
+    tau_split    = 1e-14,
     dts          = "0.2,0.1,0.05,0.025,0.0125",
     dt_taus      = "1e-4,1e-6,1e-8,1e-10",
     splits       = "1e-4,1e-5,1e-6,1e-7,1e-8,1e-9,1e-10",
@@ -555,10 +562,10 @@ function main()
         pio, _    = open_prof(@sprintf("heis_tau_prof_L%d_dt%g_T%g%s.csv", P.L, P.dt, P.t_max, knobtag()))
         try
             for tau in parse_list(P.taus, Float64), s in schemes
-                if armkey(s, tau, 1e-14) in done
+                if armkey(s, tau, P.tau_split) in done
                     @printf("  -> arm tau=%g %s: SKIP (complete)\n", tau, s); continue
                 end
-                run_arm(io, "tau", s, tau, 1e-14, true, P.dt, profs; pio = pio)
+                run_arm(io, "tau", s, tau, P.tau_split, true, P.dt, profs; pio = pio)
             end
         finally; close(io); close(pio); end
 
