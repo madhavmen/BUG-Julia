@@ -81,6 +81,25 @@ using PrecompileTools: @setup_workload, @compile_workload
                                                     maxiter = 5, tol = 0.0, hermitian = herm)
                 end
             end
+        catch err
+            @warn "BUGJulia precompile workload: the U(1)/:none block did not complete; those " *
+                  "runs will pay full JIT (~313 s measured for a first step)" exception = err
+        end
+
+        # ⛔ THE SU(2) BLOCK GETS ITS OWN try/catch/finally, AND THAT SEPARATION IS LOAD-BEARING.
+        # It used to share one `try` with the block above, with the `set_symmetry!(:U1)` restore as
+        # the LAST STATEMENT INSIDE it. MEASURED 2026-09-05 on the cluster: the SU(2) block throws
+        # (`ArgumentError: reducing over an empty collection`, raised inside LurCGT's SU(2) irrep
+        # generation, not in our code), and that had two consequences the single `try` hid:
+        #
+        #   1. THE RESTORE WAS SKIPPED, so precompilation ended with `_SYMMETRY[] == :SU2`. That Ref
+        #      is module state and is serialised into the `.ji`, so the package would LOAD in :SU2 —
+        #      a silent global-mode flip for any caller that does not set the symmetry itself.
+        #      `finally` now restores it on every path, thrown or not.
+        #   2. ONE WARNING FOR TWO VERY DIFFERENT FAILURES. "workload did not complete" read as
+        #      "nothing is cached", when in fact the U(1)/:none coverage above had already
+        #      succeeded — it runs first. The two messages now say which coverage was actually lost.
+        try
             # ⛔ SU(2) IS A SEPARATE BLOCK BECAUSE IT IS A SEPARATE COMPILATION, and leaving it out
             # meant the whole non-abelian campaign paid full JIT while the workload looked complete.
             # MEASURED before this block existed: one `cbe_bug_step!` at L=12 SU(2) took 4314 s in a
@@ -123,7 +142,6 @@ using PrecompileTools: @setup_workload, @compile_workload
                         n_sweeps = 2, grow_iters = 1)
                 end
             end
-            BondUpdateBUG.set_symmetry!(:U1)     # leave the global where it started
         catch err
             # A broken workload must not break the package; the cost is only that the first
             # call in each process pays its own JIT again.
@@ -133,8 +151,13 @@ using PrecompileTools: @setup_workload, @compile_workload
             # like a working one, and the only symptom was runs mysteriously taking minutes again.
             # Precompilation prints this, so the next `Pkg.precompile` says which entry point fell
             # out of the cache.
-            @warn "BUGJulia precompile workload did not complete; first call in each process " *
-                  "will pay full JIT (SU(2) measured at ~4300 s)" exception = err
+            @warn "BUGJulia precompile workload: the SU(2) block did not complete; SU(2) runs " *
+                  "will pay full JIT (~4300 s measured for one L=12 step). U(1)/:none coverage " *
+                  "is unaffected — that block runs first and completes." exception = err
+        finally
+            # ⛔ `finally`, NOT a trailing statement inside the `try`. As the last line of the try
+            # this never ran on the throwing path, and precompilation baked :SU2 into the image.
+            BondUpdateBUG.set_symmetry!(:U1)     # leave the global where it started
         end
     end
 end
