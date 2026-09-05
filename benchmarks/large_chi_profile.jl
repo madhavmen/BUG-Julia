@@ -57,6 +57,8 @@ const MAXITER  = envint("LCP_MAXITER", 8)
 const BLAS_T   = envints("LCP_BLAS", string(max(1, Sys.CPU_THREADS ÷ 2)))
 const ARMS     = split(get(ENV, "LCP_ARMS", "tdvp2,cbe1s,bug"), ',')
 const DELTA    = envfloat("LCP_DELTA", 1.0)
+const CONV_TOL = envfloat("LCP_CONV_TOL", 0.0)   # 0 = old breakdown-only behaviour
+const KRY_TOL  = envfloat("LCP_KRY_TOL", 1e-6)   # BUG half-sweep frame tolerance
 const DO_PROF  = envbool("LCP_PROFILE", true)
 const OUTDIR   = get(ENV, "BUG_OUTDIR", joinpath(@__DIR__, "results"))
 
@@ -158,15 +160,28 @@ end
 function run_arm(arm::AbstractString, psi0, mpo, chi::Int)
     psi = deepcopy(psi0)
     tau = ComplexF64(-im * DT)
+    # ⛔ `CONV_TOL` MUST BE SET FOR EVERY ARM OR NONE. CBE-BUG's half-sweeps stop adaptively
+    # already (`_krylov_frame` weighs Saad's contribution against `krylov_tol = 1e-6` each
+    # iteration), while `tdvp2_step!` and `tdvp_cbe1s_step!` default to `conv_tol = 0.0` and
+    # exit on BREAKDOWN only -- which on a generic H never fires, so they burn the full
+    # `maxiter` on every solve. Leaving it at the default therefore times an adaptive method
+    # against two non-adaptive ones and reads the gap as a property of the algorithm.
     step! = if arm == "tdvp2"
         () -> RSVDCBEBondUpdate.tdvp2_step!(psi, mpo, tau;
-                  maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER)
+                  maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER,
+                  conv_tol = CONV_TOL)
     elseif arm == "cbe1s"
         () -> RSVDCBEBondUpdate.tdvp_cbe1s_step!(psi, mpo, tau;
-                  maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER, exact = false)
+                  maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER, exact = false,
+                  conv_tol = CONV_TOL)
     elseif arm == "bug"
         () -> RSVDCBEBondUpdate.cbe_bug_step!(psi, mpo, tau;
-                  maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER, exact = false)
+                  maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER, exact = false,
+                  root_conv_tol = CONV_TOL, krylov_tol = KRY_TOL)
+    elseif arm == "bugmid"
+        () -> RSVDCBEBondUpdate.cbe_bug_midpoint_step!(psi, mpo, tau;
+                  maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER, exact = false,
+                  root_conv_tol = CONV_TOL, krylov_tol = KRY_TOL)
     else
         error("unknown arm $arm")
     end
@@ -199,6 +214,10 @@ function main()
 
     say(@sprintf("L=%d  chis=%s  nsteps=%d  dt=%g  maxiter=%d  arms=%s",
                  L, string(CHIS), NSTEPS, DT, MAXITER, join(ARMS, ",")))
+    say(@sprintf("conv_tol=%g (%s)  krylov_tol=%g", CONV_TOL,
+                 CONV_TOL > 0 ? "adaptive Krylov exit, all arms" :
+                                "BREAKDOWN-ONLY — TDVP arms burn full maxiter, BUG does not",
+                 KRY_TOL))
     say(@sprintf("julia threads=%d  BLAS sweep=%s  CPU_THREADS=%d",
                  Threads.nthreads(), string(BLAS_T), Sys.CPU_THREADS))
     say("output -> $csv")

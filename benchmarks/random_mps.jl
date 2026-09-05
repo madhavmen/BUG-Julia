@@ -73,7 +73,7 @@ function double_chi!(psi::SymMPS, rng::AbstractRNG)
 end
 
 """
-    random_mps(L, target_chi; seed = 1, delta = 1.0, dt = 0.05) -> psi
+    random_mps(L, target_chi; seed = 1, delta = 1.0, seed_dt = 0.5) -> psi
 
 A random symmetric MPS of length `L` whose maximum bond dimension is at least `target_chi`.
 
@@ -83,7 +83,8 @@ reproduces that single sector, so the result would be a rank-`chi` state living 
 sector: the right bond dimension and completely the wrong block structure.
 """
 function random_mps(L::Int, target_chi::Int; seed::Int = 1, delta::Float64 = 1.0,
-                    dt::Float64 = 0.05, seed_steps::Int = 3, max_seed_steps::Int = 60,
+                    seed_steps::Int = 3, max_seed_steps::Int = 60,
+                    seed_dt::Float64 = 0.5, seed_maxdim::Int = 64,
                     verbose::Bool = true)
     rng = MersenneTwister(seed)
     t0 = time()
@@ -111,15 +112,26 @@ function random_mps(L::Int, target_chi::Int; seed::Int = 1, delta::Float64 = 1.0
     b = mid - 1
     target_sectors = min(b, L - b) + 1
     nsec_of(p) = length(p[mid].RMTs)
-    for k in 1:max_seed_steps                   # cheap: chi is still tiny here
-        RSVDCBEBondUpdate.tdvp2_step!(psi, mpo, ComplexF64(-im * dt);
-                                      maxdim = 4096, trunc_thresh = 0.0, maxiter = 8)
+
+    # ⛔ SEED AT LARGE `dt` AND SMALL `maxdim`. What opens a charge sector is TIME, not rank:
+    # the weight in a high-|Sz| sector is suppressed like t^k, so at t < 1 it sits under the
+    # SVD's own 1e-14 floor and the sector is dropped no matter how much bond dimension is on
+    # offer. Measured: dt=0.05 with maxdim=4096 was still at 9 of 15 sectors after 10 steps,
+    # with chi already at 283 and climbing — the loop was buying rank, which is free later via
+    # doubling, at the price of the one thing doubling cannot manufacture.
+    # So: `seed_dt = 0.5` reaches t = 10 in twenty steps, and `seed_maxdim = 64` keeps each of
+    # those steps in the milliseconds. Seeding accuracy is irrelevant — the payloads are
+    # replaced by Gaussians immediately afterwards.
+    for k in 1:max_seed_steps
+        RSVDCBEBondUpdate.tdvp2_step!(psi, mpo, ComplexF64(-im * seed_dt);
+                                      maxdim = seed_maxdim, trunc_thresh = 0.0, maxiter = 8)
         n = nsec_of(psi)
-        k % 5 == 0 && log(@sprintf("seed step %d  chi=%d  sectors@mid=%d/%d", k,
-                                   maximum(BondUpdateBUG.bond_dims(psi)), n, target_sectors))
+        k % 5 == 0 && log(@sprintf("seed step %d  t=%.1f  chi=%d  sectors@mid=%d/%d", k,
+                                   k * seed_dt, maximum(BondUpdateBUG.bond_dims(psi)),
+                                   n, target_sectors))
         if n >= target_sectors && k >= seed_steps
-            log(@sprintf("all %d sectors open after %d seed steps (chi=%d)", n, k,
-                         maximum(BondUpdateBUG.bond_dims(psi))))
+            log(@sprintf("all %d sectors open after %d seed steps (t=%.1f, chi=%d)", n, k,
+                         k * seed_dt, maximum(BondUpdateBUG.bond_dims(psi))))
             break
         end
         k == max_seed_steps && @warn "random_mps: only $n of $target_sectors sectors opened " *

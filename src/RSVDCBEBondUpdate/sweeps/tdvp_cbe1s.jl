@@ -92,6 +92,20 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                           maxiter::Int = 30,
                           tol::Float64 = 1e-15,
                           reorth::Bool = true,
+                          # ⛔ WITHOUT THESE THIS ARM COULD NOT STOP EARLY AT ALL. `lanczos_expv`
+                          # exits on BREAKDOWN only, which on a generic `H` never fires, so every
+                          # one of the ~4(L-1) solves per step burned the full `maxiter` whether it
+                          # had converged at iteration 3 or not. `tdvp2_step!` has taken `conv_tol`
+                          # since the substep work; this arm was simply never plumbed.
+                          #
+                          # ⚠ THIS IS A FAIRNESS FIX, NOT ONLY A SPEED ONE. CBE-BUG's half-sweeps
+                          # already stop adaptively (`_krylov_frame` takes `krylov_tol = 1e-6` and
+                          # tests Saad's contribution every iteration), so comparing wall clock
+                          # with `conv_tol = 0` here measured an adaptive method against two
+                          # non-adaptive ones and credited the difference to the ALGORITHM.
+                          # Defaults stay off so nothing already measured moves silently.
+                          conv_tol::Float64 = 0.0,
+                          substeps::Int = 1,
                           # `hermitian = false` -> Arnoldi, for a non-Hermitian generator. See
                           # the note in `cbe_bug_step!`: Lanczos does not fail on one, it lies.
                           hermitian::Bool = true,
@@ -129,7 +143,8 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     function onesite!(j, lch, rch)
         H1 = one_site_h(mpo, j, lch, rch)
         psi[j] = expv(x -> (nmv += 1; apply_one_site(H1, x)), half, psi[j];
-                      hermitian = hermitian, maxiter = maxiter, tol = tol, reorth = reorth)
+                      hermitian = hermitian, maxiter = maxiter, tol = tol, reorth = reorth,
+                      conv_tol = conv_tol, substeps = substeps)
         psi.center = j
     end
 
@@ -145,7 +160,8 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         # --- forward one-site update at site i, +tau/2 ---
         H1 = one_site_h(mpo, i, lch, rch1)
         M = expv(x -> (nmv += 1; apply_one_site(H1, x)), half, psi[i];
-                 hermitian = hermitian, maxiter = maxiter, tol = tol, reorth = reorth)
+                 hermitian = hermitian, maxiter = maxiter, tol = tol, reorth = reorth,
+                 conv_tol = conv_tol, substeps = substeps)
 
         peak!(M)
         res = svd(M, (1, 2); cutoff = cut, Nkeep = maxdim, get_lists = true)
@@ -161,7 +177,8 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         # expanded `VR`.
         H0 = zero_site_h(mpo, i, lch, right_channels(rstack, i + 2), psi[i], psi[i + 1])
         C = expv(x -> (nmv += 1; apply_zero_site(H0, x)), -half, C;
-                 hermitian = hermitian, maxiter = maxiter, tol = tol, reorth = reorth)
+                 hermitian = hermitian, maxiter = maxiter, tol = tol, reorth = reorth,
+                 conv_tol = conv_tol, substeps = substeps)
 
         # Retag BOTH ends of the bond in one breath: each result is rank-3 with only one leg
         # wanting `tag`, so neither construction ever sees a duplicate index.
@@ -184,7 +201,8 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
 
         H1 = one_site_h(mpo, i + 1, lch1, rch)
         M = expv(x -> (nmv += 1; apply_one_site(H1, x)), half, psi[i + 1];
-                 hermitian = hermitian, maxiter = maxiter, tol = tol, reorth = reorth)
+                 hermitian = hermitian, maxiter = maxiter, tol = tol, reorth = reorth,
+                 conv_tol = conv_tol, substeps = substeps)
 
         res = svd(M, (1,); cutoff = cut, Nkeep = maxdim, get_lists = true)
         disc = max(disc, _trunc_weight(res))
@@ -194,7 +212,8 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
 
         H0 = zero_site_h(mpo, i, left_channels(lstack, i), rch, psi[i], psi[i + 1])
         C = expv(x -> (nmv += 1; apply_zero_site(H0, x)), -half, C;
-                 hermitian = hermitian, maxiter = maxiter, tol = tol, reorth = reorth)
+                 hermitian = hermitian, maxiter = maxiter, tol = tol, reorth = reorth,
+                 conv_tol = conv_tol, substeps = substeps)
 
         psi[i] = to_concrete(setitag(
             to_concrete(contract(psi[i], (3,), C, (1,))), 3, tag))
