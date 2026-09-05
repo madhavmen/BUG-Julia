@@ -108,7 +108,25 @@ const KRY_TOL  = envfloat("LCP_KRY_TOL", 1e-6)   # BUG half-sweep frame toleranc
 # construction, so contributions stay large and the frame runs to its cap. Cost measured
 # here is therefore an UPPER bound for BUG specifically, in a way it is not for the TDVP
 # arms — do not quote a BUG/TDVP ratio from this benchmark without saying so.
-const KRY_BASIS = envint("LCP_KRY_BASIS", MAXITER)
+# ⚠ AND `krylov_basis` IS NOT THE ANALOGUE OF `maxiter` EITHER — matching them at 8 was
+# still wrong, just less wrong. `maxiter` is a Lanczos depth: cost is `maxiter` matvecs.
+# `krylov_basis` is how many powers of H enrich the BASIS, and `_krylov_frame` returns that
+# many blocks which are then `oplus`ed into a tensor `krylov_basis` times WIDER than the
+# state and factorised by `_splitU`. At chi=1024 with m=8 that is an SVD of roughly
+# 2048 x 9016 per bond, 58 bonds a step. `m = 1` is the bare CBE frame (the code says so
+# outright); the useful range is small.
+const KRY_BASIS = envint("LCP_KRY_BASIS", 2)
+
+# ⛔⛔ CAP THE FRAME SPLIT AT `maxdim`, OR BUG SILENTLY RUNS AT TWICE EVERYONE ELSE'S RANK.
+# `cbe_bug_step!` defaults to `split_maxdim = 0` (no cap) and `split_cutoff = 1e-14` (no
+# truncation), so `_splitU` keeps the whole stacked frame — up to the full local space
+# `d*chi = 2048` at chi=1024. Every contraction after that runs at 2048 while the TDVP arms
+# run at 1024, which is not a fair race and is not a sensible configuration either.
+# This is the rank inflation already established at small chi (chi=80 against TDVP's 35, and
+# chi=41 once matched); `trunc_thresh = 0.0` here means nothing else caps it.
+# 0 = leave the library default, i.e. uncapped; anything else is an explicit cap, and the
+# driver defaults it to `chi` per target rank.
+const SPLIT_MAXDIM = envint("LCP_SPLIT_MAXDIM", -1)   # -1 = follow chi
 const DO_PROF  = envbool("LCP_PROFILE", true)
 const OUTDIR   = get(ENV, "BUG_OUTDIR", joinpath(@__DIR__, "results"))
 
@@ -228,12 +246,14 @@ function run_arm(arm::AbstractString, psi0, mpo, chi::Int, dex::Int)
         () -> RSVDCBEBondUpdate.cbe_bug_step!(psi, mpo, tau;
                   maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER, exact = false,
                   root_conv_tol = CONV_TOL, krylov_tol = KRY_TOL, krylov_basis = KRY_BASIS,
-                  dex = dex, growth = GROWTH)
+                  dex = dex, growth = GROWTH,
+                  split_maxdim = SPLIT_MAXDIM < 0 ? chi : SPLIT_MAXDIM)
     elseif arm == "bugmid"
         () -> RSVDCBEBondUpdate.cbe_bug_midpoint_step!(psi, mpo, tau;
                   maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER, exact = false,
                   root_conv_tol = CONV_TOL, krylov_tol = KRY_TOL, krylov_basis = KRY_BASIS,
-                  dex = dex, growth = GROWTH)
+                  dex = dex, growth = GROWTH,
+                  split_maxdim = SPLIT_MAXDIM < 0 ? chi : SPLIT_MAXDIM)
     else
         error("unknown arm $arm")
     end
