@@ -517,6 +517,14 @@ function run_arm(io, phase, scheme, tau_trunc, split_cutoff, close, dt, profs;
     end
     emit(1, 0.0)
 
+    # HEARTBEAT. An arm at chi=512 can run for hours and the summary line below only prints
+    # once it has FINISHED, so a long job was indistinguishable from a hung one in the .out
+    # file. Print on a TIME interval rather than a step count -- a step-count heartbeat is
+    # either silent for an hour at large chi or a flood at small chi, and the whole point is
+    # that we do not know the per-step cost in advance at the ranks we are now targeting.
+    last_beat = time()
+    beat_every = parse(Float64, get(ENV, "BUG_PROGRESS_SECONDS", "60"))
+
     for k in 1:nsteps
         t0   = time_ns()
         info = step!(psi, ComplexF64(-im * dt))
@@ -528,6 +536,14 @@ function run_arm(io, phase, scheme, tau_trunc, split_cutoff, close, dt, profs;
         hasproperty(info, :t_kry)     && (tkry += info.t_kry)
         hasproperty(info, :t_step)    && (tstep += info.t_step)
         sample_at[k] != 0 && emit(sample_at[k], k * dt)
+
+        if beat_every > 0 && (time() - last_beat >= beat_every || k == nsteps)
+            last_beat = time()
+            @printf("    .. %-11s dt=%-6g tau=%-8g | step %d/%d  t=%.3f/%.3f  chi=%d  %.0fs elapsed, ~%.0fs left\n",
+                    scheme, dt, tau_trunc, k, nsteps, k * dt, P.t_max,
+                    maximum(bond_dims(psi)), secs, secs * (nsteps - k) / k)
+            flush(stdout)
+        end
     end
 
     prof = sz_profile(psi)
