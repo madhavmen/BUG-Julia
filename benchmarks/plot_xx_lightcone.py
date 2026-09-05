@@ -1,19 +1,23 @@
 """Three-scheme XX domain-wall comparison: light cone, chi(t) and error(t).
 
   heis_lightcone_L<n>_D<cap>_m<iter>.png
-      row 1   the EXACT light cone, then |MPS - exact| per scheme on a SHARED colour scale
-      row 2   max bond dimension against t   |   L-infinity error against t
+      row 1   the EXACT light cone, then each scheme's OWN <Sz_j(t)> cone, shared colour scale
+      row 2   max bond dimension against t | L-infinity error against t | wall clock
 
-⛔ THE THREE SCHEMES' <Sz> MAPS ARE VISUALLY IDENTICAL, SO PLOTTING THREE OF THEM SAYS NOTHING.
-   At these tolerances every arm tracks the exact profile to ~1e-4 on a colour axis spanning
-   [-0.5, +0.5] -- a 5000:1 ratio, i.e. under one part in a thousand of one colour step. Three
-   indistinguishable heatmaps would read as "all three are right" while hiding which one is
-   right for the wrong reasons. The exact cone is drawn ONCE as the physics, and each scheme
-   gets an ERROR map instead, which is what actually differs.
+⚠ ROW 1 PLOTS THE OBSERVABLE, NOT THE ERROR, BY REQUEST -- and the reader must be told what that
+  does and does not show. At these tolerances every arm tracks the exact profile to ~1e-4 on a
+  colour axis spanning [-0.5, +0.5]: a 5000:1 ratio, i.e. under one part in a thousand of one
+  colour step. THE FOUR PANELS ARE THEREFORE EXPECTED TO BE INDISTINGUISHABLE BY EYE, and that
+  agreement IS the result being shown -- all three integrators reproduce the same light cone.
+  What they do NOT show is which one is right for the wrong reasons, or by how much they differ.
+  That lives in the error panel of row 2, which is quantitative and is where any claim about
+  relative accuracy must come from. The panels say so on their faces rather than leaving a reader
+  to conclude "all four look the same, so the schemes are equivalent".
 
-⛔ THE ERROR MAPS SHARE ONE COLOUR SCALE. Per-panel autoscaling is the classic way to make a
-   10x worse scheme look identical to a good one -- each panel would renormalise to its own
-   maximum and every map would show the same pattern in the same colours.
+⛔ ALL FOUR CONES SHARE ONE COLOUR SCALE, FIXED AT [-0.5, +0.5]. Per-panel autoscaling is the
+   classic way to make one scheme look like another -- each panel would renormalise to its own
+   extremes, so a scheme that had lost norm or overshot would be redrawn as if it had not. The
+   scale is the physical range of <S^z>, not the data's range.
 
 ⚠ THE REFERENCE IS EXACT, NOT A FINE-GRID PROXY. `sz_exact` is the closed-form free-fermion
   profile at Delta=0, so these are true errors. See plot_heis_profiles.py.
@@ -110,20 +114,25 @@ def figure(prof_path, scalar_path, tag):
         ax.plot(mid + sgn * ts, ts, "k--", lw=1.0, alpha=.55)
     ax.set_xlim(sites[0] - .5, sites[-1] + .5); ax.set_ylim(ts[0], ts[-1])
 
-    # ── row 1, panels 2-4: per-scheme error, ONE shared colour scale ──────────────────────
-    errs = {s: np.abs(prof[s][2] - prof[s][3]) for s, *_ in present}
-    lo = max(min(e[e > 0].min() for e in errs.values() if (e > 0).any()), FLOOR)
-    hi = max(e.max() for e in errs.values())
+    # ── row 1, panels 2-4: each scheme's OWN light cone, ONE shared colour scale ──────────
+    # ⚠ THE MAX DEVIATION IS PRINTED ON EACH PANEL, because the panel alone cannot show it. At
+    # ~1e-4 against a [-0.5, +0.5] axis the difference from the exact cone is ~1/5000 of the
+    # colour range -- invisible by construction. Without the number, four identical-looking maps
+    # invite exactly the conclusion the data does not support: that the schemes are equally
+    # accurate. They agree on the PHYSICS; the error panel below is what ranks them.
     for k, (s, lab, c, w, z) in enumerate(present):
-        ts_s, sites_s, _, _ = prof[s]                    # this arm's OWN grid -- see above
+        ts_s, sites_s, sz_s, ex_s = prof[s]              # this arm's OWN grid -- see above
         ax = fig.add_subplot(gs[0, 3 * (k + 1):3 * (k + 2)])
-        im = ax.pcolormesh(sites_s, ts_s, np.log10(np.maximum(errs[s], lo)),
-                           cmap="magma_r", vmin=np.log10(lo), vmax=np.log10(hi),
+        im = ax.pcolormesh(sites_s, ts_s, sz_s, cmap="RdBu_r", vmin=-.5, vmax=.5,
                            shading="nearest")
+        dev = np.nanmax(np.abs(sz_s - ex_s))
         partial = "  (to t=%g)" % ts_s[-1] if len(ts_s) < len(ts) else ""
-        ax.set_title("%s%s\n$\\log_{10}|$MPS $-$ exact$|$" % (lab, partial),
+        ax.set_title("%s%s\n$\\langle S^z_j(t)\\rangle$   (max dev %.1e)" % (lab, partial, dev),
                      fontsize=9.5, color=c)
         ax.set_xlabel("site $j$")
+        for sgn in (+1, -1):                             # the same v = J = 1 front as the exact
+            ax.plot(mid + sgn * ts_s, ts_s, "k--", lw=1.0, alpha=.55)
+        ax.set_xlim(sites[0] - .5, sites[-1] + .5)
         ax.set_ylim(ts[0], ts[-1])                       # same t range on every panel
         if k == 0:
             ax.set_ylabel("$t$")
@@ -167,14 +176,28 @@ def figure(prof_path, scalar_path, tag):
     # measured at 520 s and at 33867 s -- 65x. `matvec` in the middle panel is the cost axis that
     # survives. This is drawn because it was asked for and because the SHAPE (linear vs
     # accelerating) is still informative; the absolute values are not comparable across runs.
+    # ⛔ AND WHEN BUG RAN PARALLEL, THE PANEL IS NOT COMPARING LIKE WITH LIKE -- IT SAYS SO.
+    # BUG gets two workers, both TDVP arms get one, because TDVP's sweep has no independent
+    # halves to give a second worker to. That is a fair statement about the METHODS and a unfair
+    # one about the code, and which of the two a reader takes away depends entirely on the panel
+    # admitting it.
+    par = "0"
+    if os.path.exists(scalar_path):
+        for r in csv.DictReader(open(scalar_path)):
+            if r["scheme"].startswith("bug"):
+                par = r.get("parallel", "0") or "0"
+                break
     a3 = fig.add_subplot(gs[1, 8:12])
     for s, lab, c, w, z in present:
         t, _, _, _, secs = scal[s]
+        note = "  [2 workers]" if (par == "1" and s.startswith("bug")) else ""
         a3.plot(t, secs, "o-", ms=3.5, lw=w, color=c, zorder=z,
-                label="%s   (%.0f s)" % (lab, secs[-1]))
+                label="%s   (%.0f s)%s" % (lab, secs[-1], note))
     a3.set_xlabel("$t$"); a3.set_ylabel("cumulative step time (s)")
     a3.set_title("Wall clock -- SHAPE ONLY, values are contention- and\n"
-                 "standby-contaminated on this box (65x measured). Cost = matvec.",
+                 "standby-contaminated on this box (65x measured). Cost = matvec."
+                 + ("\nBUG: 2 workers; TDVP: 1 (its sweep has no parallel halves)."
+                    if par == "1" else ""),
                  fontsize=9.0)
     a3.legend(fontsize=8.5, frameon=False, loc="upper left")
     a3.grid(True, lw=.4, alpha=.35)
@@ -184,12 +207,31 @@ def figure(prof_path, scalar_path, tag):
     # half-sweep 1e-6 -- a figure whose caption asserts the opposite of what it plots. Exactly the
     # defect fixed in plot_knee's "Delta=1, Neel, uncapped" title. `tau_trunc` and `split_cutoff`
     # are columns; use them.
+    # ⛔ AND SO DO THE CBE PATH AND THE WORKER COUNT, WHICH ARE THE TWO SWITCHES THAT REDEFINE
+    # WHAT THE WALL-CLOCK PANEL MEANS. `exact_cbe` decides whether the randomised sketch ran at
+    # all (`exact=true` selects `full_local_basis`, which applies H to `d*chi_r` columns instead
+    # of the sketch's `Dpre`) and `parallel` decides whether BUG's two half-sweeps overlapped.
+    # Neither is in the filename -- `knobtag()` carries L, dt, T, maxdim, maxiter and nothing
+    # else -- so before these columns existed the ONLY record of which run a figure came from was
+    # a `tag=` string in a shell script. An entire campaign was quoted as an rSVD cost result
+    # while `exact_cbe=true` had the sketch switched off, and nothing in any figure could have
+    # contradicted it. `.get` with a default keeps older CSVs (written before the columns) from
+    # crashing the plotter -- they report "unrecorded", which is exactly what they are.
     knobs = ""
     if os.path.exists(scalar_path):
         for r in csv.DictReader(open(scalar_path)):
             if r["scheme"].startswith("bug"):
                 knobs = ("BUG: root %s / half-sweep %s;  TDVP: tol %s"
                          % (fmt(r["tau_trunc"]), fmt(r["split_cutoff"]), fmt(r["tau_trunc"])))
+                ex, par = r.get("exact_cbe", ""), r.get("parallel", "")
+                nth = r.get("nthreads", "")
+                if ex not in ("", None):
+                    knobs += ";  CBE: %s" % ("exact (rSVD OFF)" if ex == "1"
+                                             else "randomised sketch")
+                if par not in ("", None):
+                    knobs += ";  BUG half-sweeps: %s" % (
+                        "PARALLEL on %s workers (TDVP is sequential: 1)" % nth if par == "1"
+                        else "serial")
                 break
     fig.suptitle("XX chain ($\\Delta$=0), U(1), domain-wall quench%s   %s"
                  % (tag.replace("_", "  "), knobs), fontsize=10.5, y=.99)
