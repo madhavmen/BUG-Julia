@@ -84,7 +84,7 @@ sector: the right bond dimension and completely the wrong block structure.
 """
 function random_mps(L::Int, target_chi::Int; seed::Int = 1, delta::Float64 = 1.0,
                     seed_steps::Int = 3, max_seed_steps::Int = 60,
-                    seed_dt::Float64 = 0.5, seed_maxdim::Int = 64,
+                    seed_dt::Float64 = 0.5, seed_maxdim::Int = 256,
                     verbose::Bool = true)
     rng = MersenneTwister(seed)
     t0 = time()
@@ -122,22 +122,41 @@ function random_mps(L::Int, target_chi::Int; seed::Int = 1, delta::Float64 = 1.0
     # So: `seed_dt = 0.5` reaches t = 10 in twenty steps, and `seed_maxdim = 64` keeps each of
     # those steps in the milliseconds. Seeding accuracy is irrelevant — the payloads are
     # replaced by Gaussians immediately afterwards.
+    # ⛔ KEEP THE BEST STATE SEEN, DO NOT ASSUME THE COUNT ONLY RISES. Measured at
+    # seed_maxdim=64: sectors reached 11 at t=2.5 and then FELL to 9 and stayed there out to
+    # t=30. Truncation removes low-weight sectors faster than time opens new ones once the
+    # state thermalises, so running longer actively makes the structure worse — and the loop
+    # then burned all 60 steps waiting for a count it had already passed.
+    best_n, best = -1, psi
+    stall = 0
     for k in 1:max_seed_steps
         RSVDCBEBondUpdate.tdvp2_step!(psi, mpo, ComplexF64(-im * seed_dt);
                                       maxdim = seed_maxdim, trunc_thresh = 0.0, maxiter = 8)
         n = nsec_of(psi)
-        k % 5 == 0 && log(@sprintf("seed step %d  t=%.1f  chi=%d  sectors@mid=%d/%d", k,
-                                   k * seed_dt, maximum(BondUpdateBUG.bond_dims(psi)),
-                                   n, target_sectors))
-        if n >= target_sectors && k >= seed_steps
-            log(@sprintf("all %d sectors open after %d seed steps (t=%.1f, chi=%d)", n, k,
-                         k * seed_dt, maximum(BondUpdateBUG.bond_dims(psi))))
+        if n > best_n
+            best_n, best, stall = n, deepcopy(psi), 0
+        else
+            stall += 1
+        end
+        k % 5 == 0 && log(@sprintf("seed step %d  t=%.1f  chi=%d  sectors@mid=%d/%d (best %d)",
+                                   k, k * seed_dt, maximum(BondUpdateBUG.bond_dims(psi)),
+                                   n, target_sectors, best_n))
+        if best_n >= target_sectors && k >= seed_steps
+            log(@sprintf("all %d sectors open after %d seed steps (t=%.1f)", best_n, k,
+                         k * seed_dt))
             break
         end
-        k == max_seed_steps && @warn "random_mps: only $n of $target_sectors sectors opened " *
-            "in $k steps — block shapes will be larger and fewer than a physical state's, " *
-            "which biases any per-sector cost measurement"
+        # No improvement for a long stretch: the count has peaked and more time only costs.
+        if stall >= 15 && k >= seed_steps
+            log(@sprintf("sector count peaked at %d/%d after %d steps; keeping the best state",
+                         best_n, target_sectors, k))
+            break
+        end
     end
+    psi = best
+    best_n < target_sectors && @warn "random_mps: only $best_n of $target_sectors sectors " *
+        "opened — block shapes are larger and fewer than a physical state's, which biases " *
+        "any per-sector cost measurement. Raise seed_maxdim (truncation is what closes them)."
 
     while maximum(BondUpdateBUG.bond_dims(psi)) < target_chi
         double_chi!(psi, rng)

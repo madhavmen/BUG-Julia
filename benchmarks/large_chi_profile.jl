@@ -127,6 +127,25 @@ const KRY_BASIS = envint("LCP_KRY_BASIS", 2)
 # 0 = leave the library default, i.e. uncapped; anything else is an explicit cap, and the
 # driver defaults it to `chi` per target rank.
 const SPLIT_MAXDIM = envint("LCP_SPLIT_MAXDIM", -1)   # -1 = follow chi
+
+# ⛔ `parallel` DEFAULTS TO **false**, so BUG'S HALF-SWEEP PARALLELISM HAS NEVER BEEN ON in
+# any measurement here. It is one of the two structural advantages BUG is supposed to have
+# over TDVP (the other being no backward evolution), and TDVP has no equivalent — so leaving
+# it off measures BUG with one hand tied and still calls the result a method comparison.
+# ⚠ It needs `julia -t 2` or more to do anything at all; with one thread the two tasks
+# serialise and the flag is a no-op that quietly reports success.
+const PARALLEL = envbool("LCP_PARALLEL", true)
+
+"""
+BLAS threads for one arm, given the allocation's `nt`.
+
+⚠ FAIRNESS IS ABOUT TOTAL CORES, NOT THE FLAG. With `parallel = true` BUG runs two
+half-sweeps at once, so giving each of them `nt` BLAS threads uses `2*nt` cores on an
+`nt`-core allocation — BUG would oversubscribe while TDVP does not, and the resulting
+"speedup" would be partly stolen cores and partly contention. Halving BLAS for the parallel
+arms keeps every arm at the same core budget, which is the comparison we actually want.
+"""
+blas_for(arm, nt) = (PARALLEL && (arm == "bug" || arm == "bugmid")) ? max(1, nt ÷ 2) : nt
 const DO_PROF  = envbool("LCP_PROFILE", true)
 const OUTDIR   = get(ENV, "BUG_OUTDIR", joinpath(@__DIR__, "results"))
 
@@ -225,7 +244,7 @@ end
 
 # ── one arm ──────────────────────────────────────────────────────────────────
 
-function run_arm(arm::AbstractString, psi0, mpo, chi::Int, dex::Int)
+function run_arm(arm::AbstractString, psi0, mpo, chi::Int, dex::Int, nt::Int)
     psi = deepcopy(psi0)
     tau = ComplexF64(-im * DT)
     # ⛔ `CONV_TOL` MUST BE SET FOR EVERY ARM OR NONE. CBE-BUG's half-sweeps stop adaptively
@@ -246,18 +265,19 @@ function run_arm(arm::AbstractString, psi0, mpo, chi::Int, dex::Int)
         () -> RSVDCBEBondUpdate.cbe_bug_step!(psi, mpo, tau;
                   maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER, exact = false,
                   root_conv_tol = CONV_TOL, krylov_tol = KRY_TOL, krylov_basis = KRY_BASIS,
-                  dex = dex, growth = GROWTH,
+                  dex = dex, growth = GROWTH, parallel = PARALLEL,
                   split_maxdim = SPLIT_MAXDIM < 0 ? chi : SPLIT_MAXDIM)
     elseif arm == "bugmid"
         () -> RSVDCBEBondUpdate.cbe_bug_midpoint_step!(psi, mpo, tau;
                   maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER, exact = false,
                   root_conv_tol = CONV_TOL, krylov_tol = KRY_TOL, krylov_basis = KRY_BASIS,
-                  dex = dex, growth = GROWTH,
+                  dex = dex, growth = GROWTH, parallel = PARALLEL,
                   split_maxdim = SPLIT_MAXDIM < 0 ? chi : SPLIT_MAXDIM)
     else
         error("unknown arm $arm")
     end
 
+    BLAS.set_num_threads(blas_for(arm, nt))
     times = Float64[]
     allocs = Float64[]
     for k in 1:NSTEPS
@@ -329,7 +349,6 @@ function main()
         for ct in CTHREADS
             TELUM_CONTRACT_THREADS[] = ct == 0 ? typemax(Int) : ct
             for nt in BLAS_T
-                BLAS.set_num_threads(nt)
                 for dex in DEXS
                     say(@sprintf("  --- BLAS=%d | contract tasks=%s | dex=%s (julia -t %d) ---",
                                  nt, ct == 0 ? "auto" : string(ct),
@@ -340,12 +359,14 @@ function main()
                         # work. Run it on the first dex only.
                         arm == "tdvp2" && dex != DEXS[1] && continue
                         r = try
-                            run_arm(arm, psi0, mpo, chi, dex)
+                            run_arm(arm, psi0, mpo, chi, dex, nt)
                         catch err
                             say("    $arm FAILED: $(sprint(showerror, err))")
                             continue
                         end
-                        say(@sprintf("    %-6s MEAN(steps 2-%d) = %.2f s", arm, NSTEPS, r.mean))
+                            say(@sprintf("    %-6s MEAN(steps 2-%d) = %.2f s  [blas=%d%s]",
+                                     arm, NSTEPS, r.mean, blas_for(arm, nt),
+                                     (PARALLEL && startswith(arm, "bug")) ? ", parallel" : ""))
                         open(csv, "a") do io
                             for (k, t) in enumerate(r.times)
                                 @printf(io, "%d,%d,%d,%s,%d,%d,%d,%d,%.6f,%.4f,%d,%d\n",
