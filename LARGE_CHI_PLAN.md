@@ -6,6 +6,37 @@ decisively cheaper than the full SVD at these ranks.
 
 ---
 
+## STATUS 2026-09-06 — the ordering, and the five knobs that were hiding it
+
+**Target (Madhav): `tdvp2` slowest, then `tdvp_cbe1s`, then `cbe_bug` fastest. A measurement
+that disagrees means a bug or a missed optimisation, not a result.**
+
+Measured L=30, χ=1024, EPYC 9755, BLAS=8, growth 1.1, `parallel` still OFF:
+
+| arm | s/step | alloc/step | vs tdvp2 |
+|---|---|---|---|
+| **bug** | **42.1** | 69 GB | **1.59× faster** |
+| tdvp2 | 67.0 | 142 GB | — |
+| cbe1s | 80.9 | 159 GB | 1.21× slower ⚠ |
+
+**BUG is fastest. cbe1s vs tdvp2 is still inverted** — that is the open question.
+
+Five knobs were found, none of them algorithmic, each either unfair or simply wasteful at
+large rank. Runtime tracks allocation across all three arms, so a knob that inflates work
+shows up almost linearly in the clock.
+
+| knob | default | effect at χ=1024 |
+|---|---|---|
+| `split_maxdim` | 0 (uncapped) | BUG ran every contraction at rank **2048** vs TDVP's 1024. Capping it: **>800 s/step → 42.1 s**, better than 19× |
+| `growth` | 2.0 | 1024 new directions per side, a 0.6× probe, then truncated away. At 1.1: **cbe1s 246 → 81 s** |
+| `krylov_basis` | 30 | not a Lanczos depth — `_krylov_frame`'s blocks are `oplus`ed into an *m×*-wide SVD per bond |
+| `conv_tol` | 0, unplumbed in cbe1s | TDVP burned full `maxiter`; BUG's frames already exited adaptively |
+| `parallel` | false | **BUG's half-sweep parallelism has never been on in any run** |
+
+⚠ The 42.1 s is with `parallel = false`, so BUG's structural advantage is still unspent.
+
+---
+
 ## 0. Where we start (measured, not assumed)
 
 From job 16326153, L=30, Δ=1, BUG with the exact CBE:
