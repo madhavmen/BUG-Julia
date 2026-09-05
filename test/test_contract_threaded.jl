@@ -47,8 +47,18 @@ end
             RSVDCBEBondUpdate.tdvp2_step!(base, mpo, ComplexF64(-im * 0.3);
                                           maxdim = 64, trunc_thresh = 0.0, maxiter = 6)
         end
+        # ⚠ THE VACUITY GUARD ONLY APPLIES UNDER A SYMMETRY. `:none` has no charge sectors at
+        # all — every tensor is one dense block — so a contraction there has ONE output sector
+        # and `ntasks = min(1, ...) = 1`: the threaded path cannot be exercised, by
+        # construction. Asserting `nsec >= 3` there fails on a correct implementation, which
+        # is what it did. Under `:none` this testset checks only that the code still runs and
+        # still agrees; the real comparison is the `:U1` half.
         nsec = length(base[L ÷ 2].RMTs)
-        @test nsec >= 3      # otherwise the comparison below is vacuous
+        if sym === :U1
+            @test nsec >= 3      # otherwise the comparison below is vacuous
+        else
+            @test nsec >= 1
+        end
 
         for arm in (:tdvp2, :cbe1s, :bug)
             step! = (p, ) -> if arm === :tdvp2
