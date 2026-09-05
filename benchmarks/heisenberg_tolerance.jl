@@ -120,7 +120,47 @@ const P = parse_params((
     bug_growth     = 2.0,
     bug_dover      = -1,
     bug_comp_ratio = 1.0,
+    # ⛔ THE PROBE WIDTH, WHICH IS WHAT DECIDES WHETHER THE rSVD CAN PAY AT ALL — and until this
+    # knob existed it could only be set INDIRECTLY, through `growth`, which is why it was never
+    # set. `cbe_core.jl:500` reads `dex = 0` as "hand the budget to the growth schedule",
+    # `budget = ceil(growth*dmax) - r`; `cbe_core.jl:507` then makes `dover = nothing` mean
+    # `Dpre = ceil(1.2*dex)`. At `growth = 2.0` and chi = 41 that is `dex ~ 41` and `Dpre ~ 50`,
+    # against the EXACT path's `d*chi_r = 82` columns (`cbe_core.jl:56`).
+    #
+    # ⇒ THE SKETCH WAS BEING ASKED TO SKETCH AT 61% OF FULL WIDTH, where no randomised method can
+    # win: it saves 1.6x on the `H*Theta` build and pays for the random matrix, the
+    # orthonormalisation and the two-stage preselect/final pipeline on top. MEASURED L=18, T=10,
+    # chi=41: turning the sketch ON moved `t_cbe` 94.4 s -> 123.2 s, i.e. 30% SLOWER, while the
+    # `tdvp2` control (which never touches the CBE path) was 17% FASTER in the same pair of runs.
+    # The rSVD implementation is not the problem; the width it is handed is.
+    #
+    # ⚠ `0` KEEPS THE GROWTH SCHEDULE, i.e. every number recorded before this parameter existed is
+    # reproduced exactly. A POSITIVE value pins the width directly and decouples it from `growth`,
+    # which is the only way to scan the one against the other -- and the four-probe rank study
+    # already found `growth` INERT on the rank (2.0 -> 1.2 left chi at 80), so there is reason to
+    # expect the width can be cut hard without paying for it in bond dimension.
+    bug_dex        = 0,
     exact_cbe    = true,     # full SVD, not the randomised sketch (Jan's point 3)
+    # ⛔ THE ONE ASYMMETRY THAT IS A PROPERTY OF THE METHOD RATHER THAN OF THE TUNING. The BUG
+    # step's two half-sweeps are structurally independent -- the left one reads the state canonical
+    # at 1 and writes `W/Vwide/Wcbe`, the right one reads it canonical at `L` and writes
+    # `Z/Uwide/Zcbe`, and neither reads the other's output; they meet only at the single Galerkin
+    # solve at the root, which runs after both (`cbe_bug.jl:662`). TDVP's sweep has no such
+    # decomposition: site `i+1` consumes the environment site `i` just produced, so `tdvp2` and
+    # `tdvp_cbe1s` are strictly sequential and there is no flag to give them.
+    #
+    # ⚠ SO A WALL-CLOCK ROW WITH THIS ON IS "BEST EACH METHOD CAN DO ON 2 CORES", NOT
+    # "same code, one flag flipped" -- REPORT WHICH. `krylov` and the phase timers are unchanged
+    # by it (the same operator applications happen, on two workers instead of one), so every COST
+    # and ACCURACY column stays directly comparable across the flag; only `seconds`/`t_step` move.
+    #
+    # ⛔ AND `t_cbe`/`t_kry`/`t_split`/... ARE CPU-SECOND SUMS ACROSS BOTH HALF-SWEEPS WHILE
+    # `t_step` IS WALL CLOCK (`cbe_bug.jl:955`). Serially they are the same clock and the shares
+    # sum to ~1; in parallel they deliberately do not, and `(t_cbe+t_kry+...)/t_step > 1` IS the
+    # speedup. That ratio is the one timing number on this box that survives contention: a busy
+    # machine slows both workers together and leaves the ratio alone, where absolute seconds have
+    # been measured to spread 65x.
+    bug_parallel = false,
     # ⛔ THE 1-SITE CBE BASELINE WAS RUNNING ON PACKAGE DEFAULTS WHILE `cbe_bug` GOT TUNED ONES,
     # WHICH IS NOT A COMPARISON. `tdvp_cbe1s_step!` was called with `maxdim`/`trunc_thresh`/
     # `maxiter` only, so it silently kept `comp_ratio = 0.5` and `exact = false` (the randomised
@@ -275,7 +315,32 @@ const COLS_T = ["phase", "scheme", "L", "dt", "tau_trunc", "split_cutoff", "cbe_
                 # hid its cost. These are zero/absent for tdvp2 and tdvp_cbe1s, which have no
                 # expansion phase -- which is itself the point: a matvec count is only comparable
                 # between arms that spend their work in the same counted places.
-                "t_cbe", "t_kry", "t_step"]
+                "t_cbe", "t_kry", "t_step",
+                # ⛔ THE TWO SWITCHES THAT SILENTLY REDEFINE WHAT `seconds` MEANS, WRITTEN INTO
+                # EVERY ROW. Both live in `knobtag()`'s blind spot -- it carries L, dt, T, maxdim
+                # and maxiter and NOTHING ELSE -- so two runs that differ only in these produce
+                # the same filename, and a `tag=` is the only thing standing between them. That
+                # has already cost real work once (a matched-tolerance rerun about to overwrite
+                # the loose-split baseline it existed to be compared against).
+                #
+                # ⚠ AND THE FAILURE IS WORSE THAN AN OVERWRITE: a CSV mixing an exact-CBE arm with
+                # a sketch arm, or a 1-worker arm with a 2-worker one, is not corrupt and not
+                # obviously wrong -- it is a plausible table in which the cost column answers a
+                # different question row by row. `exact_cbe` was set for a TOLERANCE study and
+                # then quoted as an rSVD cost result for an entire campaign for exactly this
+                # reason. With the flags in the row, that reading is checkable instead of
+                # remembered. `nthreads` is separate from `parallel` on purpose: `parallel=1`
+                # with `nthreads=1` is the pessimisation the launcher is supposed to refuse, and
+                # a row is the only place an old file can still admit to it.
+                "exact_cbe", "parallel", "nthreads",
+                # ⛔ AND THE PROBE WIDTH, FOR THE SAME REASON: it is the single number that decides
+                # whether the sketch can beat the exact expansion, and it is set INDIRECTLY by
+                # `growth` whenever `dex = 0`. A `t_cbe` value is uninterpretable without both --
+                # `Dpre = ceil(1.2*dex)` if `dex > 0`, else `ceil(1.2*(ceil(growth*dmax) - r))` --
+                # and the ratio that matters is that against `d*chi_r`. Recording `growth` alone
+                # would be ambiguous the moment `dex` is pinned, and `dex` alone is ambiguous
+                # while it is 0, which is exactly the configuration every run so far used.
+                "dex", "growth"]
 
 # THE SWEEP HAS ONE STRUCTURE; ONLY THE KRYLOV DEPTH VARIES. `kstep`, `kaug` and `rexpand` were
 # removed on 2026-08-24 -- the basis-only sweep at `krylov_basis = 3` beat the K-step machinery on
@@ -339,6 +404,7 @@ function stepper(scheme::String, tau_trunc::Float64, split_cutoff::Float64,
         return (p, tau) -> cbe_bug_step!(p, W, tau;
                                          s...,          # empty for the `mdef` arm
                                          exact = P.exact_cbe,
+                                         parallel = P.bug_parallel,
                                          stol_pre = sp, stol_fnl = sf,
                                          split_cutoff = split_cutoff, split_maxdim = 0,
                                          root_cutoff = 0.0, root_maxdim = 0,
@@ -346,6 +412,7 @@ function stepper(scheme::String, tau_trunc::Float64, split_cutoff::Float64,
                                          # the expansion knobs, now explicit on BOTH CBE arms
                                          growth = P.bug_growth,
                                          comp_ratio = P.bug_comp_ratio,
+                                         dex = P.bug_dex,
                                          dover = P.bug_dover < 0 ? nothing : P.bug_dover,
                                          maxdim = CAP, trunc_thresh = tau_trunc, maxiter = m)
     elseif scheme == "tdvp_cbe1s"
@@ -378,7 +445,36 @@ function run_arm(io, phase, scheme, tau_trunc, split_cutoff, close, dt, profs;
                      cbe_cut = cbe_cut, kry_depth = kry_depth)
     psi    = copy(PSI0)
     nsteps = round(Int, P.t_max / dt)
-    every  = max(1, round(Int, P.sample_every / dt))
+    # ⛔ THE EMISSION GRID IS THE REFERENCE'S *TIME* GRID, NOT A ROUNDED STEP COUNT. `exact_profiles`
+    # samples at t = (n-1)*sample_every, so `profs[n]` is pinned to a TIME. The old
+    # `every = max(1, round(Int, P.sample_every / dt))` counted STEPS and then indexed
+    # `profs[k ÷ every + 1]`, which is only equivalent when `sample_every` is an exact multiple of
+    # `dt`. Every phase but `dt` runs at ONE dt (0.05, which divides 0.25), so the defect sat latent
+    # until `phase=dt` swept dt -- and it is why that phase had never produced a CSV:
+    #   dt=0.2 -> round(1.25) = 1 -> emits 11 rows into a 9-element reference: BoundsError, loud.
+    #   dt=0.1 -> round(2.5)  = 2 -> emits at t=0.2,0.4,... and compares them against the exact
+    #             profile at t=0.25,0.5,... A SILENT, GROWING TIME OFFSET. That arm would have
+    #             returned a large "error" scaling with the front velocity and read as a genuine
+    #             dt-order signal. The crash was luck; this one is the dangerous half.
+    # Now a step emits ONLY when its own time lands on a reference sample, and the index comes from
+    # the TIME. `sample_at[k]` = reference index for step k, or 0 for "do not emit".
+    sample_at = zeros(Int, nsteps)
+    for k in 1:nsteps
+        r = (k * dt) / P.sample_every
+        n = round(Int, r)
+        # 1e-9 is a float-representation tolerance, not a physics one: 0.05 and 0.25 are both
+        # inexact in binary, so `k*dt` never lands on `n*sample_every` exactly.
+        if abs(r - n) < 1e-9 && 1 <= n + 1 <= length(profs)
+            sample_at[k] = n + 1
+        end
+    end
+    # The ENDPOINT must be on the grid: the summary line below scores `profs[end]` against the final
+    # state unconditionally, so a dt that misses it makes the arm silently unscoreable — exactly the
+    # failure this fix exists to remove. Refuse it instead.
+    nsteps >= 1 && sample_at[nsteps] == length(profs) || error(
+        "dt=$dt cannot be scored: t_max=$(P.t_max) / dt = $(P.t_max / dt) (nsteps=$nsteps) and " *
+        "sample_every=$(P.sample_every) put the final step off the reference grid. " *
+        "Choose dt so that t_max/dt is an integer AND sample_every/dt is an integer.")
     e0     = real(mpo_energy(copy(psi), W)) / max(norm(psi)^2, eps())
     kry, secs, efnl, disc = 0, 0.0, 0.0, 0.0
     # Accumulated the same way as `kry`: summed over every step of the arm. Absent on the TDVP
@@ -388,11 +484,19 @@ function run_arm(io, phase, scheme, tau_trunc, split_cutoff, close, dt, profs;
     emit(n, t) = begin
         prof = sz_profile(psi)
         s, e = staggered(prof), real(mpo_energy(copy(psi), W)) / max(norm(psi)^2, eps())
-        @printf(io, "%s,%s,%d,%g,%g,%g,%g,%d,%d,%d,%g,%.10g,%.10g,%.6e,%.6e,%d,%.10g,%.10g,%.6e,%.3e,%.3e,%d,%.2f,%.3f,%.3f,%.3f\n",
+        # ⚠ THE LAST THREE ARE THE ARM'S IDENTITY, AND THEY DESCRIBE THE *BUG* ARM'S CONFIGURATION
+        # EVEN ON A TDVP ROW -- `tdvp2`/`tdvp_cbe1s` have no expansion to make exact and no
+        # half-sweeps to overlap, so for them the honest reading is "this is what the run was
+        # configured as", not "this is what this scheme did". They are per-run constants, not
+        # per-scheme ones, which is precisely why they belong in the row: the TDVP arms are the
+        # internal control, and a control is only a control if you can see it was untouched.
+        @printf(io, "%s,%s,%d,%g,%g,%g,%g,%d,%d,%d,%g,%.10g,%.10g,%.6e,%.6e,%d,%.10g,%.10g,%.6e,%.3e,%.3e,%d,%.2f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%g\n",
                 phase, scheme, P.L, dt, tau_trunc, split_cutoff, cbe_cut, 0, close ? 1 : 0,
                 P.maxdim, t, s, staggered(profs[n]), abs(s - staggered(profs[n])),
                 maximum(abs.(prof .- profs[n])), maximum(bond_dims(psi)), norm(psi),
-                e, abs(e - e0), efnl, disc, kry, secs, tcbe, tkry, tstep)
+                e, abs(e - e0), efnl, disc, kry, secs, tcbe, tkry, tstep,
+                P.exact_cbe ? 1 : 0, P.bug_parallel ? 1 : 0, Threads.nthreads(),
+                P.bug_dex, P.bug_growth)
         flush(io)
         # The site-resolved observable, for the trajectory plot. Written from the SAME `prof` the
         # error above is computed from, so the figure and the scalar can never disagree.
@@ -417,7 +521,7 @@ function run_arm(io, phase, scheme, tau_trunc, split_cutoff, close, dt, profs;
         hasproperty(info, :t_cbe)     && (tcbe += info.t_cbe)
         hasproperty(info, :t_kry)     && (tkry += info.t_kry)
         hasproperty(info, :t_step)    && (tstep += info.t_step)
-        k % every == 0 && emit(k ÷ every + 1, k * dt)
+        sample_at[k] != 0 && emit(sample_at[k], k * dt)
     end
 
     prof = sz_profile(psi)
@@ -596,6 +700,19 @@ function main()
                                "sparse Krylov ED, Sz=0 sector (caps L at ~20)")
     @printf("phase=%s  exact_cbe=%s  krylov depth=%d (bound %.1e)\n",
             P.phase, P.exact_cbe, depth_for(P.dt), krylov_bound(HNORM, P.dt, depth_for(P.dt)))
+    # ⛔ REFUSE `bug_parallel = true` ON ONE THREAD RATHER THAN RUNNING IT. The two tasks would
+    # interleave on a single worker, so the step becomes the sequential one PLUS scheduling
+    # overhead -- and the CSV would record a legitimate-looking arm showing that the parallel
+    # half-sweeps make BUG *slower*, with nothing in the file to say the machine never had a
+    # second worker to put them on. `julia -t 1` is this repo's default launch line, so the
+    # failure mode is the likely one, not the exotic one.
+    if P.bug_parallel && Threads.nthreads() < 2
+        error("bug_parallel = true needs `julia -t 2` or more; this process has " *
+              "$(Threads.nthreads()) thread. Re-launch with -t 2 (and keep " *
+              "OPENBLAS_NUM_THREADS=1 so the two sweeps do not oversubscribe BLAS).")
+    end
+    @printf("bug_parallel=%s  julia threads=%d  BLAS threads=%d  cores=%d\n",
+            P.bug_parallel, Threads.nthreads(), BLAS.get_num_threads(), Sys.CPU_THREADS)
     print("building the exact reference (C($(P.L),$(P.L÷2)) states) ... "); flush(stdout)
     t0 = time_ns()
     _, profs = exact_profiles(P.L, P.J, P.t_max, P.sample_every, P.delta, P.init, OCC)
