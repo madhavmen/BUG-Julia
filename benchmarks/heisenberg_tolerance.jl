@@ -181,7 +181,13 @@ const P = parse_params((
     cbe1s_exact      = -1,
 ))
 
-const OUTDIR = joinpath(@__DIR__, "results")
+# ⛔ `BUG_OUTDIR` OVERRIDES THE DEFAULT, AND ON A CLUSTER IT IS MANDATORY. The default writes
+# beside the source, which on the LMU HPC filer means `$HOME` -- a shared 29 T NFS volume with no
+# per-user quota command, where `cluster_compliance.md` §1.8/§6 forbids bulk job output outright.
+# A run there is a breach that shows up as a full filer for the whole faculty, not as an error for
+# us. Job scripts set `BUG_OUTDIR=$SCRATCH/<campaign>/<date>-<tag>`; the default is kept so a
+# local run still works with no environment at all.
+const OUTDIR = get(ENV, "BUG_OUTDIR", joinpath(@__DIR__, "results"))
 
 # ‖H_XXZ‖ ≤ Σ_bonds ‖h_bond‖. The XXZ bond operator has eigenvalues {Δ/4, Δ/4, -Δ/4 ± 1/2}, so
 # ‖h_bond‖ = Δ/4 + 1/2 -- which is 3/4 at Δ=1 (the value this was hard-coded to) and 1/2 at Δ=0.
