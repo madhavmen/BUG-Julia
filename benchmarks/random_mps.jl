@@ -83,18 +83,48 @@ reproduces that single sector, so the result would be a rank-`chi` state living 
 sector: the right bond dimension and completely the wrong block structure.
 """
 function random_mps(L::Int, target_chi::Int; seed::Int = 1, delta::Float64 = 1.0,
-                    dt::Float64 = 0.05, seed_steps::Int = 3, verbose::Bool = true)
+                    dt::Float64 = 0.05, seed_steps::Int = 3, max_seed_steps::Int = 60,
+                    verbose::Bool = true)
     rng = MersenneTwister(seed)
     t0 = time()
     log(msg) = verbose && (@printf("[random_mps %7.1fs] %s\n", time() - t0, msg); flush(stdout))
 
     psi = BondUpdateBUG.neel_state(L)
     mpo = RSVDCBEBondUpdate.xxz_mpo(L; J = 1.0, delta = delta)
-    for k in 1:seed_steps                       # cheap: chi is still tiny here
+
+    # ⛔ SEED UNTIL THE SECTOR COUNT SATURATES, NOT FOR A FIXED NUMBER OF STEPS.
+    # Doubling reproduces whatever sector structure it is handed, so the seed decides it for
+    # good. Measured at L=30: three steps opened only 7 sectors on the middle bond and the
+    # count then stayed at 7 for every chi, while a converged state there carries ~16 (the
+    # left half of 30 sites spans Sz = -7.5 ... 7.5). A 7-sector state at chi=1024 has blocks
+    # about twice too large and half too few -- which is a direct bias on the ONE measurement
+    # this file exists to support, since the block-size histogram is what decides whether
+    # parallelism belongs inside each gemm or across them.
+    # The target is COUNTABLE, so count it rather than watching for a plateau. On the left
+    # link of site `mid` the left block holds `b = mid - 1` spins, so its charge runs over
+    # Sz = -b/2 ... +b/2 in integer steps -- but the right block must cancel it, capping
+    # |Sz| at (L-b)/2. Hence `min(b, L-b) + 1` reachable sectors: 15 for L=30.
+    # ⚠ A stall detector was tried first and stopped at 9 of 15: sector opening is not
+    # monotone step to step, so "two quiet steps" fires long before the light cone has
+    # crossed the bond.
+    mid = L ÷ 2
+    b = mid - 1
+    target_sectors = min(b, L - b) + 1
+    nsec_of(p) = length(p[mid].RMTs)
+    for k in 1:max_seed_steps                   # cheap: chi is still tiny here
         RSVDCBEBondUpdate.tdvp2_step!(psi, mpo, ComplexF64(-im * dt);
                                       maxdim = 4096, trunc_thresh = 0.0, maxiter = 8)
-        log(@sprintf("seed step %d/%d  chi=%d", k, seed_steps,
-                     maximum(BondUpdateBUG.bond_dims(psi))))
+        n = nsec_of(psi)
+        k % 5 == 0 && log(@sprintf("seed step %d  chi=%d  sectors@mid=%d/%d", k,
+                                   maximum(BondUpdateBUG.bond_dims(psi)), n, target_sectors))
+        if n >= target_sectors && k >= seed_steps
+            log(@sprintf("all %d sectors open after %d seed steps (chi=%d)", n, k,
+                         maximum(BondUpdateBUG.bond_dims(psi))))
+            break
+        end
+        k == max_seed_steps && @warn "random_mps: only $n of $target_sectors sectors opened " *
+            "in $k steps — block shapes will be larger and fewer than a physical state's, " *
+            "which biases any per-sector cost measurement"
     end
 
     while maximum(BondUpdateBUG.bond_dims(psi)) < target_chi
