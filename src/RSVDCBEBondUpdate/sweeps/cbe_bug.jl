@@ -397,7 +397,20 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # rebuilt `H*Theta` from scratch. Results are IDENTICAL either way -- only
                        # the seconds move -- so the only reason to set it is to measure how much
                        # the sharing bought, which `benchmarks/rsvd_parallel.jl` does.
-                       share_ht::Bool = true,
+                       # ⛔ `nothing` MEANS "NOT ASKED FOR", AND THE SWEEP PASSES `exkw` TO EVERY
+                       # `cbe_expand` UNCONDITIONALLY -- so a `Bool` default here would hand
+                       # `cbe_expand` an EXPLICIT `share_ht` on every call and make its
+                       # fold_omega/share_ht contradiction check fire on runs that never asked
+                       # for sharing at all. `nothing` is resolved to `true` at the bottom of the
+                       # chain, where the two flags are actually reconciled.
+                       share_ht::Union{Nothing, Bool} = nothing,
+                       # ⚠ FOLD THE PROBE INTO THE CONTRACTION INSTEAD OF BUILDING `H*Theta`.
+                       # See `mpo.jl` -- the saving is `O(chi^3) -> O(chi^2)` per sketch but it
+                       # costs THREE chains where the shared build pays one, so it only wins for
+                       # `3*Dpre < chi`. ⛔ SET `dex` SMALL WITH IT OR IT LOSES: at the default
+                       # `dex = 0` the width comes from `growth = 2.0` and is ~chi/2, far past the
+                       # crossover. MPO path only.
+                       fold_omega::Bool = false,
                        rng::AbstractRNG = MersenneTwister(0x5EED))
     L = length(psi)
     length(mpo) == L || throw(DimensionMismatch(
@@ -458,7 +471,8 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     exkw = (dex = dex, growth = growth, dover = dover, comp_ratio = comp_ratio,
             sulz_cap = sulz_cap, rmax = maximum(bond_dims(psi); init = 0),
             preselect_only = preselect_only, exact = exact,
-            stol_pre = stol_pre, stol_fnl = stol_fnl, share_ht = share_ht, rng = rng)
+            stol_pre = stol_pre, stol_fnl = stol_fnl, share_ht = share_ht,
+            fold_omega = fold_omega, rng = rng)
 
     troot = Ref(0.0); ttrunc = Ref(0.0)
     _t0step = time_ns()

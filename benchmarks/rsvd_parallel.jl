@@ -83,7 +83,13 @@ const TAG = replace(join(MODELS, "-"), "/" => "_")
 const IO_ = open(joinpath(RESDIR, "rsvd_parallel_$(TAG).txt"), "w")
 say(l::AbstractString) = (println(IO_, l); flush(IO_); println(stdout, l); flush(stdout))
 const CSVPATH = joinpath(RESDIR, "rsvd_parallel.csv")
-const CSV_NEW = !isfile(CSVPATH)
+# ⛔ `!isfile` ALONE LOSES THE HEADER, AND IT ALREADY DID. An EXISTING but EMPTY file -- created
+# by a run that opened it and died before writing, or by a shell redirect -- is not "new", so the
+# header was skipped and every subsequent append landed in a file whose first line is a data row.
+# MEASURED: 66 rows of `rsvd_parallel.csv` with no header, which every consumer then has to read
+# by hardcoded column POSITION -- and a position-indexed reader breaks silently, not loudly, the
+# next time a column is added. Size, not existence, is the question being asked.
+const CSV_NEW = !isfile(CSVPATH) || filesize(CSVPATH) == 0
 const CSV = open(CSVPATH, "a")
 CSV_NEW && println(CSV,
     "model,L,d,mpodim,chi,arm,exact,parallel,share_ht,secs,speedup,dprof,err_t2,kry," *
@@ -101,8 +107,13 @@ say("")
 One step of a named arm. `tol = 0` + fixed `maxiter`: no convergence exit, so the arms differ only
 in HOW the sweep is executed, never in how much operator work it does.
 """
-step!(p, S, exact::Bool, par::Bool, cap::Int; share_ht::Bool = true) =
-    cbe_bug_step!(p, S.W, S.tau; exact = exact, parallel = par, share_ht = share_ht,
+step!(p, S, exact::Bool, par::Bool, cap::Int; share_ht::Bool = true, fold::Bool = false) =
+    cbe_bug_step!(p, S.W, S.tau; exact = exact, parallel = par,
+                  # ⛔ `share_ht` MUST NOT BE PASSED ALONGSIDE `fold_omega`. Folding never forms
+                  # `H*Theta`, so there is nothing to share, and `cbe_expand` REFUSES the pair
+                  # rather than silently honouring one -- `nothing` is how this arm says "not
+                  # asked for" instead of asserting a sharing policy it cannot have.
+                  share_ht = fold ? nothing : share_ht, fold_omega = fold,
                   dex = DEX, dover = DOVER, comp_ratio = 1.0,
                   krylov_basis = 3, krylov_tol = 0.0, hermitian = (S.d == 2),
                   maxdim = cap, trunc_thresh = 1e-10, maxiter = MI, tol = 0.0)
@@ -141,11 +152,12 @@ function validate()
     set_symmetry!(:U1)
     L = 10
     mpo = xxz_mpo(L; J = 1.0, delta = 1.0)
-    function run(; share_ht, parallel, exact, n = 6)
+    function run(; share_ht, parallel, exact, fold = false, n = 6)
         psi = neel_state(L); nmv = 0
         for _ in 1:n
             info = cbe_bug_step!(psi, mpo, ComplexF64(-im * DT);
-                                 exact = exact, share_ht = share_ht, parallel = parallel,
+                                 exact = exact, parallel = parallel,
+                                 share_ht = fold ? nothing : share_ht, fold_omega = fold,
                                  dex = 8, dover = 4, comp_ratio = 1.0,
                                  krylov_basis = 3, krylov_tol = 0.0,
                                  maxdim = 32, trunc_thresh = 1e-10, maxiter = 20, tol = 0.0)
@@ -171,6 +183,20 @@ function validate()
         say(@sprintf("  parallel == serial   (exact=%-5s): %s   (max|dsz| = %.3e, dE = %.3e)",
                      exact, pass ? "PASS" : "*** FAIL ***", dsz, de))
         ok &= pass
+        # ⛔ FOLDING IS ONLY MEANINGFUL ON THE SKETCH PATH. With `exact = true` the probe is
+        # `full_local_basis`, there is no `Om` to fold, and the flag is inert -- checking it there
+        # would report a PASS that tested nothing.
+        if !exact
+            d = run(; share_ht = true, parallel = false, exact = false, fold = true)
+            dsz = maximum(abs.(a.sz .- d.sz)); de = abs(a.e - d.e)
+            # The orderings are an exact identity, so this is a ROUNDOFF bar like the parallel
+            # one -- not a looser "the sketch is random anyway" tolerance. `fold_omega_check.jl`
+            # pins the sketch closures themselves at 1e-11 relative, per bond and per boundary.
+            pass = (a.chi == d.chi) && dsz < 1e-10 && de < 1e-10
+            say(@sprintf("  fold_omega == project-first (sketch): %s   (max|dsz| = %.3e, dE = %.3e)",
+                         pass ? "PASS" : "*** FAIL ***", dsz, de))
+            ok &= pass
+        end
     end
     # ⛔ REPEATABILITY IS THE STRUCTURAL TEST FOR `parallel`. If the right half-sweep read anything
     # the left one wrote, concurrency would be a race and the answer would vary run to run.
@@ -204,41 +230,70 @@ function grow_to(S, target::Int; maxsteps::Int = 400)
     return p, maximum(state_bond_dims(p))
 end
 
-"Time `REPS` steps from the SAME state; keep the BEST (least contended) and ITS phase timers."
-function timed(p0, S, cap; exact = true, par = false, share_ht = true, t2 = false)
-    best = Inf; kry = 0; prof = nothing; ph = nothing
-    for _ in 1:REPS
+"""
+ONE timed step of one arm. `best_into!` below is what turns these into a comparison.
+
+⛔ DO NOT GO BACK TO "ALL REPS OF ARM A, THEN ALL REPS OF ARM B". That is what this function
+used to be, and it made the table unable to answer its own question. Arms are timed SEQUENTIALLY,
+so consecutive-reps-per-arm gives each arm a DIFFERENT slice of machine load, and best-of-N
+inside one contended window does not recover the difference. MEASURED: two runs of the identical
+chi = 128 configuration reported `t_cbe` for `exact serial` as 1.976 s and 1.212 s -- 1.63x apart
+-- and the sketch-vs-exact comparison came out 1.32x FASTER in one and 1.35x SLOWER in the other.
+Both runs had a TIGHT `root` spread across arms (1.10x, 1.11x), which is what made the tables look
+trustworthy: `root` is a small dense solve, `cbe` is memory- and BLAS-bound, and they do not
+respond to contention alike, so `root` is NOT a noise gauge for `cbe`.
+⇒ Round-robin instead: every arm is stepped once per rep, so all arms sample the SAME window and
+a drift affects them together.
+"""
+function timed_once(p0, S, cap; exact = true, par = false, share_ht = true,
+                    t2 = false, fold = false)
+    let
         p = copy(p0)
         t0 = time_ns()
-        info = t2 ? step_t2!(p, S, cap) : step!(p, S, exact, par, cap; share_ht = share_ht)
+        info = t2 ? step_t2!(p, S, cap) :
+               step!(p, S, exact, par, cap; share_ht = share_ht, fold = fold)
         el = (time_ns() - t0) / 1e9
         # ⛔ `info.krylov_dims`, NOT `get_krylov_log()`. The log records `expv` calls only, and
         # CBE-BUG calls `expv` EXACTLY ONCE per step (the root Galerkin solve) -- all the operator
         # work in its half-sweeps goes through `_krylov_frame`/`apply_one_site`, which the log
         # never sees. Reading the log gave `20` for CBE against `1980` for TDVP2 and would have
-        # been quoted as a 99x reduction in operator applications; the true counts are what BOTH
-        # info structs already carry in `krylov_dims`.
+        # been quoted as a 99x reduction in operator applications; `krylov_dims` is what BOTH info
+        # structs carry and it is the closer count.
+        #
+        # ⛔ CLOSER, NOT COMPLETE -- AND THE DIFFERENCE HAS ALREADY BEEN MISQUOTED ONCE. It still
+        # omits every operator application inside `cbe_expand`, so it is a valid MATCHING check
+        # between CBE arms doing identical work (which is all it is used for here) and NOT a cost
+        # axis to compare CBE-BUG against TDVP with. The seconds columns are the cost axis; this
+        # one exists to prove the seconds are comparable.
         kry = info.krylov_dims
-        if el < best
-            best = el
-            # phase timers from the SAME repetition as the best wall clock, or the shares mix one
-            # step's total with another's phases. TDVP2 reports none of them.
-            g(f) = hasproperty(info, f) ? getproperty(info, f) : 0.0
-            ph = (cbe = g(:t_cbe), kry = g(:t_kry), split = g(:t_split), frame = g(:t_frame),
-                  env = g(:t_env), root = g(:t_root), trunc = g(:t_trunc), step = g(:t_step))
-        end
-        prof = S.profile(p)
+        g(f) = hasproperty(info, f) ? getproperty(info, f) : 0.0
+        # Phase timers travel WITH their own wall clock so `best_into!` can keep the pair. Mixing
+        # one repetition's total with another's phases is how a "share" above 1 appears without a
+        # parallel arm anywhere in sight.
+        ph = (cbe = g(:t_cbe), kry = g(:t_kry), split = g(:t_split), frame = g(:t_frame),
+              env = g(:t_env), root = g(:t_root), trunc = g(:t_trunc), step = g(:t_step))
+        return (secs = el, kry = kry, prof = S.profile(p), ph = ph)
     end
-    return best, kry, prof, ph
 end
 
-#                label                exact  par    share_ht  tdvp2
-const ARMS = [("exact  serial OLD",   true,  false, false,    false),
-              ("exact  serial",       true,  false, true,     false),
-              ("sketch serial",       false, false, true,     false),
-              ("exact  parallel",     true,  true,  true,     false),
-              ("sketch parallel",     false, true,  true,     false),
-              ("tdvp2 (reference)",   true,  false, true,     true)]
+"Keep the fastest observation of an arm, with the phase timers from THAT repetition."
+best_into!(acc::Dict, label::AbstractString, r) =
+    (haskey(acc, label) && acc[label].secs <= r.secs) ? acc : (acc[label] = r; acc)
+
+# ⚠ `fold` IS CARRIED IN THE LABEL AND NOT AS A CSV COLUMN, DELIBERATELY. The CSV already holds
+# 66 rows written before it had a header at all; appending a column now makes old rows one field
+# short and invites exactly the position-misalignment this file has already been bitten by. The
+# `arm` string is the primary key of the table and is unique, and `exact`/`parallel`/`share_ht`
+# are already redundant with it.
+#                     label                exact  par    share_ht  tdvp2  fold
+const ARMS = [("exact  serial OLD",         true,  false, false,    false, false),
+              ("exact  serial",             true,  false, true,     false, false),
+              ("sketch serial",             false, false, true,     false, false),
+              ("sketch serial FOLD",        false, false, true,     false, true),
+              ("exact  parallel",           true,  true,  true,     false, false),
+              ("sketch parallel",           false, true,  true,     false, false),
+              ("sketch parallel FOLD",      false, true,  true,     false, true),
+              ("tdvp2 (reference)",         true,  false, true,     true,  false)]
 
 function run_model(nm)
     S = setup(nm; sites = SITES, dt = DT, cap = maximum(CHIS))
@@ -246,11 +301,11 @@ function run_model(nm)
     say(@sprintf("MODEL %-12s %s", nm, S.label))
     say(@sprintf("   %d sites, d = %d, MPO virtual dim %d", S.L, S.d, mpodim))
     let p = copy(S.psi0)                     # warmup: JIT must never land in a timed row
-        for (_, ex, pa, sh, t2) in ARMS
+        for (_, ex, pa, sh, t2, fo) in ARMS
             try
                 timed_p = copy(p)
                 t2 ? step_t2!(timed_p, S, 16) :
-                     step!(timed_p, S, ex, pa, 16; share_ht = sh)
+                     step!(timed_p, S, ex, pa, 16; share_ht = sh, fold = fo)
             catch e
                 say("   warmup of an arm threw: " * sprint(showerror, e)[1:min(end, 200)])
             end
@@ -276,20 +331,35 @@ function run_model(nm)
         push!(done_chi, chi)
         say(chi == target ? @sprintf("   --- chi = %d ---", chi) :
                             @sprintf("   --- chi = %d (target %d, saturated) ---", chi, target))
-        # ⚠ TDVP2 FIRST so its profile is available as the accuracy reference for every CBE arm.
-        # It is REPORTED last, in the ARMS order, so the table still reads baseline-first.
-        t2res = try
-            timed(p0, S, chi; t2 = true)
-        catch e
-            say("      tdvp2 threw: " * sprint(showerror, e)[1:min(end, 200)]); nothing
+        # ⛔ ROUND-ROBIN: REP OUTER, ARM INNER. Every arm is stepped once per repetition, so all
+        # arms sample the same window of machine load and a drift moves them TOGETHER instead of
+        # landing entirely on whichever arm happened to run during it. See `timed_once`: the old
+        # arm-outer order made two runs of the identical configuration disagree on the SIGN of the
+        # sketch-vs-exact difference.
+        acc = Dict{String,Any}()
+        for _ in 1:REPS
+            for (label, ex, pa, sh, t2, fo) in ARMS
+                try
+                    r = timed_once(p0, S, chi; exact = ex, par = pa, share_ht = sh,
+                                   t2 = t2, fold = fo)
+                    best_into!(acc, label, r)
+                catch e
+                    haskey(acc, label) || say("      $(strip(label)) threw: " *
+                                              sprint(showerror, e)[1:min(end, 200)])
+                end
+            end
         end
+        t2label = first(a[1] for a in ARMS if a[5])
+        t2res = get(acc, t2label, nothing)
+
         base = nothing; bprof = nothing; bkry = 0
-        for (label, ex, pa, sh, t2) in ARMS
-            (t2 && t2res === nothing) && continue
-            s, k, pr, ph = t2 ? t2res : timed(p0, S, chi; exact = ex, par = pa, share_ht = sh)
+        for (label, ex, pa, sh, t2, fo) in ARMS
+            haskey(acc, label) || continue
+            r = acc[label]
+            s, k, pr, ph = r.secs, r.kry, r.prof, r.ph
             base === nothing && (base = s; bprof = pr; bkry = k)
             dprof  = maximum(abs.(pr .- bprof))
-            err_t2 = t2res === nothing ? NaN : maximum(abs.(pr .- t2res[3]))
+            err_t2 = t2res === nothing ? NaN : maximum(abs.(pr .- t2res.prof))
             say(@sprintf("   %-19s %9.3f %8.2fx %11.3e %11.3e %7d | %7.3f %7.3f %7.3f %7.3f %7.3f %7.3f %7.3f",
                          label, s, base / max(s, 1e-12), dprof, err_t2, k,
                          ph.cbe, ph.kry, ph.split, ph.frame, ph.env, ph.root, ph.trunc))
@@ -330,9 +400,17 @@ say("     roundoff, and is NOT expected to be exactly 0 for the parallel arms: e
 say("     re-gauges its own copy, so the floating-point path differs while the spaces do not.")
 say("  `err_t2` is against 2-site TDVP at the SAME rank cap -- an INDEPENDENT integrator, so it")
 say("     bounds the discretisation difference rather than agreeing with our own arms.")
-say("  `krylov` is `info.krylov_dims` -- TRUE operator applications, half-sweeps included, not the")
-say("     `expv` log (which sees only CBE-BUG's single root solve). It MUST match down the CBE")
-say("     rows: the root solve is pinned AND the half-sweep depth is pinned, so every CBE arm")
-say("     applies the operator the same number of times and the seconds compare. TDVP2")
-say("     legitimately differs and is exempt.")
+say("  `krylov` is `info.krylov_dims` -- the half-sweep Krylov applications plus the root solve,")
+say("     which is far more than the `expv` log sees (that one records only the single root")
+say("     solve). It MUST match down the CBE rows: root and half-sweep depth are both pinned, so")
+say("     every CBE arm applies the operator the same number of times and the seconds compare.")
+say("     TDVP2 legitimately differs and is exempt.")
+say("  ⛔ BUT `krylov` IS NOT A COMPLETE COST AXIS AND MUST NOT BE READ AS ONE. It counts")
+say("     `apply_one_site` inside `_krylov_frame` and the root `expv`; every operator application")
+say("     inside `cbe_expand` -- the `H*Theta` builds, which are the expansion's dominant cost --")
+say("     is INVISIBLE to it. `t_cbe` against `t_kry` in this very table is the measurement of the")
+say("     blind spot, and it has run ~4x. That is exactly why this table times the arms instead of")
+say("     counting them: a CBE-BUG-vs-TDVP claim built on `krylov` alone reports BUG's accuracy")
+say("     and hides its cost, which is how `krylov_basis = 0` came to look 8x cheaper while")
+say("     running 1.45x slower.")
 close(IO_)

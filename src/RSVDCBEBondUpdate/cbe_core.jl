@@ -537,12 +537,23 @@ have found -- one application of `H`, sketched -- and the per-bond Galerkin upda
 the step in it. So there is no `expv` per bond on a one-site object, only the `O(χ²)`
 matrix-free 0-site Krylov, and no rank-4 tensor anywhere.
 """
-cbe_expand(f::BondFrame, h::XXZChain, i::Int,
-           lch::ChannelSet, rch::ChannelSet; share_ht::Bool = true, kwargs...) =
-    cbe_expand(f,
-               _sketch_closures(f,
-                   () -> apply_h_two_site(frame_theta(f), h, i, lch, rch);
-                   share = share_ht)...; kwargs...)
+function cbe_expand(f::BondFrame, h::XXZChain, i::Int,
+                    lch::ChannelSet, rch::ChannelSet;
+                    share_ht::Union{Nothing, Bool} = nothing,
+                    # ⛔ ACCEPTED ONLY TO REFUSE IT WITH A SENTENCE THAT SAYS WHY. `fold_omega`
+                    # is implemented for the MPO path only; without this the term-list caller
+                    # gets a `MethodError: no method matching cbe_expand(::BondFrame, ::Function,
+                    # ::Function; fold_omega=true)` raised inside the two-argument method, which
+                    # names neither the flag's restriction nor the caller that set it.
+                    fold_omega::Bool = false, kwargs...)
+    fold_omega && throw(ArgumentError(
+        "fold_omega is implemented for the MPO path only; this is the term-list (XXZChain) " *
+        "expansion. Build the Hamiltonian as an MPO, or leave fold_omega = false."))
+    return cbe_expand(f,
+                      _sketch_closures(f,
+                          () -> apply_h_two_site(frame_theta(f), h, i, lch, rch);
+                          share = share_ht === nothing ? true : share_ht)...; kwargs...)
+end
 
 """
     cbe_expand(f, skl, skr; kwargs...) -> CBEExpansion
