@@ -1813,13 +1813,16 @@ function contract(q1::AbstractTLArray{T1, QD1, N, RD1, QT, PS, M, RMT1},
     # obvious:
     #   * `contract_temp` WAS the blocker: one scratch buffer, sized to the max over all
     #     sectors, written through by every iteration. Each task now owns one.
-    #   * `permuted_rmts1/2` are mutable caches, and `_cached_prepared_sector_rmt!` writes on a
-    #     miss -- a genuine race if two sectors share an input sector, which is exactly what
-    #     the cache exists for. But step 4 above already calls it for every pair of every valid
-    #     output sector, in order to size `max_temp_len`. So by here every entry is warm and
-    #     the helper's `if !isassigned(...)` never fires: read-only, hence safe. ⛔ IF STEP 4
-    #     EVER STOPS TOUCHING EVERY PAIR, THIS BECOMES A DATA RACE WITH NO SYMPTOM BUT WRONG
-    #     NUMBERS.
+    #   * `permuted_rmts1/2` are mutable caches and `_cached_prepared_sector_rmt!` writes on a
+    #     miss -- a race if two sectors share an input sector, which is what the cache is for.
+    #     ⛔ I FIRST ARGUED THIS AWAY AND WAS WRONG. The argument was that step 4 already calls
+    #     the helper for every pair of every valid output sector while sizing `max_temp_len`,
+    #     so every entry must be warm by here. Threaded runs then failed with
+    #     `UndefRefError: access to undefined reference` and, once, `svd produced no CGTSVD
+    #     classes` a few steps downstream -- i.e. some entries were NOT warm, and the ones
+    #     that were got read alongside garbage. The pre-warm loop below makes it true instead
+    #     of assuming it: serial, unconditional, and free when the entries are already there.
+    #     An invariant that has to hold for correctness is worth ten lines, not a comment.
     #   * `result_qlabels`, `result_wmatdata`, `result_RMTs` are written at indices derived
     #     from `result_pos`, which is unique per output sector, and `result_wmatinfo` offsets
     #     were laid out in a serial pass above. Disjoint, so no reduction is needed.
@@ -1835,28 +1838,54 @@ function contract(q1::AbstractTLArray{T1, QD1, N, RD1, QT, PS, M, RMT1},
     # buffer by `threadid()` is unsound there -- tasks may migrate between threads.
     todo = Int[op for op in eachindex(out_keys) if valid_output[op]]
 
+    # PRE-WARM THE PERMUTED-RMT CACHES, SERIALLY. `_contract_prepared_compress_sector` reads
+    # `work1[idx]` directly and cannot fill a miss, so every entry the threaded loop will
+    # touch has to exist before the first task starts. Cache hits are a branch and a load.
+    for out_pos in todo
+        for (idx1, idx2) in prepared_sector_pairs[out_pos]
+            _cached_prepared_sector_rmt!(permuted_rmts1, q1, idx1,
+                                         perm1, Val(nf1), Val(CN), Val(N))
+            _cached_prepared_sector_rmt!(permuted_rmts2, q2, idx2,
+                                         perm2, Val(nf2), Val(CN), Val(N))
+        end
+    end
+
     # ⚠ `temp` is deliberately UNANNOTATED. Writing `temp::Vector{TempT}` with a local
     # `TempT = promote_type(...)` is a syntax error -- "local variable cannot be used in
     # closure declaration" -- because the signature is evaluated where the local is not in
     # scope. The element type is fixed at the two `Vector{...}` construction sites below.
     function _merge_out_sector!(out_pos::Int, temp)
-        result_pos = out_to_result[out_pos]
-        out_qlabels = _out_key_qlabels(out_keys[out_pos], Val(QD_out))
+        # ⛔⛔ EVERY ONE OF THESE `local`s IS LOAD-BEARING. JULIA CLOSURES CAPTURE, THEY DO NOT
+        # SHADOW: assigning a name inside a nested function REBINDS the enclosing local when
+        # one exists, and `result_pos`, `U_mats`, `n`, `U` and `offset` are all assigned by the
+        # `result_wmatinfo` loop a few lines above. Without `local`, every task writes through
+        # the SAME `result_pos` and they scribble over each other's output slots.
+        #
+        # This was the second of two bugs in this threading. The first (unwarmed RMT caches)
+        # announced itself with `UndefRefError`; this one did not throw at all — it produced
+        # a plausible-looking TLArray whose sectors had been shuffled, and the failure surfaced
+        # several operations downstream as `svd produced no CGTSVD classes`. Serial passed
+        # every time. ⚠ A missing `local` in a spawned closure is invisible until the numbers
+        # are wrong, which is exactly why `test_contract_threaded.jl` compares with `==`.
+        local result_pos = out_to_result[out_pos]
+        local out_qlabels = _out_key_qlabels(out_keys[out_pos], Val(QD_out))
         for leg in 1:QD_out
             result_qlabels[leg, result_pos] = out_qlabels[leg]
         end
 
-        prepared = prepared_sectors[out_pos]
-        sector_pairs = prepared_sector_pairs[out_pos]
-        kept_sizes1 = ntuple(i -> out_keys[out_pos][1][i][2], Val(nf1))
-        kept_sizes2 = ntuple(i -> out_keys[out_pos][2][i][2], Val(nf2))
+        local prepared = prepared_sectors[out_pos]
+        local sector_pairs = prepared_sector_pairs[out_pos]
+        local kept_sizes1 = ntuple(i -> out_keys[out_pos][1][i][2], Val(nf1))
+        local kept_sizes2 = ntuple(i -> out_keys[out_pos][2][i][2], Val(nf2))
 
+        local U_mats, result_RMT
         U_mats, result_RMT = _contract_prepared_compress_sector(
             prepared, sector_pairs, permuted_rmts1, permuted_rmts2,
             kept_sizes1, kept_sizes2, temp, Val(RD_out))
         for m in 1:M
-            n = nonabelian_indices[m]
-            U = U_mats[n]
+            local n = nonabelian_indices[m]
+            local U = U_mats[n]
+            local offset, nrow, ncol
             offset, nrow, ncol = result_wmatinfo[result_pos][m]
             copyto!(view(result_wmatdata, offset:offset + nrow * ncol - 1), vec(U))
         end

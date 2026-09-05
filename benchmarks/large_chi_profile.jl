@@ -88,7 +88,11 @@ const MPO_DS   = envints("LCP_MPO_D", "0")
 # ⚠ `dex` trades against how fast the rank can GROW, so a cost win here is only real if the
 # accuracy is scored separately — this file measures cost only.
 const DEXS     = envints("LCP_DEX", "0")          # 0 = the growth schedule
-const GROWTH   = envfloat("LCP_GROWTH", 2.0)
+# ⚠ DEFAULT 1.1, NOT the library's 2.0. `growth = 1.1` is the reference's own DMRG ratchet
+# (cbe_core.jl:900) and asks for ~10% more directions: at chi=1024 that is budget = 103 and
+# Dpre = 124 against d*chi = 2048 — a 0.06x probe, which is the regime a randomised sketch
+# is actually for. `growth = 2.0` asks for 1024 and probes at 0.6x, where it cannot win.
+const GROWTH   = envfloat("LCP_GROWTH", 1.1)
 const KRY_TOL  = envfloat("LCP_KRY_TOL", 1e-6)   # BUG half-sweep frame tolerance
 # ⛔ BUG'S FRAME DEPTH IS A SEPARATE KNOB FROM `maxiter`, AND ITS DEFAULT IS 30.
 # `maxiter` bounds the `expv` solves; `krylov_basis` bounds `_krylov_frame`, which is where
@@ -254,6 +258,13 @@ end
 
 function main()
     BondUpdateBUG.set_symmetry!(:U1)
+    # ⛔ SET THE CONTRACT-THREAD BOUND BEFORE ANYTHING RUNS, NOT INSIDE THE SWEEP LOOP.
+    # It used to be set first inside `for ct in CTHREADS`, which sits below `random_mps` —
+    # so the STATE BUILD ran at the default while the sweep believed it was pinned. Job
+    # 16326783 died in `random_mps` for exactly that reason, with `LCP_CTHREADS=1` set and
+    # doing nothing. A knob that only takes effect partway through the run is worse than no
+    # knob, because the log claims a setting the measurement did not have.
+    TELUM_CONTRACT_THREADS[] = CTHREADS[1] == 0 ? typemax(Int) : CTHREADS[1]
     mkpath(OUTDIR)
     csv = joinpath(OUTDIR, @sprintf("large_chi_L%d.csv", L))
     open(csv, "w") do io
