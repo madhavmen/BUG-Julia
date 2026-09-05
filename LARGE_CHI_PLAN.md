@@ -117,18 +117,30 @@ targeting**, which is why it has looked useless so far.
 
 ---
 
-## 4. Cut Krylov cost — the largest BUG-side lever needing no fork
+## 4. Krylov — ⚠ this turned out to be a FAIRNESS bug, not just a speed one  ✅ done
 
-`lanczos_expv`'s exit condition is **breakdown-only**, so *every* solve burns the full
-`maxiter` regardless of whether it converged ten iterations ago. Since the step is
-essentially `maxiter × (H·Θ)`, a genuine residual-based convergence test is a direct
-multiplier on every arm — and it is ours to change, in `BondUpdateBUG/expv.jl`.
+`lanczos_expv` exits on **breakdown only**, which on a generic `H` essentially never fires,
+so a solve burns the full `maxiter` whether it converged at iteration 3 or not. Saad's
+a-posteriori estimate was already implemented behind `conv_tol`, defaulted off. What the
+audit found is *who had it plumbed*:
 
-- 4a. Real convergence test (residual estimate from the Lanczos coefficients), with the
-  breakdown check kept as the floor.
-- 4b. Per-solve adaptive `maxiter`.
-- 4c. Re-measure — with a fixed-`maxiter` arm retained as the control, because a convergence
-  test that quits early is indistinguishable from one that quits wrong until it is scored
+| arm | Krylov exit before this fix |
+|---|---|
+| CBE-BUG half-sweeps | **adaptive** — `_krylov_frame` weighs Saad's contribution against `krylov_tol = 1e-6` every iteration |
+| CBE-BUG root solve | full `maxiter` (`root_conv_tol = 0.0`) — one solve per step, minor |
+| `tdvp2_step!` | full `maxiter` on ~4(L−1) solves — `conv_tol` accepted but defaulted to 0 |
+| `tdvp_cbe1s_step!` | full `maxiter`, and **`conv_tol` was never plumbed at all** — none of its five `expv` call sites could take it |
+
+⛔ **So every BUG-vs-TDVP wall-clock number we have compares an adaptive method against two
+non-adaptive ones, and credits the difference to the algorithm.** That is the same class of
+error as the `krylov` CSV column: a cost axis that was measuring the harness, not the method.
+
+Fixed (commit `dc0ffa6`): `conv_tol`/`substeps` threaded through all five cbe1s call sites,
+and the benchmark now drives every arm's tolerance from one knob and prints which mode it is
+in. Defaults stay off so nothing already measured moves silently.
+
+- 4c. Still to do: keep a fixed-`maxiter` control arm when re-measuring. A convergence test
+  that quits early is indistinguishable from one that quits *wrong* until it is scored
   against a reference.
 
 ---
@@ -162,23 +174,41 @@ Apply §§1–5 to the midpoint stepper and include it as a fourth arm everywher
 
 ---
 
-## 7. Large MPO bond dimension
+## 7. Large MPO bond dimension — runs WITH §3, not after everything
 
 Everything above varies χ(MPS) with `xxz_mpo` at D=5. Cost in `H·Θ` is linear in D, so a
-D=1024 MPO is a ~200× different problem. Needs a random MPO generator mirroring
-`random_mps.jl` (inherit the sector structure, never invent it), then re-run §1 over
-D ∈ {64, 256, 1024}.
+D=1024 MPO is a ~200× different problem — and it is the setting where the sketch has the most
+to win, since the object being probed grows with D while the number of directions we actually
+want does not. So this pairs with §3 rather than trailing the plan: **how well does the rSVD
+hold up as the MPO bond dimension grows** is one question, not two.
+
+Needs a random MPO generator mirroring `random_mps.jl` (inherit the sector structure, never
+invent it), then §1 and §3 re-run over D ∈ {64, 256, 1024}.
+
+---
+
+## 8. Reduce allocation — promoted, on evidence
+
+Measured at χ=1024, L=30, BLAS=1: **tdvp2 121 s/step allocating 142 GB; cbe1s 252 s/step
+allocating 243 GB** — against a state of 0.08 GB. That is ~1800× churn, and both arms sit at
+almost exactly 1 GB/s of allocation, so **runtime is tracking bytes allocated, not FLOPs.**
+
+If the kernel breakdown confirms a large GC and memory-movement share, this outranks threading:
+`to_concrete` after every contraction materialises a fresh tensor, and the sweep discards most
+of them immediately. Targets: in-place contraction into caller-owned buffers, reusing the
+Krylov basis vectors across solves, and avoiding the permute copies that dominated the small-χ
+profile.
 
 ---
 
 ## Order of work
 
-1. **§1 measurement at χ=1024–4096** — everything else is chosen from its output.
-2. **§4 Krylov convergence** — biggest win available without forking Telum.
-3. **§3 rSVD as absolute `dex` + `fold_omega`** — where randomisation finally pays.
-4. **§5 parallel half-sweeps at scale** + **§6 midpoint**.
-5. **§2 Telum threading** — pending your decision on forking.
-6. **§7 large MPO.**
+1. **§1 measurement at χ=1024–4096** — everything else is chosen from its output. *(running)*
+2. **§4 Krylov convergence** — ✅ done, and it was a fairness bug.
+3. **§2 Telum threading** — ✅ approved and forked to `deps/Telum`; sector loop threaded.
+4. **§8 allocation** — priority set by the kernel breakdown from §1.
+5. **§3 rSVD (absolute `dex`, `fold_omega`) together with §7 large MPO D.**
+6. **§5 parallel half-sweeps at scale** and **§6 midpoint BUG** as a full arm throughout.
 
 ⛔ Cluster discipline: one timing job at a time, and the 9-point `cluster_compliance.md`
 checklist walked with named evidence per gate before every `sbatch`.
@@ -187,10 +217,16 @@ checklist walked with named evidence per gate before every `sbatch`.
 
 ## On the target
 
-"BUG faster than both" is reachable, and it is worth being precise about the arithmetic so we
-know when we get there. Per step, BUG should gain ~2× from skipping the backward evolution
-and ~2× from parallel half-sweeps. Against that, forward BUG needs 2× the steps at matched
-accuracy. Net: roughly 2× — a real win, but short of beating both arms *combined*.
+The aim is **BUG faster than 2-site TDVP and 1-site CBE-TDVP at these ranks**, per step and in
+practice. Per step, BUG should gain from skipping the backward evolution (roughly half the
+Krylov solves) and from parallel half-sweeps, neither of which TDVP can do.
 
-Closing the rest is what §6 is for: midpoint BUG removes the 2× step handicap, and then the
-per-step gains apply in full. That is the configuration to aim the optimisation at.
+⚠ **The accuracy handicap is NOT carried into this target.** The ~4× local error constant was
+measured at L=8 and L=18 with χ ≤ 128; it is a small-system result and there is no basis for
+assuming it holds at L=30, χ=1024, where the error budget is dominated by truncation rather
+than by the local step. It gets re-measured at scale rather than assumed, and a 2× difference
+in error is not a problem worth trading speed for.
+
+Midpoint BUG stays in the comparison as a full arm — it was 63–70× more accurate for 1.35× the
+wall time at matched cost, which is a good trade in its own right, independently of whether
+forward BUG needs the help.

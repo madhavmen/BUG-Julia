@@ -1,0 +1,26 @@
+name = "Telum"
+uuid = "206e1281-4cfe-4f93-80c6-84968ba7c8d5"
+version = "0.2.1"
+authors = ["Kiyeon Kim <lurlur2000@snu.ac.kr>"]
+
+[deps]
+HPTT_jll = "0d2ef6bb-bd72-5e2e-be6b-e06c14f6a480"
+HDF5 = "f67ccb44-e63f-5c2f-98bd-6dc0ccc4ba2f"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+LurCGT = "4f3ab192-95b7-495a-a0ca-04b4b33dd828"
+MKL = "33e6dc65-8f57-5167-99aa-e5a354878fb2"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+
+[compat]
+HDF5 = "0.17"
+LurCGT = "1"
+julia = "1.6"
+
+[extras]
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+SparseArrayKit = "a9a3c162-d163-4c15-8926-b8794fbefed2"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test", "Random", "SparseArrayKit"]

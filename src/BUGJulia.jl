@@ -82,8 +82,15 @@ using PrecompileTools: @setup_workload, @compile_workload
                 end
             end
         catch err
+            # ⛔ CARRY THE BACKTRACE. `exception = err` alone prints the message and nothing
+            # about where it came from, and this failure has now survived three wrong
+            # root-cause guesses (SU(2), the Julia version, the thread count) precisely
+            # because the report said WHAT and never WHERE. `(err, catch_backtrace())` is the
+            # form `@warn` unpacks into a stack trace; it costs nothing on the success path.
             @warn "BUGJulia precompile workload: the U(1)/:none block did not complete; those " *
-                  "runs will pay full JIT (~313 s measured for a first step)" exception = err
+                  "runs will pay full JIT (~313 s measured for a first step)" *
+                  " -- symmetry at failure: $(BondUpdateBUG.symmetry_mode())" exception =
+                  (err, catch_backtrace())
         end
 
         # ⛔ THE SU(2) BLOCK GETS ITS OWN try/catch/finally, AND THAT SEPARATION IS LOAD-BEARING.

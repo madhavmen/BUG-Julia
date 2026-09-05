@@ -27,7 +27,7 @@ uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
 version = "1.11.0"
 
 [[deps.BUGJulia]]
-deps = ["JSON", "LinearAlgebra", "LurCGT", "Printf", "Random", "SparseArrays", "Telum"]
+deps = ["JSON", "LinearAlgebra", "LurCGT", "PrecompileTools", "Printf", "Random", "SparseArrays", "Telum"]
 path = "."
 uuid = "8f2a1c34-5d6e-4b7a-9c8d-1e2f3a4b5c6d"
 version = "0.1.0"
@@ -537,11 +537,9 @@ version = "1.10.0"
 
 [[deps.Telum]]
 deps = ["HDF5", "HPTT_jll", "LinearAlgebra", "LurCGT", "MKL", "Printf", "SparseArrays"]
-git-tree-sha1 = "babf2ad1cdb771ca61921bd35f5df93cc376d18a"
-repo-rev = "main"
-repo-url = "https://github.com/ssblee/Telum.jl"
+path = "deps/Telum"
 uuid = "206e1281-4cfe-4f93-80c6-84968ba7c8d5"
-version = "0.2.0"
+version = "0.2.1"
 
 [[deps.TensorOperations]]
 deps = ["LRUCache", "LinearAlgebra", "PackageExtensionCompat", "Strided", "TupleTools", "VectorInterface"]

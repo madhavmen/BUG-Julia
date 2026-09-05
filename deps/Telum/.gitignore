@@ -1,0 +1,16 @@
+Manifest.toml
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+.DS_Store
+SESSION_NOTES.md
+scratch_julia_worker.jl
+benchmark_adjoint_matmul.jl
+benchmark_hptt.jl
+benchmark_hptt_pad8.jl
+benchmark_mkl.jl
+benchmark_pad8_matmul.jl
+benchmark_tblis_contract.jl
+benchmark_tullio_contract.jl
+*.txt
+docs/*

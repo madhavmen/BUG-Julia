@@ -39,8 +39,10 @@ using Random
 using BUGJulia
 using BUGJulia.BondUpdateBUG
 using BUGJulia.RSVDCBEBondUpdate
+using Telum: TELUM_CONTRACT_THREADS
 
 include(joinpath(@__DIR__, "random_mps.jl"))
+include(joinpath(@__DIR__, "random_mpo.jl"))
 
 # ── knobs ────────────────────────────────────────────────────────────────────
 
@@ -55,10 +57,54 @@ const NSTEPS   = envint("LCP_NSTEPS", 4)
 const DT       = envfloat("LCP_DT", 0.01)
 const MAXITER  = envint("LCP_MAXITER", 8)
 const BLAS_T   = envints("LCP_BLAS", string(max(1, Sys.CPU_THREADS ÷ 2)))
+# Tasks `Telum.contract` may spawn across output sectors. A list, so one job can A/B the
+# forked threading against the serial path it must reproduce bit for bit.
+# ⚠ Capped by `Threads.nthreads()`, so `julia -t 2` makes every entry above 2 identical —
+# the two parallelism axes (sectors here, BLAS below) share one thread pool.
+const CTHREADS = envints("LCP_CTHREADS", "0")   # 0 = leave the default (unbounded)
 const ARMS     = split(get(ENV, "LCP_ARMS", "tdvp2,cbe1s,bug"), ',')
 const DELTA    = envfloat("LCP_DELTA", 1.0)
 const CONV_TOL = envfloat("LCP_CONV_TOL", 0.0)   # 0 = old breakdown-only behaviour
+# MPO virtual bond dimensions to sweep. `0` means the physical `xxz_mpo` (D = 5). Anything
+# else builds a random MPO at that D — see random_mpo.jl on why no physical builder here
+# reaches D = 1024, and on why the result must never be scored for accuracy.
+# ⚠ Doubling overshoots and there is no MPO analogue of a canonical trim, so the D recorded
+# in the CSV is the D that came back, not the D requested.
+const MPO_DS   = envints("LCP_MPO_D", "0")
+# ⛔ THE CBE EXPANSION BUDGET — the knob that inverted the expected solver ordering.
+# `cbe_core.jl:646` sets `budget = ceil(growth*dmax) - r`, so the DEFAULT `growth = 2.0`
+# asks for `r` NEW directions on top of `r` existing ones: at chi = 1024 that is 1024 per
+# side, sketched with `Dpre = ceil(1.2*budget) = 1229` columns against a space of
+# `d*chi = 2048`. A 0.6x probe is a width at which no randomised method can beat a direct
+# factorisation, and the result is truncated straight back to `maxdim` afterwards.
+#
+# Measured consequence at chi=1024: cbe1s 246 s/step against tdvp2's 121 s. Both CBE arms
+# carry this and tdvp2 does not, which is exactly the wrong way round.
+#
+# `dex > 0` overrides the schedule with an ABSOLUTE per-side budget, and that is the whole
+# point at large rank: +64 directions is a 50% growth at chi=128 (useless, the sketch is
+# nearly the whole space) but 3% at chi=1024, where `Dpre = 77` against 2048 is a 0.038x
+# probe and the sketch is ~16x cheaper than the expansion it replaces.
+# ⚠ `dex` trades against how fast the rank can GROW, so a cost win here is only real if the
+# accuracy is scored separately — this file measures cost only.
+const DEXS     = envints("LCP_DEX", "0")          # 0 = the growth schedule
+const GROWTH   = envfloat("LCP_GROWTH", 2.0)
 const KRY_TOL  = envfloat("LCP_KRY_TOL", 1e-6)   # BUG half-sweep frame tolerance
+# ⛔ BUG'S FRAME DEPTH IS A SEPARATE KNOB FROM `maxiter`, AND ITS DEFAULT IS 30.
+# `maxiter` bounds the `expv` solves; `krylov_basis` bounds `_krylov_frame`, which is where
+# BUG does nearly all of its operator work — one `apply_one_site` per vector, per bond, per
+# half-sweep. Left at the default while the TDVP arms ran `maxiter = 8`, BUG was building
+# depth-30 frames against depth-8 solves: ~1700 matvecs a step against ~460. That is the
+# same class of unfairness as the `conv_tol` gap, pointing the other way, and it has to be
+# matched before any ordering claim means anything.
+#
+# ⚠ AND THE RANDOM STATE MAKES IT WORSE THAN IT WOULD BE IN PRACTICE. `_krylov_frame` exits
+# early once Saad's contribution drops below `krylov_tol`, which on a PHYSICAL state happens
+# quickly because the Schmidt spectrum decays. `random_mps` has a flat-ish spectrum by
+# construction, so contributions stay large and the frame runs to its cap. Cost measured
+# here is therefore an UPPER bound for BUG specifically, in a way it is not for the TDVP
+# arms — do not quote a BUG/TDVP ratio from this benchmark without saying so.
+const KRY_BASIS = envint("LCP_KRY_BASIS", MAXITER)
 const DO_PROF  = envbool("LCP_PROFILE", true)
 const OUTDIR   = get(ENV, "BUG_OUTDIR", joinpath(@__DIR__, "results"))
 
@@ -157,7 +203,7 @@ end
 
 # ── one arm ──────────────────────────────────────────────────────────────────
 
-function run_arm(arm::AbstractString, psi0, mpo, chi::Int)
+function run_arm(arm::AbstractString, psi0, mpo, chi::Int, dex::Int)
     psi = deepcopy(psi0)
     tau = ComplexF64(-im * DT)
     # ⛔ `CONV_TOL` MUST BE SET FOR EVERY ARM OR NONE. CBE-BUG's half-sweeps stop adaptively
@@ -173,15 +219,17 @@ function run_arm(arm::AbstractString, psi0, mpo, chi::Int)
     elseif arm == "cbe1s"
         () -> RSVDCBEBondUpdate.tdvp_cbe1s_step!(psi, mpo, tau;
                   maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER, exact = false,
-                  conv_tol = CONV_TOL)
+                  conv_tol = CONV_TOL, dex = dex, growth = GROWTH)
     elseif arm == "bug"
         () -> RSVDCBEBondUpdate.cbe_bug_step!(psi, mpo, tau;
                   maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER, exact = false,
-                  root_conv_tol = CONV_TOL, krylov_tol = KRY_TOL)
+                  root_conv_tol = CONV_TOL, krylov_tol = KRY_TOL, krylov_basis = KRY_BASIS,
+                  dex = dex, growth = GROWTH)
     elseif arm == "bugmid"
         () -> RSVDCBEBondUpdate.cbe_bug_midpoint_step!(psi, mpo, tau;
                   maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER, exact = false,
-                  root_conv_tol = CONV_TOL, krylov_tol = KRY_TOL)
+                  root_conv_tol = CONV_TOL, krylov_tol = KRY_TOL, krylov_basis = KRY_BASIS,
+                  dex = dex, growth = GROWTH)
     else
         error("unknown arm $arm")
     end
@@ -209,7 +257,7 @@ function main()
     mkpath(OUTDIR)
     csv = joinpath(OUTDIR, @sprintf("large_chi_L%d.csv", L))
     open(csv, "w") do io
-        println(io, "L,chi,arm,blas,step,seconds,alloc_gb,chi_out,nsectors")
+        println(io, "L,chi,mpoD,arm,dex,blas,cthreads,step,seconds,alloc_gb,chi_out,nsectors")
     end
 
     say(@sprintf("L=%d  chis=%s  nsteps=%d  dt=%g  maxiter=%d  arms=%s",
@@ -222,7 +270,17 @@ function main()
                  Threads.nthreads(), string(BLAS_T), Sys.CPU_THREADS))
     say("output -> $csv")
 
-    mpo = RSVDCBEBondUpdate.xxz_mpo(L; J = 1.0, delta = DELTA)
+    say(@sprintf("MPO D sweep = %s (0 = physical xxz_mpo, D=5)", string(MPO_DS)))
+
+    for mpoD in MPO_DS
+    mpo = mpoD == 0 ? RSVDCBEBondUpdate.xxz_mpo(L; J = 1.0, delta = DELTA) :
+                      random_mpo(L, mpoD; seed = 7, delta = DELTA)
+    Dact = maximum(mpo_virtual_dims(mpo))
+    say("")
+    say(repeat("#", 78))
+    say(@sprintf("MPO bond dimension D = %d%s", Dact,
+                 mpoD == 0 ? " (physical XXZ)" : " (random, requested $mpoD)"))
+    say(repeat("#", 78))
 
     for chi in CHIS
         say("")
@@ -237,25 +295,38 @@ function main()
                      mps_elements(psi0), gb(16 * mps_elements(psi0))))
         nsec, _ = report_sector_shapes(psi0)
 
-        for nt in BLAS_T
-            BLAS.set_num_threads(nt)
-            say(@sprintf("  --- BLAS threads = %d ---", nt))
-            for arm in ARMS
-                r = try
-                    run_arm(arm, psi0, mpo, chi)
-                catch err
-                    say("    $arm FAILED: $(sprint(showerror, err))")
-                    continue
-                end
-                say(@sprintf("    %-6s MEAN(steps 2-%d) = %.2f s", arm, NSTEPS, r.mean))
-                open(csv, "a") do io
-                    for (k, t) in enumerate(r.times)
-                        @printf(io, "%d,%d,%s,%d,%d,%.6f,%.4f,%d,%d\n",
-                                L, chi, arm, nt, k, t, gb(r.allocs[k]), r.chi_out, nsec)
+        for ct in CTHREADS
+            TELUM_CONTRACT_THREADS[] = ct == 0 ? typemax(Int) : ct
+            for nt in BLAS_T
+                BLAS.set_num_threads(nt)
+                for dex in DEXS
+                    say(@sprintf("  --- BLAS=%d | contract tasks=%s | dex=%s (julia -t %d) ---",
+                                 nt, ct == 0 ? "auto" : string(ct),
+                                 dex == 0 ? "growth $(GROWTH)" : string(dex),
+                                 Threads.nthreads()))
+                    for arm in ARMS
+                        # tdvp2 has no CBE expansion, so sweeping dex would re-time identical
+                        # work. Run it on the first dex only.
+                        arm == "tdvp2" && dex != DEXS[1] && continue
+                        r = try
+                            run_arm(arm, psi0, mpo, chi, dex)
+                        catch err
+                            say("    $arm FAILED: $(sprint(showerror, err))")
+                            continue
+                        end
+                        say(@sprintf("    %-6s MEAN(steps 2-%d) = %.2f s", arm, NSTEPS, r.mean))
+                        open(csv, "a") do io
+                            for (k, t) in enumerate(r.times)
+                                @printf(io, "%d,%d,%d,%s,%d,%d,%d,%d,%.6f,%.4f,%d,%d\n",
+                                        L, chi, Dact, arm, dex, nt, ct, k, t,
+                                        gb(r.allocs[k]), r.chi_out, nsec)
+                            end
+                        end
                     end
                 end
             end
         end
+        TELUM_CONTRACT_THREADS[] = typemax(Int)
 
         if DO_PROF
             say("  --- kernel breakdown (one step per arm, sampled) ---")
@@ -289,6 +360,7 @@ function main()
         end
 
         say(@sprintf("  peak RSS so far: %.2f GB", gb(Sys.maxrss())))
+    end
     end
 
     say("")
