@@ -399,6 +399,19 @@ function run_all_arms(arms, psi0, mpo, chi::Int, dex::Int, nt::Int)
     end
     times = Dict(arm => Float64[] for arm in arms)
     allocs = Dict(arm => Float64[] for arm in arms)
+    # OPERATOR APPLICATIONS PER STEP, which every arm's info struct already reports as
+    # `krylov_dims`. Worth capturing because the allocation attribution raised a question the
+    # clock cannot answer: cbe1s spends 34% of its bytes inside `expv` against tdvp2's 11%,
+    # even though a one-site plus zero-site solve is individually CHEAPER than a two-site plus
+    # one-site one. Either cbe1s runs more Krylov iterations (its solves not exiting early on
+    # `conv_tol` where tdvp2's do), or it does not and the bytes are elsewhere. That is a
+    # counter, not a timing, so contention cannot corrupt it.
+    #
+    # ⛔ NOT COMPARABLE ACROSS ARMS AS A COST AXIS -- it counts operator applications and is
+    # blind to `cbe_expand`, which is exactly the trap that made earlier "N× cheaper" claims
+    # artefacts. It is used here for ONE question only: does cbe1s burn more Krylov iterations
+    # than tdvp2 on the solves they both have?
+    kdims = Dict(arm => Int[] for arm in arms)
     failed = String[]
 
     for k in 1:NSTEPS
@@ -409,8 +422,10 @@ function run_all_arms(arms, psi0, mpo, chi::Int, dex::Int, nt::Int)
             try
                 st = @timed steppers[arm]()
                 push!(times[arm], st.time); push!(allocs[arm], st.bytes)
-                say(@sprintf("    rep %d  %-6s  %8.2f s  alloc %6.2f GB  chi=%d",
-                             k, arm, st.time, gb(st.bytes),
+                kd = hasproperty(st.value, :krylov_dims) ? st.value.krylov_dims : -1
+                push!(kdims[arm], kd)
+                say(@sprintf("    rep %d  %-6s  %8.2f s  alloc %6.2f GB  matvec %6d  chi=%d",
+                             k, arm, st.time, gb(st.bytes), kd,
                              maximum(BondUpdateBUG.bond_dims(states[arm]))))
             catch err
                 say("    rep $k  $arm FAILED: $(sprint(showerror, err))")
@@ -418,7 +433,7 @@ function run_all_arms(arms, psi0, mpo, chi::Int, dex::Int, nt::Int)
             end
         end
     end
-    return times, allocs, states
+    return times, allocs, states, kdims
 end
 
 "Median of the measured steps — rep 1 dropped, since it carries first-call compilation."
@@ -493,7 +508,8 @@ function main()
                     # tdvp2 has no CBE expansion, so sweeping dex would re-time identical
                     # work. Run it on the first dex only.
                     arms_here = [a for a in ARMS if a != "tdvp2" || dex == DEXS[1]]
-                    times, allocs, states = run_all_arms(arms_here, psi0, mpo, chi, dex, nt)
+                    times, allocs, states, kdims =
+                        run_all_arms(arms_here, psi0, mpo, chi, dex, nt)
 
                     say("    " * repeat("-", 60))
                     for arm in arms_here
@@ -501,8 +517,9 @@ function main()
                         med = measured_median(times[arm])
                         lo, hi = extrema(length(times[arm]) > 1 ? times[arm][2:end] :
                                          times[arm])
-                        say(@sprintf("    %-6s MEDIAN = %7.2f s  (spread %.2f-%.2f)  [blas=%d%s]",
-                                     arm, med, lo, hi, blas_for(arm, nt),
+                        kd = isempty(kdims[arm]) ? -1 : kdims[arm][end]
+                        say(@sprintf("    %-6s MEDIAN = %7.2f s  (spread %.2f-%.2f)  matvec %6d  [blas=%d%s]",
+                                     arm, med, lo, hi, kd, blas_for(arm, nt),
                                      (PARALLEL && startswith(arm, "bug")) ? ", parallel" : ""))
                     end
                     open(csv, "a") do io
