@@ -62,17 +62,27 @@ end
 end
 
 @testset "SU(2): the product UNDERCOUNTS, so the slow path is mandatory" begin
-    psi = warm_state(10; sym = :SU2)
+    # ⛔ NOT `warm_state` HERE. `xxz_mpo` cannot be built under SU(2) at all -- the SU(2) local
+    # space exposes only `I` and `S`, while `xxz_chain` (henv.jl:97) reaches for `.Sp` and so
+    # raises `FieldError: type NamedTuple has no field Sp`. That is a property of the model
+    # builder, not of this fix, and it is why this half uses a state needing no Hamiltonian.
+    #
+    # `dimer_state` exists under SU(2) and is the SHARPEST case rather than a weaker one: every
+    # link carries exactly ONE multiplet, so `leg_dim` reads 1 on both legs and the product says
+    # 1 -- while spin-1/2 (x) spin-1/2 fuses to 0 (+) 1, i.e. TWO multiplets. The undercount that
+    # would silently freeze CBE is therefore visible with no time evolution at all.
+    set_symmetry!(:SU2)
+    psi = BondUpdateBUG.dimer_state(10)
     canonical!(psi, 5)
 
     # At least one bond where the multiplet product is strictly smaller than the true fused
     # dimension. If this ever stops holding, either SU(2) stopped being non-abelian or the
-    # state never left chi = 1 -- both of which must fail loudly here rather than in a campaign.
+    # branch stopped mattering -- both must fail loudly here rather than as a frozen rank.
     strictly_smaller = 0
     for i in 1:(length(psi) - 1)
         A = psi[i]
         ex, fa = exact_fused(A, 1, 2), fast_fused(A, 1, 2)
-        @test fa <= ex
+        @test fa <= ex                 # the product can never OVERcount
         fa < ex && (strictly_smaller += 1)
     end
     @test strictly_smaller > 0
