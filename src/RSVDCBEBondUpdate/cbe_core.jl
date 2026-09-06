@@ -602,11 +602,26 @@ function cbe_expand(f::BondFrame, skl, skr;
     # whichever symmetry the tensors actually carry and this line never needs to know. It
     # reduces EXACTLY to the old product for abelian charges, so it is not a special case.
     #
-    # KNOWN COST: this duplicates a `fusion_basis` that `sector_graded_sketch` /
-    # `full_local_basis` will build again for the same frame a few lines below -- four calls per
-    # expand where two would do. Folding them together means threading the bases through the
-    # probe, which is worth doing only once it shows up in a measurement.
-    fused_dim(t, a, b) = sum(d for (_, d) in reachable_sectors(t, a, b); init = 0)
+    # ⛔ AND IT HAS NOW SHOWN UP IN A MEASUREMENT, so the abelian case no longer pays for it.
+    # `reachable_sectors` builds a FULL `fusion_basis` -- `getIdentity` plus a complete `svd` of a
+    # `(d*chi) x (d*chi)` blocked tensor -- and then reads nothing from it but `.spaces[end]`. It
+    # is called TWICE per expand, at `2(L-1)` bonds a step: 116 large SVDs per step at L=30,
+    # purely to COUNT DIMENSIONS. At chi=1024 `LAPACK svd/qr` measured 4.0% of cbe1s's active
+    # work and 6.1% of BUG's, and the discarded `U` is allocation on top of that.
+    #
+    # For ABELIAN charges the answer is exactly `leg_dim(a) * leg_dim(b)` -- the paragraph above
+    # says so ("It reduces EXACTLY to the old product for abelian charges"), because every pair of
+    # input sectors fuses to exactly one output of size `da*db`, and `leg_dim` is just the summed
+    # sector dimensions. So the product is not an approximation of the fused dimension here, it IS
+    # it, and `test_fused_dim_fast.jl` asserts the two agree sector-sum for sector-sum.
+    #
+    # ⚠ NON-ABELIAN STILL TAKES THE SLOW PATH, and must: under SU(2) `leg_dim` counts MULTIPLETS,
+    # so the product reads `chi * 1 = chi` for a spin-1/2 site, `room` collapses to ~0, and CBE
+    # would decline to expand -- the chi = 1 freeze described above. That failure is silent, which
+    # is why this branches on the symmetry rather than on a tolerance.
+    fused_dim(t, a, b) = symmetry_mode() === :SU2 ?
+        sum(d for (_, d) in reachable_sectors(t, a, b); init = 0) :
+        leg_dim(t, a) * leg_dim(t, b)
     room_l = fused_dim(U0, 1, 2) - r
     room_r = fused_dim(V0, 2, 3) - r
     # GROWTH IS NEIGHBOURHOOD-COUPLED, as in the reference (`RSVDpreBE0SiQS.m:66-77`):
