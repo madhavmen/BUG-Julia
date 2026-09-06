@@ -161,6 +161,11 @@ arms keeps every arm at the same core budget, which is the comparison we actuall
 """
 blas_for(arm, nt) = (PARALLEL && (arm == "bug" || arm == "bugmid")) ? max(1, nt ÷ 2) : nt
 const DO_PROF  = envbool("LCP_PROFILE", true)
+# Allocation attribution. Off by default: it is a second pass over every arm, and the sampler
+# holds a backtrace per sampled allocation, so a high rate is itself a memory risk on a step
+# that already allocates ~100 GB. 1e-4 keeps the sample count in the tens of thousands.
+const DO_ALLOC_PROF = envbool("LCP_ALLOC_PROFILE", false)
+const ALLOC_RATE    = envfloat("LCP_ALLOC_RATE", 1e-4)
 const OUTDIR   = get(ENV, "BUG_OUTDIR", joinpath(@__DIR__, "results"))
 
 const T0 = time()
@@ -521,18 +526,18 @@ function main()
             for arm in ARMS
                 Profile.clear(); Profile.init(n = 2 * 10^6, delay = 0.01)
                 try
-                    psi = deepcopy(psi0)
-                    tau = ComplexF64(-im * DT)
-                    @profile if arm == "tdvp2"
-                        RSVDCBEBondUpdate.tdvp2_step!(psi, mpo, tau;
-                            maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER)
-                    elseif arm == "cbe1s"
-                        RSVDCBEBondUpdate.tdvp_cbe1s_step!(psi, mpo, tau;
-                            maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER, exact = false)
-                    else
-                        RSVDCBEBondUpdate.cbe_bug_step!(psi, mpo, tau;
-                            maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER, exact = false)
-                    end
+                    # ⛔ THE PROFILE MUST RUN THE CONFIGURATION THAT WAS TIMED. This block used to
+                    # call the steppers DIRECTLY with only `maxdim`/`trunc_thresh`/`maxiter`,
+                    # which silently dropped `dex`, `growth`, `conv_tol`, `fold_omega`,
+                    # `parallel`, `split_maxdim` and `krylov_basis` back to LIBRARY DEFAULTS.
+                    # So every breakdown it printed described a run nobody measured: `growth`
+                    # 2.0 instead of 1.1, `krylov_basis` 30 instead of 2, `conv_tol` 0 (no
+                    # adaptive exit), and — worst — `split_maxdim = 0`, uncapped, which is the
+                    # exact setting that made BUG take >800 s/step instead of 42 s. A bucket
+                    # table attributed to the timed run but measured on a different one is not
+                    # evidence, so it goes through `make_stepper` like everything else.
+                    step!, _ = make_stepper(arm, psi0, mpo, chi, dex)
+                    @profile step!()
                     b, active, tot = profile_buckets()
                     active == 0 && (say("    $arm: no active samples"); continue)
                     say(@sprintf("    %-6s %d active samples of %d (%.0f%% of thread-samples were IDLE workers)",
@@ -552,6 +557,63 @@ function main()
                     say("    $arm profile FAILED: $(sprint(showerror, err))")
                 end
             end
+        end
+
+        # ── WHERE THE BYTES COME FROM ────────────────────────────────────────────────
+        #
+        # The sampling profiler above answers "which kernel is running", and its answer is
+        # GC/alloc at 51-59% for every arm. That is a symptom, not an address: it says the
+        # collector is busy, never which of our call sites handed it the garbage. The two
+        # questions have different answers, and the one worth acting on is the second.
+        #
+        # `Profile.Allocs` records the ALLOCATION SITE, so the bytes get attributed to the
+        # BUGJulia frame that caused them. That is what distinguishes "cbe1s allocates more
+        # than tdvp2 because of the CBE expansion" (fixable by the sketch) from "because its
+        # one-site solve allocates as much per matvec as a two-site one" (a different fix
+        # entirely) — a distinction the bucket table cannot make, and one I have so far been
+        # guessing at.
+        #
+        # ⚠ SAMPLED, at `sample_rate` of the allocations. The RATIOS are the result; the
+        # absolute GB belong to the `alloc_gb` CSV column, which is an exact counter.
+        if DO_ALLOC_PROF
+            say("  --- allocation attribution (one step per arm, sampled) ---")
+            BLAS.set_num_threads(BLAS_T[end])
+            for arm in ARMS
+                try
+                    step!, _ = make_stepper(arm, psi0, mpo, chi, dex)
+                    Profile.Allocs.clear()
+                    Profile.Allocs.@profile sample_rate = ALLOC_RATE step!()
+                    res = Profile.Allocs.fetch()
+                    isempty(res.allocs) && (say("    $arm: no allocation samples"); continue)
+
+                    # Attribute each allocation to the DEEPEST frame that is our code. Telum's
+                    # `contract` is the immediate allocator almost everywhere, so blaming the
+                    # immediate frame would just print "contract" for everything and say nothing.
+                    bytes = Dict{String, Int}()
+                    total = 0
+                    for a in res.allocs
+                        total += a.size
+                        site = "«outside BUGJulia»"
+                        for sf in a.stacktrace
+                            f = string(sf.file)
+                            if occursin("RSVDCBEBondUpdate", f) || occursin("BondUpdateBUG", f)
+                                site = string(basename(f), ":", sf.line, "  ", sf.func)
+                                break
+                            end
+                        end
+                        bytes[site] = get(bytes, site, 0) + a.size
+                    end
+                    say(@sprintf("    %-6s %d sampled allocations, %.2f GB sampled (rate %.3g)",
+                                 arm, length(res.allocs), gb(total), ALLOC_RATE))
+                    for (site, b) in first(sort(collect(bytes), by = x -> -x[2]), 15)
+                        say(@sprintf("    %-6s  %5.1f%%  %8.2f GB  %s",
+                                     arm, 100 * b / max(total, 1), gb(b), site))
+                    end
+                catch err
+                    say("    $arm alloc profile FAILED: $(sprint(showerror, err))")
+                end
+            end
+            Profile.Allocs.clear()
         end
 
         say(@sprintf("  peak RSS so far: %.2f GB", gb(Sys.maxrss())))
