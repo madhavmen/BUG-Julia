@@ -151,6 +151,14 @@ include("models/kagome.jl")
 include("models/breathing_kagome.jl")
 include("models/oat.jl")
 include("models/tfim.jl")
+# models/mbl_scars.jl        the two ERGODICITY-BREAKING models, whose published results exist
+#                            only as ED at `L <= 22`: the DISORDERED XXZ chain of RMP 91, 021001
+#                            (arXiv:1804.11065) Eq. (5)/(6) -- U(1)-native, since a random `S^z`
+#                            field conserves total `S^z` exactly -- and the PXP blockade chain of
+#                            arXiv:2011.09486, which is `:none` only because `σ^x` conserves
+#                            nothing. Both quench from a PRODUCT state, which is what makes them
+#                            the test of a rank-adaptive sweep rather than of a tuned schedule.
+include("models/mbl_scars.jl")
 
 # The two TDVP integrators live in their own directories. They are FILES of this module, not
 # submodules: both are built on `henv.jl` (environments) and `cbe_core.jl` (the expansion)
@@ -256,6 +264,9 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        # charge-raising, so a U(1) run reports zero rather than the revival signal.
        oat_couplings, oat_energy_shift, oat_mpo, oat_mpo_pairs,
        x_polarized_state, sx_operator, sx_profile, total_sx,
+       # models/mbl_scars.jl -- MBL (disordered XXZ, U(1)) and scars (PXP, :none)
+       disorder_fields, field_mpo_from_terms, disordered_xxz_mpo,
+       pxp_operators, pxp_mpo, z2_state,
        # sweeps/ -- the structured RSVD-CBE sweeps
        BondExpansionInfo, expand_bond!, lanczos_lowest,
        DMRGCBEInfo, DMRGCBERun, dmrg_cbe1s_sweep!, dmrg_cbe1s!,

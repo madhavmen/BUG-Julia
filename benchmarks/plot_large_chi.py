@@ -59,15 +59,28 @@ def load(path):
     return rows
 
 
+def _median(xs):
+    s = sorted(xs)
+    n = len(s)
+    return s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
+
+
 def mean_steps(rows):
-    """Mean seconds and alloc over steps >= 2, keyed by (arm, chi, mpoD, blas, cthreads)."""
+    """MEDIAN seconds and alloc over steps >= 2, keyed by (arm, chi, mpoD, blas, cthreads).
+
+    Median, not mean, and for the reason the Julia driver already gives for its own summary:
+    contention on a shared node produces ONE-SIDED spikes, so a single bad slot moves a
+    2-sample mean by half the spike. Measured on one config, identical work: 38.2 / 43.9 s.
+    The two must agree anyway -- a plot that averages while the log it is plotted against
+    takes medians invites exactly the "these numbers disagree" confusion that wastes an hour.
+    """
     acc = defaultdict(lambda: ([], []))
     for r in rows:
         if r["step"] < 2:
             continue                      # compilation lives in step 1
         t, a = acc[(r["arm"], r["chi"], r["mpoD"], r["blas"], r["cthreads"])]
         t.append(r["seconds"]); a.append(r["alloc_gb"])
-    return {k: (sum(t) / len(t), sum(a) / len(a)) for k, (t, a) in acc.items() if t}
+    return {k: (_median(t), _median(a)) for k, (t, a) in acc.items() if t}
 
 
 def _finish(ax, xlabel, ylabel, path, logx=True, logy=True):
