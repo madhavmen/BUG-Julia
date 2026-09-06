@@ -315,7 +315,21 @@ end
 
 # ── one arm ──────────────────────────────────────────────────────────────────
 
-function run_arm(arm::AbstractString, psi0, mpo, chi::Int, dex::Int, nt::Int)
+"""
+A closure that advances this arm's own state by one step, plus that state.
+
+⛔ SPLIT OUT OF `run_arm` SO THE SWEEP CAN RUN **REP-OUTER**. Running every step of one arm
+before starting the next (arm-outer) makes each arm's number a sample of whatever the shared
+node was doing during its slot, and the cluster nodes are shared: across two jobs with
+IDENTICAL settings, tdvp2 moved 41.0 -> 56.9 s (+39%), cbe1s 46.9 -> 72.8 (+55%) and BUG
+28.4 -> 56.2 (+98%). BUG degraded worst because its parallel half-sweeps need 16 concurrent
+threads to pay, which is exactly what a busy node cannot give -- so arm-outer does not just
+add noise, it BIASES against whichever arm is most contention-sensitive, and that arm is the
+one whose advantage we are trying to measure.
+
+Rep-outer interleaves the arms, so a contention episode lands on all of them.
+"""
+function make_stepper(arm::AbstractString, psi0, mpo, chi::Int, dex::Int)
     psi = deepcopy(psi0)
     tau = ComplexF64(-im * DT)
     # ⛔ `CONV_TOL` MUST BE SET FOR EVERY ARM OR NONE. CBE-BUG's half-sweeps stop adaptively
@@ -348,21 +362,53 @@ function run_arm(arm::AbstractString, psi0, mpo, chi::Int, dex::Int, nt::Int)
         error("unknown arm $arm")
     end
 
-    BLAS.set_num_threads(blas_for(arm, nt))
-    times = Float64[]
-    allocs = Float64[]
-    for k in 1:NSTEPS
-        GC.gc()
-        st = @timed step!()
-        push!(times, st.time); push!(allocs, st.bytes)
-        say(@sprintf("    %-6s step %d/%d  %8.2f s  alloc %6.2f GB  chi=%d",
-                     arm, k, NSTEPS, st.time, gb(st.bytes),
-                     maximum(BondUpdateBUG.bond_dims(psi))))
+    return step!, psi
+end
+
+"""
+Run every arm rep-outer and return per-arm times and allocations.
+
+`median` rather than `mean` over the measured steps: contention produces one-sided spikes,
+and a single bad slot moves a 2-sample mean by half the spike.
+"""
+function run_all_arms(arms, psi0, mpo, chi::Int, dex::Int, nt::Int)
+    steppers = Dict{String, Any}()
+    states = Dict{String, Any}()
+    for arm in arms
+        s, p = make_stepper(arm, psi0, mpo, chi, dex)
+        steppers[arm] = s; states[arm] = p
     end
-    # step 1 carries first-call compilation; measure on the rest when we have them
-    meas = length(times) > 1 ? times[2:end] : times
-    return (times = times, allocs = allocs, mean = sum(meas) / length(meas),
-            chi_out = maximum(BondUpdateBUG.bond_dims(psi)))
+    times = Dict(arm => Float64[] for arm in arms)
+    allocs = Dict(arm => Float64[] for arm in arms)
+    failed = String[]
+
+    for k in 1:NSTEPS
+        for arm in arms
+            arm in failed && continue
+            BLAS.set_num_threads(blas_for(arm, nt))
+            GC.gc()
+            try
+                st = @timed steppers[arm]()
+                push!(times[arm], st.time); push!(allocs[arm], st.bytes)
+                say(@sprintf("    rep %d  %-6s  %8.2f s  alloc %6.2f GB  chi=%d",
+                             k, arm, st.time, gb(st.bytes),
+                             maximum(BondUpdateBUG.bond_dims(states[arm]))))
+            catch err
+                say("    rep $k  $arm FAILED: $(sprint(showerror, err))")
+                push!(failed, arm)
+            end
+        end
+    end
+    return times, allocs, states
+end
+
+"Median of the measured steps — rep 1 dropped, since it carries first-call compilation."
+function measured_median(v::Vector{Float64})
+    isempty(v) && return NaN
+    m = length(v) > 1 ? v[2:end] : v
+    s = sort(m)
+    n = length(s)
+    return isodd(n) ? s[(n + 1) ÷ 2] : 0.5 * (s[n ÷ 2] + s[n ÷ 2 + 1])
 end
 
 # ── main ─────────────────────────────────────────────────────────────────────
@@ -425,24 +471,28 @@ function main()
                                  nt, ct == 0 ? "auto" : string(ct),
                                  dex == 0 ? "growth $(GROWTH)" : string(dex),
                                  Threads.nthreads()))
-                    for arm in ARMS
-                        # tdvp2 has no CBE expansion, so sweeping dex would re-time identical
-                        # work. Run it on the first dex only.
-                        arm == "tdvp2" && dex != DEXS[1] && continue
-                        r = try
-                            run_arm(arm, psi0, mpo, chi, dex, nt)
-                        catch err
-                            say("    $arm FAILED: $(sprint(showerror, err))")
-                            continue
-                        end
-                            say(@sprintf("    %-6s MEAN(steps 2-%d) = %.2f s  [blas=%d%s]",
-                                     arm, NSTEPS, r.mean, blas_for(arm, nt),
+                    # tdvp2 has no CBE expansion, so sweeping dex would re-time identical
+                    # work. Run it on the first dex only.
+                    arms_here = [a for a in ARMS if a != "tdvp2" || dex == DEXS[1]]
+                    times, allocs, states = run_all_arms(arms_here, psi0, mpo, chi, dex, nt)
+
+                    say("    " * repeat("-", 60))
+                    for arm in arms_here
+                        isempty(times[arm]) && continue
+                        med = measured_median(times[arm])
+                        lo, hi = extrema(length(times[arm]) > 1 ? times[arm][2:end] :
+                                         times[arm])
+                        say(@sprintf("    %-6s MEDIAN = %7.2f s  (spread %.2f-%.2f)  [blas=%d%s]",
+                                     arm, med, lo, hi, blas_for(arm, nt),
                                      (PARALLEL && startswith(arm, "bug")) ? ", parallel" : ""))
-                        open(csv, "a") do io
-                            for (k, t) in enumerate(r.times)
+                    end
+                    open(csv, "a") do io
+                        for arm in arms_here
+                            cout = maximum(BondUpdateBUG.bond_dims(states[arm]))
+                            for (k, t) in enumerate(times[arm])
                                 @printf(io, "%d,%d,%d,%s,%d,%d,%d,%d,%.6f,%.4f,%d,%d\n",
                                         L, chi, Dact, arm, dex, nt, ct, k, t,
-                                        gb(r.allocs[k]), r.chi_out, nsec)
+                                        gb(allocs[arm][k]), cout, nsec)
                             end
                         end
                     end
