@@ -520,6 +520,14 @@ function main()
         end
         TELUM_CONTRACT_THREADS[] = typemax(Int)
 
+        # ⛔ BOTH PROFILE STAGES SIT OUTSIDE THE `for dex in DEXS` LOOP, so `dex` is NOT in scope
+        # here — reaching for it threw `UndefVarError: dex not defined in Main` for all eight
+        # profile attempts in job 16333134 (caught by the per-arm `try`, so the job still exited
+        # COMPLETED with the timings intact and every breakdown missing).
+        # `DEXS[end]` is the configuration the LAST timed block ran, which is the one these
+        # numbers have to describe.
+        prof_dex = DEXS[end]
+
         if DO_PROF
             say("  --- kernel breakdown (one step per arm, sampled) ---")
             BLAS.set_num_threads(BLAS_T[end])
@@ -536,7 +544,7 @@ function main()
                     # exact setting that made BUG take >800 s/step instead of 42 s. A bucket
                     # table attributed to the timed run but measured on a different one is not
                     # evidence, so it goes through `make_stepper` like everything else.
-                    step!, _ = make_stepper(arm, psi0, mpo, chi, dex)
+                    step!, _ = make_stepper(arm, psi0, mpo, chi, prof_dex)
                     @profile step!()
                     b, active, tot = profile_buckets()
                     active == 0 && (say("    $arm: no active samples"); continue)
@@ -580,7 +588,7 @@ function main()
             BLAS.set_num_threads(BLAS_T[end])
             for arm in ARMS
                 try
-                    step!, _ = make_stepper(arm, psi0, mpo, chi, dex)
+                    step!, _ = make_stepper(arm, psi0, mpo, chi, prof_dex)
                     Profile.Allocs.clear()
                     Profile.Allocs.@profile sample_rate = ALLOC_RATE step!()
                     res = Profile.Allocs.fetch()
