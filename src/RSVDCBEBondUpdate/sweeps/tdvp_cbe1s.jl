@@ -87,6 +87,26 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                           sulz_cap::Bool = false,
                           preselect_only::Bool = false,
                           exact::Bool = false,
+                          # ⛔ WITHOUT THIS THE SKETCH CANNOT SAVE ANYTHING, AND THIS ARM WAS THE
+                          # ONLY ONE THAT COULD NOT BE ASKED. `cbe_bug_step!` has taken
+                          # `fold_omega` since the fold-first rewrite; this sweep never got the
+                          # kwarg, so every CBE-1s run ever timed went down the project-first
+                          # path -- `apply_h_two_site` builds the FULL `H*Theta` at every bond and
+                          # `Om` is contracted into the RESULT. That is a complete two-site matvec
+                          # per bond spent purely on BASIS SELECTION, on top of this arm's own
+                          # one-site and zero-site solves, which is why `cbe1s` measured SLOWER
+                          # than `tdvp2` (72.8 s vs 56.9 s at chi = 1024) when a one-site sweep
+                          # should be the cheaper of the two.
+                          #
+                          # The fold replaces `d*chi_r` columns with `g = npre` BEFORE the
+                          # environment contractions, so the saving is `chi/g` and GROWS with the
+                          # bond dimension. Folding cannot share one `H*Theta` across the three
+                          # sketch calls, so it wins when `3g < chi` -- at chi = 1024 with
+                          # `dex = 64` that is `231 < 1024`, comfortable, and it is exactly the
+                          # large-chi regime this is being tuned for. It can LOSE at small chi or
+                          # wide `growth`, so the default stays off and nothing already measured
+                          # moves silently.
+                          fold_omega::Bool = false,
                           maxdim::Int = 200,
                           trunc_thresh::Float64 = 1e-12,
                           maxiter::Int = 30,
@@ -120,9 +140,13 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     n_new = zeros(Int, L - 1)
     maxexp = 0; epre = 0.0; efnl = 0.0; disc = 0.0; nmv = 0
 
+    # `share_ht` is deliberately NOT in here: the MPO `cbe_expand` REFUSES the pair, and its
+    # default (`nothing`) already means "share when project-first" -- so leaving it out is what
+    # lets one `exkw` serve both paths.
     exkw = (dex = dex, growth = growth, dover = dover, comp_ratio = comp_ratio,
             sulz_cap = sulz_cap, rmax = maximum(bond_dims(psi); init = 0),
-            preselect_only = preselect_only, exact = exact, rng = rng)
+            preselect_only = preselect_only, exact = exact, fold_omega = fold_omega,
+            rng = rng)
 
     # Working set at this instant: the state as it stands plus the transients still alive. SAME
     # DEFINITION as `CBEBugSweepInfo.peak_elements` and `TDVP2Info.peak_elements`, which is the
@@ -183,7 +207,7 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         # Retag BOTH ends of the bond in one breath: each result is rank-3 with only one leg
         # wanting `tag`, so neither construction ever sees a duplicate index.
         psi[i + 1] = to_concrete(setitag(
-            to_concrete(contract(C, (2,), psi[i + 1], (1,))), 1, tag))
+            to_concrete!(contract(C, (2,), psi[i + 1], (1,))), 1, tag))
         psi[i] = to_concrete(setitag(psi[i], 3, tag))
         psi.center = i + 1
 
@@ -216,7 +240,7 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                  conv_tol = conv_tol, substeps = substeps)
 
         psi[i] = to_concrete(setitag(
-            to_concrete(contract(psi[i], (3,), C, (1,))), 3, tag))
+            to_concrete!(contract(psi[i], (3,), C, (1,))), 3, tag))
         psi[i + 1] = to_concrete(setitag(psi[i + 1], 1, tag))
         psi.center = i
 

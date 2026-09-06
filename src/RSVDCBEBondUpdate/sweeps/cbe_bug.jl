@@ -584,7 +584,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             fr = if side === :left
                 spl  = svd(vs[end], (1, 2), "bU,L", "bU,R"; cutoff = 0.0)
                 U0   = to_concrete(spl.U)
-                core = to_concrete(contract(U0', (1, 2), vs[end], (1, 2)))     # (bU, g)
+                core = to_concrete!(contract(U0', (1, 2), vs[end], (1, 2)))     # (bU, g)
                 BondFrame(U0, core, V,
                           vs[end].inds[1], vs[end].inds[2], vs[end].inds[3],
                           V.inds[2], V.inds[3],
@@ -592,7 +592,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             else
                 spl  = svd(vs[end], (1,), "bV,L", "bV,R"; cutoff = 0.0)
                 V0   = to_concrete(spl.Vd)
-                core = to_concrete(contract(vs[end], (2, 3), V0', (2, 3)))     # (g, bV)
+                core = to_concrete!(contract(vs[end], (2, 3), V0', (2, 3)))     # (g, bV)
                 BondFrame(V, core, V0,
                           V.inds[1], V.inds[2], V.inds[3],
                           vs[end].inds[2], vs[end].inds[3],
@@ -612,12 +612,12 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             if leg_dim(Vn, leg) > leg_dim(V, leg)
                 acc.ngrow += 1
                 P = side === :left ?
-                    to_concrete(contract(V, (2, 3), Vn', (2, 3))) :      # (old_g, new_g)
-                    to_concrete(contract(Vn', (1, 2), V, (1, 2)))       # (new_g, old_g)
+                    to_concrete!(contract(V, (2, 3), Vn', (2, 3))) :      # (old_g, new_g)
+                    to_concrete!(contract(Vn', (1, 2), V, (1, 2)))       # (new_g, old_g)
                 for t in eachindex(vs)
                     vs[t] = side === :left ?
-                            to_concrete(contract(vs[t], (3,), P, (1,))) :
-                            to_concrete(contract(P, (2,), vs[t], (1,)))
+                            to_concrete!(contract(vs[t], (3,), P, (1,))) :
+                            to_concrete!(contract(P, (2,), vs[t], (1,)))
                 end
                 V = Vn
             end
@@ -719,7 +719,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         C = nothing
         held = 0                          # frames this sweep has accumulated, running total
     for i in 1:c
-        K = C === nothing ? psiL[i] : to_concrete(contract(C, (2,), psiL[i], (1,)))
+        K = C === nothing ? psiL[i] : to_concrete!(contract(C, (2,), psiL[i], (1,)))
         _fr = (t0 = time_ns(); f = _frame_from(K, psiL[i + 1]);
                accL.tframe += (time_ns() - t0) / 1e9; f)
         ex = record!(accL, n_newL, timed_expand(accL, _fr, mpo, i, lch,
@@ -744,8 +744,8 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             # like `||H1||^k` and the SVD's relative `cutoff` -- which is measured against the
             # LARGEST singular value -- deletes the low-order vectors that carry the state
             # itself. `Kex` is left unnormalised so it keeps the state's own scale.
-            M   = to_concrete(contract(psiL[i + 1], (2, 3), ex.V_ex', (2, 3)))
-            Kex = to_concrete(contract(K, (3,), M, (1,)))
+            M   = to_concrete!(contract(psiL[i + 1], (2, 3), ex.V_ex', (2, 3)))
+            Kex = to_concrete!(contract(K, (3,), M, (1,)))
             blocks = if krylov_grow
                 # PER-PASS BUDGET = what the FIRST expansion admitted on this bond. Keeping the
                 # increment constant makes the space grow linearly in the Lanczos step, which is
@@ -775,7 +775,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
 
         # (d) carry the ORIGINAL amplitude into the new basis. `K`, not `Kex`: `W[i]` touches
         # only legs 1-2, so this lands on `(b_i, link_i)` and composes with `psiL[i+1]`.
-        C = to_concrete(contract(W[i]', (1, 2), K, (1, 2)))
+        C = to_concrete!(contract(W[i]', (1, 2), K, (1, 2)))
         i == c && (lenv_root = lch)     # captured BEFORE pushing through the root frame
         i < c && ((lch = (t0 = time_ns(); e = push_left_channels(lch, mpo, W[i], i);
                  accL.tenv += (time_ns() - t0) / 1e9; e)))
@@ -804,7 +804,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         held = 0
     for j in (L - 1):-1:c
         B = D === nothing ? psiR[j + 1] :
-            to_concrete(contract(psiR[j + 1], (3,), D, (1,)))
+            to_concrete!(contract(psiR[j + 1], (3,), D, (1,)))
         _fr = (t0 = time_ns(); f = _frame_from(psiR[j], B);
                accR.tframe += (time_ns() - t0) / 1e9; f)
         ex = record!(accR, n_newR, timed_expand(accR, _fr, mpo, j,
@@ -815,8 +815,8 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         held += tensor_elements(ex.U_ex) + tensor_elements(ex.V_ex)
         if krylov_basis > 0
             # Row mirror of the K half-sweep's Krylov basis; see the comment there.
-            M   = to_concrete(contract(ex.U_ex', (1, 2), psiR[j], (1, 2)))    # (b_L, link_j)
-            Bex = to_concrete(contract(M, (2,), B, (1,)))
+            M   = to_concrete!(contract(ex.U_ex', (1, 2), psiR[j], (1, 2)))    # (b_L, link_j)
+            Bex = to_concrete!(contract(M, (2,), B, (1,)))
             blocks = if krylov_grow
                 bl, Ufin = _grow_frame(accR, Bex, ex.U_ex, :right, j,
                                        left_channels(lstack, j), rch, max(ex.n_new_l, 1))
@@ -840,7 +840,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         j != c && (expanded[j] = leg_dim(Z[j], 1))
         held += tensor_elements(Z[j])
 
-        D = to_concrete(contract(B, (2, 3), Z[j]', (2, 3)))          # (link_j, b_j)
+        D = to_concrete!(contract(B, (2, 3), Z[j]', (2, 3)))          # (link_j, b_j)
         j == c && (renv_root = rch)
         j > c && ((rch = (t0 = time_ns(); e = push_right_channels(rch, mpo, Z[j], j + 1);
                  accR.tenv += (time_ns() - t0) / 1e9; e)))
@@ -902,17 +902,17 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         AR = nothing
         for j in (L - 1):-1:c                    # mirrors `half_right!`'s `D` recursion on `psi`
             B = AR === nothing ? psi[j + 1] :
-                to_concrete(contract(psi[j + 1], (3,), AR, (1,)))
-            AR = to_concrete(contract(B, (2, 3), Z[j]', (2, 3)))     # (link_j, b_j)
+                to_concrete!(contract(psi[j + 1], (3,), AR, (1,)))
+            AR = to_concrete!(contract(B, (2, 3), Z[j]', (2, 3)))     # (link_j, b_j)
         end
     end
 
     AL = nothing
     for i in 1:c
-        T = AL === nothing ? psi[i] : to_concrete(contract(AL, (2,), psi[i], (1,)))
-        AL = to_concrete(contract(W[i]', (1, 2), T, (1, 2)))         # (b_L, link_{i+1})
+        T = AL === nothing ? psi[i] : to_concrete!(contract(AL, (2,), psi[i], (1,)))
+        AL = to_concrete!(contract(W[i]', (1, 2), T, (1, 2)))         # (b_L, link_{i+1})
     end
-    S0 = to_concrete(contract(AL, (2,), AR, (1,)))                   # (b_L, b_R)
+    S0 = to_concrete!(contract(AL, (2,), AR, (1,)))                   # (b_L, b_R)
     peak = accL.peak + accR.peak +
            sum(tensor_elements(t) for t in (W[c], Z[c], S0); init = 0)
 

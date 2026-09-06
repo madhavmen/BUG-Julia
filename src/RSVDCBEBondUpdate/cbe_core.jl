@@ -115,7 +115,7 @@ function _sketch_closures(f::BondFrame, buildHT; share::Bool = true)
         share && AL[] !== nothing && return AL[]
         H = _ht()
         c = contract(f.U0', (1, 2), H, (1, 2))             # (bond, site_r, link_r)
-        A = to_concrete(H - to_concrete(contract(f.U0, (3,), c, (1,))))
+        A = to_concrete(H - to_concrete!(contract(f.U0, (3,), c, (1,))))
         share && (AL[] = A)
         return A
     end
@@ -123,11 +123,11 @@ function _sketch_closures(f::BondFrame, buildHT; share::Bool = true)
         share && AR[] !== nothing && return AR[]
         H = _ht()
         c = contract(H, (3, 4), f.V0', (2, 3))             # (link_l, site_l, bond)
-        A = to_concrete(H - to_concrete(contract(c, (3,), f.V0, (1,))))
+        A = to_concrete(H - to_concrete!(contract(c, (3,), f.V0, (1,))))
         share && (AR[] = A)
         return A
     end
-    skl = Om -> to_concrete(contract(_al(), (3, 4), Om', (2, 3)))       # (link_l, site_l, g)
+    skl = Om -> to_concrete!(contract(_al(), (3, 4), Om', (2, 3)))       # (link_l, site_l, g)
     skr = Om -> to_concrete(permutedims(contract(_ar(), (1, 2), Om', (1, 2)), (3, 1, 2)))
     return skl, skr
 end
@@ -755,14 +755,14 @@ function cbe_expand(f::BondFrame, skl, skr;
     TLC = if njl == 0
         nothing
     elseif resj !== nothing && dex_l <= joint
-        to_concrete(contract(QL, (3,), resj.U, (1,)))
+        to_concrete!(contract(QL, (3,), resj.U, (1,)))
     else
         _trim_total(QL, 3, dex_l)
     end
     TRC = if njr == 0
         nothing
     elseif resj !== nothing && dex_r <= joint
-        to_concrete(contract(resj.Vd, (2,), QR, (1,)))
+        to_concrete!(contract(resj.Vd, (2,), QR, (1,)))
     else
         _trim_total(QR, 1, dex_r)
     end
@@ -1160,8 +1160,8 @@ function sketch_bond_left(f::BondFrame, gate, Om)
     tl, tr = f.site_l.itags, f.site_r.itags
     HT = apply_gate(gate, frame_theta(f), tl, tr)       # (link_l, site_l, site_r, link_r)
     c  = contract(f.U0', (1, 2), HT, (1, 2))            # (bond, site_r, link_r)
-    A  = to_concrete(HT - to_concrete(contract(f.U0, (3,), c, (1,))))
-    return to_concrete(contract(A, (3, 4), Om', (2, 3)))          # (link_l, site_l, g)
+    A  = to_concrete(HT - to_concrete!(contract(f.U0, (3,), c, (1,))))
+    return to_concrete!(contract(A, (3, 4), Om', (2, 3)))          # (link_l, site_l, g)
 end
 
 """
@@ -1175,7 +1175,7 @@ function sketch_bond_right(f::BondFrame, gate, Om)
     tl, tr = f.site_l.itags, f.site_r.itags
     HT = apply_gate(gate, frame_theta(f), tl, tr)
     c  = contract(HT, (3, 4), f.V0', (2, 3))            # (link_l, site_l, bond)
-    A  = to_concrete(HT - to_concrete(contract(c, (3,), f.V0, (1,))))
+    A  = to_concrete(HT - to_concrete!(contract(c, (3,), f.V0, (1,))))
     Y  = contract(A, (1, 2), Om', (1, 2))               # (site_r, link_r, g)
     return to_concrete(permutedims(Y, (3, 1, 2)))       # (g, site_r, link_r)
 end
@@ -1270,14 +1270,14 @@ function cbe_bond_update(f::BondFrame, gate, tau::ComplexF64;
     # The Galerkin step in a GIVEN basis. Note `S_start` is rebuilt from `theta0` every time it
     # is called -- see the loop below for why that is the whole correctness argument.
     function galerkin(U_aug, V_aug)
-        S_start = to_concrete(contract(contract(U_aug', (1, 2), theta0, (1, 2)),
+        S_start = to_concrete!(contract(contract(U_aug', (1, 2), theta0, (1, 2)),
                                        (2, 3), V_aug', (2, 3)))
         function apply_s(x)
             nmv[] += 1
             theta = to_concrete((U_aug * x) * V_aug)
             evolved = apply_gate(gate, theta, tl, tr)
             proj = contract(U_aug', (1, 2), evolved, (1, 2))
-            return to_concrete(contract(proj, (2, 3), V_aug', (2, 3)))
+            return to_concrete!(contract(proj, (2, 3), V_aug', (2, 3)))
         end
         return expv(apply_s, tau_s, S_start; hermitian = true, maxiter = maxiter,
                     tol = tol, reorth = s_reorth)
@@ -1394,7 +1394,7 @@ current one and the recurrence alone would drift.
 function _expanding_krylov(f::BondFrame, applyH, expand, solver::SStepSolver, theta0, nmv;
                            maxiter::Int, tol::Float64, grow_iters::Int,
                            probe::Symbol = :residual)
-    project(U, V, th) = to_concrete(contract(contract(U', (1, 2), th, (1, 2)),
+    project(U, V, th) = to_concrete!(contract(contract(U', (1, 2), th, (1, 2)),
                                              (2, 3), V', (2, 3)))
 
     # Embed a core from the (Uo,Vo) basis into (Un,Vn). `oplus` keeps the old block first so
@@ -1407,11 +1407,11 @@ function _expanding_krylov(f::BondFrame, applyH, expand, solver::SStepSolver, th
     # With a Krylov dimension of ~30 that is ~30x the frame work per pass, and it grows with
     # chi. Hoisted here; the per-vector cost is now the two `O(chi^3)` core contractions alone.
     embed_ops(Uo, Vo, Un, Vn) =
-        (to_concrete(contract(Un', (1, 2), Uo, (1, 2))),         # PL (new_l, old_l)
-         to_concrete(contract(Vo, (2, 3), Vn', (2, 3))))         # PR (old_r, new_r)
+        (to_concrete!(contract(Un', (1, 2), Uo, (1, 2))),         # PL (new_l, old_l)
+         to_concrete!(contract(Vo, (2, 3), Vn', (2, 3))))         # PR (old_r, new_r)
 
     embed_with(PL, PR, S) =
-        to_concrete(contract(contract(PL, (2,), S, (1,)), (2,), PR, (1,)))
+        to_concrete!(contract(contract(PL, (2,), S, (1,)), (2,), PR, (1,)))
 
     U, V = f.U0, f.V0
     S0 = project(U, V, theta0)
@@ -1526,9 +1526,9 @@ Everything here is `O(χ²)`: no rank-4 tensor is formed to measure convergence.
 function _new_direction_weight(U_prev, V_prev, U_aug, V_aug, S)
     n = norm(S)
     n == 0 && return 0.0
-    PL = to_concrete(contract(U_prev', (1, 2), U_aug, (1, 2)))     # (prev_l, new_l)
-    PR = to_concrete(contract(V_aug, (2, 3), V_prev', (2, 3)))     # (new_r, prev_r)
-    S_old = to_concrete(contract(contract(PL, (2,), S, (1,)), (2,), PR, (1,)))
+    PL = to_concrete!(contract(U_prev', (1, 2), U_aug, (1, 2)))     # (prev_l, new_l)
+    PR = to_concrete!(contract(V_aug, (2, 3), V_prev', (2, 3)))     # (new_r, prev_r)
+    S_old = to_concrete!(contract(contract(PL, (2,), S, (1,)), (2,), PR, (1,)))
     return sqrt(max(n^2 - norm(S_old)^2, 0.0)) / n
 end
 

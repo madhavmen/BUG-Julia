@@ -326,7 +326,7 @@ function _left_close(E, A, O, i::Int)
           error("_left_close: rank-$nE environment with a rank-$nAO operator at site $i")
     length(tmp.inds) == 3 || error(
         "_left_close: an operator channel is still open at the right boundary")
-    s = to_concrete(contract(tmp, (1, 2, 3), _bra_right_boundary(A), (2, 3, 1)))
+    s = to_concrete!(contract(tmp, (1, 2, 3), _bra_right_boundary(A), (2, 3, 1)))
     return ComplexF64(s[])
 end
 
@@ -455,7 +455,7 @@ function _right_close(E, A, O, i::Int)
           error("_right_close: rank-$nE environment with a rank-$nAO operator at site $i")
     length(tmp.inds) == 3 || error(
         "_right_close: an operator channel is still open at the left boundary")
-    s = to_concrete(contract(tmp, (1, 2, 3), _bra_left_boundary(A), (1, 2, 3)))
+    s = to_concrete!(contract(tmp, (1, 2, 3), _bra_left_boundary(A), (1, 2, 3)))
     return ComplexF64(s[])
 end
 

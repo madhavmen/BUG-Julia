@@ -215,7 +215,7 @@ function apply_zero_site(H0::ZeroSiteH, S)
 
     if H0.done_l !== ZERO
         # (bra_l, bond_r) <- done_l's bra replaces bond_l
-        add!(_unprime(to_concrete(contract(H0.done_l, (2,), S, (1,))), 1))
+        add!(_unprime(to_concrete!(contract(H0.done_l, (2,), S, (1,))), 1))
     end
     if H0.done_r !== ZERO
         out = contract(S, (2,), H0.done_r, (2,))       # (bond_l, bra_r)

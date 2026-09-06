@@ -94,6 +94,20 @@ const DEXS     = envints("LCP_DEX", "0")          # 0 = the growth schedule
 # is actually for. `growth = 2.0` asks for 1024 and probes at 0.6x, where it cannot win.
 const GROWTH   = envfloat("LCP_GROWTH", 1.1)
 const KRY_TOL  = envfloat("LCP_KRY_TOL", 1e-6)   # BUG half-sweep frame tolerance
+# ⛔ DEFAULT ON HERE, AND ONLY HERE. Project-first builds the FULL `H*Theta` at every bond and
+# contracts the probe into the RESULT, so the randomised sketch shrinks the SVD and nothing else
+# -- the object that dominates gets built either way. That is a whole two-site matvec per bond
+# spent on BASIS SELECTION, which is what put `cbe1s` (72.8 s) behind `tdvp2` (56.9 s) at
+# chi = 1024 when a one-site sweep must be the cheaper of the two. Folding puts `Om` in BEFORE
+# the environment contractions, replacing `d*chi_r` columns with `g ~ 1.2*budget`.
+#
+# ⚠ IT IS A COST SWITCH ONLY -- `P_perp` and `Om` act on disjoint legs, so they commute, and
+# `benchmarks/fold_omega_check.jl` pins the two orderings bond by bond (recorded PASS at
+# max|dsz| = 4.5e-15). It can LOSE at small chi, because folding cannot share one `H*Theta`
+# across the three sketch calls: the rule is `3g < chi`. At chi = 1024, dex = 64 that is
+# 231 < 1024. ⛔ SO THIS DEFAULT IS ONLY RIGHT FOR THE LARGE-CHI REGIME THIS DRIVER EXISTS FOR;
+# the library defaults stay off.
+const FOLD     = envbool("LCP_FOLD", true)
 # ⛔ BUG'S FRAME DEPTH IS A SEPARATE KNOB FROM `maxiter`, AND ITS DEFAULT IS 30.
 # `maxiter` bounds the `expv` solves; `krylov_basis` bounds `_krylov_frame`, which is where
 # BUG does nearly all of its operator work — one `apply_one_site` per vector, per bond, per
@@ -345,18 +359,18 @@ function make_stepper(arm::AbstractString, psi0, mpo, chi::Int, dex::Int)
     elseif arm == "cbe1s"
         () -> RSVDCBEBondUpdate.tdvp_cbe1s_step!(psi, mpo, tau;
                   maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER, exact = false,
-                  conv_tol = CONV_TOL, dex = dex, growth = GROWTH)
+                  conv_tol = CONV_TOL, dex = dex, growth = GROWTH, fold_omega = FOLD)
     elseif arm == "bug"
         () -> RSVDCBEBondUpdate.cbe_bug_step!(psi, mpo, tau;
                   maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER, exact = false,
                   root_conv_tol = CONV_TOL, krylov_tol = KRY_TOL, krylov_basis = KRY_BASIS,
-                  dex = dex, growth = GROWTH, parallel = PARALLEL,
+                  dex = dex, growth = GROWTH, parallel = PARALLEL, fold_omega = FOLD,
                   split_maxdim = SPLIT_MAXDIM < 0 ? chi : SPLIT_MAXDIM)
     elseif arm == "bugmid"
         () -> RSVDCBEBondUpdate.cbe_bug_midpoint_step!(psi, mpo, tau;
                   maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER, exact = false,
                   root_conv_tol = CONV_TOL, krylov_tol = KRY_TOL, krylov_basis = KRY_BASIS,
-                  dex = dex, growth = GROWTH, parallel = PARALLEL,
+                  dex = dex, growth = GROWTH, parallel = PARALLEL, fold_omega = FOLD,
                   split_maxdim = SPLIT_MAXDIM < 0 ? chi : SPLIT_MAXDIM)
     else
         error("unknown arm $arm")

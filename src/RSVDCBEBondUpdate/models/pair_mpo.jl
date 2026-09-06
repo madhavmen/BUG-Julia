@@ -86,7 +86,7 @@ function _outer(A, B)
     B1 = to_concrete(addSingleton(B, (1,)))
     for (x, y) in ((A1, B1), (B1, A1))
         try
-            T = to_concrete(contract(x, (length(x.inds),), y, (1,)))
+            T = to_concrete!(contract(x, (length(x.inds),), y, (1,)))
             # Restore (A's legs..., B's legs...) if the contractable order was the other one.
             return x === A1 ? T :
                    to_concrete(permutedims(T, (ntuple(k -> length(B.inds) + k,

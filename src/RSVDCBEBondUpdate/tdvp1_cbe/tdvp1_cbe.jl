@@ -69,7 +69,7 @@ function _tdvp1_cbe_bond!(psi::SymMPS, h::XXZChain, i::Int, tau::ComplexF64, dir
         # Absorb, then rename BOTH ends of the bond to `tag` in the same breath. Each result is
         # rank-3 with only one leg wanting `tag`, so neither construction sees a duplicate.
         psi[i + 1] = to_concrete(setitag(
-            to_concrete(contract(C, (2,), psi[i + 1], (1,))), 1, tag))
+            to_concrete!(contract(C, (2,), psi[i + 1], (1,))), 1, tag))
         psi[i] = to_concrete(setitag(psi[i], 3, tag))
         psi.center = i + 1
 
@@ -99,7 +99,7 @@ function _tdvp1_cbe_bond!(psi::SymMPS, h::XXZChain, i::Int, tau::ComplexF64, dir
                  hermitian = true, maxiter = maxiter, tol = tol, reorth = reorth)
 
         psi[i] = to_concrete(setitag(
-            to_concrete(contract(psi[i], (3,), C, (1,))), 3, tag))
+            to_concrete!(contract(psi[i], (3,), C, (1,))), 3, tag))
         psi[i + 1] = to_concrete(setitag(psi[i + 1], 1, tag))
         psi.center = i
 

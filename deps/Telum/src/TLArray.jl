@@ -840,6 +840,35 @@ end
 
 canonicalize(q::AbstractTLArray) = to_concrete(q)
 
+"""
+    to_concrete!(q::TLArray) -> TLArray
+
+[`to_concrete`](@ref) WITHOUT the defensive copy: applies the same w-matrix normalisation and
+orientation cleanup to `q` IN PLACE and returns `q` itself.
+
+⛔ **ONLY FOR A TENSOR THE CALLER EXCLUSIVELY OWNS.** `to_concrete` copies because it promises
+never to mutate its argument or anything reachable from it, and that promise is what makes it
+safe to call on a tensor someone else still holds. This does not make that promise. Passing it
+anything shared — a site tensor of a live MPS, an environment kept in a stack — mutates that
+object, and the corruption is silent.
+
+WHY IT EXISTS. `_eager_tlarray(q::TLArray) = copy(q)`, so `to_concrete` on an ALREADY CONCRETE
+tensor is a full deep copy of every block. The sweeps are written as `to_concrete(contract(…))`
+throughout, and `contract` builds its result out of freshly allocated `result_RMTs`,
+`result_wmatdata` and `result_wmatinfo` which alias nothing on either input — so that copy
+duplicates a tensor nobody else can see, once per contraction, hundreds of times per step.
+Measured context: a chi=1024 TDVP2 step allocates ~142 GB against a 0.08 GB state, and
+GC/allocation is ~67% of active profile samples against ~12% for BLAS gemm.
+
+`contract(…)` results are the intended argument, and they are safe by construction.
+"""
+function to_concrete!(q::TLArray)
+    materialize(q)
+    _normalize_wmats!(q)
+    _orient_wmats!(q)
+    return q
+end
+
 function _qlabels_from_accessors(q::AbstractTLArray{T, QD, N, RD, QT}) where {T, QD, N, RD, QT}
     return [ntuple(leg -> sector_qlabel(q, sector, leg), Val(QD))::NTuple{QD, QT}
             for sector in sector_slots(q)]

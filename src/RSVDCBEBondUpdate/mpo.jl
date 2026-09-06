@@ -657,19 +657,19 @@ function apply_h_two_site(Theta, mpo::MPO, i::Int, lenv::MPOLink, renv::MPOLink)
     # Left end: attach the environment, or -- at the boundary -- keep `Theta`'s own link
     # leg and drop the MPO's dim-1 boundary leg.
     T = if lenv.E === nothing
-        X = to_concrete(contract(Theta, (2,), W1, (2,)))  # (ℓ_l,s_r,ℓ_r,w_l,s_bra,w_mid)
+        X = to_concrete!(contract(Theta, (2,), W1, (2,)))  # (ℓ_l,s_r,ℓ_r,w_l,s_bra,w_mid)
         to_concrete(deleteSingleton(X, 4))
     else
-        X = to_concrete(contract(lenv.E, (3,), Theta, (1,)))       # (bra,w,s_l,s_r,ℓ_r)
-        to_concrete(contract(X, (2, 3), W1, (1, 2)))
+        X = to_concrete!(contract(lenv.E, (3,), Theta, (1,)))       # (bra,w,s_l,s_r,ℓ_r)
+        to_concrete!(contract(X, (2, 3), W1, (1, 2)))
     end                                                  # (link_l, s_r, ℓ_r, s_bra_l, w)
-    T = to_concrete(contract(T, (5, 2), W2, (1, 2)))      # (link_l,ℓ_r,s_bra_l,s_bra_r,w)
+    T = to_concrete!(contract(T, (5, 2), W2, (1, 2)))      # (link_l,ℓ_r,s_bra_l,s_bra_r,w)
 
     T = if renv.E === nothing
         X = to_concrete(deleteSingleton(T, 5))            # (link_l, ℓ_r, s_bra_l, s_bra_r)
         to_concrete(permutedims(X, (1, 3, 4, 2)))
     else
-        to_concrete(contract(T, (5, 2), renv.E, (2, 3)))  # (link_l,s_bra_l,s_bra_r,bra_r)
+        to_concrete!(contract(T, (5, 2), renv.E, (2, 3)))  # (link_l,s_bra_l,s_bra_r,bra_r)
     end
 
     lenv.E === nothing || (T = _unprime(T, 1))
@@ -765,23 +765,23 @@ function _fold_sketch_closures(f::BondFrame, mpo::MPO, i::Int,
         #    leg left by trimming, dropped rather than contracted -- the same asymmetry
         #    `apply_h_two_site` handles, and the reason this is not one expression.
         C = if renv.E === nothing
-            X = to_concrete(contract(Omd, (2,), W2, (3,)))   # (g,bra_r,w_mid,s_ket_r,w_r)
+            X = to_concrete!(contract(Omd, (2,), W2, (3,)))   # (g,bra_r,w_mid,s_ket_r,w_r)
             to_concrete(deleteSingleton(X, 5))               # (g, bra_r, w_mid, s_ket_r)
         else
-            X = to_concrete(contract(Omd, (3,), renv.E, (1,)))  # (g, s_bra_r, w, ket_r)
+            X = to_concrete!(contract(Omd, (3,), renv.E, (1,)))  # (g, s_bra_r, w, ket_r)
             # W2 = (w_mid, s_ket_r, s_bra_r, w_r); close `s_bra_r` and `w_r`.
-            to_concrete(contract(X, (2, 3), W2, (3, 4)))     # (g, ket_r, w_mid, s_ket_r)
+            to_concrete!(contract(X, (2, 3), W2, (3, 4)))     # (g, ket_r, w_mid, s_ket_r)
         end
         # 2. into Theta: close the ket site and ket link on the right.
-        D = to_concrete(contract(Theta, (3, 4), C, (4, 2)))  # (ℓ_l, s_l, g, w_mid)
+        D = to_concrete!(contract(Theta, (3, 4), C, (4, 2)))  # (ℓ_l, s_l, g, w_mid)
         # 3. W1 = (w_l, s_ket_l, s_bra_l, w_mid); close the ket site and the shared MPO leg.
-        E = to_concrete(contract(D, (2, 4), W1, (2, 4)))     # (ℓ_l, g, w_l, s_bra_l)
+        E = to_concrete!(contract(D, (2, 4), W1, (2, 4)))     # (ℓ_l, g, w_l, s_bra_l)
         Y = if lenv.E === nothing
             X = to_concrete(deleteSingleton(E, 3))           # (ℓ_l, g, s_bra_l)
             to_concrete(permutedims(X, (1, 3, 2)))           # (ℓ_l, s_bra_l, g)
         else
             # lenv.E = (bra, w, ket); close the ket link and `w_l`.
-            X = to_concrete(contract(E, (1, 3), lenv.E, (3, 2)))  # (g, s_bra_l, bra)
+            X = to_concrete!(contract(E, (1, 3), lenv.E, (3, 2)))  # (g, s_bra_l, bra)
             _unprime(to_concrete(permutedims(X, (3, 2, 1))), 1)   # (bra, s_bra_l, g)
         end
         return _project_left(f, Y)
@@ -791,23 +791,23 @@ function _fold_sketch_closures(f::BondFrame, mpo::MPO, i::Int,
     function skr(Om)
         Omd = Om'                                # (bra_l, s_bra_l, g)
         C = if lenv.E === nothing
-            X = to_concrete(contract(Omd, (2,), W1, (3,)))   # (bra_l,g,w_l,s_ket_l,w_mid)
+            X = to_concrete!(contract(Omd, (2,), W1, (3,)))   # (bra_l,g,w_l,s_ket_l,w_mid)
             to_concrete(deleteSingleton(X, 3))               # (bra_l, g, s_ket_l, w_mid)
         else
-            X = to_concrete(contract(Omd, (1,), lenv.E, (1,)))  # (s_bra_l, g, w, ket_l)
+            X = to_concrete!(contract(Omd, (1,), lenv.E, (1,)))  # (s_bra_l, g, w, ket_l)
             # W1 = (w_l, s_ket_l, s_bra_l, w_mid); close `s_bra_l` and `w_l`.
-            Z = to_concrete(contract(X, (1, 3), W1, (3, 1)))    # (g, ket_l, s_ket_l, w_mid)
+            Z = to_concrete!(contract(X, (1, 3), W1, (3, 1)))    # (g, ket_l, s_ket_l, w_mid)
             to_concrete(permutedims(Z, (2, 1, 3, 4)))           # (ket_l, g, s_ket_l, w_mid)
         end
         # into Theta: close the ket link and ket site on the left.
-        D = to_concrete(contract(Theta, (1, 2), C, (1, 3)))  # (s_r, ℓ_r, g, w_mid)
+        D = to_concrete!(contract(Theta, (1, 2), C, (1, 3)))  # (s_r, ℓ_r, g, w_mid)
         # W2 = (w_mid, s_ket_r, s_bra_r, w_r); close the ket site and the shared MPO leg.
-        E = to_concrete(contract(D, (1, 4), W2, (2, 1)))     # (ℓ_r, g, s_bra_r, w_r)
+        E = to_concrete!(contract(D, (1, 4), W2, (2, 1)))     # (ℓ_r, g, s_bra_r, w_r)
         Y = if renv.E === nothing
             X = to_concrete(deleteSingleton(E, 4))           # (ℓ_r, g, s_bra_r)
             to_concrete(permutedims(X, (2, 3, 1)))           # (g, s_bra_r, ℓ_r)
         else
-            X = to_concrete(contract(E, (1, 4), renv.E, (3, 2)))  # (g, s_bra_r, bra_r)
+            X = to_concrete!(contract(E, (1, 4), renv.E, (3, 2)))  # (g, s_bra_r, bra_r)
             _unprime(to_concrete(X), 3)
         end
         return _project_right(f, Y)
@@ -818,14 +818,14 @@ end
 
 "`P_perp^L Y` with `P_perp^L = I - U0 U0'`, for `Y` of layout `(link_l, site_l, g)`."
 function _project_left(f::BondFrame, Y)
-    c = to_concrete(contract(f.U0', (1, 2), Y, (1, 2)))      # (bond, g)
-    return to_concrete(Y - to_concrete(contract(f.U0, (3,), c, (1,))))
+    c = to_concrete!(contract(f.U0', (1, 2), Y, (1, 2)))      # (bond, g)
+    return to_concrete(Y - to_concrete!(contract(f.U0, (3,), c, (1,))))
 end
 
 "`Y P_perp^R` with `P_perp^R = I - V0' V0`, for `Y` of layout `(g, site_r, link_r)`."
 function _project_right(f::BondFrame, Y)
-    c = to_concrete(contract(Y, (2, 3), f.V0', (2, 3)))      # (g, bond)
-    return to_concrete(Y - to_concrete(contract(c, (2,), f.V0, (1,))))
+    c = to_concrete!(contract(Y, (2, 3), f.V0', (2, 3)))      # (g, bond)
+    return to_concrete(Y - to_concrete!(contract(c, (2,), f.V0, (1,))))
 end
 
 """
@@ -895,12 +895,24 @@ one_site_h(mpo::MPO, j::Int, lenv::MPOLeftEnvStack, renv::MPORightEnvStack) =
 `H_eff A` for a site tensor `A` with legs `(link_l, site, link_r)`, in and out.
 """
 function apply_one_site(H1::MPOOneSiteH, A)
+    # ⛔ `to_concrete!` ON THE CONTRACTION RESULTS, NOT `to_concrete`. This is THE hot path —
+    # one call per Krylov vector per bond per half-sweep, several hundred per step — and
+    # `_eager_tlarray(q::TLArray) = copy(q)`, so `to_concrete` on an already-concrete tensor
+    # deep-copies every block. `contract` builds its result from freshly allocated RMTs and
+    # w-matrix storage that alias neither input, so that copy duplicates a tensor nobody else
+    # can see. Measured context: a chi=1024 TDVP2 step allocated ~142 GB against a 0.08 GB
+    # state, with GC/allocation ~67% of active profile samples and BLAS gemm ~12%.
+    #
+    # ⚠ SAFE HERE BECAUSE EVERY ARGUMENT IS A FRESH `contract` RESULT. `H1.l`, `H1.w`, `H1.r`
+    # and `A` are all still owned by their callers and are never passed to `to_concrete!` —
+    # only the intermediates. `deleteSingleton` and `permutedims` return views, so those keep
+    # the copying `to_concrete`.
     T = if H1.l === nothing
-        X = to_concrete(contract(A, (2,), H1.w, (2,)))     # (ℓ_l, ℓ_r, w_l, s_bra, w_r)
-        to_concrete(deleteSingleton(X, 3))                 # (ℓ_l, ℓ_r, s_bra, w_r)
+        X = to_concrete!(contract(A, (2,), H1.w, (2,)))     # (ℓ_l, ℓ_r, w_l, s_bra, w_r)
+        to_concrete(deleteSingleton(X, 3))                  # (ℓ_l, ℓ_r, s_bra, w_r)
     else
-        X = to_concrete(contract(H1.l, (3,), A, (1,)))      # (bra_l, w, s, ℓ_r)
-        X = to_concrete(contract(X, (2, 3), H1.w, (1, 2)))  # (bra_l, ℓ_r, s_bra, w_r)
+        X = to_concrete!(contract(H1.l, (3,), A, (1,)))      # (bra_l, w, s, ℓ_r)
+        X = to_concrete!(contract(X, (2, 3), H1.w, (1, 2)))  # (bra_l, ℓ_r, s_bra, w_r)
         X
     end                                                    # (link_l, ℓ_r, s_bra, w_r)
 
@@ -908,7 +920,7 @@ function apply_one_site(H1::MPOOneSiteH, A)
         X = to_concrete(deleteSingleton(T, 4))             # (link_l, ℓ_r, s_bra)
         to_concrete(permutedims(X, (1, 3, 2)))
     else
-        to_concrete(contract(T, (4, 2), H1.r, (2, 3)))     # (link_l, s_bra, bra_r)
+        to_concrete!(contract(T, (4, 2), H1.r, (2, 3)))    # (link_l, s_bra, bra_r)
     end
 
     H1.l === nothing || (T = _unprime(T, 1))
@@ -953,7 +965,7 @@ contributes its bra leg in place of the ket leg it consumes, so the result carri
 own legs after unpriming.
 """
 function apply_zero_site(H0::MPOZeroSiteH, S)
-    T = to_concrete(contract(H0.l, (3,), S, (1,)))        # (bra_l, mpo, bond_r)
-    T = to_concrete(contract(T, (2, 3), H0.r, (2, 3)))    # (bra_l, bra_r)
+    T = to_concrete!(contract(H0.l, (3,), S, (1,)))        # (bra_l, mpo, bond_r)
+    T = to_concrete!(contract(T, (2, 3), H0.r, (2, 3)))    # (bra_l, bra_r)
     return _unprime(_unprime(T, 1), 2)
 end
