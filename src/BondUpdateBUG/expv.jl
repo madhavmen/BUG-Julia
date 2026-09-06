@@ -104,7 +104,16 @@ function tensor_inner(a, b)
     n = length(a.inds)
     legs = ntuple(identity, n)
     r = contract(a', legs, b, legs)
-    rc = to_concrete(r)
+    # ⛔ `to_concrete!`, NOT `to_concrete`. `_eager_tlarray(q::TLArray) = copy(q)`, so the
+    # copying form DEEP-COPIES the tensor just to read ONE SCALAR out of it. `r` is a fresh
+    # `contract` result aliasing neither argument, so nobody else can observe the mutation.
+    #
+    # This is the hottest allocation site in the whole package. Allocation attribution at
+    # chi=1024 (job 16333509) put it FIRST for every arm: 39.9% of tdvp2's sampled bytes and
+    # 20.1% of cbe1s's. That is because re-orthogonalised Lanczos calls it O(maxiter^2) times
+    # per solve -- two passes over the whole basis every iteration -- against ~4(L-1) solves
+    # per step, so it runs tens of thousands of times where a matvec runs hundreds.
+    rc = to_concrete!(r)
     length(rc) == 0 && return 0.0 + 0.0im   # `length` of a TLArray is its sector count
     return ComplexF64(rc[])
 end
@@ -265,13 +274,24 @@ function lanczos_expv(apply, tau::ComplexF64, x;
             w = apply(v); total += 1
             a = real(tensor_inner(v, w))
             push!(alpha, a)
-            w = w + (-a) * v + (-b) * basis[end - 1]
+            # ⛔ MATERIALISE BEFORE THE REORTH LOOP, NOT AFTER IT. Telum's `+`/`-` are LAZY, so
+            # leaving `w` symbolic made every `tensor_inner(u, w)` below force a sum tree that
+            # GREW BY ONE TERM PER STEP -- and the loop runs `2k` times at iteration `k`. Cost
+            # per iteration was therefore O(k^2 N) instead of O(k N), i.e. O(k^3 N) per solve,
+            # all of it allocation. `tensor_inner` came top of the allocation attribution for
+            # every arm (job 16333509), and this loop is why its call count is quadratic.
+            #
+            # ⚠ THIS DOES NOT CHANGE THE ARITHMETIC OR ITS ORDER. Modified Gram-Schmidt is
+            # inherently sequential -- each projection must see the vector the previous one
+            # left -- and that is exactly what this does; the only change is WHEN each
+            # subtraction is evaluated. Deferring them never made the sequence cheaper, because
+            # `tensor_inner` forced the tree anyway on the very next line.
+            w = to_concrete(w + (-a) * v + (-b) * basis[end - 1])
             if reorth
                 for _pass in 1:2, u in basis
-                    w = w - tensor_inner(u, w) * u
+                    w = to_concrete(w - tensor_inner(u, w) * u)
                 end
             end
-            w = to_concrete(w)
         end
 
         vals, vecs = _tridiag_eigen(alpha, betas)
@@ -401,10 +421,13 @@ function arnoldi_expv(apply, tau::ComplexF64, x;
                 for i in 1:length(basis)
                     h = tensor_inner(basis[i], w)
                     H[i, j] += h
-                    w = w - h * basis[i]
+                    # Materialised per projection, for the reason `lanczos_expv` spells out:
+                    # Telum's `-` is lazy, so a symbolic `w` makes the NEXT `tensor_inner` force
+                    # a sum tree one term longer each time, turning this double Gram-Schmidt
+                    # from O(k N) into O(k^2 N) per iteration -- all of it allocation.
+                    w = to_concrete(w - h * basis[i])
                 end
             end
-            w = to_concrete(w)
             m = j
             b = norm(w)
             betak = b

@@ -6,7 +6,22 @@ Drop one prime level from `leg`. An environment's bra leg is primed to keep it d
 from the ket while both are open (`henv.jl`); once it has replaced a link leg it must
 carry that link's original prime level again.
 """
-_unprime(t, leg::Int) = to_concrete(prime(t, leg; inc = -1))
+#
+# ⛔ `to_concrete!`, NOT `to_concrete` -- THIS WAS COPYING THE WHOLE TENSOR TWICE TO CHANGE ONE
+# INTEGER. `prime` goes through `_modify_plev`, which alters one `TLIndex`'s prime level and
+# then builds its result with `_copy_wmat_storage(q; deep=true)` and
+# `_copy_sector_RMTs(q; deep=true)` -- already a FULL DEEP COPY that the caller exclusively
+# owns. Wrapping that in the copying `to_concrete` (`_eager_tlarray(q::TLArray) = copy(q)`)
+# duplicated every block a second time, for no reader.
+#
+# Measured at chi=1024 (allocation attribution, job 16333509): this line is 28.5% of bugmid's
+# sampled bytes, 9.6% of tdvp2's and 6.1% of cbe1s's. Dropping the second copy halves it.
+#
+# ⚠ THE FIRST COPY IS STILL THERE, inside `_modify_plev`. Removing it needs a shallow relabel
+# that SHARES storage with `t`, which is only sound where the caller owns `t` -- true at these
+# call sites (all fresh `contract` results) but not a property of the function. Left for a
+# measured follow-up rather than assumed.
+_unprime(t, leg::Int) = to_concrete!(prime(t, leg; inc = -1))
 
 """
     _env_on_link(T, E, leg) -> TLArray
