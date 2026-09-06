@@ -156,7 +156,8 @@ gb(bytes) = bytes / 2^30
 # ── kernel-level breakdown ───────────────────────────────────────────────────
 
 const BUCKETS = ["BLAS gemm", "LAPACK svd/qr", "permute/HPTT", "GC/alloc",
-                 "contract bookkeeping", "svd bookkeeping", "oplus/sum", "other"]
+                 "memcpy/copyto", "TLArray plumbing", "contract bookkeeping",
+                 "svd bookkeeping", "oplus/sum", "BUGJulia sweep", "other"]
 
 """
 Classify ONE backtrace by its INNERMOST recognised frame.
@@ -181,12 +182,65 @@ function classify_bt(bt, lidict)
             (occursin("hptt", f) || occursin("permutedims", f)) && return "permute/HPTT"
             (occursin("gc", lowercase(f)) || occursin("jl_alloc", f) ||
              occursin("array_", f)) && return "GC/alloc"
+            # Bulk data movement that is NOT a permute: `copyto!`, `similar`, `fill!`,
+            # `memmove`. Separated from GC because the fixes differ — GC pressure wants fewer
+            # allocations, memcpy wants in-place kernels — and at 40% combined it matters
+            # which half is which.
+            (occursin("copyto", f) || occursin("memmove", f) || occursin("memcpy", f) ||
+             f == "similar" || f == "fill!" || occursin("unsafe_copyto", f)) &&
+                return "memcpy/copyto"
             occursin("svd.jl", file) && return "svd bookkeeping"
             occursin("contract.jl", file) && return "contract bookkeeping"
             (occursin("oplus", f) || occursin("sum_tlarray", file)) && return "oplus/sum"
+            # Telum's own tensor plumbing outside contract/svd: TLArray construction,
+            # to_concrete, itag and index handling. This is the layer `to_concrete` after
+            # every contraction lands in.
+            (occursin("TLArray.jl", file) || occursin("utils.jl", file) ||
+             occursin("permute.jl", file)) && return "TLArray plumbing"
+            (occursin("cbe_core.jl", file) || occursin("cbe_bug.jl", file) ||
+             occursin("tdvp_cbe1s.jl", file) || occursin("tdvp2_baseline.jl", file) ||
+             occursin("mpo.jl", file) || occursin("expv.jl", file)) &&
+                return "BUGJulia sweep"
         end
     end
     return "other"
+end
+
+"""
+The innermost frames that fell through every bucket, most common first.
+
+⛔ WITHOUT THIS THE PROFILE IS UNACTIONABLE. The first chi=1024 breakdown put 39-44% —
+the largest single bucket for cbe1s — into `other`, which says only "not one of the things
+I thought to name". A bucket list is a hypothesis about where time goes; this prints what
+the hypothesis missed, so the next refinement is driven by the data instead of by another
+guess.
+"""
+function unclassified_top(n::Int = 12)
+    data = Profile.fetch(include_meta = false)
+    lidict = Profile.getdict(data)
+    counts = Dict{String, Int}()
+    bt = UInt64[]
+    function tally(bt)
+        classify_bt(bt, lidict) == "other" || return
+        for ip in bt
+            frames = get(lidict, ip, nothing)
+            frames === nothing && continue
+            for fr in (frames isa Vector ? frames : [frames])
+                key = string(fr.func) * "  @ " * basename(string(fr.file))
+                counts[key] = get(counts, key, 0) + 1
+                return                      # innermost recognised frame only
+            end
+        end
+    end
+    for ip in data
+        if ip == 0
+            isempty(bt) || (tally(bt); empty!(bt))
+        else
+            push!(bt, ip)
+        end
+    end
+    isempty(bt) || tally(bt)
+    return sort(collect(counts), by = kv -> -kv[2])[1:min(n, length(counts))]
 end
 
 """
@@ -402,8 +456,14 @@ function main()
                     tot == 0 && (say("    $arm: no samples"); continue)
                     for k in sort(collect(keys(b)), by = x -> -b[x])
                         b[k] == 0 && continue
-                        say(@sprintf("    %-6s %-14s %5.1f%%  (%d samples)",
+                        say(@sprintf("    %-6s %-22s %5.1f%%  (%d samples)",
                                      arm, k, 100 * b[k] / tot, b[k]))
+                    end
+                    if b["other"] > 0.05 * tot
+                        say(@sprintf("    %-6s -- what 'other' actually is --", arm))
+                        for (name, c) in unclassified_top(12)
+                            say(@sprintf("    %-6s    %5.1f%%  %s", arm, 100 * c / tot, name))
+                        end
                     end
                 catch err
                     say("    $arm profile FAILED: $(sprint(showerror, err))")
