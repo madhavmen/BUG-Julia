@@ -157,7 +157,7 @@ gb(bytes) = bytes / 2^30
 
 const BUCKETS = ["BLAS gemm", "LAPACK svd/qr", "permute/HPTT", "GC/alloc",
                  "memcpy/copyto", "TLArray plumbing", "contract bookkeeping",
-                 "svd bookkeeping", "oplus/sum", "BUGJulia sweep", "other"]
+                 "svd bookkeeping", "oplus/sum", "BUGJulia sweep", "other", "IDLE"]
 
 """
 Classify ONE backtrace by its INNERMOST recognised frame.
@@ -175,6 +175,21 @@ function classify_bt(bt, lidict)
         frames === nothing && continue
         for fr in (frames isa Vector ? frames : [frames])
             f = string(fr.func); file = string(fr.file)
+            # ⛔⛔ IDLE THREADS ARE NOT WORK, AND THEY WERE 47% OF THE FIRST BREAKDOWN.
+            # Julia's sampler samples EVERY thread, so with OPENBLAS_NUM_THREADS=16 and
+            # per-sector gemms too small to occupy them, fifteen workers sit parked in
+            # `__futex_abstimed_wait_common` and land in every sample. They diluted the
+            # denominator: BLAS gemm read 7.5% at 8 threads and 1.3% at 16, which looks like
+            # gemm shrinking and is actually idle padding growing.
+            # These are excluded from the total, not bucketed, so every percentage below is a
+            # share of ACTIVE samples. The idle count is reported separately — it is a real
+            # and useful number (it says the thread pool is oversubscribed for these shapes),
+            # just not a share of the work.
+            (occursin("futex", f) || occursin("pthread_cond", f) ||
+             occursin("sched_yield", f) || occursin("nanosleep", f) ||
+             occursin("poll", f) || f == "wait" || f == "uv_run" ||
+             occursin("jl_task_get_next", f) || occursin("ijl_task_get_next", f)) &&
+                return "IDLE"
             (occursin("gemm", f) || occursin("gemv", f) || occursin("syrk", f) ||
              f == "mul!" || occursin("generic_matmatmul", f)) && return "BLAS gemm"
             (occursin("gesdd", f) || occursin("gesvd", f) || occursin("geqrf", f) ||
@@ -272,7 +287,9 @@ function profile_buckets()
     if !isempty(bt)
         buckets[classify_bt(bt, lidict)] += 1; total += 1
     end
-    return buckets, total
+    # ACTIVE total: idle samples are excluded from the denominator so each bucket is a share
+    # of real work, not a share of "how many threads happened to exist".
+    return buckets, total - buckets["IDLE"], total
 end
 
 # ── the shapes the gemms actually see ────────────────────────────────────────
@@ -438,7 +455,7 @@ function main()
             say("  --- kernel breakdown (one step per arm, sampled) ---")
             BLAS.set_num_threads(BLAS_T[end])
             for arm in ARMS
-                Profile.clear(); Profile.init(n = 10^7, delay = 0.005)
+                Profile.clear(); Profile.init(n = 2 * 10^6, delay = 0.01)
                 try
                     psi = deepcopy(psi0)
                     tau = ComplexF64(-im * DT)
@@ -452,17 +469,19 @@ function main()
                         RSVDCBEBondUpdate.cbe_bug_step!(psi, mpo, tau;
                             maxdim = chi, trunc_thresh = 0.0, maxiter = MAXITER, exact = false)
                     end
-                    b, tot = profile_buckets()
-                    tot == 0 && (say("    $arm: no samples"); continue)
+                    b, active, tot = profile_buckets()
+                    active == 0 && (say("    $arm: no active samples"); continue)
+                    say(@sprintf("    %-6s %d active samples of %d (%.0f%% of thread-samples were IDLE workers)",
+                                 arm, active, tot, 100 * b["IDLE"] / max(tot, 1)))
                     for k in sort(collect(keys(b)), by = x -> -b[x])
-                        b[k] == 0 && continue
+                        (b[k] == 0 || k == "IDLE") && continue
                         say(@sprintf("    %-6s %-22s %5.1f%%  (%d samples)",
-                                     arm, k, 100 * b[k] / tot, b[k]))
+                                     arm, k, 100 * b[k] / active, b[k]))
                     end
-                    if b["other"] > 0.05 * tot
+                    if b["other"] > 0.05 * active
                         say(@sprintf("    %-6s -- what 'other' actually is --", arm))
                         for (name, c) in unclassified_top(12)
-                            say(@sprintf("    %-6s    %5.1f%%  %s", arm, 100 * c / tot, name))
+                            say(@sprintf("    %-6s    %5.1f%%  %s", arm, 100 * c / active, name))
                         end
                     end
                 catch err
