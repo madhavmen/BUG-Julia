@@ -6,20 +6,79 @@ decisively cheaper than the full SVD at these ranks.
 
 ---
 
-## STATUS 2026-09-06 — the ordering, and the five knobs that were hiding it
+## STATUS 2026-09-06 (late) — allocation is the bottleneck, and it is 86% of the step
 
 **Target (Madhav): `tdvp2` slowest, then `tdvp_cbe1s`, then `cbe_bug` fastest. A measurement
 that disagrees means a bug or a missed optimisation, not a result.**
 
-Measured L=30, χ=1024, EPYC 9755, BLAS=8, growth 1.1, `parallel` still OFF:
+L=30, χ=1024, EPYC 9755, growth 1.1, `parallel = true`, `split_maxdim = χ`, rep-outer medians
+(job 16332908, spreads under 5%):
 
 | arm | s/step | alloc/step | vs tdvp2 |
 |---|---|---|---|
-| **bug** | **42.1** | 69 GB | **1.59× faster** |
-| tdvp2 | 67.0 | 142 GB | — |
-| cbe1s | 80.9 | 159 GB | 1.21× slower ⚠ |
+| **bug** | **34.0** | 46–61 GB | **1.21× faster** |
+| tdvp2 | 41.1 | 103 GB | — |
+| cbe1s | 54.8 | 117 GB | 1.33× slower ⚠ |
+| bugmid | 69.2 | 120 GB | 1.68× slower |
 
-**BUG is fastest. cbe1s vs tdvp2 is still inverted** — that is the open question.
+✅ **BUG beats tdvp2 + cbe1s COMBINED (34.0 s vs 95.8 s, 2.8×)** — the stated goal.
+⚠ **cbe1s vs tdvp2 is still inverted** — the open question, and the FLOP count says it should
+not be: per bond tdvp2 runs 8 two-site + 8 one-site matvecs (8d² + 8d = 48 units of χ³D)
+against cbe1s's 8 one-site + 8 zero-site (8d + 8 = 24). cbe1s should be **1.6× FASTER**; it is
+1.33× slower, a **2.2× discrepancy arithmetic cannot explain**.
+
+### Why FLOPs cannot explain it: the step is not arithmetic
+
+Idle-excluded kernel breakdown (job 16329485). ⚠ Sampled on library defaults, not the timed
+configuration — that profiler defect is fixed but the corrected table is not yet in hand:
+
+| bucket | tdvp2 | cbe1s | bug |
+|---|---|---|---|
+| GC / allocation | 58.8% | 55.9% | 51.0% |
+| memcpy / copyto | 16.7% | 14.5% | 11.7% |
+| TLArray plumbing | 10.4% | 5.9% | 5.1% |
+| **BLAS gemm** | **5.9%** | **9.6%** | **13.3%** |
+
+**86% allocation/copy/plumbing against 6% arithmetic.** BUG's `other` 7.3% is all MKL inner
+loops, so its true arithmetic share is ~20% — it is the least allocation-bound arm, which is
+exactly why it is fastest. Runtime tracks allocation across every arm.
+
+⛔ **This is why threading `Telum.contract` was a 4–13% NET LOSS** — Amdahl on a 6% share.
+
+### Landed since
+
+| change | effect |
+|---|---|
+| `to_concrete!` — `to_concrete(contract(…))` deep-copied 71 hot-path tensors that alias nothing | alloc: tdvp2 **−22%**, cbe1s −11%, bug −8%. Verified bit-identical (12/12 + 6/6, exact `==`) |
+| `fold_omega` wired into `tdvp_cbe1s_step!` (the kwarg did not exist there) | net of a tdvp2 control: **bug −6.7%**, cbe1s −2.1%, bugmid ~0. A real BUG win; **NOT the cbe1s fix** |
+| `fused_dim` fast path — `reachable_sectors` built a full `fusion_basis` (getIdentity + full SVD) 116×/step purely to COUNT | abelian equality 37/37; timing effect pending |
+| profiler now goes through `make_stepper` | ⛔ it had been sampling `growth=2.0`, `krylov_basis=30`, `conv_tol=0`, `split_maxdim` UNCAPPED — a run nobody timed |
+
+### The open question, three suspects (being settled by allocation attribution, job 16333134)
+
+cbe1s allocates the MOST (117 GB) while doing the LEAST arithmetic. Read out of the code, none
+yet confirmed by measurement:
+
+1. **`apply_zero_site`'s accumulator** (`zero_site_core.jl:214`) rebuilds the whole χ×χ bond
+   matrix per MPO channel: `acc = to_concrete(acc + x)`, plus 2 contracts and ~4 `to_concrete`
+   each. The "cheap" zero-site solve may issue MORE contract calls than a two-site one.
+2. **`fusion_basis`'s SVD is numerically discarded** (`sectors.jl:89`) — `sector_graded_sketch`
+   reads only `F.spaces[3]` and `_randomize_like(F, rng)`, which overwrites every payload with
+   `randn`. ⚠ Cannot simply be dropped: the SVD also fixes the fused-leg charge labels, and
+   that is the silent-corruption trap the docstring flags (false-passes on a vacuum link).
+3. **`_frame_from` does two full untruncated SVDs per bond** (`zero_site_core.jl:132`), one on
+   an already-canonical tensor whose decomposition is therefore known.
+
+### Also open
+
+- ⛔ **`seffx`: CPU-util 54.9% on 16 CPUs, 95% of thread-samples idle.** BLAS=16 is
+  oversubscribed for these block shapes (block areas max 81224, median 12544, min 112 — a gemm
+  under ~128×128 cannot fill a threaded BLAS). Untaken, deliberately deferred so it does not
+  confound the current A/B.
+- ⚠ **Cross-job wall clock is worth ±33%** even on provably identical work (`alloc_gb`
+  bit-identical while seconds moved 38.2 → 43.9). Only within-job comparisons are quotable.
+- Accuracy at scale is unmeasured: `split_maxdim = χ` is a basis cap that could buy speed with
+  error, and nothing here scores accuracy.
 
 Five knobs were found, none of them algorithmic, each either unfair or simply wasteful at
 large rank. Runtime tracks allocation across all three arms, so a knob that inflates work
