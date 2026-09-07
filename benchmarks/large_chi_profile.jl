@@ -389,8 +389,16 @@ Run every arm rep-outer and return per-arm times and allocations.
 
 `median` rather than `mean` over the measured steps: contention produces one-sided spikes,
 and a single bad slot moves a 2-sample mean by half the spike.
+
+⛔ `emit` IS FLUSHED PER STEP, NOT PER BLOCK. The batch write this replaced ran only after
+every step of a `(chi, D)` block had finished, so a block that died took all of its completed
+steps with it: job 16339888 measured D=640 to two full steps, was OOM-killed in the third, and
+wrote a CSV containing D=5/40/160 only — the D=640 rows existed nowhere but the log, and the
+rerun cost an hour and a half on a different, busier node. At chi=4096 one step is ~30 min, so
+the same defect would discard a whole afternoon. `open(...,"a") do` per row closes the handle
+each time, which is a flush; the cost is negligible against a multi-minute step.
 """
-function run_all_arms(arms, psi0, mpo, chi::Int, dex::Int, nt::Int)
+function run_all_arms(arms, psi0, mpo, chi::Int, dex::Int, nt::Int; emit = nothing)
     steppers = Dict{String, Any}()
     states = Dict{String, Any}()
     for arm in arms
@@ -424,9 +432,14 @@ function run_all_arms(arms, psi0, mpo, chi::Int, dex::Int, nt::Int)
                 push!(times[arm], st.time); push!(allocs[arm], st.bytes)
                 kd = hasproperty(st.value, :krylov_dims) ? st.value.krylov_dims : -1
                 push!(kdims[arm], kd)
+                cout = maximum(BondUpdateBUG.bond_dims(states[arm]))
                 say(@sprintf("    rep %d  %-6s  %8.2f s  alloc %6.2f GB  matvec %6d  chi=%d",
-                             k, arm, st.time, gb(st.bytes), kd,
-                             maximum(BondUpdateBUG.bond_dims(states[arm]))))
+                             k, arm, st.time, gb(st.bytes), kd, cout))
+                # ⚠ `cout` is the rank AT THIS STEP, where the batch writer used the rank after
+                # the LAST step for every row. The rank grows over the first steps (D=640:
+                # tdvp2 allocated 1157 GB in step 1 against 1457 in step 2, identically on both
+                # nodes), so the per-step value is the honest one.
+                emit === nothing || emit(arm, k, st.time, st.bytes, cout)
             catch err
                 say("    rep $k  $arm FAILED: $(sprint(showerror, err))")
                 push!(failed, arm)
@@ -508,8 +521,12 @@ function main()
                     # tdvp2 has no CBE expansion, so sweeping dex would re-time identical
                     # work. Run it on the first dex only.
                     arms_here = [a for a in ARMS if a != "tdvp2" || dex == DEXS[1]]
+                    sink = (arm, k, t, bytes, cout) -> open(csv, "a") do io
+                        @printf(io, "%d,%d,%d,%s,%d,%d,%d,%d,%.6f,%.4f,%d,%d\n",
+                                L, chi, Dact, arm, dex, nt, ct, k, t, gb(bytes), cout, nsec)
+                    end
                     times, allocs, states, kdims =
-                        run_all_arms(arms_here, psi0, mpo, chi, dex, nt)
+                        run_all_arms(arms_here, psi0, mpo, chi, dex, nt; emit = sink)
 
                     say("    " * repeat("-", 60))
                     for arm in arms_here
@@ -522,16 +539,7 @@ function main()
                                      arm, med, lo, hi, kd, blas_for(arm, nt),
                                      (PARALLEL && startswith(arm, "bug")) ? ", parallel" : ""))
                     end
-                    open(csv, "a") do io
-                        for arm in arms_here
-                            cout = maximum(BondUpdateBUG.bond_dims(states[arm]))
-                            for (k, t) in enumerate(times[arm])
-                                @printf(io, "%d,%d,%d,%s,%d,%d,%d,%d,%.6f,%.4f,%d,%d\n",
-                                        L, chi, Dact, arm, dex, nt, ct, k, t,
-                                        gb(allocs[arm][k]), cout, nsec)
-                            end
-                        end
-                    end
+                    # (rows already written by `sink`, one per step as it completed)
                 end
             end
         end
