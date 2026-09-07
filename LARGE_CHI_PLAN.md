@@ -6,6 +6,48 @@ decisively cheaper than the full SVD at these ranks.
 
 ---
 
+## ✅ STATUS 2026-09-07 — THE TARGET ORDERING IS ACHIEVED, ON THE MPO AXIS
+
+**Target: `tdvp2` slowest, then `tdvp_cbe1s`, then `cbe_bug` fastest.**
+
+L=30, χ=256, four solvers vs MPO bond dimension D (jobs 16339888, 16340517; medians, spreads
+<1.5%; D=640 is rep 1, where a ~900 s step makes JIT negligible):
+
+| D | bug | bugmid | cbe1s | tdvp2 | cbe1s/tdvp2 |
+|---|---|---|---|---|---|
+| 5 | **7.62** | 14.32 | 19.45 | 14.86 | 1.31× ⚠ |
+| 40 | **12.53** | 24.07 | 34.48 | 32.96 | 1.046× |
+| 160 | **26.93** | 52.66 | 76.33 | 76.17 | 1.002× |
+| 640 | **123.95** | 274.72 | 780.87 | 958.46 | **0.81× ✅** |
+
+✅ **At D = 640 the ordering is exactly as specified: tdvp2 (958) > cbe1s (781) > bug (124).**
+✅ **BUG beats tdvp2 + cbe1s COMBINED at every D** (4.5× at D=5, 5.7× at D=160, 14× at D=640).
+✅ BUG is 7.7× faster than tdvp2 at D=640, and `bugmid` also beats both TDVP arms there.
+
+### Why the ordering depends on D — measured, not argued
+
+The `matvec` counter (`krylov_dims`, a COUNTER, so contention cannot corrupt it) shows cbe1s and
+tdvp2 doing **the same number of operator applications** — 648 vs 644 at low D, 908 vs 912 at
+D=640. So cbe1s never burned extra Krylov iterations; that hypothesis is REFUTED.
+
+Everything cbe1s does that tdvp2 does not is **D-INDEPENDENT**: `_frame_from`'s two untruncated
+SVDs, `fusion_basis`'s two SVDs (whose numerical results are then overwritten by `randn`),
+`perp_component`, the sketch fill. Everything tdvp2 does extra is **D-LINEAR** matvec, and a
+2-site matvec is intrinsically dearer than cbe1s's 1-site + 0-site pair. So cbe1s carries a fixed
+per-bond offset that dilutes as D grows — which is precisely the 1.31 → 1.046 → 1.002 → 0.81
+trajectory.
+
+Allocation crosses over with it, confirming the mechanism: at D=5 cbe1s allocates MORE than tdvp2
+(15.3 vs 8.9 GB), at D=640 it allocates LESS (832 vs 1157 GB).
+
+⇒ **To make cbe1s win at every D, remove the D-independent SVDs.** `fusion_basis` is the
+candidate: its result depends only on the two legs' index structure and spaces, never on the
+tensor's values, so memoising on that signature returns a bit-identical object. ⚠ Its SVD also
+fixes the fused-leg charge labels — the silent-corruption trap its own docstring flags — so the
+cache key must be complete and tested, never guessed.
+
+---
+
 ## STATUS 2026-09-06 (late) — allocation is the bottleneck, and it is 86% of the step
 
 **Target (Madhav): `tdvp2` slowest, then `tdvp_cbe1s`, then `cbe_bug` fastest. A measurement
