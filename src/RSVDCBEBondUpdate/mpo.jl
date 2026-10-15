@@ -637,6 +637,73 @@ function mpo_energy(psi::SymMPS, mpo::MPO)
     return _mpo_left_close(E, psi[L], mpo[L])
 end
 
+"""
+    _mpo2_left_step(E, A, W) -> TLArray
+
+[`_mpo_left_step`](@ref) with TWO copies of `W` between bra and ket: the left environment of
+`<psi|H H|psi>` on link `i+1`, legs `(bra, w_a, w_b, ket)` (`w_b` is the copy nearer the ket).
+`W` is `(w_l, s_in, s_out, w_r)`; at the left boundary both copies' trimmed dim-1 `w_l` legs are
+dropped exactly as the single-layer step drops one.
+
+⛔ THE OUTER COPY'S VIRTUAL LEGS ARE PRIMED (`_mpo_outer`). Two copies of one `W` carry identical
+leg tags, and Telum refuses a tensor holding two legs with the same tag ("Duplicate TLIndex ...
+W") -- MEASURED, jobs 17208864/17208865. Priming `w_l`, `w_r` of the `a` copy keeps the layers
+distinct; the physical legs need nothing, since the inner copy's `s_out` is contracted away.
+"""
+# `inc = 5`: far above any prime level the inner copy, the state or the bra carries, so the
+# outer layer's virtual legs cannot coincide with any other leg whatever their direction.
+_mpo_outer(W) = to_concrete(prime(prime(W, 1; inc = 5), 4; inc = 5))
+
+function _mpo2_left_step(E, A, W)
+    Wa = _mpo_outer(W)
+    if E === nothing
+        T = contract(W, (2,), A, (2,))                    # (wb_l, s1, wb_r, ℓ_l, ℓ_r)
+        T = contract(to_concrete(T), (2,), Wa, (2,))      # (wb_l, wb_r, ℓ_l, ℓ_r, wa_l, s2, wa_r)
+        T = contract(to_concrete(T), (6, 3), _bra_left_boundary(A), (2, 1))
+        #                                                   (wb_l, wb_r, ℓ_r, wa_l, wa_r, ℓ_r')
+        T = to_concrete(deleteSingleton(to_concrete(T), 1))   # (wb_r, ℓ_r, wa_l, wa_r, ℓ_r')
+        T = to_concrete(deleteSingleton(T, 3))                # (wb_r, ℓ_r, wa_r, ℓ_r')
+        return to_concrete(permutedims(T, (4, 3, 1, 2)))
+    end
+    T = contract(E, (4,), A, (1,))                        # (bra, wa, wb, s, ℓ_r)
+    T = contract(to_concrete(T), (3, 4), W, (1, 2))       # (bra, wa, ℓ_r, s1, wb_r)
+    T = contract(to_concrete(T), (2, 4), Wa, (1, 2))      # (bra, ℓ_r, wb_r, s2, wa_r)
+    T = contract(to_concrete(T), (1, 4), _bra_interior(A), (1, 2))  # (ℓ_r, wb_r, wa_r, ℓ_r')
+    return to_concrete(permutedims(to_concrete(T), (4, 3, 2, 1)))
+end
+
+"""
+    mpo_variance(psi, mpo) -> Float64
+
+The exact energy variance `<H^2> - <H>^2` of the NORMALISED state, `<H^2> = <psi|H H|psi>` from a
+two-layer MPO environment (no `H^2` MPO is formed). The accuracy measure a ground state carries
+where exact diagonalisation is out of reach (simulation_plan_2 Task 4): zero exactly on an
+eigenstate, and `variance / gap` bounds the energy error.
+
+⚠ A difference of two `O(E^2)` numbers: its floor is `~eps * E^2`, i.e. ~1e-13 at `E ~ 30`.
+"""
+function mpo_variance(psi::SymMPS, mpo::MPO)
+    L = length(psi)
+    length(mpo) == L || throw(DimensionMismatch(
+        "MPO has $(length(mpo)) sites, state has $L"))
+    L >= 2 || throw(ArgumentError("mpo_variance needs at least two sites"))
+    E = nothing
+    for i in 1:(L - 1)
+        E = _mpo2_left_step(E, psi[i], mpo[i])
+    end
+    A, W = psi[L], mpo[L]
+    T = contract(E, (4,), A, (1,))                        # (bra, wa, wb, s, ℓ_r)
+    T = contract(to_concrete(T), (3, 4), W, (1, 2))       # (bra, wa, ℓ_r, s1, wb_r)
+    T = to_concrete(deleteSingleton(to_concrete(T), 5))   # (bra, wa, ℓ_r, s1)
+    T = contract(T, (2, 4), _mpo_outer(W), (1, 2))        # (bra, ℓ_r, s2, wa_r)
+    T = to_concrete(deleteSingleton(to_concrete(T), 4))   # (bra, ℓ_r, s2)
+    h2 = real(ComplexF64(to_concrete(contract(T, (1, 3, 2), _bra_right_boundary(A),
+                                              (1, 2, 3)))[]))
+    n2 = norm(psi)^2
+    e = real(mpo_energy(psi, mpo)) / n2
+    return h2 / n2 - e^2
+end
+
 # ── the effective Hamiltonians: Eq. (1.7) ────────────────────────────────────
 
 """

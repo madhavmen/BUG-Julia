@@ -53,6 +53,8 @@ What one [`dmrg_cbe1s_sweep!`](@ref) half-sweep pair did.
   - `err_pre`, `err_fnl`, `discarded` -- the largest preselection / final-selection /
     truncation weight over the sweep.
   - `krylov_dims` -- total operator applications in the local eigensolves.
+  - `ledger` -- the adaptive path's [`AdaptiveLedger`](@ref) for the sweep (Tests A/B per bond in
+    `bond_log`, the split's discarded norm, `:budget_unmet` reasons); `nothing` on the legacy path.
 """
 struct DMRGCBEInfo
     energy::Float64
@@ -64,18 +66,52 @@ struct DMRGCBEInfo
     err_fnl::Float64
     discarded::Float64
     krylov_dims::Int
+    ledger::Union{Nothing, AdaptiveLedger}
 end
+
+"""
+Default `tol_basis` / `tol_trunc` of the ADAPTIVE CBE-DMRG -- medium-loose, NOT the time step's
+`TOL_DEFAULTS` (1e-5 / 1e-7). A DMRG sweep is not a one-shot step: every bond is re-expanded and
+re-solved on the next sweep, so a direction a loose sweep skips is offered again, and a tight
+per-sweep budget mostly buys rank and matvecs the next sweep throws away. PROVISIONAL until
+`benchmarks/ground_state/adaptive_dmrg_tolerance.jl` measures how loose each may be at a given
+energy accuracy (results: `ADAPTIVE_DMRG_TOLERANCE_RESULTS.md`).
+"""
+const DMRG_TOL_DEFAULTS = (basis = 1e-3, trunc = 1e-4)
 
 """
     dmrg_cbe1s_sweep!(psi, mpo; kwargs...) -> DMRGCBEInfo
 
 One full CBE-DMRG sweep (left to right, then right to left), in place.
 
-Keywords: `dex`, `growth`, `dover`, `comp_ratio`, `sulz_cap`, `preselect_only`, `exact`
-forward to [`cbe_expand`](@ref) -- `exact = false` (the default) is the **RSVD** selection and
-is the method; `exact = true` forms the full fused basis and is the A/B reference arm.
-`maxdim` / `trunc_thresh` bound the truncation, `maxiter` / `restol` the local eigensolve
-(the reference's `K` / `Ktol`).
+## Adaptive path (the default): `tol_basis`, `tol_trunc`, `maxdim`
+
+The SAME RSVD engine `cbe_bug_step!` uses (simulation_plan_2 Task 4: "the same adaptive RSVD
+discovery ... may be shared with the ground-state optimizer"). At every bond `cbe_expand` runs
+with the step's [`BasisAllocation`](@ref): sector coverage, Test B (holdout sampling residual,
+targeted widening) decides how much to SAMPLE and Test A (projected singular tail) how many
+directions to KEEP, under the [`work_ceiling`](@ref) derived from `maxdim`. No `dex`, `dover`,
+`growth`, `comp_ratio` or `stol_pre`.
+
+⚠ WHAT `tol_basis` MEASURES HERE. There is no time step, so the allocation is taken at unit
+time (`tau = 1`): a bond's indicator is `||(I - P) H Theta|| / ||psi||` in ENERGY units of `H`
+-- the part of `H`'s action that leaves the expanded two-site space. Summed in quadrature over
+bonds that is the two-site variance estimate, so `tol_basis^2 / gap` is the scale of energy
+error a met sweep can still hide. A ground state at finite `maxdim` keeps a nonzero two-site
+variance, so a `tol_basis` tighter than that reports `:budget_unmet` (Test A at the work
+ceiling) instead of pretending -- the variational energy is unaffected either way.
+
+`tol_trunc` budgets each split's discarded RELATIVE norm at `tol_trunc / sqrt(L - 1)` (the
+rule of [`_budget_svd`](@ref)); `maxdim` binding past that share is `:trunc` in the ledger.
+`restol` / `maxiter` stay: the local stopping test of an EIGENSOLVE is the Ritz residual, not a
+basis tolerance (plan Task 4).
+
+## Legacy path
+
+Naming any of `dex`, `growth`, `dover`, `comp_ratio`, `trunc_thresh` selects the historical
+fixed-knob selection (`ledger = nothing`), exactly as before; mixing them with `tol_basis` /
+`tol_trunc` is refused. `exact = true` forms the full fused basis (the A/B reference arm) on
+either path. `maxiter` / `restol` bound the local eigensolve (the reference's `K` / `Ktol`).
 
 Leaves the orthogonality centre at site 1, so consecutive sweeps chain with no extra
 canonicalisation.
@@ -106,15 +142,18 @@ larger `D`. The reference's own rule is proportional (`Dex = ceil(rDex*Nkeep)`, 
 of the CAP). Set `dex` at the DRIVER, where the cap is known; do not bake it in here.
 """
 function dmrg_cbe1s_sweep!(psi::SymMPS, mpo::MPO;
-                           dex::Int = 0,
-                           growth::Float64 = 2.0,
+                           tol_basis::Union{Nothing, Float64} = nothing,
+                           tol_trunc::Union{Nothing, Float64} = nothing,
+                           # Legacy knobs: `nothing` = not named (see `resolve_budget`).
+                           dex::Union{Nothing, Int} = nothing,
+                           growth::Union{Nothing, Float64} = nothing,
                            dover::Union{Nothing, Int} = nothing,
-                           comp_ratio::Union{Float64, Nothing} = 1.0,
+                           comp_ratio::Union{Nothing, Float64} = nothing,
+                           trunc_thresh::Union{Nothing, Float64} = nothing,
                            sulz_cap::Bool = false,
                            preselect_only::Bool = false,
                            exact::Bool = false,
-                           maxdim::Int = 200,
-                           trunc_thresh::Float64 = 1e-12,
+                           maxdim::Union{Nothing, Int} = nothing,
                            maxiter::Int = 30,
                            restol::Float64 = 1e-6,
                            seed_expanded::Bool = false,
@@ -124,22 +163,76 @@ function dmrg_cbe1s_sweep!(psi::SymMPS, mpo::MPO;
         "MPO has $(length(mpo)) sites, state has $L"))
     L >= 2 || throw(ArgumentError("dmrg_cbe1s_sweep! needs at least two sites"))
 
-    cut = max(trunc_thresh, 1e-14)
+    # `maxiter`/`restol` are the EIGENSOLVE's controls, not the BUG root solve's legacy
+    # `maxiter`, so they are not offered to `resolve_budget`.
+    budget, adaptive, legacy_names = resolve_budget(tol_basis, tol_trunc, nothing,
+        (dex = dex, dover = dover, comp_ratio = comp_ratio, growth = growth,
+         trunc_thresh = trunc_thresh))
+    _legacy_hint(legacy_names)
+    # The GROUND-STATE defaults, not the time step's: a sweep is repeated until the energy
+    # settles, so each one need not be tight (see `DMRG_TOL_DEFAULTS`).
+    adaptive && (budget = AdaptiveBudget(something(tol_basis, DMRG_TOL_DEFAULTS.basis),
+                                         something(tol_trunc, DMRG_TOL_DEFAULTS.trunc),
+                                         budget.expv))
+    maxdim = something(maxdim, adaptive ? 128 : 200)
+    cut = max(legacy_or_default(trunc_thresh, :trunc_thresh), 1e-14)
     energies = Float64[]
     n_new = zeros(Int, L - 1)
     maxexp = 0; epre = 0.0; efnl = 0.0; disc = 0.0; nmv = 0
 
+    rmax = maximum(bond_dims(psi); init = 0)    # read before the gauge, as it always was
+    canonical!(psi, 1)
+    ledger = adaptive ? AdaptiveLedger() : nothing
+    if adaptive
+        # Scale-free indicators: the Lanczos solves return unit vectors anyway, so normalising
+        # the start only makes the first bond's residual comparable with the rest.
+        n0 = norm(psi[1])
+        n0 > 0 && (psi[1] = to_concrete((1.0 / n0) * psi[1]))
+    end
+    alloc = basis_allocation(budget, L - 1; tau = 1.0, nrm = 1.0)
+    share = budget.trunc / sqrt(L - 1)          # each split's relative discarded-norm share
+    swept = [0.0, 0.0]                          # squared discarded norm, per half-sweep
+
     # `rmax` read ONCE, before anything widens, so an (optional) global rank bound is a
     # statement about the state rather than about whichever bond is being looked at.
-    exkw = (dex = dex, growth = growth, dover = dover, comp_ratio = comp_ratio,
-            sulz_cap = sulz_cap, rmax = maximum(bond_dims(psi); init = 0),
-            preselect_only = preselect_only, exact = exact, rng = rng)
+    exkw = (dex = legacy_or_default(dex, :dex), growth = legacy_or_default(growth, :growth),
+            dover = dover, comp_ratio = legacy_or_default(comp_ratio, :comp_ratio),
+            sulz_cap = sulz_cap, rmax = rmax, preselect_only = preselect_only, exact = exact,
+            rng = rng,
+            # Plan §1: on the adaptive path the preselection cuts only at the numerical rank
+            # floor; Tests A/B against `tol_basis` decide what matters.
+            stol_pre = adaptive ? 0.0 : legacy_or_default(nothing, :stol_pre),
+            alloc = adaptive ? alloc : nothing,
+            workcap = adaptive ? work_ceiling(maxdim, rmax) : 0)
 
     function record!(info)
         maxexp = max(maxexp, info.dim_out)
         n_new[info.bond] += info.n_new
         epre = max(epre, info.err_pre)
         efnl = max(efnl, info.err_fnl)
+    end
+
+    # The split after the local solve: Telum's relative cut on the legacy path, the budgeted
+    # rule on the adaptive one. Logs the bond (Tests A/B from its expansion, plus what the split
+    # discarded) into the sweep ledger.
+    function split!(A, legs, i, bondlg, info, half)
+        res = if adaptive
+            r, capped = _budget_svd(A, legs, maxdim, n2 -> share * sqrt(n2))
+            capped && (bondlg.maxdim_reached = true; _unmet!(bondlg, :trunc))
+            r
+        else
+            svd(A, legs; cutoff = cut, Nkeep = maxdim, get_lists = true)
+        end
+        w = _trunc_weight(res)
+        disc = max(disc, w)
+        if adaptive
+            swept[half] += w^2
+            _log_bond!(ledger, bondlg, i, info.dir, info.dim_out)
+            ledger.bond_log[end] = merge(ledger.bond_log[end],
+                                         (r_old = info.dim_in, r_final = length(res.kept_list),
+                                          discarded = w))
+        end
+        return res
     end
 
     """
@@ -196,19 +289,18 @@ function dmrg_cbe1s_sweep!(psi::SymMPS, mpo::MPO;
     # `>= i+2`; the sweep has written only `psi[i]` and `psi[i+1]` by then. Getting this
     # backwards reads a STALE environment, which does not throw -- it silently minimises the
     # wrong Hamiltonian.
-    canonical!(psi, 1)
     rstack = right_env_stack(psi, mpo; downto = 3)
     lch = boundary_channels(mpo)
     for i in 1:(L - 1)
+        bondlg = adaptive ? AdaptiveLedger() : nothing      # this bond's Tests A/B (§8)
         rch1, info = expand_bond!(psi, mpo, i, :right, lch,
-                                  right_channels(rstack, i + 2); exkw...)
+                                  right_channels(rstack, i + 2); exkw..., ledger = bondlg)
         record!(info)
 
         A = solve1(i, lch, rch1; expanded = true)
         # Split with the amplitude moving RIGHT, truncating: this is the only place rank is
         # removed, and `Nkeep` is in MULTIPLETS under a non-abelian symmetry.
-        res = svd(A, (1, 2); cutoff = cut, Nkeep = maxdim, get_lists = true)
-        disc = max(disc, _trunc_weight(res))
+        res = split!(A, (1, 2), i, bondlg, info, 1)
         tag = psi[i].inds[3].itags
         C = to_concrete(res.S * res.Vd)
         psi[i]     = to_concrete(setitag(res.U, 3, tag))
@@ -228,13 +320,13 @@ function dmrg_cbe1s_sweep!(psi::SymMPS, mpo::MPO;
     lstack = left_env_stack(psi, mpo; upto = L - 2)
     rch = boundary_channels(mpo)
     for i in (L - 1):-1:1
+        bondlg = adaptive ? AdaptiveLedger() : nothing
         lch1, info = expand_bond!(psi, mpo, i, :left,
-                                  left_channels(lstack, i), rch; exkw...)
+                                  left_channels(lstack, i), rch; exkw..., ledger = bondlg)
         record!(info)
 
         A = solve1(i + 1, lch1, rch; expanded = true)
-        res = svd(A, (1,); cutoff = cut, Nkeep = maxdim, get_lists = true)
-        disc = max(disc, _trunc_weight(res))
+        res = split!(A, (1,), i, bondlg, info, 2)
         tag = psi[i].inds[3].itags
         C = to_concrete(res.U * res.S)
         psi[i + 1] = to_concrete(setitag(res.Vd, 1, tag))
@@ -246,8 +338,16 @@ function dmrg_cbe1s_sweep!(psi::SymMPS, mpo::MPO;
     psi[1] = solve1(1, boundary_channels(mpo), rch)
     psi.center = 1
 
+    if adaptive
+        # Each half-sweep cuts every bond once, against a unit-norm centre; the larger of the
+        # two accumulations is what the sweep's splits cost the state (the `tol_trunc` budget).
+        ledger.discarded = sqrt(maximum(swept))
+        ledger.r_old = rmax
+        ledger.r_aug = maxexp
+        ledger.r_final = maximum(bond_dims(psi); init = 0)
+    end
     return DMRGCBEInfo(minimum(energies; init = Inf), energies, bond_dims(psi),
-                       maxexp, n_new, epre, efnl, disc, nmv)
+                       maxexp, n_new, epre, efnl, disc, nmv, ledger)
 end
 
 dmrg_cbe1s_sweep!(psi::SymMPS, h::XXZChain; kwargs...) =
@@ -282,6 +382,10 @@ struct DMRGCBERun
     discarded::Vector{Float64}
     krylov_dims::Vector{Int}
     converged::Bool
+    # Per sweep: `budget_status` (`:met` / `:budget_unmet` / `:legacy`) and the sweep's ledger
+    # (`nothing` on the legacy path), so a converged energy carries its basis verdict with it.
+    status::Vector{Symbol}
+    ledgers::Vector{Union{Nothing, AdaptiveLedger}}
 end
 
 Base.length(r::DMRGCBERun) = length(r.energies)
@@ -318,6 +422,7 @@ function dmrg_cbe1s!(psi::SymMPS, h::Union{XXZChain, MPO};
     es = Float64[]; spread = Float64[]; bds = Vector{Int}[]; maxbd = Int[]
     sbds = Vector{Int}[]; maxsbd = Int[]; secs = Float64[]
     maxexp = Int[]; epre = Float64[]; efnl = Float64[]; disc = Float64[]; kd = Int[]
+    status = Symbol[]; ledgers = Union{Nothing, AdaptiveLedger}[]
     converged = false
     prev = Inf
 
@@ -334,6 +439,7 @@ function dmrg_cbe1s!(psi::SymMPS, h::Union{XXZChain, MPO};
         push!(maxexp, info.max_expanded)
         push!(epre, info.err_pre); push!(efnl, info.err_fnl)
         push!(disc, info.discarded); push!(kd, info.krylov_dims)
+        push!(status, budget_status(info.ledger)); push!(ledgers, info.ledger)
         if abs(info.energy - prev) < etol
             converged = true
             break
@@ -341,7 +447,7 @@ function dmrg_cbe1s!(psi::SymMPS, h::Union{XXZChain, MPO};
         prev = info.energy
     end
     return DMRGCBERun(es, spread, bds, maxbd, sbds, maxsbd, secs, maxexp, epre, efnl, disc,
-                      kd, converged)
+                      kd, converged, status, ledgers)
 end
 
 """

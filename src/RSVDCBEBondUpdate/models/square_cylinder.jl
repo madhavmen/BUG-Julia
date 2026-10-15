@@ -20,7 +20,7 @@
 # `periodic_y` is refused below for `Ly < 3`.
 
 """
-    square_cylinder_couplings(Lx, Ly; J=1.0, periodic_y=true) -> Matrix{Float64}
+    square_cylinder_couplings(Lx, Ly; J=1.0, J2=0.0, periodic_y=true) -> Matrix{Float64}
 
 `J[i,j]` for a `Lx x Ly` square lattice wrapped into a cylinder, under the column-major snake
 `site(x, y) = (x - 1) * Ly + y`.
@@ -30,6 +30,9 @@ Bonds, all with the same `J`:
   * **rung** `(x, y) - (x, y+1)`, chain distance 1
   * **wrap** `(x, Ly) - (x, 1)` when `periodic_y`, chain distance `Ly - 1`
   * **leg**  `(x, y) - (x+1, y)`, chain distance `Ly`
+  * **diagonal** (`J2`, only when `J2 != 0`) `(x, y) - (x+1, y+-1)`, wrapped in `y` when
+    `periodic_y`; chain distance `Ly +- 1` (up to `2Ly - 1` across the wrap). These are the
+    next-nearest neighbours of the square `J1-J2` model and set the MPO bond dimension.
 
 Open in `x`, periodic in `y` -- the standard cylinder. Returns the STRICTLY UPPER triangle, which
 is what [`pair_mpo`](@ref) reads; the lower triangle stays zero so no bond is counted twice.
@@ -38,7 +41,7 @@ is what [`pair_mpo`](@ref) reads; the lower triangle stays zero so no bond is co
 both silently doubles that coupling -- a factor of two in the Hamiltonian that looks like a
 physics result rather than a geometry bug.
 """
-function square_cylinder_couplings(Lx::Int, Ly::Int; J::Float64 = 1.0,
+function square_cylinder_couplings(Lx::Int, Ly::Int; J::Float64 = 1.0, J2::Float64 = 0.0,
                                    periodic_y::Bool = true)
     Lx >= 1 || throw(ArgumentError("Lx must be >= 1, got $Lx"))
     Ly >= 2 || throw(ArgumentError("Ly must be >= 2, got $Ly"))
@@ -53,9 +56,9 @@ function square_cylinder_couplings(Lx::Int, Ly::Int; J::Float64 = 1.0,
     # `i` undefined and `j` holding the pair. `+=` rather than `=` so a geometry that proposes
     # the same bond twice shows up as a doubled coupling in a test instead of being silently
     # overwritten -- that is exactly the `Ly = 2` wrap trap the docstring refuses.
-    function put!(a::Int, b::Int)
+    function put!(a::Int, b::Int, c::Float64 = J)
         i, j = minmax(a, b)
-        Jm[i, j] += J
+        Jm[i, j] += c
         return nothing
     end
     for x in 1:Lx
@@ -67,15 +70,23 @@ function square_cylinder_couplings(Lx::Int, Ly::Int; J::Float64 = 1.0,
             for y in 1:Ly
                 put!(site(x, y), site(x + 1, y))      # leg
             end
+            if J2 != 0.0
+                # Diagonals: each (x, y) -> (x+1, y+-1) is a distinct bond, so counted once.
+                for y in 1:Ly, dy in (1, -1)
+                    yy = periodic_y ? mod1(y + dy, Ly) : y + dy
+                    1 <= yy <= Ly || continue
+                    put!(site(x, y), site(x + 1, yy), J2)
+                end
+            end
         end
     end
     return Jm
 end
 
 """
-    square_cylinder_mpo(Lx, Ly; J=1.0, periodic_y=true) -> MPO
+    square_cylinder_mpo(Lx, Ly; J=1.0, J2=0.0, periodic_y=true) -> MPO
 
-Heisenberg `H = J Σ_<ij> S_i · S_j` on the cylinder, in whatever symmetry mode is active.
+Heisenberg `H = J Σ_<ij> S_i · S_j + J2 Σ_<<ij>> S_i · S_j` on the cylinder, in whatever symmetry mode is active.
 
 Built through [`pair_mpo`](@ref) and [`spin_vertices`](@ref), so `:none`, `:U1` and `:SU2` all
 route through the same code -- under `:SU2` that is the single `S`/`S'` vertex, under `:U1` the
@@ -86,8 +97,9 @@ per open bond, and under the column-major snake at most `Ly` bonds are open at a
 the whole reason for wrapping the short direction, and it is worth checking with
 `mpo_virtual_dims` on any new geometry rather than assuming.
 """
-square_cylinder_mpo(Lx::Int, Ly::Int; J::Float64 = 1.0, periodic_y::Bool = true) =
-    pair_mpo(Lx * Ly, square_cylinder_couplings(Lx, Ly; J = J, periodic_y = periodic_y),
+square_cylinder_mpo(Lx::Int, Ly::Int; J::Float64 = 1.0, J2::Float64 = 0.0,
+                    periodic_y::Bool = true) =
+    pair_mpo(Lx * Ly, square_cylinder_couplings(Lx, Ly; J = J, J2 = J2, periodic_y = periodic_y),
              spin_vertices(Lx * Ly))
 
 """

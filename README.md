@@ -115,6 +115,23 @@ speed knob, `tol_expv = 1e-2` suffices at `dt = 0.05` (use `1e-4` near 1e-5 on i
 models), and the ordinary/midpoint choice sets the floor; re-checked on isotropic Heisenberg and
 at `dt = 0.1`. Plan conformance: [ADAPTIVE_PLAN_AUDIT.md](ADAPTIVE_PLAN_AUDIT.md).
 
+**Ground states use the same engine.** `dmrg_cbe1s!(psi, mpo; tol_basis, tol_trunc, maxdim)`
+(and `rsvd_cbe_dmrg1s!`) runs the one-site CBE-DMRG with the adaptive Test A/B selection and the
+`maxdim`-derived work ceiling. With no time step, a bond's indicator is
+`||(I - P) H Theta|| / ||psi||` in energy units: summed over bonds, that is the two-site variance
+estimate. Each split keeps the smallest rank whose discarded norm fits `tol_trunc / sqrt(L - 1)`.
+`r.status` and `r.ledgers` record the per-sweep verdict and the per-bond logs. When no
+tolerance is named, the defaults are medium-loose (`DMRG_TOL_DEFAULTS`, `1e-3` / `1e-4`), not the
+time step's tight ones. A sweep is repeated until the energy settles, so a direction one loose
+sweep skips is offered again on the next. These defaults are provisional until the tolerance
+study (`benchmarks/ground_state/adaptive_dmrg_tolerance.jl`) has measured them. The local
+eigensolve keeps its Ritz-residual stop (`restol`). Naming `dex`, `growth`, `dover`, `comp_ratio`
+or `trunc_thresh` selects the old fixed-knob DMRG unchanged. `mpo_variance(psi, mpo)` is the
+exact `<H^2> - <H>^2`, from a two-layer MPO environment. 2D spectra (square, square `J2`, kagome,
+triangular) with every integrator arm, the adaptive ground state and an exact reference up to
+N = 20 are produced by `benchmarks/spectral/fig45_2209.jl`. Conformance:
+[SIMULATION_PLAN_2_AUDIT.md](SIMULATION_PLAN_2_AUDIT.md).
+
 ### The legacy fixed-knob path
 
 Its accuracy knob is the **depth of the Krylov basis** the half-sweeps build:

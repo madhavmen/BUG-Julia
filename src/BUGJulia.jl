@@ -30,9 +30,81 @@ include("RSVDCBEBondUpdate/RSVDCBEBondUpdate.jl")
 # performance optimisation into a package that does not load at all. A failure here must degrade
 # to "slow again", never to "broken".
 using PrecompileTools: @setup_workload, @compile_workload
+using Preferences: @load_preference
+
+# ⛔ WHICH WORKLOAD IS A PREFERENCE, NOT AN ENV VARIABLE: a preference is part of the cache key,
+# so changing it recompiles; an ENV switch would silently keep whichever image was built first.
+#
+#   "adaptive" (default)  the U(1) spin paths the current campaign runs -- adaptive CBE-BUG at
+#                         orders 1/2/4 and midpoint, adaptive + legacy CBE-DMRG, TDVP2, CBE-TDVP,
+#                         energy / variance / S^z. MEASURED 2026-10-16: the old "full" workload
+#                         cost 1802 s of precompilation on EVERY src edit (job 17208254) while
+#                         covering none of the adaptive entry points, so each process still paid
+#                         their JIT on top.
+#   "full"                adds the original blocks: `:none`, non-Hermitian branches, SU(2), fused
+#                         d = 4 Hubbard -- set it for those campaigns
+#                         (`Preferences.set_preferences!(BUGJulia, "workload" => "full")`).
+#   "none"                no workload (fastest edit cycle; every process pays its own JIT).
+const _WORKLOAD = @load_preference("workload", "adaptive")
 
 @setup_workload begin
     @compile_workload begin
+        if _WORKLOAD in ("adaptive", "full")
+        try
+            BondUpdateBUG.set_symmetry!(:U1)
+            psi0 = BondUpdateBUG.neel_state(6)
+            mpo = RSVDCBEBondUpdate.xxz_mpo(6; J = 1.0, delta = 1.0)
+            tau = ComplexF64(-0.05im)
+            # maxdim = 4 so the cap BINDS and the truncation branch compiles (see the d = 4 note
+            # below: one step from a product state never truncates).
+            akw = (tol_basis = 1e-4, tol_trunc = 1e-6, tol_expv = 1e-6, maxdim = 4)
+            for (exact, parallel) in ((false, false), (true, false), (false, true))
+                p = copy(psi0)
+                for _ in 1:3
+                    RSVDCBEBondUpdate.cbe_bug_step!(p, mpo, tau; exact = exact,
+                                                    parallel = parallel, akw...)
+                end
+            end
+            let p = copy(psi0)
+                for _ in 1:2
+                    RSVDCBEBondUpdate.cbe_bug_midpoint_step!(p, mpo, tau; parallel = true, akw...)
+                end
+                for ord in (2, 4)
+                    RSVDCBEBondUpdate.cbe_bug_step!(p, mpo, tau; order = ord, parallel = true, akw...)
+                end
+                RSVDCBEBondUpdate.cbe_bug_step!(p, mpo, tau; dex = 4, dover = 0,
+                                                comp_ratio = 1.0, krylov_basis = 3,
+                                                krylov_tol = 0.0, maxdim = 4,
+                                                trunc_thresh = 1e-10, maxiter = 5, tol = 0.0)
+                for _ in 1:2
+                    RSVDCBEBondUpdate.tdvp2_step!(p, mpo, tau; maxdim = 4, trunc_thresh = 1e-10,
+                                                  maxiter = 8)
+                    RSVDCBEBondUpdate.tdvp_cbe1s_step!(p, mpo, tau; maxdim = 4,
+                                                       trunc_thresh = 1e-10, maxiter = 8)
+                end
+                BondUpdateBUG.magnetisation(p)
+                BondUpdateBUG.overlap(p, psi0)
+                q = copy(psi0); BondUpdateBUG.apply_sz!(q, 3)
+            end
+            for ex in (false, true)
+                RSVDCBEBondUpdate.dmrg_cbe1s!(copy(psi0), mpo; n_sweeps = 2, tol_basis = 1e-3,
+                                              tol_trunc = 1e-4, maxdim = 4, exact = ex)
+            end
+            let p = copy(psi0)
+                RSVDCBEBondUpdate.dmrg_cbe1s!(p, mpo; n_sweeps = 2, maxdim = 4,
+                                              trunc_thresh = 1e-10)
+                RSVDCBEBondUpdate.mpo_energy(p, mpo)
+                RSVDCBEBondUpdate.mpo_variance(p, mpo)
+            end
+        catch err
+            @warn "BUGJulia precompile workload: the adaptive U(1) block did not complete; " *
+                  "those runs will pay full JIT" exception = (err, catch_backtrace())
+        finally
+            BondUpdateBUG.set_symmetry!(:U1)
+        end
+        end   # adaptive block
+
+        if _WORKLOAD == "full"   # the original blocks, kept for SU(2) / d = 4 campaigns
         try
             for sym in (:U1, :none)
                 BondUpdateBUG.set_symmetry!(sym)
@@ -237,6 +309,7 @@ using PrecompileTools: @setup_workload, @compile_workload
         finally
             BondUpdateBUG.set_symmetry!(:U1)
         end
+        end   # full block
     end
 end
 

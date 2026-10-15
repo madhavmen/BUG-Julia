@@ -279,6 +279,26 @@ function truncate_sweep!(psi::SymMPS; maxdim::Int = 200, cutoff::Float64 = 1e-12
 end
 
 """
+    _budget_svd(T, split, maxdim, share_of) -> (res, capped)
+
+ONE bond's budgeted cut, the rule `truncate_recursive!` applies with `weight_tol` and the
+adaptive CBE-DMRG applies at every split: keep the SMALLEST rank whose discarded Schmidt norm
+fits the absolute allowance `share_of(n2)` (`n2` = this tensor's total squared weight), never
+more than `maxdim`. `capped` reports that `maxdim`, not the allowance, set the rank.
+"""
+function _budget_svd(T, split, maxdim::Int, share_of)
+    res = svd(T, split; cutoff = 0.0, Nkeep = maxdim, get_lists = true)
+    share = share_of(_sq_weight(res.kept_list) + _sq_weight(res.trunc_list))
+    nk = length(res.kept_list)
+    # `trunc_list` holds what `maxdim` (and exact zeros) already removed: it is spent.
+    k, tail = _tail_rank(res.kept_list, 1.0, share, nk; base = _sq_weight(res.trunc_list))
+    capped = tail > share && !isempty(res.trunc_list)
+    k = max(k, 1)            # a bond never closes; a zero state has nothing to keep anyway
+    k < nk && (res = svd(T, split; cutoff = 0.0, Nkeep = k, get_lists = true))
+    return res, capped
+end
+
+"""
     truncate_recursive!(psi, root; maxdim, cutoff, weight_tol) -> (psi, discarded, cumulative, capped)
 
 `Θ_τ` — the **recursive root-to-leaves rank truncation** of the rank-adaptive tree integrator
@@ -344,15 +364,11 @@ function truncate_recursive!(psi::SymMPS, root::Int; maxdim::Int = 200,
     function cut(T, split)
         weight_tol === nothing &&
             return svd(T, split; cutoff = cutoff, Nkeep = maxdim, get_lists = true)
-        res = svd(T, split; cutoff = 0.0, Nkeep = maxdim, get_lists = true)
-        nrm2 < 0 && (nrm2 = _sq_weight(res.kept_list) + _sq_weight(res.trunc_list))
-        share = sdiv > 0 ? weight_tol * sqrt(max(nrm2, 0.0)) / sdiv : 0.0
-        nk = length(res.kept_list)
-        # `trunc_list` holds what `maxdim` (and exact zeros) already removed: it is spent.
-        k, tail = _tail_rank(res.kept_list, 1.0, share, nk; base = _sq_weight(res.trunc_list))
-        tail > share && !isempty(res.trunc_list) && (capped = true)
-        k = max(k, 1)            # a bond never closes; a zero state has nothing to keep anyway
-        k < nk && (res = svd(T, split; cutoff = 0.0, Nkeep = k, get_lists = true))
+        res, c = _budget_svd(T, split, maxdim, function (n2)
+            nrm2 < 0 && (nrm2 = n2)
+            return sdiv > 0 ? weight_tol * sqrt(max(nrm2, 0.0)) / sdiv : 0.0
+        end)
+        capped |= c
         return res
     end
     function account!(res, side, bond)

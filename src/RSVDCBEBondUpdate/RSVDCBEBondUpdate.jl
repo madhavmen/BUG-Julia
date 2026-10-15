@@ -241,7 +241,7 @@ include("sweeps/krylov_closure.jl")
 include("modes/ground_state.jl")
 
 export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bond_gate,
-       MPO, mpo_from_terms, xxz_mpo, heisenberg_su2_mpo, mpo_virtual_dims, mpo_energy,
+       MPO, mpo_from_terms, xxz_mpo, heisenberg_su2_mpo, mpo_virtual_dims, mpo_energy, mpo_variance,
        LongRangeTerm, long_range_mpo, long_range_zz_mpo,
        LongRangeFit, fit_long_range, default_decays, long_range_terms, power_law_zz_mpo,
        MPOLink, MPOLeftEnvStack, MPORightEnvStack, MPOZeroSiteH, MPOOneSiteH,
