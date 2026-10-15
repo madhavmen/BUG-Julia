@@ -93,6 +93,21 @@ accepted. `exact = true` replaces the random sketch by the complete local basis.
 are complex by default; `neel_state(L; eltype = Float64)` (likewise `domain_wall_state`,
 `product_state`) gives a real one.
 
+**`order = p`** (default `1`) is the one method choice on top of the three tolerances. For
+`p > 1` the step closes the global Krylov frontiers of the root generator before its single root
+`expv`: each `F_j = (tau^j/j!) B^j S0`, `j = 1..p-1` (`B = P (tau H) P`), is embedded as an MPS and
+swept with the same CBE / Tests C/D kernels until its outside-space action `(I - P) H F_j` fits
+its share of `tol_basis`, so `B^j psi = (tau H)^j psi` for `j <= p` (local error `O(dt^(p+1))`).
+`info.ledger.leak` (per frontier), `.defect` (integrated-defect estimate), `.n_passes` and
+`.closure_log` report it; failing to close is `:budget_unmet` (`:closure`). The frontiers are
+first MEASURED on the ordinary step's frames (`.leak_initial`, `.rho_initial`); when those
+already close them no closure sweep runs (`n_passes = 0`). `closure_probe = m` records the same
+numbers on an `order = 1` step without changing it. The order is a claim to be measured:
+tolerances, `maxdim` and the final compression set an error floor
+([krylov_closure_cbe_bug_realtime_L16_plan.md](krylov_closure_cbe_bug_realtime_L16_plan.md),
+conformance in [KRYLOV_CLOSURE_AUDIT.md](KRYLOV_CLOSURE_AUDIT.md), XX L=16 results in
+[KRYLOV_CLOSURE_L16_RESULTS.md](KRYLOV_CLOSURE_L16_RESULTS.md)).
+
 What each tolerance buys, measured on XX L=20 against the exact solution, and starting
 settings per target error: [ADAPTIVE_XX_L20_RESULTS.md](ADAPTIVE_XX_L20_RESULTS.md). In short:
 `tol_basis` sets the accuracy (err ~ tol_basis), `tol_trunc` can be 10-100x looser and is the

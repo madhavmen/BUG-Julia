@@ -62,6 +62,8 @@ include(joinpath(@__DIR__, "..", "common", "free_fermion.jl"))
     include("test_adaptive_expv.jl")
     # ...and the per-bond log, real start states and the migration hint (§8, §7, §1).
     include("test_adaptive_diagnostics.jl")
+    # ...and the general-order Krylov closure built on all of the above (`order = p`).
+    include("test_krylov_closure.jl")
     include("test_pair_mpo.jl")
     include("test_tfim_mpo.jl")
     include("test_sweeps.jl")

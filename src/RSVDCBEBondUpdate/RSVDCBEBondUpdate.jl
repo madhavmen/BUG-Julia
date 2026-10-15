@@ -218,6 +218,10 @@ include("sweeps/expansion.jl")
 include("sweeps/dmrg_cbe1s.jl")
 include("sweeps/tdvp_cbe1s.jl")
 include("sweeps/cbe_bug.jl")
+#   sweeps/krylov_closure.jl  the GENERAL-ORDER extension of `cbe_bug_step!` (`order = p`): the
+#                          global Krylov frontiers of the root generator, embedded as MPS and
+#                          swept with the same CBE / Tests C/D kernels until they close.
+include("sweeps/krylov_closure.jl")
 
 # The modes come last: each imports from the parent, so everything they name must already be
 # defined. A submodule rather than a file so `GroundState.solve!` reads as what it is at the

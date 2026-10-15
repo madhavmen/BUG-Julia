@@ -70,8 +70,14 @@ struct exists rather than four more keywords. It is also deliberately the SIMPLE
 is dimensionally honest, so that when it proves too conservative the benchmark says so against
 a rule somebody can state in one sentence:
 
-    per_bond = tol_basis / sqrt(n_bonds)        errors over bonds add in quadrature
-    each test = per_bond / sqrt(4)              four independent checks, likewise
+    per_bond = tol_basis / sqrt(n_bonds * n_frontiers)   errors over bonds add in quadrature
+    each test = per_bond / sqrt(4)                       four independent checks, likewise
+
+`n_frontiers` is the requested temporal ORDER `p` (`krylov_closure.jl`): the step closes the
+Krylov frontiers `j = 0 .. p-1`, each a separate set of basis decisions over every bond. Frontier
+`j` enters the local error weighted by `1/(j+1)` (variation of constants), so the integrated
+defect is at most `sum_j eta_j/(j+1) <= (H_p / sqrt(p)) tol_basis`, i.e. `1.06, 1.06, 1.04 x
+tol_basis` for `p = 2, 3, 4`. `p = 1` is the rule above unchanged.
 
 ⚠ QUADRATURE IS AN ASSUMPTION ABOUT INDEPENDENCE, not an identity. Residuals at different
 bonds are only approximately orthogonal, and under a strongly correlated error (a systematic
@@ -90,10 +96,11 @@ struct BasisAllocation
 end
 
 """
-    basis_allocation(budget, nbonds; tau, nrm) -> BasisAllocation
+    basis_allocation(budget, nbonds; tau, nrm, nfront = 1) -> BasisAllocation
 
-Apportion `budget.basis` over `nbonds` bonds and the four tests, and fix the relative scale
-residuals are measured in.
+Apportion `budget.basis` over `nbonds` bonds, `nfront` Krylov frontiers (the order, see
+[`BasisAllocation`](@ref)) and the four tests, and fix the relative scale residuals are
+measured in.
 
 THE SCALE IS `|tau| / ||psi||`, AND BOTH HALVES ARE LOAD-BEARING. The CBE and Krylov
 residuals measure the part of `H*Theta` the trial space misses; what that costs the STEP is
@@ -108,9 +115,9 @@ then 1 -- a pure "is this subspace closed under H" question with no time in it -
 0, which would declare every residual negligible and return the unexpanded frame.
 """
 function basis_allocation(budget::AdaptiveBudget, nbonds::Int;
-                          tau::Number = 0, nrm::Real = 1.0)
+                          tau::Number = 0, nrm::Real = 1.0, nfront::Int = 1)
     nb = max(nbonds, 1)
-    per_bond = budget.basis / sqrt(nb)
+    per_bond = budget.basis / sqrt(nb * max(nfront, 1))
     # Four tests (A, B-left/right counted as one sampling decision, C/D as one closure
     # decision) -> sqrt(4) = 2. Kept as an explicit `sqrt(4)` so the count is visible.
     per_test = per_bond / sqrt(4)
@@ -189,7 +196,8 @@ mutable struct AdaptiveLedger
     expv_iters::Int
     # WHICH checks failed, so `:budget_unmet` comes with a reason (see `budget_diagnostic`):
     # `:sample` (Test B), `:tail` (Test A), `:krylov` (Tests C/D), `:trunc` (final
-    # compression), `:projection` (midpoint frames), `:expv` (root solve).
+    # compression), `:projection` (midpoint frames), `:expv` (root solve), `:closure` (the
+    # order-p Krylov frontiers did not close within the pass bound).
     unmet::Vector{Symbol}
     # One entry per Test B verdict (per bond and side): `(side, est, relunc, per, holdout,
     # sketch)` -- the indicator, a bound on its relative sampling error, each sector's scaled
@@ -203,11 +211,36 @@ mutable struct AdaptiveLedger
     # probes; after the compression `cbe_bug_step!` adds `r_old`, `r_final` and that bond's
     # relative `discarded` norm. The step-level fields above are the max/sum over these.
     bond_log::Vector{Any}
+    # ── General-order Krylov closure (`krylov_closure.jl`; 1 / 0 / empty on `order = 1`) ──
+    order::Int                   # the temporal order the step was asked for
+    n_passes::Int                # closure passes over the frontiers j = 1..order-1
+    n_closure_sweeps::Int        # frontier half-sweep pairs run (enriching or measuring)
+    # Final time-weighted outside-space action of each frontier j = 0..order-1,
+    # `|tau| ||(I - P) A F_j|| / ||psi||` (upper bound sqrt(left^2 + right^2)), measured on the
+    # frames the root solve used; and the integrated-defect estimate `sum_j leak[j]/(j+1)`.
+    leak::Vector{Float64}
+    defect::Float64
+    n_root_frontier::Int         # zero-site applications that built the frontiers
+    n_h2_leak::Int               # two-site applications that measured the outside-space action
+    n_h1_closure::Int            # one-site applications of the frontier Tests C/D
+    # One entry per frontier sweep: pass, degree, leak before, directions added, widths,
+    # newly occupied sectors, bonds skipped by the leak gate.
+    closure_log::Vector{Any}
+    t_closure::Float64
+    n_compress::Int              # final `root_out` compressions (plan: exactly one per step)
+    # The same frontiers measured on the frames the half-sweeps built, BEFORE any closure
+    # enrichment: what the ordinary CBE + local-Krylov step already captures. `leak_initial`
+    # is time-weighted like `leak`; `rho_initial[j]` is scale-free, `||(I - P) A F_j|| /
+    # ||F_j||` (upper bound). Filled by `order > 1` and by `closure_probe` on `order = 1`.
+    leak_initial::Vector{Float64}
+    rho_initial::Vector{Float64}
 end
 
 AdaptiveLedger() = AdaptiveLedger(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
                                   0, 0, 0, 0, 0, 0, 0, 0, false, true,
-                                  false, 0.0, 0, 0, 0, 0, Symbol[], Any[], Any[])
+                                  false, 0.0, 0, 0, 0, 0, Symbol[], Any[], Any[],
+                                  1, 0, 0, Float64[], 0.0, 0, 0, 0, Any[], 0.0, 0,
+                                  Float64[], Float64[])
 
 """
     _unmet!(ledger, what) -> ledger
@@ -259,6 +292,10 @@ function budget_diagnostic(ledger::AdaptiveLedger)
     :expv in ledger.unmet &&
         push!(msg, "root expv error estimate $(ledger.expv_err) after $(ledger.expv_iters) " *
                    "applications (reduce dt)")
+    :closure in ledger.unmet &&
+        push!(msg, "order-$(ledger.order) Krylov closure did not close after " *
+                   "$(ledger.n_passes) passes, frontier leak $(ledger.leak)" * cap *
+                   " (or lower the order)")
     return "budget unmet: " * join(msg, "; ")
 end
 
@@ -294,6 +331,19 @@ function merge_ledger!(a::AdaptiveLedger, b::AdaptiveLedger)
     a.expv_iters += b.expv_iters
     union!(a.unmet, b.unmet)
     append!(a.bond_log, b.bond_log)
+    a.order = max(a.order, b.order)
+    a.n_passes += b.n_passes
+    a.n_closure_sweeps += b.n_closure_sweeps
+    append!(a.leak, b.leak)
+    a.defect = max(a.defect, b.defect)
+    a.n_root_frontier += b.n_root_frontier
+    a.n_h2_leak += b.n_h2_leak
+    a.n_h1_closure += b.n_h1_closure
+    append!(a.closure_log, b.closure_log)
+    a.t_closure += b.t_closure
+    a.n_compress += b.n_compress
+    append!(a.leak_initial, b.leak_initial)
+    append!(a.rho_initial, b.rho_initial)
     return a
 end
 

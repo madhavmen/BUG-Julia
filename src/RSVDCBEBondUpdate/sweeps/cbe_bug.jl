@@ -225,10 +225,15 @@ not forced closed.
 Returns the grown frame and `stats = (eta_c, eta_d, added, n_h1, d_after_c, capped, met)`.
 `capped` means the work ceiling or the depth bound stopped the search with weight left;
 `met = false` then, and the caller records it -- never a silent pass.
+
+`amp` is the seed's norm relative to the STATE's (`||v0|| / ||psi||`). The weights above are
+relative to the unit seed, which is the state's own scale on the ordinary half-sweep (`amp = 1`);
+a Krylov frontier (`krylov_closure.jl`) is a small vector, and its directions matter only in
+proportion to its size.
 """
 function _krylov_enrich(v0, applyH, Q0, side::Symbol, tau::ComplexF64,
                         alloc::BasisAllocation; workcap::Int = 0,
-                        maxdepth::Int = _KRY_MAXDEPTH)
+                        maxdepth::Int = _KRY_MAXDEPTH, amp::Float64 = 1.0)
     side in (:left, :right) || throw(ArgumentError("side must be :left or :right"))
     perp = side === :left ? perp_component : perp_component_right
     fl = side === :left ? 3 : 1
@@ -259,7 +264,7 @@ function _krylov_enrich(v0, applyH, Q0, side::Symbol, tau::ComplexF64,
             Hm[k + 1, k] = b
             v = to_concrete((1.0 / b) * w)
             push!(vs, v)
-            weight = _kry_weight(Hm, k, teff)
+            weight = amp * _kry_weight(Hm, k, teff)
             R = to_concrete(perp(Q, v))
             eta = weight * norm(R)
             k == 1 ? (eta_c = eta) : (eta_d = max(eta_d, eta))
@@ -341,7 +346,9 @@ What one [`cbe_bug_step!`](@ref) did.
     counts, cumulative compression, projection error, ranks, `tolerance_met`,
     `workcap_reached`); `nothing` on the legacy fixed-knob path. [`budget_status`](@ref) reads
     `:met` / `:budget_unmet` off it and [`budget_diagnostic`](@ref) says why.
-  - `krylov_dims` -- operator applications, summed over the `L` K-steps and the one root solve.
+  - `krylov_dims` -- operator applications, summed over the `L` K-steps and the one root solve,
+    plus, for `order > 1`, the frontier sweeps' one-site and zero-site applications (their
+    two-site leak measurements are `ledger.n_h2_leak`).
   - `peak_elements` -- working set (`state + accumulated frames + transients alive at that
     moment`), the same definition `TDVP2Info` uses, so the two are comparable.
     ⚠ **This sweep does NOT have a lower working set than 2-site TDVP.** It never forms a rank-4
@@ -435,6 +442,16 @@ retired it, including the three hypotheses that were wrong on the way.
 Keywords beyond the [`cbe_expand`](@ref) ones (`dex`, `growth`, `dover`, `comp_ratio`,
 `sulz_cap`, `preselect_only`, `exact`, `stol_pre`, `stol_fnl`):
 
+  - `order` -- the temporal order `p` (default `1`, the ordinary step). For `p > 1` the frames
+    the half-sweeps built are grown until the root generator `B = P(tau H)P` reproduces the
+    global Krylov moments `B^j psi = (tau H)^j psi`, `j <= p`: each projected frontier
+    `F_j = (tau^j/j!) B^j S0`, `j = 1..p-1`, is embedded as an MPS and swept with the same
+    CBE / Tests C/D kernels until its outside-space action fits its share of `tol_basis`
+    (`krylov_closure.jl`). One root `expv`, one compression, as always. `ledger.leak`,
+    `ledger.defect`, `ledger.n_passes` and `ledger.closure_log` report it; failing to close is
+    `:budget_unmet` (`:closure`). An order is a CLAIM TO BE MEASURED, not a guarantee: finite
+    tolerances, the rank cap and the final compression set an error floor.
+
   ⛔ ON THE ADAPTIVE PATH (no retired knob named) THE HALF-SWEEP FRAME IS BUILT BY
   [`_krylov_enrich`](@ref): it starts from the CBE frame `U_ex` and appends Krylov directions only
   when Tests C/D (plan §4) find their weighted residual outside the frame above `tol_basis`'s
@@ -520,6 +537,17 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        tol_basis::Union{Nothing, Float64} = nothing,
                        tol_trunc::Union{Nothing, Float64} = nothing,
                        tol_expv::Union{Nothing, Float64} = nothing,
+                       # The temporal order `p` -- a METHOD choice, not a fourth tolerance.
+                       # `p > 1` closes the global Krylov frontiers `j = 1..p-1` of the root
+                       # generator before the one root solve (`krylov_closure.jl`); `1` is the
+                       # ordinary step, unchanged. Adaptive path only.
+                       order::Int = 1,
+                       # ⚠ INSTRUMENTATION, NOT A METHOD CHOICE. `m > 0` on an `order = 1`
+                       # step MEASURES (never enriches) the frontiers `j = 0..m-1` on the frames
+                       # the ordinary step solves in -- `ledger.leak_initial`/`rho_initial`,
+                       # what CBE + local Krylov already capture of the global Krylov sequence.
+                       # The evolved state is unchanged. `order > 1` always records them.
+                       closure_probe::Int = 0,
                        # ── THE RETIRED TUNING PARAMETERS ─────────────────────────────────
                        #
                        # ⛔ EACH OF THESE IS A GUESS AT A RANK MADE BEFORE THE SPECTRUM THAT
@@ -681,6 +709,14 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
          maxiter = maxiter, tol = tol, root_conv_tol = root_conv_tol,
          root_substeps = root_substeps))
     _legacy_hint(legacy_names)
+    order >= 1 || throw(ArgumentError("order must be >= 1, got $order"))
+    order == 1 || adaptive || throw(ArgumentError(
+        "order = $order needs the adaptive solver; $(join(legacy_names, ", ")) selected the " *
+        "first-order legacy path, which has no tolerance to close the Krylov frontiers against"))
+    order == 1 || frame_state === nothing || throw(ArgumentError(
+        "order > 1 is a single-step method and does not combine with the midpoint predictor"))
+    closure_probe >= 0 && (closure_probe == 0 || adaptive) || throw(ArgumentError(
+        "closure_probe = $closure_probe needs the adaptive solver and a non-negative count"))
 
     dex          = legacy_or_default(dex, :dex)
     growth       = legacy_or_default(growth, :growth)
@@ -722,8 +758,9 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     # before they read. Guarded anyway: an out-of-range `center` gives 1.0 (an unnormalised
     # relative scale) rather than a bounds error from a diagnostic.
     _nrm = (1 <= psi.center <= L) ? norm(psi[psi.center]) : 1.0
-    alloc  = basis_allocation(budget, L - 1; tau = tau, nrm = _nrm)
+    alloc  = basis_allocation(budget, L - 1; tau = tau, nrm = _nrm, nfront = order)
     ledger = AdaptiveLedger()
+    ledger.order = order
     bd0 = bond_dims(psi)                 # per-bond `r_old` for the bond log (plan §8)
     ledger.r_old = maximum(bd0; init = 0)
     bwts = adaptive ? zeros(L - 1) : nothing   # per-bond discarded norm of the compression
@@ -1071,28 +1108,9 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             peak!(accL, held + _state_stored(psiL), Wkry)
             W[i] = to_concrete(setitag(Wkry, 3, _tagW(i)))
         elseif krylov_basis > 0
-            # ── BASIS FROM THE KRYLOV SPACE, NOT FROM ONE APPLICATION OF `H` ───────────────
-            #
-            # `krylov_basis = 0` builds the frame from `cbe_expand` alone, i.e. from
-            # `span{Theta, H*Theta}` -- ONE power of `H`. That is enough wherever `tau*||H_loc||`
-            # is small (XX and Heisenberg: measured bit-identical to the shipped sweep on XX),
-            # and badly short where it is not.
-            #
-            # Here the frame is instead `orth span{Kex, H1*Kex, ..., H1^m*Kex}`: real
-            # applications of the one-site effective Hamiltonian, so the basis carries `m` Krylov
-            # vectors rather than one. `m = 0` is the bare CBE frame; `m = 1` reproduces it exactly.
-            #
-            # The vectors are NORMALISED before the direct sum. Without that, `H1^k*Kex` grows
-            # like `||H1||^k` and the SVD's relative `cutoff` -- which is measured against the
-            # LARGEST singular value -- deletes the low-order vectors that carry the state
-            # itself. `Kex` is left unnormalised so it keeps the state's own scale.
             M   = to_concrete!(contract(psiL[i + 1], (2, 3), ex.V_ex', (2, 3)))
             Kex = to_concrete!(contract(K, (3,), M, (1,)))
             blocks = if krylov_grow
-                # PER-PASS BUDGET = what the FIRST expansion admitted on this bond. Keeping the
-                # increment constant makes the space grow linearly in the Lanczos step, which is
-                # what "old kept plus expanded" asks for; reusing `growth` would re-derive a
-                # budget from the rank that expansion just raised, i.e. zero.
                 bl, Vfin = _grow_frame(accL, Kex, ex.V_ex, :left, i, lch,
                                        right_channels(rstack, i + 2), max(ex.n_new_r, 1))
                 Vwide[i] = Vfin          # accounting must see the width the growth reached
@@ -1261,20 +1279,39 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     #      that would be hardest to spot afterwards.
     if frame_state !== nothing
         canonical!(psi, L)
-        AR = nothing
-        for j in (L - 1):-1:c                    # mirrors `half_right!`'s `D` recursion on `psi`
-            B = AR === nothing ? psi[j + 1] :
-                to_concrete!(contract(psi[j + 1], (3,), AR, (1,)))
-            AR = to_concrete!(contract(B, (2, 3), Z[j]', (2, 3)))     # (link_j, b_j)
-        end
+        AR = _overlap_right(psi, Z, c)           # mirrors `half_right!`'s `D` recursion on `psi`
     end
 
-    AL = nothing
-    for i in 1:c
-        T = AL === nothing ? psi[i] : to_concrete!(contract(AL, (2,), psi[i], (1,)))
-        AL = to_concrete!(contract(W[i]', (1, 2), T, (1, 2)))         # (b_L, link_{i+1})
-    end
+    AL = _overlap_left(psi, W, c)                                     # (b_L, link_{c+1})
     S0 = to_concrete!(contract(AL, (2,), AR, (1,)))                   # (b_L, b_R)
+
+    # ── GENERAL ORDER (plan: krylov_closure_cbe_bug_realtime_L16_plan.md) ───────────────────
+    # The half-sweeps closed the frontier j = 0 (psi itself). For `order > 1` the frontiers
+    # j = 1..order-1 of the ROOT generator are closed against the GLOBAL operator, growing `W`
+    # and `Z` in place; the root environments and `S0` come back rebuilt in the final frames,
+    # and the single root solve below runs in them.
+    nclose = 0
+    if adaptive && order > 1
+        fr = KLFrames(W, Z, c, lenv_root, renv_root, 0)
+        ckw = Base.structdiff(exkw, NamedTuple{(:share_ht, :fold_omega)})
+        cl = _krylov_closure!(fr, psi, mpo, S0, tau, alloc, ckw; order = order,
+                              workcap = wcap_step, nrm = _nrm, parallel = parallel, rng = rng,
+                              ledger = ledger)
+        lenv_root, renv_root, S0 = fr.lenv, fr.renv, cl.S0
+        for i in 1:(c - 1)
+            expanded[i] = leg_dim(W[i], 3)
+        end
+        for j in (c + 1):(L - 1)
+            expanded[j] = leg_dim(Z[j], 1)
+        end
+        nclose = cl.n_h1 + cl.n_root
+    elseif adaptive && closure_probe > 0
+        # A copied `rng` and untouched frames: the step itself stays bit-identical.
+        pr = _measure_frontiers(KLFrames(W, Z, c, lenv_root, renv_root, 0), psi, mpo, S0, tau,
+                                alloc, NamedTuple(), closure_probe; nrm = _nrm,
+                                parallel = parallel, rng = copy(rng))
+        merge_ledger!(ledger, pr.ledger)
+    end
     # PLAN §5 `state_projection_error`: how much of `psi` the frames miss. `W`/`Z` are
     # isometries, so `||S0|| = ||P psi||` and the miss is `sqrt(||psi||^2 - ||S0||^2)`. `psi` is
     # canonical at `L` here on both paths (`half_right!` or the `frame_state` re-gauge above).
@@ -1353,6 +1390,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         ttrunc[] = (time_ns() - _t0tr) / 1e9
         discarded = max(discarded, wtr)
         if adaptive
+            ledger.n_compress += 1
             ledger.discarded = cumw
             ledger.maxdim_reached = capped
             # Relative slack for the rounding in the per-bond shares, which sum to `tol` exactly.
@@ -1373,7 +1411,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     # seconds than the step takes, and a share above 1 is the speedup showing up, not a bug. Keep
     # comparing phases arm-to-arm in seconds; only the serial arm's shares are fractions of a step.
     return CBEBugSweepInfo(expanded, n_new, c, root_rank, epre, efnl,
-                           discarded, accL.nmv + accR.nmv + nroot[], peak,
+                           discarded, accL.nmv + accR.nmv + nroot[] + nclose, peak,
                            accL.ngrow + accR.ngrow, leg_dim(Z[c], 1),
                            accL.tcbe + accR.tcbe, accL.tkry + accR.tkry, troot[], ttrunc[],
                            accL.tsplit + accR.tsplit, accL.tframe + accR.tframe,
@@ -1419,6 +1457,9 @@ CONSTANT and the proven bound, not an extra order; `benchmarks/midpoint_bug.jl` 
 comparison lives.
 """
 function cbe_bug_midpoint_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64; kwargs...)
+    get(kwargs, :order, 1) == 1 || throw(ArgumentError(
+        "order > 1 is a single-step method (cbe_bug_step!); the midpoint scheme is its own " *
+        "second-order construction and does not take an order"))
     half = copy(psi)
     # stage 1: bases only. `truncate = false` keeps the augmented rank -- see the docstring.
     info1 = cbe_bug_step!(half, mpo, tau / 2; kwargs..., truncate = false)
