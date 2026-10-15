@@ -165,7 +165,8 @@ What it says that the main plan does not:
   90 pass, 1 broken, 2 FAIL: the Heisenberg-RING magnon arm, which never ran before (the
   `jan_bug_step!` error aborted the testset first). It fails for `cbe_bug` (5.0e-3) AND for
   `tdvp_cbe1s` (2.7e-3) -- TDVP reaches 2.6e-8 on the HS magnon -- so it is not the adaptive or
-  BUG code; the ring reference or the test's convention is the suspect. NOT marked broken: that
-  would be a second weakening of this file, which needs the user's decision.
+  BUG code (the reference was re-read and is right: `E_F = L/4` for the NN ring). User decision
+  2026-10-15: skip it -- opt-in via `BUGJULIA_TEST_RING_MAGNON=1`. Job 17200031: `test_physics.jl`
+  18/18. With 17199914 (`exact_refs`: all pass, OAT rank broken), both previously red files pass.
 - Kept by design: `_range_find` stops on a
   global count, and Test B covers the gap that leaves.

@@ -47,6 +47,10 @@ using LinearAlgebra
 import Random
 
 const _HS = get(ENV, "BUGJULIA_TEST_HS", "0") == "1"
+# ⚠ The Heisenberg-RING magnon arm is opt-in too (user decision 2026-10-15): job 17199914 measured
+# cbe_bug 5.0e-3 AND tdvp_cbe1s 2.7e-3 against the 1e-4 bar with a correct reference, i.e. both
+# integrators on the periodic NN ring -- not the adaptive code. Re-enable to investigate.
+const _RING_MAGNON = get(ENV, "BUGJULIA_TEST_RING_MAGNON", "0") == "1"
 
 @testset "physics: Haldane-Shastry and Heisenberg" begin
 
@@ -117,14 +121,15 @@ const _HS = get(ENV, "BUGJULIA_TEST_HS", "0") == "1"
     end
 
     # ── real time (a): magnon propagation, exactly ────────────────────────────────────────
-    @testset "magnon propagation == the exact Fourier solution" begin
+    (_HS || _RING_MAGNON) && @testset "magnon propagation == the exact Fourier solution" begin
         # A single down spin at site 1 among ups: bond dimension 1, entirely inside the
         # one-magnon sector, and its exact evolution is `magnon_amplitudes` with `c_n` the
         # Fourier transform of a delta at site 1.
         set_symmetry!(:U1)
         L = 8
-        models = Any[("ring", heisenberg_ring_mpo(L),
-                      [r == 1 || r == L - 1 ? 1.0 : 0.0 for r in 1:(L - 1)])]
+        models = Any[]
+        _RING_MAGNON && push!(models, ("ring", heisenberg_ring_mpo(L),
+                                       [r == 1 || r == L - 1 ? 1.0 : 0.0 for r in 1:(L - 1)]))
         _HS && pushfirst!(models, ("HS", haldane_shastry_mpo(L), hs_couplings_analytic(L)))
         for (nm, m, Jr) in models
             c = ComplexF64[cis(-2 * pi * n / L) / sqrt(L) for n in 0:(L - 1)]
