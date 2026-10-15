@@ -160,5 +160,12 @@ What it says that the main plan does not:
   2026-08-25, `docs/PLAN-tolerance-control.md` §7); `physics:82,116` `UndefVarError: jan_bug_step!`
   (deleted in 3024066). All four run the LEGACY path (`trunc_thresh` named) or a deleted function.
   User decision 2026-10-15: not in scope (Haldane-Shastry skipped); run only the relevant test files.
+- **Job 17199914 (2026-10-15), edited files only:** HS physics gated behind `BUGJULIA_TEST_HS=1`
+  (user: skip Haldane-Shastry), dead `jan_bug_step!` arms removed, OAT rank `@test_broken`.
+  90 pass, 1 broken, 2 FAIL: the Heisenberg-RING magnon arm, which never ran before (the
+  `jan_bug_step!` error aborted the testset first). It fails for `cbe_bug` (5.0e-3) AND for
+  `tdvp_cbe1s` (2.7e-3) -- TDVP reaches 2.6e-8 on the HS magnon -- so it is not the adaptive or
+  BUG code; the ring reference or the test's convention is the suspect. NOT marked broken: that
+  would be a second weakening of this file, which needs the user's decision.
 - Kept by design: `_range_find` stops on a
   global count, and Test B covers the gap that leaves.

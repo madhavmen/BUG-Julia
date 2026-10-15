@@ -1,5 +1,10 @@
 # THE PHYSICS: Haldane-Shastry and Heisenberg, ground state / imaginary time / real time, for the
-# new CBE + fixed-rank-BUG sweep and for `jan_bug_step!`, against ANALYTIC references.
+# new CBE + fixed-rank-BUG sweep, against ANALYTIC references.
+#
+# ⚠ HALDANE-SHASTRY IS OPT-IN (`BUGJULIA_TEST_HS=1`): the default run covers the Heisenberg ring
+# only (user decision 2026-10-15: Heisenberg and XX are the models in scope; the HS magnon arm has
+# been red since 2026-08-25, `docs/PLAN-tolerance-control.md` §7). The `jan_bug_step!` arms were
+# removed with that integrator in 3024066; they could only raise `UndefVarError`.
 #
 # WHAT IS ANALYTIC AND WHAT IS NOT -- stated up front, because the honest scope of each test is
 # part of the test:
@@ -41,12 +46,14 @@ using Test
 using LinearAlgebra
 import Random
 
+const _HS = get(ENV, "BUGJULIA_TEST_HS", "0") == "1"
+
 @testset "physics: Haldane-Shastry and Heisenberg" begin
 
     renorm!(p) = (p[p.center] = to_concrete((1.0 / norm(p)) * p[p.center]); p)
 
     # ── ground state ──────────────────────────────────────────────────────────────────────
-    @testset "Haldane-Shastry ground energy == the analytic formula" begin
+    _HS && @testset "Haldane-Shastry ground energy == the analytic formula" begin
         for sym in (:U1, :SU2)
             set_symmetry!(sym)
             for L in (6, 8)
@@ -83,15 +90,12 @@ import Random
         for sym in (:U1, :SU2)
             set_symmetry!(sym)
             L = 6
-            for (nm, m, want) in (("HS", haldane_shastry_mpo(L), hs_ground_energy(L)),
-                                  ("ring", heisenberg_ring_mpo(L),
-                                   first(bethe_xxx_ring_energy(L))))
+            models = Any[("ring", heisenberg_ring_mpo(L), first(bethe_xxx_ring_energy(L)))]
+            _HS && pushfirst!(models, ("HS", haldane_shastry_mpo(L), hs_ground_energy(L)))
+            for (nm, m, want) in models
                 for (sname, step!) in
                     (("cbe_bug", (p, t) -> cbe_bug_step!(p, m, t; maxdim = 128,
-                                                         trunc_thresh = 1e-14)),
-                     ("jan_bug", (p, t) -> jan_bug_step!(p, m, t; lossless = true,
-                                                         maxdim = 128,
-                                                         trunc_thresh = 1e-14)))
+                                                         trunc_thresh = 1e-14)),)
                     psi = dimer_state(L)
                     e0 = real(mpo_energy(psi, m))
                     es = Float64[]
@@ -119,9 +123,10 @@ import Random
         # Fourier transform of a delta at site 1.
         set_symmetry!(:U1)
         L = 8
-        for (nm, m, Jr) in (("HS", haldane_shastry_mpo(L), hs_couplings_analytic(L)),
-                            ("ring", heisenberg_ring_mpo(L),
-                             [r == 1 || r == L - 1 ? 1.0 : 0.0 for r in 1:(L - 1)]))
+        models = Any[("ring", heisenberg_ring_mpo(L),
+                      [r == 1 || r == L - 1 ? 1.0 : 0.0 for r in 1:(L - 1)])]
+        _HS && pushfirst!(models, ("HS", haldane_shastry_mpo(L), hs_couplings_analytic(L)))
+        for (nm, m, Jr) in models
             c = ComplexF64[cis(-2 * pi * n / L) / sqrt(L) for n in 0:(L - 1)]
             # Sanity on the convention: at `t = 0` the wavepacket IS the delta at site 1.
             a0 = magnon_amplitudes(c, 0.0, Jr; L = L)
@@ -132,9 +137,7 @@ import Random
                 (("cbe_bug", (p, t) -> cbe_bug_step!(p, m, t; maxdim = 64,
                                                      trunc_thresh = 1e-14)),
                  ("tdvp_cbe1s", (p, t) -> tdvp_cbe1s_step!(p, m, t; maxdim = 64,
-                                                           trunc_thresh = 1e-14)),
-                 ("jan_bug", (p, t) -> jan_bug_step!(p, m, t; lossless = true, maxdim = 64,
-                                                     trunc_thresh = 1e-14)))
+                                                           trunc_thresh = 1e-14)))
                 psi = product_state([j == 1 ? :down : :up for j in 1:L])
                 dt = 0.01; nst = 20
                 for _ in 1:nst
@@ -156,7 +159,7 @@ import Random
     end
 
     # ── real time (b): an eigenstate evolves by a pure phase ──────────────────────────────
-    @testset "an eigenstate keeps |<psi(0)|psi(t)>| = 1 and its analytic energy" begin
+    _HS && @testset "an eigenstate keeps |<psi(0)|psi(t)>| = 1 and its analytic energy" begin
         # The real-time reference available in EVERY symmetry mode, SU(2) included: converge to
         # the ground state, then evolve it in real time. It is an eigenstate, so the state is
         # invariant up to a phase and the energy sits at the analytic value for the whole run.
@@ -180,7 +183,7 @@ import Random
     end
 
     # ── the fully polarised state, an exactly known eigenstate of any two-body H ───────────
-    @testset "the polarised state is an eigenstate at the analytic energy" begin
+    _HS && @testset "the polarised state is an eigenstate at the analytic energy" begin
         # The cheapest available check that the HS MPO's overall NORMALISATION is right, and it
         # is worth having separately from the ground-state test: Telum scales SU(2) generators
         # through Clebsch-Gordan factors, and `<F|H|F> = (1/4) * (number of pairs weighted by J)`
