@@ -246,7 +246,8 @@ of that job reloads the source). Changes:
   (one process): adaptive beats legacy kry3 on trial width/rank/wall at matched error (audit 6.9
   DONE). Next experiment: a non-free-fermion model (Heisenberg/OAT) and a
   large-chi case where the RSVD sketch could actually beat `exact = true`.
-- Nothing committed (user to decide).
+- Committed (user chose the whole tested tree): branch `feature/adaptive-cbe-krylov`, commit 0555fb4.
+  RSVD crossover (17195922): RSVD/exact CBE time 1.8 at chi 29 -> parity at chi ~250-400. Not pushed.
 
 ## 5) Quick resume commands (cluster)
 
