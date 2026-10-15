@@ -51,17 +51,22 @@ def bond_report(bonds):
         a["workcap"] += b["workcap"] == "true"
         a["unmet"] += b["met"] == "false"
         a["sample"] = max(a["sample"], num(b["sample"]))
+        a["rfin"] += num(b.get("r_final", "nan"))
+        a["disc"] = max(a["disc"], num(b.get("discarded", "nan")))
+        a["sect"] = max(a["sect"], num(b.get("n_sectors", "nan")))
         a["tail"] = max(a["tail"], num(b["tail"]))
     lines = ["## Per bond (plan §8): totals over every run and step given\n",
-             "| bond | side | visits | mean / max width | probes | Krylov dirs | H1 | "
-             "C pass | D after C | workcap | unmet | worst B | worst A |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "| bond | side | visits | mean / max width | mean r_final | sectors | probes | "
+             "Krylov dirs | H1 | C pass | D after C | workcap | unmet | worst B | worst A | "
+             "max discarded |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for (bond, side), a in sorted(agg.items()):
         v = a["visits"]
         lines.append(f"| {bond} | {side} | {int(v)} | {a['width'] / v:.1f} / {int(a['wmax'])} | "
+                     f"{a['rfin'] / v:.1f} | {a['sect']:.0f} | "
                      f"{int(a['n_probes'])} | {int(a['n_krylov'])} | {int(a['n_h1'])} | "
                      f"{int(a['c_pass'])} | {int(a['d_after_c'])} | {int(a['workcap'])} | "
-                     f"{int(a['unmet'])} | {a['sample']:.1e} | {a['tail']:.1e} |")
+                     f"{int(a['unmet'])} | {a['sample']:.1e} | {a['tail']:.1e} | {a['disc']:.1e} |")
     return "\n".join(lines) + "\n"
 
 

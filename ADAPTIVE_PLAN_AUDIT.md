@@ -126,6 +126,16 @@ baseline (T = 0.5), 17195155 sweeps, 17195335 combos, 17195336 maxdim (T = 2).
 | R.2 | §7 "Use both Float64 and complex state tensors where applicable" | `product_state`/`neel_state`/`domain_wall_state(...; eltype = ComplexF64)`; `test_adaptive_diagnostics.jl` runs a Float64 Neel through ordinary and midpoint, real and imaginary time, against its complex twin, and the RSVD path against free fermions | DONE | The step itself works in `ComplexF64` (`tau` is promoted), so "where applicable" = the START state the step receives. Default unchanged: every existing caller still gets complex tensors. 83/83 (job 17198444): Float64 Neel, ordinary + midpoint, real + imaginary time, all `:met`, Sz within 1e-6 of the complex twin; RSVD path from a real state within 1e-4 of free fermions. |
 | R.3 | §1 old names: deprecation warning with migration hint (row 1.5) | `_legacy_hint(legacy_names)` right after `resolve_budget` in `cbe_bug_step!`: one `@warn` per session (`maxlog=1`) naming the knobs and the four adaptive keywords | DONE | Informs, does not refuse: the legacy path is a supported study arm. Test asserts the message, the public-entry warning, and no warning on an adaptive step. 83/83 (job 17198444): message, public-entry warning, no warning on an adaptive step. |
 
+## `simulation_plan.md` checked line by line (2026-10-15). Audited before submission; job 17199363
+
+Its tasks, UT1-UT8 and IT1-IT5 are the main plan's §3-§5, UT03-UT14 and IT01-IT07 (rows above).
+What it says that the main plan does not:
+
+| # | Requirement (simulation_plan §) | Evidence | Status | Note |
+|---|---|---|---|---|
+| S.1 | §1 signature shows `adaptive = true` | no such keyword: the path is inferred from whether a retired knob is named (`resolve_budget`) | DIVERGES (by decision) | The main plan's §1 signature (the governing plan) has no flag, and §1 forbids silently honouring two configurations; a mode flag is one more knob that can disagree with the knobs passed. Stated in `adaptive_budget.jl` ("NO `adaptive = true` FLAG, DELIBERATELY"). |
+| S.2 | §5 per bond AND timestep: `n_reachable_sectors`, `n_rsvd_samples`, `n_rsvd_selected`, `n_krylov_added`, `r_old`, `r_augmented`, `r_final`, sampling residual, retained tail, Krylov residual, `discarded_weight`, `n_hamiltonian_actions` | `bond_log` entries (R.1) gain `n_sectors` + `probes_per_sector` (final Test B sketch per side, `_log_bond!`), and after compression `r_old`, `r_final`, `discarded` (that bond's relative discarded norm, from `truncate_recursive!(...; bond_weights)`); `width` is `r_augmented` | DONE | Test: per-bond `r_old`/`r_final` equal the state's bond dims before/after; the per-bond discarded norms rebuild the step's cumulative estimate `sqrt(Σ_left d²) + sqrt(Σ_right d²)` to 1e-10 at `tol_trunc = 1e-3` (non-vacuous); sampled bonds report >= 1 sector. CSV/analyzer columns added. Job 17199363: `test_adaptive_diagnostics.jl` + `test_adaptive_compression.jl` 170/170 (5m24s); driver smoke writes the new columns. |
+
 ## Open items, by when they must close
 
 - **Before Stage 3:** none of Stage 1/2 scope. **Stages 1-2 are closed** (job 17190027): UT01-02

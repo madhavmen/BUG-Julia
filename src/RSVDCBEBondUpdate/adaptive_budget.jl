@@ -198,8 +198,10 @@ mutable struct AdaptiveLedger
     # a step-level maximum cannot say which sector or how sure.
     sample_log::Vector{Any}
     # Plan §8 "track by bond and timestep": one entry per half-sweep bond visit, written by
-    # `_log_bond!` -- the bond's own Test A/B/C/D indicators, its counts, its verdict and the
-    # width of the frame it produced. The step-level fields above are the max/sum over these.
+    # `_log_bond!` -- the bond's own Test A/B/C/D indicators, its counts, its verdict, the
+    # width of the frame it produced (`r_augmented`), and the reachable sectors with their
+    # probes; after the compression `cbe_bug_step!` adds `r_old`, `r_final` and that bond's
+    # relative `discarded` norm. The step-level fields above are the max/sum over these.
     bond_log::Vector{Any}
 end
 
@@ -307,6 +309,14 @@ no-op.
 _log_bond!(::Nothing, ::Nothing, ::Int, ::Symbol, ::Int) = nothing
 function _log_bond!(ledger::AdaptiveLedger, bl::AdaptiveLedger, bond::Int, side::Symbol,
                     width::Int)
+    # Probes per reachable sector, from the FINAL Test B sketch of each expansion side (Test B
+    # logs every widening attempt; the last one is what the frame was built from). Empty on
+    # `exact = true`, which draws no sketch.
+    final = Dict{Symbol, Any}()
+    for s in bl.sample_log
+        final[s.side] = s.sketch
+    end
+    probes = Dict{Symbol, Dict{Any, Int}}(k => v for (k, v) in final)
     push!(bl.bond_log,
           (bond = bond, side = side, sample = bl.max_sample, tail = bl.max_tail,
            krylov_c = bl.max_krylov_c, krylov_d = bl.max_krylov_d,
@@ -314,7 +324,8 @@ function _log_bond!(ledger::AdaptiveLedger, bl::AdaptiveLedger, bond::Int, side:
            n_targeted = bl.n_targeted, n_krylov = bl.n_krylov, n_h1 = bl.n_h1,
            c_pass = bl.n_c_pass > 0, d_after_c = bl.n_d_after_c > 0,
            workcap = bl.workcap_reached, met = bl.tolerance_met, unmet = copy(bl.unmet),
-           width = width))
+           width = width, n_sectors = sum(length, values(probes); init = 0),
+           probes_per_sector = probes))
     return merge_ledger!(ledger, bl)
 end
 

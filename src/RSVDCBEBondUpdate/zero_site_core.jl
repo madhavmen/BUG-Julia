@@ -317,13 +317,19 @@ TWO RANK RULES, chosen by which keyword is set:
 the total still fits, because the largest single SVD's weight cannot show that a cap, not the
 tolerance, decided the rank. `cumulative` is returned in both modes.
 
+`bond_weights` (a length `L-1` vector, optional) receives each bond's own relative discarded
+norm `sqrt(w_b) / ||psi||` -- the per-bond diagnostic of plan §8; untouched bonds stay 0.
+
 ⚠ THE BUDGETED RULE COSTS A SECOND SVD at a bond where it cuts: the first (`cutoff = 0`, keeping
 every nonzero singular value up to `maxdim`) produces the spectrum, the second applies the rank.
 """
 function truncate_recursive!(psi::SymMPS, root::Int; maxdim::Int = 200,
                              cutoff::Float64 = 1e-12,
-                             weight_tol::Union{Nothing, Float64} = nothing)
+                             weight_tol::Union{Nothing, Float64} = nothing,
+                             bond_weights::Union{Nothing, Vector{Float64}} = nothing)
     L = length(psi)
+    bond_weights === nothing || length(bond_weights) == L - 1 ||
+        throw(DimensionMismatch("bond_weights needs $(L - 1) entries"))
     1 <= root <= L || throw(ArgumentError("root $root outside 1:$L"))
     weight_tol === nothing || weight_tol >= 0 ||
         throw(ArgumentError("weight_tol must be non-negative, got $weight_tol"))
@@ -349,16 +355,17 @@ function truncate_recursive!(psi::SymMPS, root::Int; maxdim::Int = 200,
         k < nk && (res = svd(T, split; cutoff = 0.0, Nkeep = k, get_lists = true))
         return res
     end
-    function account!(res, side)
+    function account!(res, side, bond)
         worst = max(worst, _trunc_weight(res))
         cum[side] += _sq_weight(res.trunc_list)
+        bond_weights === nothing || (bond_weights[bond] = _sq_weight(res.trunc_list))
         nrm2 < 0 && (nrm2 = _sq_weight(res.kept_list) + _sq_weight(res.trunc_list))
     end
 
     # ── left subtree, root-to-leaf: bonds root-1, root-2, … 1 ──
     for i in root:-1:2
         res = cut(psi[i], (1,))
-        account!(res, 1)
+        account!(res, 1, i - 1)               # splits bond (i-1, i)
         tag = psi[i - 1].inds[3].itags
         # `A = U S Vd`: keep `Vd` here and hand `U S` outward, so the child receives the weight
         # and its own SVD is a genuine Schmidt decomposition.
@@ -376,7 +383,7 @@ function truncate_recursive!(psi::SymMPS, root::Int; maxdim::Int = 200,
     # ── right subtree, root-to-leaf: bonds root, root+1, … L-1 ──
     for i in root:(L - 1)
         res = cut(psi[i], (1, 2))
-        account!(res, 2)
+        account!(res, 2, i)                   # splits bond (i, i+1)
         tag = psi[i].inds[3].itags
         psi[i]     = to_concrete(setitag(res.U, 3, tag))
         psi[i + 1] = to_concrete(setitag(
@@ -385,6 +392,7 @@ function truncate_recursive!(psi::SymMPS, root::Int; maxdim::Int = 200,
     end
 
     cumulative = nrm2 > 0 ? (sqrt(cum[1]) + sqrt(cum[2])) / sqrt(nrm2) : 0.0
+    bond_weights === nothing || (bond_weights .= nrm2 > 0 ? sqrt.(bond_weights ./ nrm2) : 0.0)
     return psi, worst, cumulative, capped
 end
 

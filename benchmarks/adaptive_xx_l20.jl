@@ -112,10 +112,11 @@ const COLS = ["phase", "arm", "state", "scheme", "seed", "path", "exact",
 const BCOLS = ["phase", "arm", "state", "scheme", "seed", "exact", "tol_basis", "tol_trunc",
                "tol_expv", "maxdim", "step", "stage", "bond", "side", "width", "sample", "tail",
                "krylov_c", "krylov_d", "n_probes", "n_holdout", "n_selected", "n_targeted",
-               "n_krylov", "n_h1", "c_pass", "d_after_c", "workcap", "met", "unmet"]
+               "n_krylov", "n_h1", "c_pass", "d_after_c", "workcap", "met", "n_sectors",
+               "r_old", "r_final", "discarded", "unmet"]
 const BFIELDS = (:bond, :side, :width, :sample, :tail, :krylov_c, :krylov_d, :n_probes,
                  :n_holdout, :n_selected, :n_targeted, :n_krylov, :n_h1, :c_pass, :d_after_c,
-                 :workcap, :met)
+                 :workcap, :met, :n_sectors, :r_old, :r_final, :discarded)
 
 _f(x) = x === nothing ? "" : x isa AbstractFloat ? @sprintf("%.6e", x) : string(x)
 

@@ -261,6 +261,10 @@ of that job reloads the source). Changes:
   `*_bonds.csv`, analyzer "Per bond"), `neel_state(L; eltype = Float64)` etc. + Float64 tests,
   `_legacy_hint` (one warning per session). New tests 83/83; full sweeps 1186/2/2 = 4 baseline reds.
   EVERY ROW OF THE PLAN AUDIT IS NOW DONE.
+- simulation_plan.md checked line by line (audit S.1-S.2): `adaptive = true` deliberately absent
+  (main plan's API wins); §5 per-bond list completed -- bond entries carry `n_sectors`,
+  `probes_per_sector`, `r_old`, `r_final`, `discarded` (`truncate_recursive!(...; bond_weights)`).
+  Job 17199363: relevant tests 170/170. USER: run only relevant test files from now on.
 
 ## 5) Quick resume commands (cluster)
 

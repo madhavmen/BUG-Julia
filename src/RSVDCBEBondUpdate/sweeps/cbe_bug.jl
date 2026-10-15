@@ -724,7 +724,9 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     _nrm = (1 <= psi.center <= L) ? norm(psi[psi.center]) : 1.0
     alloc  = basis_allocation(budget, L - 1; tau = tau, nrm = _nrm)
     ledger = AdaptiveLedger()
-    ledger.r_old = maximum(bond_dims(psi); init = 0)
+    bd0 = bond_dims(psi)                 # per-bond `r_old` for the bond log (plan §8)
+    ledger.r_old = maximum(bd0; init = 0)
+    bwts = adaptive ? zeros(L - 1) : nothing   # per-bond discarded norm of the compression
 
     # ── `grow_iters` RESOLVES ONTO THE TWO KNOBS IT IS SHORTHAND FOR ────────────────────────────
     # `nothing` leaves `krylov_grow`/`krylov_basis` exactly as passed, so every existing call and
@@ -1345,7 +1347,8 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         # budget on the CUMULATIVE discarded norm over all bonds, shared out by
         # `truncate_recursive!`; the legacy path keeps its per-bond relative cut.
         _, wtr, cumw, capped = adaptive ?
-            truncate_recursive!(psi, c + 1; maxdim = maxdim, weight_tol = budget.trunc) :
+            truncate_recursive!(psi, c + 1; maxdim = maxdim, weight_tol = budget.trunc,
+                                bond_weights = bwts) :
             truncate_recursive!(psi, c + 1; maxdim = maxdim, cutoff = cut)
         ttrunc[] = (time_ns() - _t0tr) / 1e9
         discarded = max(discarded, wtr)
@@ -1356,7 +1359,13 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             cumw > budget.trunc * (1 + 1e-8) && _unmet!(ledger, :trunc)
         end
     end
-    adaptive && (ledger.r_final = maximum(bond_dims(psi); init = 0))
+    if adaptive
+        bd1 = bond_dims(psi)
+        ledger.r_final = maximum(bd1; init = 0)
+        # Close the per-bond log with what only exists after the root solve and compression.
+        ledger.bond_log = Any[merge(e, (r_old = bd0[e.bond], r_final = bd1[e.bond],
+                                        discarded = bwts[e.bond])) for e in ledger.bond_log]
+    end
 
     # ⚠ THE PHASE TIMERS ARE SUMS ACROSS BOTH HALF-SWEEPS, i.e. CPU time, while `t_step` is WALL
     # clock. Under `parallel = false` they are the same clock and the shares sum to ~1 as before.

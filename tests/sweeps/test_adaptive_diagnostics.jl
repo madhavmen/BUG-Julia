@@ -54,6 +54,31 @@ _sz(p) = real.(magnetisation(copy(p))) ./ norm(copy(p))^2
         @test e.width == want
     end
 
+    @testset "per-bond ranks, sectors and discarded norm (simulation_plan §5)" begin
+        # A loose `tol_trunc` so the compression really cuts: the per-bond discarded norms must
+        # then rebuild the step's cumulative estimate exactly (Pythagoras within each subtree,
+        # triangle across -- `truncate_recursive!`'s rule).
+        mpo4, psi4 = _xx_warm(L, 2)
+        bd0 = bond_dims(psi4)
+        info4 = cbe_bug_step!(psi4, mpo4, ComplexF64(-0.05im); tol_basis = 1e-6,
+                              tol_trunc = 1e-3, rng = Random.MersenneTwister(1))
+        lg4, c4 = info4.ledger, info4.root
+        bd1 = bond_dims(psi4)
+        @test all(e -> e.r_old == bd0[e.bond] && e.r_final == bd1[e.bond], lg4.bond_log)
+        d = Dict(e.bond => e.discarded for e in lg4.bond_log)
+        @test sort(collect(keys(d))) == collect(1:(L - 1))
+        @test lg4.discarded > 0                                     # non-vacuous: it cut
+        left  = sqrt(sum(d[b]^2 for b in 1:c4))                    # root c4+1: bonds c4..1
+        right = sqrt(sum((d[b]^2 for b in (c4 + 1):(L - 1)); init = 0.0))
+        @test lg4.discarded ≈ left + right rtol = 1e-10
+        # Reachable sectors: every bond that sampled has at least one, and its probes are > 0.
+        for e in lg4.bond_log
+            e.n_probes > 0 || continue
+            @test e.n_sectors >= 1
+            @test all(v -> sum(values(v); init = 0) > 0, values(e.probes_per_sector))
+        end
+    end
+
     @testset "a failed bond is named; only step-level checks fail without one" begin
         # maxdim = 2 binds the work ceiling (UT11). Whatever fails, every per-bond failure is in
         # the step's verdict, and every step failure no bond explains is a step-level check.
