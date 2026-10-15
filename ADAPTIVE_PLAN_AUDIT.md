@@ -153,5 +153,12 @@ What it says that the main plan does not:
   were missing; added as rows R.1/R.2 with the row-1.5 hint as R.3.
 - **R.1-R.3 closed (job 17198444):** new tests 83/83; full `tests/sweeps` 1186/2/2 = the 4 baseline
   reds only (`exact_refs:310`, `physics:82,116,153`); MaxRSS 11.4 GB (cold precompile).
+- **The four standing reds are pre-existing and unrelated, shown by value, not by count.** In
+  the baseline job 17169504 (2026-10-13), before any of this work changed physics, they are the same
+  four with the same numbers: `exact_refs:310` OAT rank `12 == 7`; `physics:153` Haldane-Shastry
+  magnon `0.0042542611127878716` (job 17198444: `0.004254261112787816`; also measured 4.2543e-03 on
+  2026-08-25, `docs/PLAN-tolerance-control.md` §7); `physics:82,116` `UndefVarError: jan_bug_step!`
+  (deleted in 3024066). All four run the LEGACY path (`trunc_thresh` named) or a deleted function.
+  User decision 2026-10-15: not in scope (Haldane-Shastry skipped); run only the relevant test files.
 - Kept by design: `_range_find` stops on a
   global count, and Test B covers the gap that leaves.
