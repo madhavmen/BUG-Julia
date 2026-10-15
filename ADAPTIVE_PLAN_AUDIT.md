@@ -127,5 +127,12 @@ baseline (T = 0.5), 17195155 sweeps, 17195335 combos, 17195336 maxdim (T = 2).
 - **Final regression (job 17195549, all code final):** full `tests/sweeps` 1103/2/2 -- ONLY the 4 baseline reds (`exact_refs:310`, `physics:82,116,153`).
 - **Stage 3 closed** (job 17192249, see 3.10). 1.6 `krylov_tol` -> closed by 3.4.  **Stage 4**: 1.12 and 2.13 -> closed by 4.1/4.2.
   **Stage 5**: 1.6/1.7 -> closed by 5.1/5.4. **Stages 4 and 5 closed** (17193333 + rerun 17195151).  **Stage 6 closed** (6.9 by matched-accuracy job 17195550). 2.8 closed (IT03).
+- **Robustness of the Stage 6 conclusions (2026-10-15, jobs 17197997-99):** quickstart example
+  runs as written (QUICKSTART-OK); per-component sweeps re-run on isotropic Heisenberg (exact
+  sparse reference) and on XX at dt = 0.1 -- the looseness rules hold, see finding 9 in
+  `ADAPTIVE_XX_L20_RESULTS.md`.
+- **Found by a line-by-line re-read of §7/§8 (not rows above):** §8 "Track by bond and timestep"
+  -- the ledger aggregates over bonds (max/sum per step); only Test B's `sample_log` is per bond.
+  §7 "Float64 and complex state tensors" -- the adaptive tests build complex states only.
 - Kept by design: 1.5 has no deprecation hint (the plan says "may"); `_range_find` stops on a
   global count, and Test B covers the gap that leaves.

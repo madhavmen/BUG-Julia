@@ -10,9 +10,10 @@ julia --project=. examples/oat_z2.jl          # defaults
 python3 examples/plot_examples.py             # figures for every CSV present
 ```
 
-The three models:
+The adaptive-solver quickstart, then the three models:
 
 ```bash
+julia -t 2 --project=. examples/adaptive_quickstart.jl  # the three-tolerance API, its status, an infeasible request
 julia --project=. examples/oat_z2.jl          # one-axis twisting, Z2        (constant rank)
 julia --project=. examples/xx_domain_wall.jl  # XX chain from a domain wall  (growing rank)
 julia --project=. examples/tfim_z2.jl         # transverse-field Ising, Z2   (growing rank)

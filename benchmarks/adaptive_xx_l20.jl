@@ -29,7 +29,12 @@
 #              256 and 512, Neel, in ONE process so `t_cbe` per step compares as chi grows.
 #   all        profiles + sweeps + baseline.
 #
-# usage:  julia -t 2 --project=. benchmarks/adaptive_xx_l20.jl PHASE [OUTDIR] [L] [T] [dt]
+# usage:  julia -t 2 --project=. benchmarks/adaptive_xx_l20.jl PHASE [OUTDIR] [L] [T] [dt] [model]
+#
+# model = "xx" (default; free-fermion reference) or "heis" (isotropic Heisenberg, NOT free
+# fermions; reference = exact sparse Krylov propagation of the Sz = 0 sector,
+# `benchmarks/exact_sparse.jl`), so the looseness findings can be checked off the free-fermion
+# point.
 #
 # Output: one streamed CSV row per (run, step) in OUTDIR/adaptive_xx_<phase>.csv, so a killed job
 # keeps everything up to the kill. The script exits non-zero if it graded nothing.
@@ -42,6 +47,7 @@ using BUGJulia.RSVDCBEBondUpdate
 import Random
 
 include(joinpath(@__DIR__, "..", "tests", "common", "free_fermion.jl"))
+include(joinpath(@__DIR__, "exact_sparse.jl"))
 
 const PHASE  = isempty(ARGS) ? "all" : ARGS[1]
 const OUTDIR = length(ARGS) >= 2 ? ARGS[2] : joinpath(@__DIR__, "results")
@@ -49,6 +55,33 @@ const L      = length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 20
 const TMAX   = length(ARGS) >= 4 ? parse(Float64, ARGS[4]) : 0.5
 const DT     = length(ARGS) >= 5 ? parse(Float64, ARGS[5]) : 0.05
 const NSTEP  = round(Int, TMAX / DT)
+const MODEL  = length(ARGS) >= 6 ? ARGS[6] : "xx"
+MODEL in ("xx", "heis") || error("unknown model $MODEL (xx | heis)")
+
+"The model's MPO: XX (delta = 0) or isotropic Heisenberg (delta = 1)."
+model_mpo() = xxz_mpo(L; J = 1.0, delta = MODEL == "heis" ? 1.0 : 0.0)
+
+# Exact <Sz_j>(n*DT) for the Heisenberg chain, propagated ONCE per initial state and cached:
+# `expv_sparse` restarts and checks its own residual, so this is exact to Krylov tolerance.
+const _HEIS_REF = Dict{String, Vector{Vector{Float64}}}()
+function heis_reference(state::String)
+    get!(_HEIS_REF, state) do
+        H, states, idx = heisenberg_sparse(L; J = 1.0, delta = 1.0)
+        v = state == "neel" ? neel_vector(L, idx) :
+            state == "dw"   ? domain_wall_vector(L, states, idx) :
+            error("no Heisenberg reference for state $state (Sz = 0 sector only)")
+        out = Vector{Vector{Float64}}()
+        for _ in 1:NSTEP
+            v = expv_sparse(H, ComplexF64(-im * DT), v)
+            push!(out, magnetisation_dense(v, L, states))
+        end
+        out
+    end
+end
+
+"Exact <Sz_j> after step `n` from `state` (occupied = its up sites, for the free-fermion map)."
+exact_sz(state, occ, n) = MODEL == "heis" ? heis_reference(state)[n] :
+                                            xx_free_fermion_sz(L, n * DT; J = 1.0, occupied = occ)
 const MAXDIM = 128
 
 PHASE in ("profiles", "sweeps", "baseline", "combos", "maxdim", "matched", "rsvdscan", "all") ||
@@ -83,7 +116,7 @@ knob under test is exactly what the integrator received (and is echoed in the ro
 """
 function run_arm(io, phase, arm, state, scheme; seed::Int, legacy::Bool = false, kw...)
     set_symmetry!(:U1)
-    mpo = xxz_mpo(L; J = 1.0, delta = 0.0)
+    mpo = model_mpo()
     psi, occ = initial(state)
     rng = Random.MersenneTwister(seed)
     step! = scheme == "midpoint" ? cbe_bug_midpoint_step! : cbe_bug_step!
@@ -103,7 +136,7 @@ function run_arm(io, phase, arm, state, scheme; seed::Int, legacy::Bool = false,
         (lg === nothing) == legacy ||
             error("arm $arm expected $(legacy ? "legacy" : "adaptive") path, got the other")
         t = n * DT
-        err = maximum(abs.(sz(psi) .- xx_free_fermion_sz(L, t; J = 1.0, occupied = occ)))
+        err = maximum(abs.(sz(psi) .- exact_sz(state, occ, n)))
         n == 1 && (err1 = err)
         errl = err
         g(f) = lg === nothing ? nothing : getfield(lg, f)
@@ -132,7 +165,10 @@ end
 
 function main()
     mkpath(OUTDIR)
-    path = joinpath(OUTDIR, "adaptive_xx_$(PHASE)_L$(L).csv")
+    # The XX file name is unchanged so earlier results keep their names; other models and a
+    # non-default dt are spelled out so no run overwrites another.
+    tag = (MODEL == "xx" ? "" : "_$(MODEL)") * (DT == 0.05 ? "" : "_dt$(DT)")
+    path = joinpath(OUTDIR, "adaptive_xx_$(PHASE)_L$(L)$(tag).csv")
     graded = 0
     open(path, "w") do io
         println(io, join(COLS, ","))

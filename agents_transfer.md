@@ -249,6 +249,15 @@ of that job reloads the source). Changes:
 - Committed (user chose the whole tested tree): branch `feature/adaptive-cbe-krylov`, commit 0555fb4.
   RSVD crossover (17195922): RSVD/exact CBE time 1.8 at chi 29 -> parity at chi ~250-400. Not pushed.
 
+## 4h) 2026-10-15: robustness + quickstart
+
+- `examples/adaptive_quickstart.jl` (17197997): QUICKSTART-OK (defaults 1.6e-6 chi 43; loose 4.4e-5
+  chi 4; maxdim 4 -> 20/20 `:budget_unmet` with a readable diagnostic).
+- Driver takes `[model]` (`xx` | `heis`, exact sparse Sz=0 reference in `benchmarks/exact_sparse.jl`)
+  and `dt`. 17197998 Heisenberg sweeps+combos, 17197999 XX dt 0.1 sweeps (T=2): rules hold; finding
+  9 + "Robustness" tables in `ADAPTIVE_XX_L20_RESULTS.md`. Gate 9 clean (MaxRSS 2.5/1.6 GB).
+- Open plan gaps found by re-reading §7/§8: per-bond diagnostics, Float64 test states; row 1.5 by design.
+
 ## 5) Quick resume commands (cluster)
 
 ```bash

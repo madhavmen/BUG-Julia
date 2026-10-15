@@ -81,6 +81,28 @@ worse on every count. The MIDPOINT step at ~1e-9 needs tight tol_trunc and then 
 applications than legacy kry3 (1222 vs 900, T = 0.5) while still keeping a narrower trial space
 (58 vs 94). `exact = true` is the fastest arm throughout, with results identical to the RSVD arm.
 
+**9. The rules survive a second model and a second dt (jobs 17197998, 17197999; 2026-10-15).**
+Same driver, Neel, T = 2, L = 20, maxdim 128. (a) ISOTROPIC HEISENBERG (`delta = 1`, interacting,
+graded against an exact sparse Sz = 0 Krylov evolution, `benchmarks/exact_sparse.jl`; L = 8 smoke
+agrees to <= 1e-5, so the reference convention is right). (b) XX at dt = 0.1 (free fermions).
+
+| rule (from XX, dt 0.05) | Heisenberg, dt 0.05 | XX, dt 0.1 |
+|---|---|---|
+| err ~ 0.1-0.9 x tol_basis down to the floor | ordinary 0.14-0.84 x, midpoint 0.02-0.93 x | ordinary 0.17-0.6 x, midpoint 0.03-0.6 x |
+| ordinary / midpoint floor | 5.5e-6 / <= 3.9e-9 | 3.7e-5 / <= 4.6e-9 |
+| tol_trunc 10-100 x target | 1e-3 -> 5.6e-5 (chi 12); 1e-4 -> floor at chi 18 vs 128 | 1e-3 -> 2.1e-5 (chi 9); 1e-4 -> floor at chi 12 |
+| tol_expv 1e-2 is enough | 1e-2 -> 2.0e-5 = 3.6 x floor; 1e-4 reaches it | 1e-2 at the floor |
+| RSVD == exact CBE | identical to 3 digits; CBE time 1.66 x | identical; CBE time 1.79 x |
+| loose settings combine, all `:met` | all 24 combos `:met`; (1e-5, 1e-3, 1e-2) -> 4.5e-5 at chi 12 | (not run) |
+
+So `tol_basis` remains the accuracy knob and `tol_trunc` the speed knob on an interacting model
+and at twice the step. Two things move: the ORDINARY step's floor grows ~8x when dt doubles (3.7e-5
+at dt 0.1), so below ~1e-4 use midpoint or a smaller dt; and on Heisenberg `tol_expv = 1e-2` costs
+~3.6x the floor, so use 1e-4 for targets near 1e-5. The tight sweeps (tol_trunc 1e-10 or tol_basis
+<= 1e-3 with tol_trunc 1e-10) hit maxdim 128 and are flagged `:budget_unmet (trunc)` on both
+runs -- the cap, not a silent loss: the discarded weight is <= 4e-7 and the error sits on the floor.
+Tables: "Robustness" at the end of this file.
+
 ## Recommended starting settings (XX-like dynamics, dt = 0.05)
 
 Measured at T = 2 (combos table below; error in parentheses):
@@ -91,9 +113,11 @@ Measured at T = 2 (combos table below; error in parentheses):
 | 1e-4 | tol_basis 1e-5, tol_trunc 1e-3, tol_expv 1e-2 (6.7e-5, chi 8) | tol_basis 1e-5, tol_trunc 1e-3, tol_expv 1e-2 (7.0e-5, chi 8) |
 | 1e-5 | tol_basis 1e-5, tol_trunc 1e-5, tol_expv 1e-6 (5.5e-6, chi 18; just above the 4.7e-6 floor) | tol_basis 1e-5, tol_trunc 1e-5, tol_expv 1e-6 (1.1e-6, chi 16) |
 
-Rule of thumb from this model: tol_basis ~ target, tol_trunc ~ 10-100 x target, tol_expv 1e-2 is
-enough at this dt; prefer `exact = true` while d*chi is a few hundred. One model, one dt: re-check
-on a non-free-fermion Hamiltonian before relying on the constants.
+Rule of thumb: tol_basis ~ target, tol_trunc ~ 10-100 x target, tol_expv 1e-2 (1e-4 for targets
+near 1e-5 on interacting models); prefer `exact = true` while d*chi is a few hundred. Checked on
+XX and isotropic Heisenberg at dt 0.05 and XX at dt 0.1 (finding 9). On Heisenberg the same
+ordinary settings give 4.5e-5 (target 1e-4) and 6.1e-4 (target 1e-3); the ordinary step cannot
+reach 1e-5 at dt 0.1 (its floor is 3.7e-5).
 
 ## T = 0.5 (plan settings)
 
@@ -355,3 +379,148 @@ T = 2:
 | ordinary | neel | adaptive | 1e-04 | 1.80e-04 | 3180 | 31 | 12 | 46.0s | met |
 | ordinary | neel | adaptive_exact | 1e-04 | 1.80e-04 | 3180 | 31 | 12 | 27.0s | met |
 
+## Robustness (2026-10-15): isotropic Heisenberg and dt = 0.1
+
+Jobs 17197998 (Heisenberg, dt 0.05, graded against the exact sparse Sz = 0 evolution) and 17197999
+(XX, dt 0.1, free fermions), `$SCRATCH/rsvd_adaptive/2026-10-15-robust/`; Neel, T = 2, maxdim 128.
+Driver arguments `sweeps|combos OUTDIR 20 2.0 0.05 heis` and `sweeps OUTDIR 20 2.0 0.1 xx`.
+Gate 9: both COMPLETED 0:0, MaxRSS 2.5 / 1.6 GB of 13 GB, no OOM/error lines.
+
+### Heisenberg (delta = 1), dt = 0.05
+
+#### Sweeps: one tolerance at a time (Neel, seed 1; others tight)
+
+| sweep | tol | err(1 step) | err(T) | chi | r_aug | H applications | probes | Krylov dirs | C pass / D after C | expv iters | discarded | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| basis | 1e-01 | 2.97e-06 | 8.43e-02 | 26 | 26 | 1970 | 18906 | 186 | 620 / 0 | 370 | 5.9e-19 | met |
+| basis | 1e-02 | 1.23e-06 | 3.32e-03 | 86 | 86 | 2702 | 45054 | 666 | 408 / 0 | 396 | 4.6e-19 | met |
+| basis | 1e-03 | 4.71e-07 | 3.47e-04 | 128 | 135 | 3185 | 66336 | 1054 | 374 / 0 | 399 | 1.4e-07 | budget_unmet (trunc) |
+| basis | 1e-04 | 2.46e-07 | 1.36e-05 | 128 | 147 | 3648 | 85704 | 1762 | 382 / 0 | 400 | 3.5e-07 | budget_unmet (trunc) |
+| basis | 1e-05 | 9.01e-10 | 5.90e-06 | 128 | 162 | 4050 | 102099 | 3213 | 394 / 0 | 400 | 1.2e-07 | budget_unmet (trunc) |
+| basis | 1e-06 | 3.38e-10 | 5.52e-06 | 128 | 182 | 4628 | 115255 | 5328 | 411 / 0 | 400 | 3.3e-08 | budget_unmet (trunc) |
+| basis | 1e-07 | 2.96e-10 | 5.51e-06 | 128 | 208 | 4920 | 125593 | 8453 | 420 / 4 | 400 | 6.4e-09 | budget_unmet (trunc) |
+| exact | 1e-01 | 2.97e-06 | 8.43e-02 | 26 | 26 | 1970 | 0 | 186 | 620 / 0 | 370 | 1.5e-18 | met |
+| exact | 1e-02 | 1.23e-06 | 3.32e-03 | 86 | 86 | 2702 | 0 | 666 | 408 / 0 | 396 | 3.5e-19 | met |
+| exact | 1e-03 | 4.71e-07 | 3.47e-04 | 128 | 135 | 3185 | 0 | 1054 | 374 / 0 | 399 | 1.4e-07 | budget_unmet (trunc) |
+| exact | 1e-04 | 2.46e-07 | 1.36e-05 | 128 | 147 | 3648 | 0 | 1762 | 382 / 0 | 400 | 3.5e-07 | budget_unmet (trunc) |
+| exact | 1e-05 | 9.01e-10 | 5.90e-06 | 128 | 163 | 4050 | 0 | 3209 | 394 / 0 | 400 | 1.2e-07 | budget_unmet (trunc) |
+| exact | 1e-06 | 3.38e-10 | 5.52e-06 | 128 | 182 | 4628 | 0 | 5354 | 412 / 0 | 400 | 3.5e-08 | budget_unmet (trunc) |
+| exact | 1e-07 | 2.96e-10 | 5.51e-06 | 128 | 209 | 4918 | 0 | 8446 | 421 / 5 | 400 | 6.6e-09 | budget_unmet (trunc) |
+| mid | 1e-01 | 2.97e-06 | 9.29e-02 | 24 | 24 | 1973 | 36134 | 186 | 1426 / 0 | 703 | 6.4e-16 | met |
+| mid | 1e-02 | 1.23e-06 | 3.44e-03 | 87 | 87 | 2714 | 91884 | 666 | 1206 / 0 | 751 | 4.3e-19 | met |
+| mid | 1e-03 | 1.39e-07 | 1.35e-04 | 128 | 138 | 3209 | 138466 | 1140 | 1144 / 0 | 756 | 3.3e-07 | budget_unmet (trunc) |
+| mid | 1e-04 | 1.29e-07 | 1.01e-05 | 128 | 156 | 3668 | 173082 | 2094 | 1064 / 0 | 759 | 3.9e-07 | budget_unmet (trunc) |
+| mid | 1e-05 | 8.74e-11 | 2.00e-07 | 128 | 180 | 4036 | 204689 | 4226 | 1013 / 2 | 760 | 1.2e-07 | budget_unmet (trunc) |
+| mid | 1e-06 | 6.51e-11 | 3.46e-08 | 128 | 208 | 4626 | 234974 | 7647 | 961 / 0 | 760 | 3.5e-08 | budget_unmet (trunc) |
+| mid | 1e-07 | 6.08e-11 | 3.93e-09 | 128 | 236 | 4945 | 253918 | 11648 | 956 / 0 | 760 | 4.8e-09 | budget_unmet (trunc) |
+| trunc | 1e-02 | 5.05e-10 | 2.13e-03 | 7 | 60 | 4754 | 34750 | 11864 | 214 / 0 | 400 | 8.8e-03 | met |
+| trunc | 1e-03 | 5.05e-10 | 5.55e-05 | 12 | 83 | 4812 | 43416 | 13756 | 262 / 0 | 400 | 7.9e-04 | met |
+| trunc | 1e-04 | 5.05e-10 | 5.26e-06 | 18 | 106 | 4824 | 49606 | 14422 | 278 / 0 | 400 | 7.8e-05 | met |
+| trunc | 1e-05 | 2.94e-10 | 5.66e-06 | 24 | 111 | 4852 | 53524 | 14108 | 290 / 0 | 400 | 7.4e-06 | met |
+| trunc | 1e-06 | 2.96e-10 | 5.54e-06 | 35 | 122 | 4892 | 60214 | 14292 | 294 / 0 | 400 | 7.2e-07 | met |
+| trunc | 1e-07 | 2.96e-10 | 5.51e-06 | 49 | 126 | 4896 | 66630 | 14508 | 296 / 0 | 400 | 7.2e-08 | met |
+| trunc | 1e-08 | 2.96e-10 | 5.51e-06 | 110 | 169 | 4896 | 87817 | 11900 | 323 / 0 | 400 | 6.9e-09 | met |
+| trunc | 1e-09 | 2.96e-10 | 5.51e-06 | 128 | 205 | 4896 | 111722 | 9293 | 399 / 2 | 400 | 5.1e-09 | budget_unmet (trunc) |
+| trunc | 1e-10 | 2.96e-10 | 5.51e-06 | 128 | 208 | 4920 | 125593 | 8453 | 420 / 4 | 400 | 6.4e-09 | budget_unmet (trunc) |
+| expv | 1e-02 | 4.26e-09 | 2.01e-05 | 128 | 208 | 5044 | 129927 | 7337 | 429 / 0 | 160 | 1.4e-08 | budget_unmet (trunc) |
+| expv | 1e-04 | 6.93e-10 | 5.31e-06 | 128 | 204 | 5077 | 129169 | 7393 | 426 / 2 | 200 | 1.1e-08 | budget_unmet (trunc) |
+| expv | 1e-06 | 2.96e-10 | 5.51e-06 | 128 | 205 | 4930 | 127760 | 8022 | 426 / 4 | 280 | 6.9e-09 | budget_unmet (trunc) |
+| expv | 1e-08 | 2.96e-10 | 5.51e-06 | 128 | 208 | 4847 | 126142 | 8384 | 427 / 2 | 320 | 6.2e-09 | budget_unmet (trunc) |
+| expv | 1e-10 | 2.96e-10 | 5.51e-06 | 128 | 206 | 4879 | 125486 | 8440 | 422 / 5 | 360 | 6.3e-09 | budget_unmet (trunc) |
+| expv | 1e-12 | 2.96e-10 | 5.51e-06 | 128 | 208 | 4920 | 125593 | 8453 | 420 / 4 | 400 | 6.4e-09 | budget_unmet (trunc) |
+
+##### Loosest tolerance reaching each accuracy target (max |Sz - exact| over the run)
+
+| sweep | err <= 1e-02 | err <= 1e-03 | err <= 1e-04 | err <= 1e-05 |
+|---|---|---|---|---|
+| basis | 1e-02 | 1e-03 | 1e-04 | 1e-05 |
+| exact | 1e-02 | 1e-03 | 1e-04 | 1e-05 |
+| mid | 1e-02 | 1e-03 | 1e-04 | 1e-05 |
+| trunc | 1e-02 | 1e-03 | 1e-03 | 1e-04 |
+| expv | 1e-02 | 1e-02 | 1e-02 | 1e-04 |
+
+Error floor over all sweep runs: 3.93e-09 (what the tightest settings reach at this dt -- the integrator/time-step error no tolerance removes).
+
+#### Combined loose settings (do they compound?)
+
+| scheme | tol_basis | tol_trunc | tol_expv | maxdim | err(T) | chi | H applications | discarded | status |
+|---|---|---|---|---|---|---|---|---|---|
+| midpoint | 1e-03 | 1e-03 | 1e-02 | 128 | 4.38e-04 | 12 | 2960 | 8.3e-04 | met |
+| midpoint | 1e-03 | 1e-03 | 1e-06 | 128 | 4.34e-04 | 12 | 2965 | 8.3e-04 | met |
+| midpoint | 1e-03 | 1e-05 | 1e-02 | 128 | 2.12e-04 | 75 | 2999 | 5.4e-06 | met |
+| midpoint | 1e-03 | 1e-05 | 1e-06 | 128 | 2.87e-04 | 72 | 3064 | 5.4e-06 | met |
+| midpoint | 1e-04 | 1e-03 | 1e-02 | 128 | 8.77e-05 | 12 | 3576 | 7.9e-04 | met |
+| midpoint | 1e-04 | 1e-03 | 1e-06 | 128 | 8.31e-05 | 12 | 3476 | 7.9e-04 | met |
+| midpoint | 1e-04 | 1e-05 | 1e-02 | 128 | 2.39e-05 | 65 | 3678 | 7.0e-06 | met |
+| midpoint | 1e-04 | 1e-05 | 1e-06 | 128 | 3.52e-05 | 58 | 3479 | 6.7e-06 | met |
+| midpoint | 1e-05 | 1e-03 | 1e-02 | 128 | 4.50e-05 | 12 | 3896 | 7.9e-04 | met |
+| midpoint | 1e-05 | 1e-03 | 1e-06 | 128 | 5.57e-05 | 12 | 3908 | 7.9e-04 | met |
+| midpoint | 1e-05 | 1e-05 | 1e-02 | 128 | 1.64e-05 | 40 | 3888 | 7.6e-06 | met |
+| midpoint | 1e-05 | 1e-05 | 1e-06 | 128 | 9.35e-07 | 24 | 3908 | 7.9e-06 | met |
+| ordinary | 1e-03 | 1e-03 | 1e-02 | 128 | 6.12e-04 | 12 | 2724 | 7.5e-04 | met |
+| ordinary | 1e-03 | 1e-03 | 1e-06 | 128 | 6.15e-04 | 12 | 2804 | 7.5e-04 | met |
+| ordinary | 1e-03 | 1e-05 | 1e-02 | 128 | 5.17e-04 | 71 | 2996 | 5.5e-06 | met |
+| ordinary | 1e-03 | 1e-05 | 1e-06 | 128 | 7.99e-04 | 61 | 3043 | 5.5e-06 | met |
+| ordinary | 1e-04 | 1e-03 | 1e-02 | 128 | 1.90e-04 | 12 | 3246 | 7.9e-04 | met |
+| ordinary | 1e-04 | 1e-03 | 1e-06 | 128 | 1.86e-04 | 12 | 3366 | 7.9e-04 | met |
+| ordinary | 1e-04 | 1e-05 | 1e-02 | 128 | 2.08e-05 | 65 | 3596 | 7.0e-06 | met |
+| ordinary | 1e-04 | 1e-05 | 1e-06 | 128 | 6.78e-05 | 48 | 3394 | 6.8e-06 | met |
+| ordinary | 1e-05 | 1e-03 | 1e-02 | 128 | 4.45e-05 | 12 | 3690 | 7.9e-04 | met |
+| ordinary | 1e-05 | 1e-03 | 1e-06 | 128 | 5.39e-05 | 12 | 3810 | 7.9e-04 | met |
+| ordinary | 1e-05 | 1e-05 | 1e-02 | 128 | 2.03e-05 | 41 | 3868 | 7.2e-06 | met |
+| ordinary | 1e-05 | 1e-05 | 1e-06 | 128 | 7.38e-06 | 26 | 3896 | 6.9e-06 | met |
+
+### XX, dt = 0.1
+
+#### Sweeps: one tolerance at a time (Neel, seed 1; others tight)
+
+| sweep | tol | err(1 step) | err(T) | chi | r_aug | H applications | probes | Krylov dirs | C pass / D after C | expv iters | discarded | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| basis | 1e-01 | 4.75e-05 | 6.10e-02 | 37 | 37 | 1275 | 11142 | 298 | 200 / 0 | 217 | 0.0e+00 | met |
+| basis | 1e-02 | 3.60e-06 | 3.34e-03 | 58 | 58 | 1555 | 17426 | 512 | 180 / 0 | 233 | 1.6e-12 | met |
+| basis | 1e-03 | 3.12e-06 | 1.72e-04 | 89 | 89 | 1849 | 25246 | 780 | 156 / 0 | 237 | 1.5e-11 | met |
+| basis | 1e-04 | 1.85e-08 | 3.31e-05 | 126 | 127 | 2123 | 33092 | 1092 | 160 / 0 | 239 | 1.6e-11 | met |
+| basis | 1e-05 | 1.84e-08 | 3.69e-05 | 128 | 156 | 2361 | 42611 | 1705 | 172 / 2 | 239 | 1.9e-08 | budget_unmet (trunc) |
+| basis | 1e-06 | 1.34e-08 | 3.73e-05 | 128 | 169 | 2643 | 49437 | 2645 | 179 / 0 | 239 | 4.8e-09 | budget_unmet (trunc) |
+| basis | 1e-07 | 1.16e-08 | 3.73e-05 | 128 | 188 | 2840 | 53839 | 4132 | 188 / 2 | 239 | 9.4e-10 | budget_unmet (trunc) |
+| exact | 1e-01 | 4.75e-05 | 6.10e-02 | 37 | 37 | 1275 | 0 | 298 | 200 / 0 | 217 | 0.0e+00 | met |
+| exact | 1e-02 | 3.60e-06 | 3.34e-03 | 58 | 58 | 1555 | 0 | 512 | 180 / 0 | 233 | 1.6e-12 | met |
+| exact | 1e-03 | 3.12e-06 | 1.72e-04 | 89 | 89 | 1849 | 0 | 780 | 156 / 0 | 237 | 1.5e-11 | met |
+| exact | 1e-04 | 1.85e-08 | 3.31e-05 | 126 | 127 | 2123 | 0 | 1092 | 160 / 0 | 239 | 1.6e-11 | met |
+| exact | 1e-05 | 1.84e-08 | 3.70e-05 | 128 | 156 | 2361 | 0 | 1695 | 172 / 2 | 239 | 2.0e-08 | budget_unmet (trunc) |
+| exact | 1e-06 | 1.34e-08 | 3.73e-05 | 128 | 169 | 2643 | 0 | 2634 | 178 / 0 | 239 | 4.3e-09 | budget_unmet (trunc) |
+| exact | 1e-07 | 1.16e-08 | 3.73e-05 | 128 | 187 | 2840 | 0 | 4133 | 188 / 2 | 239 | 9.4e-10 | budget_unmet (trunc) |
+| mid | 1e-01 | 4.75e-05 | 5.80e-02 | 35 | 35 | 1285 | 21896 | 276 | 612 / 0 | 403 | 4.5e-19 | met |
+| mid | 1e-02 | 8.55e-06 | 2.45e-03 | 63 | 63 | 1580 | 38756 | 568 | 542 / 0 | 430 | 3.0e-12 | met |
+| mid | 1e-03 | 3.12e-06 | 9.99e-05 | 90 | 90 | 1876 | 50894 | 780 | 538 / 2 | 437 | 1.5e-11 | met |
+| mid | 1e-04 | 9.43e-09 | 8.71e-06 | 128 | 140 | 2129 | 68582 | 1174 | 506 / 0 | 439 | 7.1e-10 | budget_unmet (trunc) |
+| mid | 1e-05 | 1.78e-09 | 9.74e-07 | 128 | 170 | 2369 | 89715 | 2295 | 457 / 0 | 440 | 1.8e-08 | budget_unmet (trunc) |
+| mid | 1e-06 | 1.18e-09 | 2.69e-08 | 128 | 188 | 2628 | 103358 | 4054 | 434 / 0 | 440 | 3.7e-09 | budget_unmet (trunc) |
+| mid | 1e-07 | 7.90e-11 | 4.55e-09 | 128 | 215 | 2840 | 109233 | 6141 | 432 / 0 | 440 | 6.2e-10 | budget_unmet (trunc) |
+| trunc | 1e-02 | 1.16e-08 | 2.38e-03 | 7 | 59 | 2605 | 17144 | 6286 | 104 / 0 | 239 | 9.0e-03 | met |
+| trunc | 1e-03 | 1.16e-08 | 2.08e-05 | 9 | 68 | 2653 | 20098 | 6930 | 114 / 0 | 239 | 8.1e-04 | met |
+| trunc | 1e-04 | 1.16e-08 | 3.32e-05 | 12 | 83 | 2665 | 21992 | 7166 | 116 / 0 | 239 | 8.8e-05 | met |
+| trunc | 1e-05 | 1.16e-08 | 3.70e-05 | 17 | 83 | 2671 | 22986 | 7120 | 118 / 0 | 239 | 8.0e-06 | met |
+| trunc | 1e-06 | 1.16e-08 | 3.73e-05 | 20 | 88 | 2753 | 24782 | 7002 | 132 / 0 | 239 | 7.8e-07 | met |
+| trunc | 1e-07 | 1.16e-08 | 3.73e-05 | 37 | 93 | 2789 | 29126 | 7394 | 136 / 0 | 239 | 7.1e-08 | met |
+| trunc | 1e-08 | 1.16e-08 | 3.73e-05 | 79 | 125 | 2803 | 36831 | 6071 | 153 / 3 | 239 | 7.0e-09 | met |
+| trunc | 1e-09 | 1.16e-08 | 3.73e-05 | 123 | 162 | 2827 | 45954 | 4887 | 178 / 2 | 239 | 5.9e-10 | met |
+| trunc | 1e-10 | 1.16e-08 | 3.73e-05 | 128 | 188 | 2840 | 53839 | 4132 | 188 / 2 | 239 | 9.4e-10 | budget_unmet (trunc) |
+| expv | 1e-02 | 1.79e-08 | 3.56e-05 | 128 | 190 | 2914 | 60592 | 3705 | 186 / 2 | 100 | 7.2e-09 | budget_unmet (trunc) |
+| expv | 1e-04 | 1.18e-08 | 3.73e-05 | 128 | 187 | 2894 | 59614 | 3496 | 188 / 2 | 120 | 4.8e-09 | budget_unmet (trunc) |
+| expv | 1e-06 | 1.16e-08 | 3.73e-05 | 128 | 190 | 2832 | 57837 | 3782 | 187 / 2 | 160 | 1.8e-09 | budget_unmet (trunc) |
+| expv | 1e-08 | 1.16e-08 | 3.73e-05 | 128 | 188 | 2794 | 55571 | 4074 | 187 / 2 | 180 | 1.3e-09 | budget_unmet (trunc) |
+| expv | 1e-10 | 1.16e-08 | 3.73e-05 | 128 | 188 | 2822 | 53684 | 4154 | 186 / 2 | 219 | 8.7e-10 | budget_unmet (trunc) |
+| expv | 1e-12 | 1.16e-08 | 3.73e-05 | 128 | 188 | 2840 | 53839 | 4132 | 188 / 2 | 239 | 9.4e-10 | budget_unmet (trunc) |
+
+##### Loosest tolerance reaching each accuracy target (max |Sz - exact| over the run)
+
+| sweep | err <= 1e-02 | err <= 1e-03 | err <= 1e-04 | err <= 1e-05 |
+|---|---|---|---|---|
+| basis | 1e-02 | 1e-03 | 1e-04 | none |
+| exact | 1e-02 | 1e-03 | 1e-04 | none |
+| mid | 1e-02 | 1e-03 | 1e-03 | 1e-04 |
+| trunc | 1e-02 | 1e-03 | 1e-03 | none |
+| expv | 1e-02 | 1e-02 | 1e-02 | none |
+
+Error floor over all sweep runs: 5.29e-09 (what the tightest settings reach at this dt -- the integrator/time-step error no tolerance removes).
