@@ -55,10 +55,11 @@ psi = domain_wall_state(8)                        # |↑↑↑↑↓↓↓↓⟩
 W   = xxz_mpo(8; J = 1.0, delta = 1.0)
 
 for _ in 1:40
-    cbe_bug_step!(psi, W, ComplexF64(-im * 0.05); maxdim = 32, trunc_thresh = 1e-10)
+    info = cbe_bug_step!(psi, W, ComplexF64(-im * 0.05); tol_basis = 1e-5, maxdim = 32)
+    budget_status(info.ledger) === :met || @warn budget_diagnostic(info.ledger)
 end
 
-bond_dims(psi)          # rank grew from a product state: 1 -> [2,4,8,16,8,4,2]
+bond_dims(psi)          # rank grew from a product state, as far as tol_trunc/maxdim allow
 mpo_energy(psi, W)
 ```
 
@@ -68,8 +69,34 @@ mpo_energy(psi, W)
 | `tdvp_cbe1s_step!` | 1-site TDVP with controlled bond expansion ([arXiv:2208.10972](https://arxiv.org/abs/2208.10972)) — the baseline to beat. |
 | `tdvp2_step!` | 2-site TDVP. The conventional reference. |
 
-There is **one sweep**, and its accuracy knob is the **depth of the Krylov basis** the half-sweeps
-build:
+### Three tolerances and one resource limit
+
+`cbe_bug_step!` and `cbe_bug_midpoint_step!` are driven by
+
+| keyword | default | controls |
+|---|---|---|
+| `tol_basis` | `1e-5` | the trial space: RSVD sampling and retained rank (Tests A/B) and one-site Krylov enrichment (Tests C/D) |
+| `tol_trunc` | `1e-7` | the ONE final compression: cumulative discarded norm of the evolved state |
+| `tol_expv` | `1e-10` | the root Galerkin `expv` (convergence test and substep split) |
+| `maxdim` | `128` | final bond dimension; also sets the internal working-rank ceiling |
+
+Everything else (`dex`, `dover`, `comp_ratio`, `growth`, `krylov_basis`, `krylov_tol`,
+`split_*`, `root_*`, `trunc_thresh`, `stol_*`, `maxiter`, `tol`) belongs to the **legacy
+fixed-knob path**: naming any of them selects it, and mixing them with a tolerance is an error.
+`info.ledger` (`nothing` on the legacy path) records every indicator; `budget_status(info.ledger)`
+is `:met` or `:budget_unmet`, and `budget_diagnostic` says which check failed and what to change
+(smaller `dt`, larger `maxdim`, looser `tol_trunc`) -- a rank cap is reported, never silently
+accepted. `exact = true` replaces the random sketch by the complete local basis.
+
+What each tolerance buys, measured on XX L=20 against the exact solution, and starting
+settings per target error: [ADAPTIVE_XX_L20_RESULTS.md](ADAPTIVE_XX_L20_RESULTS.md). In short:
+`tol_basis` sets the accuracy (err ~ tol_basis), `tol_trunc` can be 10-100x looser and is the
+speed knob, `tol_expv = 1e-2` suffices at `dt = 0.05`, and the ordinary/midpoint choice sets
+the floor. Plan conformance: [ADAPTIVE_PLAN_AUDIT.md](ADAPTIVE_PLAN_AUDIT.md).
+
+### The legacy fixed-knob path
+
+Its accuracy knob is the **depth of the Krylov basis** the half-sweeps build:
 
 - **`krylov_basis`** (default `30`) — the *cap* on how many orthonormal vectors
   `span{Θ, HΘ, H²Θ, …}` the half-sweep builds per bond. `0` stops at one application of `H`, which

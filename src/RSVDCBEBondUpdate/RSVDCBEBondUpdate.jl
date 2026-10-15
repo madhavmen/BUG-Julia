@@ -90,6 +90,10 @@ include("henv.jl")
 # The weights are already correct (`sum(sigma^2 * degeneracy) == norm^2`, measured) -- this is
 # bookkeeping so a cross-symmetry claim is checkable, not a fix.
 include("multiplets.jl")
+# The three-tolerance accuracy budget (`tol_basis`, `tol_trunc`, `tol_expv`) and the fixed
+# rule that apportions it across bonds and tests. BEFORE `cbe_core.jl`, which derives its
+# rank decisions from the allocation rather than from the retired `dex`/`dover` guesses.
+include("adaptive_budget.jl")
 include("cbe_core.jl")
 # The Hamiltonian as a genuine MPO (rank-4 `W^[i]`) plus its rank-3 environments, i.e. the
 # objects arXiv:2606.28169 Eqs. (1.3), (1.7) and (1.8) name. It provides a METHOD for every
@@ -159,6 +163,17 @@ include("models/tfim.jl")
 #                            nothing. Both quench from a PRODUCT state, which is what makes them
 #                            the test of a rank-adaptive sweep rather than of a tuned schedule.
 include("models/mbl_scars.jl")
+
+# models/hubbard_d4.jl   THE SAME EXPERIMENT'S SPINFUL MODEL, ON FUSED d = 4 SITES, and the only
+#                        layout in which it can be evolved from a product state at all. The
+#                        interleaved ↑₁↓₁↑₂↓₂… chain in `mbl_scars.jl` makes every hop RANGE-2,
+#                        and a range-2 Hamiltonian has no term inside any two-site block, so the
+#                        CDW start state is an exact fixed point of every two-site sweep --
+#                        measured, and identical for bug/tdvp2/cbe1s. One physical site = one MPS
+#                        site restores range-1 hops. Uses Telum's own spinful-fermion local
+#                        space, so the Jordan-Wigner signs come from the library rather than from
+#                        a string identity written out by hand.
+include("models/hubbard_d4.jl")
 
 # The two TDVP integrators live in their own directories. They are FILES of this module, not
 # submodules: both are built on `henv.jl` (environments) and `cbe_core.jl` (the expansion)
@@ -233,6 +248,10 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        apply_h_two_site,
        sketch_h_left, sketch_h_right,
        sector_graded_sketch, full_local_basis,
+       # The three-tolerance budget: the normal accuracy API, and the ledger that reports
+       # when a rank ceiling rather than a tolerance ended a search.
+       AdaptiveBudget, BasisAllocation, basis_allocation, indicator,
+       AdaptiveLedger, merge_ledger!, work_ceiling, budget_status, budget_diagnostic,
        CBEExpansion, cbe_expand,
        truncate_sweep!, truncate_recursive!,
        CBEBugOptions, CBEBugRunInfo, tfim_mpo,
@@ -266,7 +285,19 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        x_polarized_state, sx_operator, sx_profile, total_sx,
        # models/mbl_scars.jl -- MBL (disordered XXZ, U(1)) and scars (PXP, :none)
        disorder_fields, field_mpo_from_terms, disordered_xxz_mpo,
-       pxp_operators, pxp_mpo, z2_state,
+       # ... and the QUASIPERIODIC (Aubry-André) potential of arXiv:1501.05661, which is a
+       # different model from random disorder rather than a variant of it
+       quasiperiodic_fields, aubry_andre_xxz_mpo,
+       # ... and the SPINFUL Aubry-André-Hubbard chain, which is the experiment's own
+       # Hamiltonian: interleaved 2L-site ordering, three-site Jordan-Wigner string hops
+       hubbard_aa_mpo, hubbard_cdw_state,
+       # models/hubbard_d4.jl -- the FUSED d=4 spinful chain. `hubbard_aa_mpo` above is the
+       # interleaved 2L-site form and is retained only as the object whose freeze is documented;
+       # it cannot be evolved from a product state (range-2 => H_eff == 0 on every bond).
+       hub4_space, hub4_basis_index, hub4_sector, hub4_product_state,
+       HUB4_EMPTY, HUB4_UP, HUB4_DOWN, HUB4_BOTH,
+       hubbard_aa_mpo_d4, hub4_density, hub4_imbalance, hub4_cdw_occupations,
+       pxp_operators, pxp_mpo, z2_state, zk_state,
        # sweeps/ -- the structured RSVD-CBE sweeps
        BondExpansionInfo, expand_bond!, lanczos_lowest,
        DMRGCBEInfo, DMRGCBERun, dmrg_cbe1s_sweep!, dmrg_cbe1s!,

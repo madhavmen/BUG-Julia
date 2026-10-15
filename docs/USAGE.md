@@ -356,10 +356,26 @@ opts = CBEBugOptions(;
     maxiter      = 8,         # Krylov depth (see below)
     exact        = false,     # false = RSVD-CBE (the method); true = exact CBE (A/B only)
     normalize    = true,
-    growth       = 2.0,       # expansion budget — PROBLEM-DEPENDENT, see cbe_bug.md §7.1
+    growth       = 2.0,       # seed width for the adaptive expansion, see below
     seed         = 0x5EED,    # one RNG threads the run, so runs are reproducible
 )
 ```
+
+**`dex` and `dover` are adaptive at their defaults (`0` and `nothing`), and that is the
+recommended setting.** The expansion no longer admits a *fixed* number of directions per side,
+nor oversamples the probe by a *fixed* 1.2×. Both are read off the preselection SVD against
+`stol_pre`, the tolerance that pass already applies:
+
+* the directions admitted are those that clear the tolerance, capped only by `room` (the hard
+  local-space limit) and by `maxdim` at the truncation;
+* the probe is **widened** — doubling — until that SVD actually cuts something, which is the
+  evidence that the sketched range reached past the decay instead of ending inside it. It stops
+  early once the admitted count already fills `room`, so a bond near full rank cannot drag the
+  sketch out to the full fused basis.
+
+`growth` therefore no longer caps anything at `dex = 0`; it only sets the width the widening
+starts from, i.e. how many passes are needed, not what they converge to. Setting `dex > 0` or
+`dover` to an integer restores the old fixed cap / fixed oversample for an A/B.
 
 **`exact = false` is the method and the default.** `exact = true` replaces the thin Gaussian
 sketch with the complete fused basis, which forms the rank-4 `H·Θ` that the sketch exists to

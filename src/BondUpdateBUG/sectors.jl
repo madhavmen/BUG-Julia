@@ -68,6 +68,78 @@ function fuse_spaces(syms, space_a, dir_a::Char, space_b, dir_b::Char)
 end
 
 """
+Memo for [`fusion_basis`](@ref), plus the counters that justify it.
+
+⛔⛔ **THIS IS THE #1 COST OF A FUSED d=4 STEP AND IT IS RECOMPUTED WORK, NOT PHYSICS.** Flat
+profile of one truncating step (job 16342051 stage 3, L=20, **chi=32**, `bug`, d=4), 57598
+samples in the step:
+
+    svd_std (all SVD)              39535   68.6%
+    cbe_expand                     28858   50.1%
+    sector_graded_sketch           27697   48.1%
+    fusion_basis                   25798   44.8%
+    gesdd!  (LAPACK, SELF time)    23448   40.7%
+    getIdentity                       27    0.05%   <-- building the isometry is FREE
+
+⇒ `getIdentity` costs nothing and the **SVD of its output is 45% of the entire step**.
+
+**AND THE RESULT DEPENDS ONLY ON THE LEG SPACES, NEVER ON `t`'s DATA.** `getIdentity` is a
+reshaping isometry: it is a function of the two legs' sector lists, arrows, tags and prime
+levels, and of `tag`. Two calls with matching legs MUST return the identical tensor. So this is
+memoisation of a pure function — it needs no argument about whether the SVD is skippable, which
+is the safer position given that `svd(F,(1,2)).U` for a unitary `F` has all singular values equal
+to 1 and is therefore basis-degenerate. ⚠ Do NOT "optimise" this by deleting the SVD without a
+measured equivalence test: the docstring below records a silent-corruption trap on charged links
+that a vacuum-link test cannot see.
+
+⚠ **THE KEY MUST CARRY THE ITAGS AND THE ARROWS.** The returned tensor inherits legs 1 and 2 from
+the inputs, so two frames that differ only by an itag are NOT interchangeable — keying on the
+sector lists alone would hand back a tensor whose legs are labelled for a different bond, which
+Telum would either refuse ("Duplicate TLIndex with non-empty itag") or, worse, silently contract
+wrongly. `string(...)` on the itag is used rather than the struct because `Itag` is not `isbits`,
+so the default `objectid` hash would key on IDENTITY and never hit.
+
+⚠ **A COPY IS RETURNED.** Callers own their result and some go on to `permutedims`/`setitag` it;
+handing out the cached object would let one caller corrupt every later one. The copy is ~65 KB
+against a 128x128 LAPACK SVD, so it is free by comparison.
+
+⛔⛔ **AND IT IS LOCKED, BECAUSE `cbe_bug_step!(parallel = true)` RUNS THE TWO HALF-SWEEPS
+CONCURRENTLY.** `cbe_bug.jl`'s own thread-safety note clears `_LOCAL_SPACES` as safe only because
+"the sweeps only read it" — this memo is WRITTEN on the hot path, so it does not inherit that
+argument. An unsynchronised `Dict` under two tasks can corrupt during a rehash, which would show
+up as a wrong answer, not a crash.
+
+⚠ The lock is held only around the two `Dict` touches, never across `getIdentity`/`svd`. A race
+therefore costs at worst a duplicated computation of a pure function, which is harmless, instead
+of serialising the two half-sweeps against each other.
+"""
+const _FUSION_CACHE = Dict{Any, Any}()
+const _FUSION_LOCK = ReentrantLock()
+const _FUSION_CALLS = Ref(0)
+const _FUSION_MISSES = Ref(0)
+
+"Calls, misses and distinct keys since the last `reset_fusion_stats!`."
+fusion_stats() = (calls = _FUSION_CALLS[], misses = _FUSION_MISSES[],
+                  keys = length(_FUSION_CACHE))
+
+"Zero the counters (NOT the cache) so a step can be attributed on its own."
+function reset_fusion_stats!()
+    _FUSION_CALLS[] = 0
+    _FUSION_MISSES[] = 0
+    return nothing
+end
+
+"Drop the memo entirely -- for tests that switch symmetry mode under one process."
+function clear_fusion_cache!()
+    empty!(_FUSION_CACHE)
+    reset_fusion_stats!()
+    return nothing
+end
+
+_leg_key(t, l::Int) = (t.spaces[l], t.inds[l].dir, string(t.inds[l].itags),
+                       t.inds[l].plev, t.inds[l].lock)
+
+"""
     fusion_basis(t, leg_a=1, leg_b=2; tag="fused") -> TLArray
 
 Orthonormal basis of the fused `leg_a (x) leg_b` space, **in `t`'s own leg
@@ -85,8 +157,21 @@ Getting this wrong is a silent corruption: with a vacuum link the reachable set
 is `{+q,-q}`, its own dual, so the mislabelled version still agrees. It only
 surfaces once the link carries a non-zero charge -- the same false-pass trap as
 the fusion-sign bug (jobs 93413, 93458).
+
+⚠ MEMOISED -- see `_FUSION_CACHE` above for why, and for the ownership and
+locking rules. The mathematics below is unchanged; it simply runs once per
+distinct pair of legs instead of once per call.
 """
 function fusion_basis(t, leg_a::Int = 1, leg_b::Int = 2; tag::AbstractString = "fused")
+    key = (_leg_key(t, leg_a), _leg_key(t, leg_b), String(tag), symmetry_mode())
+    hit = lock(_FUSION_LOCK) do
+        _FUSION_CALLS[] += 1
+        get(_FUSION_CACHE, key, nothing)
+    end
+    hit === nothing || return to_concrete(hit)
+    lock(_FUSION_LOCK) do
+        _FUSION_MISSES[] += 1
+    end
     F = to_concrete(getIdentity((t, leg_a), (t, leg_b); itag = tag)')
     # getIdentity's output is always (input_a, input_b, fused), whatever
     # leg numbers the inputs had, so the split is on (1,2) -- NOT (leg_a, leg_b).
@@ -107,7 +192,12 @@ function fusion_basis(t, leg_a::Int = 1, leg_b::Int = 2; tag::AbstractString = "
     # computation read only `.spaces[end]` and never look at tags; the two CBE probes WANT the
     # distinct tag; and the probe's tag never reaches an `oplus`, because the preselection SVDs
     # create their own bond legs (`_TAG_L`/`_TAG_R`) afterwards.
-    return to_concrete(setitag(U, 3, tag))
+    out = to_concrete(setitag(U, 3, tag))
+    # Store, then hand out a copy -- see the memo's note on caller ownership.
+    lock(_FUSION_LOCK) do
+        _FUSION_CACHE[key] = out
+    end
+    return to_concrete(out)
 end
 
 """

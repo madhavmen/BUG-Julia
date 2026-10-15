@@ -231,6 +231,27 @@ function _alloc_columns(dims::Dict, budget::Int)
     return Dict(q => min(d, ceil(Int, d / tot * budget)) for (q, d) in dims)
 end
 
+"""
+    _boost!(cols, boost, cap) -> Dict
+
+Add `boost[q]` columns to `cols[q]`, capped at `cap[q]`, and return what did not fit.
+
+A sector absent from `cap` is not reachable from this side, so it is skipped rather than
+created: Test B targets a sector by its residual, and a residual can never name a charge the
+fusion forbids, but the guard keeps that true by construction instead of by argument.
+"""
+function _boost!(cols::Dict, boost, cap::Dict)
+    left = Dict{Any, Int}()
+    for (q, b) in boost
+        haskey(cap, q) || continue
+        have = get(cols, q, 0)
+        add = clamp(b, 0, max(cap[q] - have, 0))
+        cols[q] = have + add
+        b > add && (left[q] = b - add)
+    end
+    return left
+end
+
 "Keep `counts[q]` columns of sector `q` on `leg`, dropping sectors allotted none."
 function _trim_per_sector(Q, leg::Int, counts::Dict)
     keep = s -> (n = get(counts, s, 0); n <= 0 ? nothing : 1:n)
@@ -275,6 +296,11 @@ The CBE sketch block for one side of a bond, in the frame's own layout:
 `npre` is the total column budget `Dpre`. Returns `nothing` only when neither half can be
 built at all.
 
+`boost` (sector => extra columns) is Test B's lever: it widens the probe only where the
+holdout found range missing (see [`_certified_range`](@ref)). Extra columns go to the
+complement half first, then to the isometry half of the same sector; neither ever exceeds the
+sector's dimension.
+
 NOTE ON A SATURATED FRAME. If the frame already spans its whole local space there is no
 complement, and this returns the isometry half alone -- it does NOT decline. The sketch is
 a PROBE applied to the frame on the *opposite* side of the bond, so a saturated right
@@ -286,7 +312,8 @@ other was full.
 function sector_graded_sketch(frame, side::Symbol, npre::Int;
                               comp_ratio::Union{Float64, Nothing} = 0.5,
                               rng::AbstractRNG = MersenneTwister(0x5EED),
-                              tag::AbstractString = "cbeG")
+                              tag::AbstractString = "cbeG",
+                              boost = nothing)
     side in (:left, :right) || throw(ArgumentError("side must be :left or :right"))
     # The ENDPOINTS ARE ALLOWED, and they are the interesting A/B: `1.0` is
     # complement-only (the pure discarded space), `0.0` isometry-only. An earlier version
@@ -328,7 +355,9 @@ function sector_graded_sketch(frame, side::Symbol, npre::Int;
     #
     # It is also strictly cheaper: two `perp_component` calls per side per pass disappear.
     if comp_ratio === nothing
-        R = _trim_per_sector(_randomize_like(F, rng), 3, _alloc_columns(dfull, npre))
+        cols = _alloc_columns(dfull, npre)
+        boost === nothing || _boost!(cols, boost, dfull)
+        R = _trim_per_sector(_randomize_like(F, rng), 3, cols)
         R === nothing && return nothing
         Rl = to_concrete(tolayout(R))
         return norm(Rl) > 0 ? Rl : nothing
@@ -356,6 +385,11 @@ function sector_graded_sketch(frame, side::Symbol, npre::Int;
     ct = _alloc_columns(dT, n_t)
     short = n_t - sum(values(ct); init = 0)
     short > 0 && (cc = _alloc_columns(dC, n_c + short))  # and back, if that half is short too
+    if boost !== nothing
+        # A sector whose complement is already fully drawn can still hide range behind the
+        # frame's own span, so the remainder goes to the isometry half rather than vanishing.
+        _boost!(ct, _boost!(cc, boost, dC), dT)
+    end
 
     # NEVER RETURN AN EMPTY PROBE while the space has dimensions. The sketch probes the frame
     # on the OPPOSITE side of the bond, so a saturated frame is still a perfectly good probe --
@@ -410,10 +444,12 @@ end
 # eps/cutoff. The same omission in `augment.jl::_complement_basis` duplicated a column and
 # grew the norm by 128x over five steps.
 
+"Degeneracy-weighted squared singular weight of a Telum SVD list, `Σ σ² · deg`."
+_sq_weight(list) = sum(Float64(s)^2 * Float64(deg) for (s, deg, _, _) in list; init = 0.0)
+
 "Relative weight discarded by an SVD, `sqrt(Σcut σ² / Σall σ²)`."
 function _trunc_weight(res)
-    w(list) = sum(Float64(s)^2 * Float64(deg) for (s, deg, _, _) in list; init = 0.0)
-    kept, cut = w(res.kept_list), w(res.trunc_list)
+    kept, cut = _sq_weight(res.kept_list), _sq_weight(res.trunc_list)
     tot = kept + cut
     return tot == 0.0 ? 0.0 : sqrt(cut / tot)
 end
@@ -434,6 +470,23 @@ const _TAG_OL, _TAG_OLR = "cbeO,L", "cbeO,R"
 const _TAG_OR, _TAG_ORR = "cbeP,L", "cbeP,R"
 
 """
+    _rank_cut(stol, Y, n) -> Float64
+
+The preselection SVD's relative cutoff. `stol > 0` is the legacy absolute-on-normalised cut
+(`stol_pre`). `stol <= 0` is the adaptive path's NUMERICAL RANK test (plan §1: `stol_pre` is
+replaced by machine-precision rank detection; physical importance is Tests A/B's job).
+
+THE FLOOR IS MEASURED AGAINST `Y`, NOT `R`. `R = P_perp Y` is a difference, and when most of
+`Y` lies in the frame the subtraction cancels: rounding of order `eps * ||Y||` survives in an `R`
+of size `n`, i.e. relative noise `eps * ||Y|| / n` after normalising. A cut fixed at a few `eps`
+would admit that noise as directions whenever `n << ||Y||`; one fixed at 1e-10 drops real
+directions whenever `n ~ ||Y||`. `_CBE_EPS` (100 eps) is the same margin the empty-residual test
+above already uses.
+"""
+_rank_cut(stol::Float64, Y, n::Real) =
+    stol > 0 ? stol : _CBE_EPS * max(norm(Y), n) / n
+
+"""
     _preselect_left(U0, Y, stol) -> (Q, err) or (nothing, 0.0)
 
 Orthonormal basis of the part of the sketched action `Y` lying outside `U0`, with the
@@ -448,7 +501,7 @@ function _preselect_left(U0, Y, stol::Float64)
     n = norm(R)
     n <= _CBE_EPS * max(norm(Y), 1.0) && return (nothing, 0.0)
     res = svd(to_concrete((1.0 / n) * R), (1, 2), _TAG_L, _TAG_LR;
-              cutoff = stol, get_lists = true)
+              cutoff = _rank_cut(stol, Y, n), get_lists = true)
     Q = to_concrete(res.U)
     R2 = to_concrete(perp_component(U0, Q))            # RepairOrtho
     norm(R2) <= _CBE_EPS * norm(Q) && return (nothing, 0.0)
@@ -467,13 +520,326 @@ function _preselect_right(V0, Y, stol::Float64)
     n = norm(R)
     n <= _CBE_EPS * max(norm(Y), 1.0) && return (nothing, 0.0)
     res = svd(to_concrete((1.0 / n) * R), (2, 3), _TAG_R, _TAG_RR;
-              cutoff = stol, get_lists = true)
+              cutoff = _rank_cut(stol, Y, n), get_lists = true)
     Q = to_concrete(permutedims(res.U, (3, 1, 2)))
     R2 = to_concrete(perp_component_right(V0, Q))      # RepairOrtho
     norm(R2) <= _CBE_EPS * norm(Q) && return (nothing, 0.0)
     Q = to_concrete(permutedims(svd(R2, (2, 3), _TAG_R, _TAG_RR; cutoff = 1e-13).U,
                                 (3, 1, 2)))
     return (Q, _trunc_weight(res))
+end
+
+"""
+    _range_find(draw, wleg, select, qleg, w0, wcap, ncap) -> (Q, err, n)
+
+Randomised range finder for one side of the preselection: widen the probe until the
+preselection SVD CUTS something, then hand back its orthonormal basis `Q`, the weight it
+discarded, and `n = leg_dim(Q, qleg)` -- the number of directions that cleared the
+tolerance.
+
+`draw(w)` returns a probe of requested width `w` (or `nothing`), with the probe's own width
+on leg `wleg`; `select(Y)` is the preselection, returning `(Q, err)`.
+
+WHAT THE STOPPING TEST MEANS, AND WHY IT NEEDS NO TOLERANCE OF ITS OWN. `select` cuts at
+`stol_pre`, so a returned `n` STRICTLY BELOW the delivered width is the sketched range
+having run past the decay of `P_perp (H Theta)` -- there were directions to rank and the
+tolerance ranked some of them out. `n == w` is the opposite reading: the probe is saturated,
+every direction it drew still carried weight, so the range was CLIPPED by the width and a
+wider probe would find more. That is exactly the question a fixed oversample answers by
+guessing, and it is answered here by looking.
+
+⚠️ `ncap` IS WHAT KEEPS THIS AN RSVD. Without it a probe whose spectrum never decays --
+a bond near full rank, where every drawn direction carries weight -- would double all the way
+to `wcap`, i.e. to the complete fused basis, which is precisely the cost the sketch exists to
+avoid. `ncap` is the side's ADMISSION limit (`room`, or an explicit `dex`), and once `n`
+reaches it a wider probe cannot admit one further direction: the surplus is trimmed by
+`_trim_total` either way. So it is a bound on pointless work, not a tolerance.
+
+The loop only ever widens, by doubling, and also stops at `wcap` (the opposite frame's fused
+dimension -- see the call site) or as soon as the probe delivers fewer columns than asked,
+which means the local space is exhausted and there is nothing left to widen into. So it
+terminates in at most `log2(wcap)` passes, and at an explicit `dover` (`wcap == w0`) it is
+one pass and the old behaviour exactly.
+"""
+function _range_find(draw, wleg::Int, select, qleg::Int, w0::Int, wcap::Int, ncap::Int)
+    w = clamp(w0, 1, max(wcap, 1))
+    while true
+        Om = draw(w)
+        Om === nothing && return (nothing, 0.0, 0)
+        wd = leg_dim(Om, wleg)
+        Q, err = select(Om)
+        Q === nothing && return (nothing, 0.0, 0)
+        n = leg_dim(Q, qleg)
+        (n < wd || n >= ncap || wd < w || w >= wcap) && return (Q, err, n)
+        w = min(2 * w, wcap)
+    end
+end
+
+"""
+    _tail_rank(list, scale, allowance, kmax; base = 0.0) -> (k, tail)
+
+TEST A, the tail test: the SMALLEST `k <= kmax` whose discarded tail
+`scale * sqrt(base + sum_{j>k} sigma_j^2 * deg_j)` still fits inside `allowance`, together
+with the indicator that tail achieves.
+
+`list` is a Telum `kept_list`, `(sigma, degeneracy, ...)` sorted descending. The DEGENERACY
+FACTOR IS NOT COSMETIC: under SU(2) one entry stands for `deg` states, and ranking on
+`sigma` alone would under-count a multiplet's weight by exactly that factor.
+
+`base` is squared weight the SVD ALREADY discarded (its `trunc_list`). Omitting it would
+measure the tail of the surviving list against an allowance meant for the whole spectrum,
+and so report a rank as certified when the weight below the SVD's own cut already breached
+the budget.
+
+The tail is ABSOLUTE, not relative to the leading singular value. `scale` has already
+divided by the state norm (see `basis_allocation`), so the comparison is against a
+tolerance on the step's error, which is the quantity the caller actually budgeted. A
+relative cut cannot do this: it answers "is this direction small compared to its loudest
+neighbour", which at a bond whose whole spectrum is tiny keeps rank that buys no accuracy,
+and at a bond with one dominant direction throws away rank that does.
+
+Returns `kmax` when even the full tail does not fit -- the allowance is then unmeetable at
+this width, and the caller records `tolerance_met = false` rather than silently believing it.
+"""
+function _tail_rank(list, scale::Float64, allowance::Float64, kmax::Int; base::Float64 = 0.0)
+    n = length(list)
+    kmax = min(kmax, n)
+    kmax <= 0 && return (0, scale * sqrt(base + _sq_weight(list)))
+    w = [Float64(s)^2 * Float64(deg) for (s, deg, _, _) in list]
+    # Weight below `kmax` is discarded whatever `k` we choose, so it belongs to the floor.
+    tail = base + sum(w[(kmax + 1):n]; init = 0.0)
+    k = kmax
+    while k > 0
+        t = tail + w[k]
+        scale * sqrt(t) <= allowance || break
+        tail = t
+        k -= 1
+    end
+    return (k, scale * sqrt(tail))
+end
+
+"""
+    _sample_residual(Q, project, sketch, draw, nh, wleg, side) -> (est, per_sector, cols)
+
+TEST B, the sampling test: a matrix-free estimate of `||(I - QQ†) P_perp (H Theta)||_F`
+from HOLDOUT probes that took no part in building `Q`.
+
+The independence is the whole content of the test. The probe that built `Q` is, by
+construction, inside its range -- re-measuring with it reports zero residual no matter how
+much range was missed, which is why a range finder cannot certify itself from its own
+sketch.
+
+⛔ THE NORMALISATION IS PER SECTOR, because the holdout is sector-graded. A column drawn in
+sector `q` is Gaussian on that sector alone, so `E||A Om_q||_F^2 = n_q ||A_q||_F^2` and the
+unbiased estimate of `||A||_F^2` is `sum_q ||A Om_q||_F^2 / n_q`. Dividing the pooled sum by the
+total width instead weights every sector by its SHARE OF THE COLUMNS, and the `ceil`
+allocation hands a one-dimensional empty-but-reachable sector one column out of `w` -- so a
+range missed there was reported `sqrt(w)` times too small, in exactly the sector the
+expansion exists to find.
+
+`project` applies the frame projector `P_perp` (the closure the preselection used), `sketch`
+applies `H Theta` to a probe, `draw(w)` returns a probe of width `w` or `nothing`, `wleg` is
+the probe's width leg, and `side` (`:left`/`:right`) fixes the frame layout and so which
+projector removes `Q`.
+
+Returns the estimate, each sector's SQUARED contribution (they sum to `est^2`; this is what
+[`_certified_range`](@ref) targets), and the holdout columns per sector. A zero estimate means
+no probe could be drawn or the sketched action vanished: no range left to miss.
+"""
+function _sample_residual(Q, project, sketch, draw, nh::Int, wleg::Int, side::Symbol)
+    side in (:left, :right) || throw(ArgumentError("side must be :left or :right"))
+    per = Dict{Any, Float64}()
+    cols = Dict{Any, Int}()
+    nh >= 1 || return (0.0, per, cols)
+    Om = draw(nh)
+    Om === nothing && return (0.0, per, cols)
+    for (q, d) in Om.spaces[wleg]
+        d > 0 && (cols[q] = d)
+    end
+    isempty(cols) && return (0.0, per, cols)
+    Y = sketch(Om)
+    Y === nothing && return (0.0, per, cols)
+    R = to_concrete(project(Y))
+    norm(R) <= _CBE_EPS && return (0.0, per, cols)
+    if Q !== nothing
+        off = side === :left ? perp_component(Q, R) : perp_component_right(Q, R)
+        # `project` is reapplied so the estimate cannot be polluted by a component along the
+        # frame, which `Q` is not meant to cover.
+        R = to_concrete(project(to_concrete(off)))
+    end
+    # The sketch contracts the probe's local legs and leaves its width leg free, so the
+    # residual's width sectors ARE the probe's sectors, label for label.
+    rleg = side === :left ? 3 : 1
+    for (q, d) in R.spaces[rleg]
+        n_q = get(cols, q, 0)
+        n_q > 0 || error("Test B: residual sector $q has no holdout column -- the sketch " *
+                         "did not preserve the probe's width labels, so the per-sector " *
+                         "normalisation would be wrong")
+        Rq = length(R.spaces[rleg]) == 1 ? R :
+             to_concrete(getsub(R, rleg, s -> s == q ? (1:d) : nothing))
+        per[q] = norm(Rq)^2 / n_q
+    end
+    return (sqrt(sum(values(per); init = 0.0)), per, cols)
+end
+
+"""
+    _target_sectors!(boost, per, Om, wleg, alloc) -> Int
+
+Decide where Test B widens next: every sector whose own share of the missed residual exceeds
+a fair `1/S` split of the allowance (`S` = sectors the holdout probed) gets its sketch columns
+doubled in `boost`. Returns how many sectors were targeted.
+
+THE PLAN'S `dover`/`comp_ratio` ROLE, MADE SPECIFIC. A uniform doubling spends its new
+columns in proportion to sector size, i.e. mostly where the range was ALREADY found; the
+holdout says which sector is short, so that is where the columns go. Whenever the total
+fails, at least one sector is over its fair share, so a failing test always targets
+something.
+"""
+function _target_sectors!(boost::Dict, per::Dict, Om, wleg::Int, alloc::BasisAllocation)
+    isempty(per) && return 0
+    have = Om === nothing ? Dict{Any, Int}() : Dict{Any, Int}(q => d for (q, d) in Om.spaces[wleg])
+    share = alloc.sample^2 / length(per)
+    n = 0
+    for (q, s) in per
+        alloc.scale^2 * s > share || continue
+        boost[q] = get(boost, q, 0) + max(get(have, q, 0), 1)
+        n += 1
+    end
+    return n
+end
+
+"""
+    _one_sided_tail(M, alloc, kmax, stol, ledger) -> U or nothing
+
+Test A on one side's candidates. `M` carries the candidate leg first (the conjugate of the
+side's bond leg) and the opposite local space second; its singular values are the candidates'
+weights. Returns the left singular vectors of the smallest rank the tail test allows (the
+coefficients that rotate the candidates onto their ranked directions), or `nothing` if no
+direction is needed. Weight cut by `kmax` counts toward the tail, as in the joint branch.
+"""
+function _one_sided_tail(M, alloc::BasisAllocation, kmax::Int, stol::Float64,
+                         ledger::Union{Nothing, AdaptiveLedger})
+    (length(M.qlabels) == 0 || norm(M) == 0) && return nothing
+    res = svd(M, (1,); Nkeep = kmax, cutoff = stol, get_lists = true)
+    nk = length(res.kept_list)
+    k, tail = _tail_rank(res.kept_list, alloc.scale, alloc.tail, nk;
+                         base = _sq_weight(res.trunc_list))
+    if ledger !== nothing
+        ledger.max_tail = max(ledger.max_tail, tail)
+        tail <= alloc.tail || _unmet!(ledger, :tail)
+    end
+    k == 0 && return nothing
+    k < nk && (res = svd(M, (1,); Nkeep = k, cutoff = stol))
+    return to_concrete(res.U)
+end
+
+"""
+    _record_sample!(ledger, side, ind, per, hcols, sketch, wleg, alloc)
+
+Write one Test B verdict into the ledger: the per-side maximum, and a `sample_log` entry with
+the per-sector indicators and a bound on the estimate's relative sampling error.
+
+THE UNCERTAINTY BOUND. For a complex Gaussian column `||A w||^2 = sum_i s_i^2 |z_i|^2` with
+`|z_i|^2 ~ Exp(1)`, so its variance is `sum_i s_i^4 <= ||A||_F^4`. Averaging `n_q` columns gives
+`var(per_q) <= per_q^2 / n_q`, and the relative standard deviation of `est = sqrt(sum per_q)` is
+half that of its square: `0.5 * sqrt(sum_q per_q^2 / n_q) / sum_q per_q`. An upper bound, tight
+for a rank-1 miss -- the case that matters, a single missed direction.
+"""
+function _record_sample!(ledger::AdaptiveLedger, side::Symbol, ind::Float64, per::Dict,
+                         hcols::Dict, sketch, wleg::Int, alloc::BasisAllocation)
+    ledger.max_sample = max(ledger.max_sample, ind)
+    if side === :left
+        ledger.max_sample_l = max(ledger.max_sample_l, ind)
+    else
+        ledger.max_sample_r = max(ledger.max_sample_r, ind)
+    end
+    tot = sum(values(per); init = 0.0)
+    relunc = tot > 0 ? 0.5 * sqrt(sum(s^2 / hcols[q] for (q, s) in per; init = 0.0)) / tot : 0.0
+    push!(ledger.sample_log,
+          (side = side, est = ind, relunc = relunc,
+           per = Dict{Any, Float64}(q => alloc.scale * sqrt(s) for (q, s) in per),
+           holdout = copy(hcols),
+           sketch = sketch === nothing ? Dict{Any, Int}() :
+                    Dict{Any, Int}(q => d for (q, d) in sketch.spaces[wleg])))
+    return ledger
+end
+
+"""
+    _certified_range(draw, wleg, select, qleg, project, sketch, side,
+                     w0, wcap, ncap, alloc, ledger) -> (Q, err, n)
+
+One side's candidate basis, widened until TEST B certifies it. `draw(w, boost)` returns a
+probe of base width `w` with `boost` (sector => extra columns, or `nothing`) on top.
+
+`_range_find` stops when the preselection SVD cuts something, which says the sketched
+spectrum decayed INSIDE the probe. That is necessary but not sufficient: it is a statement
+about the directions the probe happened to draw, and a sector the probe under-sampled can
+decay convincingly while the range outside it is untouched -- the misleading tail. Test B
+asks the independent question, how much of `P_perp (H Theta)` is left outside `Q`, with an
+unboosted holdout that took no part in building `Q`, and on failure widens ONLY the sectors
+the holdout names ([`_target_sectors!`](@ref)).
+
+On the legacy path (`alloc === nothing`) this is exactly `_range_find` and nothing is drawn.
+
+TERMINATION. Every pass that continues has a strictly wider sketch than the last, and the
+width is bounded by `wcap`, so the loop ends. It stops with the test failed when (i) the
+sketch reached `wcap` or `n` reached the admission limit `ncap` -- a resource bound,
+recorded as `workcap_reached` -- or (ii) targeting could not widen the sketch because the
+named sectors are already fully drawn. Both clear `tolerance_met`; neither is accepted
+silently.
+"""
+function _certified_range(draw, wleg::Int, select, qleg::Int, project, sketch, side::Symbol,
+                          w0::Int, wcap::Int, ncap::Int,
+                          alloc::Union{Nothing, BasisAllocation},
+                          ledger::Union{Nothing, AdaptiveLedger};
+                          # A SEPARATE DISTRIBUTION ONLY IN TESTS: UT06 cripples the sketch to
+                          # miss a sector, and the audit must not share the crippling.
+                          holdout = w -> draw(w, nothing))
+    alloc === nothing &&
+        return _range_find(w -> draw(w, nothing), wleg, select, qleg, w0, wcap, ncap)
+
+    boost = Dict{Any, Int}()
+    last = Ref{Any}(nothing)       # the last sketch drawn, for its per-sector widths
+    lastw = Ref(w0)                # ...and the base width it was asked for
+    function drawn(w)
+        Om = draw(w, isempty(boost) ? nothing : boost)
+        if Om !== nothing
+            last[], lastw[] = Om, w
+            ledger === nothing || (ledger.n_probes += leg_dim(Om, wleg))
+        end
+        return Om
+    end
+    width_of() = last[] === nothing ? 0 : leg_dim(last[], wleg)
+
+    Q, err, n = _range_find(drawn, wleg, select, qleg, w0, wcap, ncap)
+    prev = -1
+    while true
+        width = width_of()
+        # A quarter of the working width, so the holdout stays a fraction of the sketch it
+        # audits. `_alloc_columns` still gives every reachable sector at least one column.
+        nh = clamp(cld(max(width, 1), 4), 1, max(wcap, 1))
+        resid, per, hcols = _sample_residual(Q, project, sketch, holdout, nh, wleg, side)
+        ind = indicator(alloc, resid)
+        ledger === nothing || (ledger.n_holdout += sum(values(hcols); init = 0))
+        # The indicator is recorded for the basis RETURNED, not for the passes it replaced --
+        # otherwise a side that recovered would report a breach alongside `tolerance_met`.
+        ok = ind <= alloc.sample
+        capped = width >= wcap || n >= ncap
+        if ok || capped || width <= prev
+            ledger === nothing || _record_sample!(ledger, side, ind, per, hcols, last[],
+                                                  wleg, alloc)
+            ok && return (Q, err, n)
+            if ledger !== nothing
+                _unmet!(ledger, :sample)
+                ledger.workcap_reached |= capped
+            end
+            return (Q, err, n)
+        end
+        nt = _target_sectors!(boost, per, last[], wleg, alloc)
+        ledger === nothing || (ledger.n_targeted += nt)
+        prev = width
+        Q, err, n = _range_find(drawn, wleg, select, qleg, lastw[], wcap, ncap)
+    end
 end
 
 """
@@ -512,15 +878,20 @@ empty-but-reachable sectors through `H` itself).
 
 Keywords:
 
-  - `dex` -- new directions to admit per side. `0` (default) hands the budget to the
-    `growth` schedule below; any positive value is an absolute per-side budget and
-    overrides the schedule entirely.
+  - `dex` -- absolute per-side cap on the directions admitted. `0` (default) is ADAPTIVE:
+    there is no count to hit, the cap is the hard local limit `room`, and what is actually
+    admitted is whatever cleared `stol_pre` in the preselection SVD. Any positive value
+    restores the old behaviour -- a fixed per-side cap, overriding the schedule.
   - `growth` -- the schedule's target, as a multiple of the NEIGHBOURHOOD max bond
-    dimension: `budget = ceil(growth*dmax) - r`. Default `2.0`, i.e. a bond at the
-    neighbourhood max may double. See the budget block in the body for the measurement
-    that set it.
-  - `dover` -- oversampling for the preselection. `nothing` gives `ceil(0.2*dex)`, i.e.
-    `Dpre = ceil(1.2*dex)` as in the reference.
+    dimension: `budget = ceil(growth*dmax) - r`. Default `2.0`. At `dex = 0` this NO LONGER
+    CAPS the expansion; it only seeds the sketch width the range finder starts from, which
+    sets how many passes the loop needs and not what it converges to. See the budget block
+    in the body.
+  - `dover` -- oversampling for the preselection. `nothing` (default) is ADAPTIVE: the probe
+    starts at `Dpre = ceil(1.2*budget)` and is WIDENED (doubling) until the preselection SVD
+    cuts something, i.e. until the sketched range reaches past the decay rather than ending
+    inside it -- see [`_range_find`](@ref). An integer pins the width at `budget + dover`
+    with no range finding, as before.
   - `comp_ratio` -- the sketch's complement/isometry split (`CompRatio`). `1.0` draws the
     sketch ENTIRELY from the frame's orthogonal complement -- the discarded space; `0.5`
     restores the reference's split; `nothing` drops the split entirely (probe drawn from
@@ -588,6 +959,13 @@ so confirming CBE works against a validated Trotter sweep also validates the sel
 Lubich sweep depends on. Nothing here knows which caller it has.
 """
 function cbe_expand(f::BondFrame, skl, skr;
+                    # ⚠ THESE DEFAULT TO THEIR HISTORICAL VALUES, NOT TO `nothing`, and that
+                    # is the difference between this layer and `cbe_bug_step!`. The step is
+                    # the PUBLIC API and has to tell "not asked for" from "asked for the old
+                    # value" in order to pick a path; `cbe_expand` is the kernel it dispatches
+                    # to, and by the time control arrives here the path is already chosen and
+                    # every value is concrete. Giving the kernel sentinels too would move a
+                    # decision that belongs at the boundary into the hot loop.
                     dex::Int = 0,
                     growth::Float64 = 2.0,
                     dover::Union{Nothing, Int} = nothing,
@@ -598,6 +976,12 @@ function cbe_expand(f::BondFrame, skl, skr;
                     exact::Bool = false,
                     stol_pre::Float64 = 1e-10,
                     stol_fnl::Float64 = 1e-13,
+                    # The step's allocation and ledger. `nothing` is the LEGACY path: fixed
+                    # counts, no residual tests, exactly the historical selection. An
+                    # allocation switches on Tests A/B and the rank comes off the spectrum.
+                    alloc::Union{Nothing, BasisAllocation} = nothing,
+                    ledger::Union{Nothing, AdaptiveLedger} = nothing,
+                    workcap::Int = 0,
                     rng::AbstractRNG = MersenneTwister(0x5EED))
     U0, V0 = f.U0, f.V0
     r = f.old_rank
@@ -688,11 +1072,58 @@ function cbe_expand(f::BondFrame, skl, skr;
     # `sulz_cap = true` keeps the global form available purely as an A/B.
     rm = rmax > 0 ? rmax : r
     sulz_cap && (budget = min(budget, max(2 * rm - r, 0)))
-    dex_l, dex_r = min(budget, room_l), min(budget, room_r)
-    (dex_l <= 0 && dex_r <= 0) && return none()      # both frames already complete
+
+    # ADAPTIVE BUDGET AND ADAPTIVE SKETCH WIDTH -- NEITHER ADDS A KNOB.
+    #
+    # `dex` and `dover` were both GUESSES MADE BEFORE ANY SPECTRAL INFORMATION EXISTS: a
+    # per-side count of directions to admit, and a fixed 20% oversample on top of it. The
+    # preselection SVD already produces the quantity both were guessing at -- the singular
+    # values of `P_perp (H Theta) Om`, cut at `stol_pre` -- so both are read off it instead,
+    # against the tolerances this routine already carries.
+    #
+    #   * `dex` (the per-side cap) becomes the hard local limit `room`, and the number of
+    #     directions actually admitted is whatever cleared `stol_pre`, i.e. `n_j` below. The
+    #     cap stops CAPPING and the spectrum decides. This is not a new behaviour downstream:
+    #     `_trim_total(Q, leg, dex_*)` already kept `min(n_j, dex_*)`, so the schedule was only
+    #     ever an upper bound, and it was the BINDING one -- `err_fnl = 0.62` in the table
+    #     above is that bound discarding 62% of the ranked candidate weight.
+    #   * `dover` (the oversample) becomes a randomised-range-finder loop (`_range_find`): the
+    #     probe is widened until the preselection SVD CUTS something, which is the signal that
+    #     the sketched range has captured the decay rather than ending inside it. A fixed
+    #     1.2x cannot know that; a cut spectrum is proof of it.
+    #
+    # The schedule survives as the range finder's STARTING width only. It sets how many passes
+    # the loop needs, not what it converges to -- the loop only ever widens, and the budget is
+    # read off the spectrum afterwards either way.
+    #
+    # Both knobs keep their old meaning when set explicitly: `dex > 0` is still an absolute
+    # per-side cap, and an explicit `dover` still pins the width at `budget + dover` with no
+    # range finding, which is what the A/B benchmarks and `test_cbe_bug_exact_refs.jl` drive.
+    cap_l, cap_r = dex > 0 ? (min(budget, room_l), min(budget, room_r)) : (room_l, room_r)
+    if sulz_cap
+        lim_ex = max(2 * rm - r, 0)
+        cap_l, cap_r = min(cap_l, lim_ex), min(cap_r, lim_ex)
+    end
+    # PLAN §5: THE WORK CEILING ALSO BOUNDS WHAT IS RETAINED, not only how wide the sketch is.
+    # A frame of width `r` may grow to `workcap` and no further; `workcap >= 2r`, so the
+    # augmented rank-`2r` basis always fits. Where this cap is the binding one and the
+    # candidates fill it, `workcap_reached` is set; whether accuracy suffered is Test A's call
+    # (the directions it cut are in its tail), so a cap is reported, never silently accepted.
+    wbind_l = wbind_r = false
+    if alloc !== nothing && workcap > 0
+        wk = max(workcap - r, 0)
+        wbind_l, wbind_r = wk < cap_l, wk < cap_r
+        cap_l, cap_r = min(cap_l, wk), min(cap_r, wk)
+    end
+    (cap_l <= 0 && cap_r <= 0) && return none()      # both frames already complete
 
     npre = preselect_only ? max(budget, 1) :
            dover === nothing ? ceil(Int, 1.2 * budget) : budget + dover
+    # The probe for the LEFT expansion lives on the RIGHT frame's fused space and vice versa,
+    # so that is where each side's width ceiling comes from. Widening past it buys nothing:
+    # `sector_graded_sketch` caps every sector at its own dimension and simply returns fewer
+    # columns, which `_range_find` reads as "the local space is exhausted".
+    full_l, full_r = room_l + r, room_r + r
 
     # ---- preselection: sketch H from each side, project off the frame ----------
     #
@@ -720,26 +1151,51 @@ function cbe_expand(f::BondFrame, skl, skr;
     # SVD returns the true leading directions of `P_perp (H Theta)` rather than an estimate.
     # Nothing downstream changes or needs to know. `comp_ratio`, `npre`, `dover` and `rng` are
     # all inert on this path -- there is no probe to grade, oversample or draw.
-    probe(frame, side) = exact ? full_local_basis(frame, side) :
-                         sector_graded_sketch(frame, side, npre;
-                                              comp_ratio = comp_ratio, rng = rng)
+    probe(frame, side, w, boost) = exact ? full_local_basis(frame, side) :
+                                   sector_graded_sketch(frame, side, w; boost = boost,
+                                                        comp_ratio = comp_ratio, rng = rng)
+    # An explicit `dover` pins the width, and `exact` has no width to pin -- the probe is the
+    # complete basis, so there is nothing to widen and the first pass already sees everything.
+    wcap_l, wcap_r = dover === nothing && !exact ? (full_r, full_l) : (npre, npre)
+    # THE WORK CEILING IS THE ONE RESOURCE LIMIT, and it is what keeps the certified loop an
+    # RSVD. Test B widens until the residual fits, and at a bond whose spectrum does not decay
+    # that is satisfied only by the complete fused basis -- exactly the cost the sketch exists
+    # to avoid. `workcap` (`2*max(maxdim, rmax)`, set by the caller from `maxdim`) stops the
+    # doubling there and the shortfall is REPORTED as `workcap_reached` rather than paid for.
+    if alloc !== nothing && workcap > 0
+        wcap_l, wcap_r = min(wcap_l, workcap), min(wcap_r, workcap)
+    end
+    # The exact probe IS the complete local basis, so there is no range left for Test B to
+    # find, and its holdout would be drawn from that same deterministic basis.
+    alloc_b = exact ? nothing : alloc
 
-    QL, err_l = if dex_l > 0
-        OmR = probe(V0, :right)
-        OmR === nothing ? (nothing, 0.0) : _preselect_left(U0, skl(OmR), stol_pre)
+    QL, err_l, njl = if cap_l > 0
+        _certified_range((w, b) -> probe(V0, :right, w, b), 1,
+                         Y -> _preselect_left(U0, skl(Y), stol_pre), 3,
+                         X -> perp_component(U0, X), skl, :left,
+                         npre, wcap_l, cap_l, alloc_b, ledger)
     else
-        (nothing, 0.0)
+        (nothing, 0.0, 0)
     end
 
-    QR, err_r = if dex_r > 0
-        OmL = probe(U0, :left)
-        OmL === nothing ? (nothing, 0.0) : _preselect_right(V0, skr(OmL), stol_pre)
+    QR, err_r, njr = if cap_r > 0
+        _certified_range((w, b) -> probe(U0, :left, w, b), 3,
+                         Y -> _preselect_right(V0, skr(Y), stol_pre), 1,
+                         X -> perp_component_right(V0, X), skr, :right,
+                         npre, wcap_r, cap_r, alloc_b, ledger)
     else
-        (nothing, 0.0)
+        (nothing, 0.0, 0)
     end
     err_pre = sqrt(err_l^2 + err_r^2)
 
     (QL === nothing && QR === nothing) && return none()
+
+    # THE BUDGET IS READ OFF THE SPECTRUM HERE, not guessed before it: `n_j` counts the
+    # candidate directions that cleared `stol_pre` in the preselection SVD, and the per-side
+    # cap is the hard local limit (plus an explicit `dex`/`sulz_cap` when one was asked for).
+    dex_l, dex_r = min(njl, cap_l), min(njr, cap_r)
+    ledger === nothing || ((wbind_l && njl >= cap_l) || (wbind_r && njr >= cap_r)) &&
+        (ledger.workcap_reached = true)
 
     # ---- final selection: rank the candidates by their weight in H Theta ------
     #
@@ -764,9 +1220,6 @@ function cbe_expand(f::BondFrame, skl, skr;
     # side falls back to its own preselected candidates, which are ALREADY weight-ordered (the
     # preselection SVD's singular values are the weights in the sketched action). Each side
     # decides independently, and either may come back empty without silencing the other.
-    njl = QL === nothing ? 0 : leg_dim(QL, 3)
-    njr = QR === nothing ? 0 : leg_dim(QR, 1)
-
     joint, resj, err_fnl = 0, nothing, 0.0
     if !preselect_only && njl > 0 && njr > 0
         UMU = to_concrete(permutedims(contract(skl(QR), (1, 2), QL', (1, 2)), (2, 1)))
@@ -778,14 +1231,61 @@ function cbe_expand(f::BondFrame, skl, skr;
             if joint > 0
                 resj = svd(UMU, (1,); Nkeep = joint, cutoff = stol_fnl, get_lists = true)
                 err_fnl = _trunc_weight(resj)
+                # TEST A. The `Nkeep = joint` cut above is a RESOURCE bound -- the smaller
+                # side's headroom -- and says nothing about accuracy. The tail test asks the
+                # accuracy question of the ranked spectrum it produced: how few of these
+                # directions can be kept with the discarded weight still inside the bond's
+                # share of `tol_basis`. Keeping more than that buys rank no observable needs;
+                # keeping fewer breaks the budget, which is why `k` is capped BELOW by nothing
+                # and the shortfall is reported instead.
+                if alloc !== nothing
+                    k, tail = _tail_rank(resj.kept_list, alloc.scale, alloc.tail, joint;
+                                         base = _sq_weight(resj.trunc_list))
+                    if ledger !== nothing
+                        ledger.max_tail = max(ledger.max_tail, tail)
+                        tail <= alloc.tail || _unmet!(ledger, :tail)
+                    end
+                    if k < joint
+                        joint = k
+                        resj = k > 0 ?
+                               svd(UMU, (1,); Nkeep = k, cutoff = stol_fnl, get_lists = true) :
+                               nothing
+                        err_fnl = resj === nothing ? 0.0 : _trunc_weight(resj)
+                    end
+                    # THE TAIL RANK MUST BIND BOTH SIDES, not just the joint rotation. The
+                    # per-side fallback below trims to `dex_*`, which is a headroom bound; a
+                    # side with more headroom than `k` would otherwise admit directions the
+                    # tail test just certified as unnecessary, and the test would silently
+                    # apply to one side only.
+                    dex_l, dex_r = min(dex_l, joint), min(dex_r, joint)
+                end
             end
         end
     end
+
+    # TEST A ON A SIDE THE JOINT RANKING DID NOT COVER. With no joint SVD -- the other side
+    # has no candidates, or the two share no charge sector -- the fallback below used to keep
+    # every preselected direction, so the tail test applied to one kind of bond and not the
+    # other. Here the side's candidates are ranked by their EXACT weight against the complete
+    # opposite local space, `Q' (P_perp H Theta) F` with `F` that space's full basis -- the
+    # same operator the side's preselection sketched (no projection on the far side, exactly
+    # as `skl`/`skr` apply it). This contracts against the full local basis, which the sketch
+    # otherwise avoids; it runs only on bonds where the joint ranking is unavailable.
+    oneL = alloc !== nothing && !preselect_only && njl > 0 && resj === nothing && dex_l > 0
+    oneR = alloc !== nothing && !preselect_only && njr > 0 && resj === nothing && dex_r > 0
+    UL = oneL ? _one_sided_tail(to_concrete(contract(QL', (1, 2),
+                                                     skl(full_local_basis(V0, :right)), (1, 2))),
+                                alloc, dex_l, stol_fnl, ledger) : nothing
+    UR = oneR ? _one_sided_tail(to_concrete(contract(QR', (2, 3),
+                                                     skr(full_local_basis(U0, :left)), (2, 3))),
+                                alloc, dex_r, stol_fnl, ledger) : nothing
 
     TLC = if njl == 0
         nothing
     elseif resj !== nothing && dex_l <= joint
         to_concrete!(contract(QL, (3,), resj.U, (1,)))
+    elseif oneL
+        UL === nothing ? nothing : to_concrete!(contract(QL, (3,), UL, (1,)))
     else
         _trim_total(QL, 3, dex_l)
     end
@@ -793,6 +1293,8 @@ function cbe_expand(f::BondFrame, skl, skr;
         nothing
     elseif resj !== nothing && dex_r <= joint
         to_concrete!(contract(resj.Vd, (2,), QR, (1,)))
+    elseif oneR
+        UR === nothing ? nothing : to_concrete!(contract(UR, (1,), QR, (1,)))
     else
         _trim_total(QR, 1, dex_r)
     end
@@ -802,6 +1304,11 @@ function cbe_expand(f::BondFrame, skl, skr;
     # `RepairOrtho`: that pass ran on `Q`, this one runs on what the final selection made of it.
     TLC = _reortho_left(U0, TLC)
     TRC = _reortho_right(V0, TRC)
+
+    if ledger !== nothing
+        ledger.n_selected += (TLC === nothing ? 0 : leg_dim(TLC, 3)) +
+                             (TRC === nothing ? 0 : leg_dim(TRC, 1))
+    end
 
     (TLC === nothing && TRC === nothing) && return CBEExpansion(U0, V0, 0, 0, err_pre, 0.0)
 
@@ -926,8 +1433,11 @@ where the meaning is the same, so the integrators can be driven from the same ca
     (`tau = -dt`); the mode
     forms `tau` from it. [`GroundState`](@ref) ignores both and uses `n_sweeps`/`etol`.
   - `dex`, `growth`, `dover`, `comp_ratio`, `sulz_cap`, `preselect_only` -- the expansion,
-    forwarded to [`cbe_expand`](@ref). `dex = 0` (default) uses the `growth` schedule;
-    `growth = 1.1` reproduces the reference's DMRG ratchet, for the A/B.
+    forwarded to [`cbe_expand`](@ref). `dex = 0` and `dover = nothing` (both defaults) are
+    ADAPTIVE: the admitted directions are those clearing `stol_pre` in the preselection, and
+    the sketch width is range-found rather than fixed at `1.2x`. Setting either to a positive
+    value restores the old fixed cap / fixed oversample, which is what the A/B arms use;
+    `growth = 1.1` reproduces the reference's DMRG ratchet for the seed width.
   - `maxdim`, `trunc_thresh` -- truncation, applied at the centre and in the final sweep.
   - `normalize` -- rescale after each step; the norm is recorded BEFORE rescaling.
   - `maxiter`, `tol` -- Krylov budget for the single 0-site exponential.

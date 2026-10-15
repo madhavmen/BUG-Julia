@@ -238,7 +238,7 @@ Hamiltonian -- still Hermitian, still conserving the same charges, so nothing do
 complains.
 """
 function pair_mpo(L::Int, Js::Vector{<:AbstractMatrix}, vertices::Vector{PairVertex};
-                  Iloc = nothing)
+                  Iloc = nothing, Itrans = nothing, field = nothing)
 
     length(Js) == length(vertices) || throw(DimensionMismatch(
         "pair_mpo got $(length(Js)) coupling matrices for $(length(vertices)) vertices; " *
@@ -247,17 +247,20 @@ function pair_mpo(L::Int, Js::Vector{<:AbstractMatrix}, vertices::Vector{PairVer
         size(J) == (L, L) || throw(DimensionMismatch(
             "coupling matrix $t is $(size(J)), expected ($L, $L)"))
     end
-    return _pair_mpo(L, collect(Js), vertices; Iloc = Iloc)
+    return _pair_mpo(L, collect(Js), vertices; Iloc = Iloc, Itrans = Itrans, field = field)
 end
 
-function pair_mpo(L::Int, J::AbstractMatrix, vertices::Vector{PairVertex}; Iloc = nothing)
+function pair_mpo(L::Int, J::AbstractMatrix, vertices::Vector{PairVertex}; Iloc = nothing,
+                  Itrans = nothing, field = nothing)
     L >= 2 || throw(ArgumentError("pair_mpo needs at least two sites, got $L"))
     size(J) == (L, L) || throw(DimensionMismatch(
         "coupling matrix is $(size(J)), expected ($L, $L)"))
-    return _pair_mpo(L, [J for _ in vertices], vertices; Iloc = Iloc)
+    return _pair_mpo(L, [J for _ in vertices], vertices; Iloc = Iloc, Itrans = Itrans,
+                     field = field)
 end
 
-function _pair_mpo(L::Int, Js::Vector, vertices::Vector{PairVertex}; Iloc = nothing)
+function _pair_mpo(L::Int, Js::Vector, vertices::Vector{PairVertex}; Iloc = nothing,
+                   Itrans = nothing, field = nothing)
     L >= 2 || throw(ArgumentError("pair_mpo needs at least two sites, got $L"))
     n = length(vertices)
     n >= 1 || throw(ArgumentError("pair_mpo needs at least one vertex"))
@@ -284,6 +287,16 @@ function _pair_mpo(L::Int, Js::Vector, vertices::Vector{PairVertex}; Iloc = noth
     Iloc = Iloc !== nothing ? Iloc :
            symmetry_mode() === :SU2 ? local_space(:SU2).I :
            symmetry_mode() === :Z2  ? ising_local_space(:Z2).I : local_space().I
+    # ⛔ THE TRANSPORTED OPERATOR IS NOT ALWAYS THE IDENTITY, and before `Itrans` existed the two
+    # were the same tensor -- so threading a Jordan-Wigner string was impossible: passing `σ^z` as
+    # `Iloc` would also have replaced the `id -> id` and `done -> done` blocks, applying `σ^z` on
+    # every site OUTSIDE the pair.
+    #
+    # A fermionic hop on an interleaved spinful chain is `S^+_{m+2} σ^z_{m+1} S^-_m`: the string
+    # sits on the sites the channel CROSSES, which is exactly what the transport block is. Setting
+    # `Itrans = σ^z` and a coupling matrix supported on `|i-j| = 2` therefore gives the correct
+    # fermionic hopping, with the identity channels left alone.
+    Itrans = Itrans !== nothing ? Itrans : Iloc
 
     # `coupling(o, j, t)` is the weight of the pair FOR VERTEX `t`, strict upper triangle only.
     coupling(o, j, t) = o < j ? Js[t][o, j] : 0.0
@@ -307,7 +320,7 @@ function _pair_mpo(L::Int, Js::Vector, vertices::Vector{PairVertex}; Iloc = noth
         closes = [_mpo_block(v.right, i, tl, tr, _side(v.right, :right)) for v in vertices]
         # The transport block is built from the VERTEX rather than from `opens`/`closes`, because
         # verifying it needs partner blocks tagged for site `i+1` -- see `_charged_transport`.
-        trans  = [_charged_transport(vertices[t], Iloc, i, tl, tr) for t in 1:n]
+        trans  = [_charged_transport(vertices[t], Itrans, i, tl, tr) for t in 1:n]
 
         prev, cur = alive(i - 1), alive(i)
         # Row index of channel `(o,t)` in the incoming set, column index in the outgoing one.
@@ -357,13 +370,20 @@ function _pair_mpo(L::Int, Js::Vector, vertices::Vector{PairVertex}; Iloc = noth
             mat[rowof[(o, t)], ncol] = to_concrete((c == 0.0 ? zero(c) : c) * closes[t])
         end
 
+        # `id -> done`: an ON-SITE term. No channel opens, so it costs no virtual dimension.
+        field !== nothing && (mat[1, ncol] = field[i])
+
         # Boundaries: site 1 can only be in `id`, site `L` can only end `done`.
         if i == 1
             mat = reshape(mat[1, :], 1, ncol)
-            ncol > 1 && (mat[1, ncol] = Znil)         # nothing can be `done` yet
+            # ⛔ `mat[1, ncol]` IS THE FIELD'S SLOT. Blanking it unconditionally drops `h_1` here
+            # and `h_L` below -- an error that shrinks like 1/L and therefore reads as a
+            # convergence artefact rather than a wrong Hamiltonian. Same trap
+            # `field_mpo_from_terms` documents; the guard is why it is not repeated here.
+            ncol > 1 && field === nothing && (mat[1, ncol] = Znil)
         elseif i == L
             mat = reshape(mat[:, ncol], nrow, 1)
-            nrow > 1 && (mat[1, 1] = Znil)            # nothing may stay `id` past the end
+            nrow > 1 && field === nothing && (mat[1, 1] = Znil)
         end
         push!(Ws, to_concrete(oplus(mat, (1, 4))))
     end

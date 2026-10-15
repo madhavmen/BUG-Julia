@@ -75,12 +75,43 @@ function _krylov_frame(v0, applyH, maxdepth::Int, tol::Float64, tau::ComplexF64)
     Hm = zeros(ComplexF64, maxdepth + 1, maxdepth + 1)
     for k in 1:maxdepth
         w = applyH(vs[end])
-        for _pass in 1:2, (i, u) in pairs(vs)
-            c = tensor_inner(u, w)
-            # accumulate across BOTH passes: the second pass's correction is part of the
-            # projection, not a separate quantity
-            Hm[i, k] += c
-            w = to_concrete(w - c * u)
+        # ⛔⛔ ONE MATERIALISATION PER PASS, NOT ONE PER VECTOR -- THIS IS THE ALLOCATION DEFECT
+        # THAT BLOCKED THE SPINFUL CAMPAIGN. The previous form updated `w` inside the inner loop:
+        #
+        #     for _pass in 1:2, (i, u) in pairs(vs)
+        #         c = tensor_inner(u, w); Hm[i,k] += c; w = to_concrete(w - c * u)   # allocates
+        #
+        # so one solve performed `sum_k 2k ~ m^2` full-tensor materialisations. MEASURED at
+        # L=20, chi=32, d=4, m=30: ~930 per solve x ~38 solves x a 262 KB two-site tensor, and the
+        # step allocated **28.6 GiB rising to 237 GiB by step 5** with `maxbond` pinned at 32.
+        # The allocation profile named it exactly: `_compress_sum_sector` 24.6% of bytes (the
+        # `w - c*u` being compressed) and `copy` 37.9% (the `to_concrete`), against ~6.6% for
+        # every SVD site combined -- which is why the TIME profile, where SVD is 68.6%, pointed
+        # somewhere else entirely.
+        #
+        # Accumulating the correction and subtracting ONCE per pass makes it `2m`
+        # materialisations per solve instead of `m^2` -- 15x fewer at m=30 -- because Telum's `+`
+        # and `*` are LAZY, so `corr` is a symbolic tree that costs nothing until it is forced.
+        #
+        # ⚠ THIS IS THE CLASSICAL (CGS2) PROJECTION RATHER THAN THE MODIFIED (MGS) ONE: within a
+        # pass every inner product is taken against the SAME `w`, not against a partially updated
+        # one. That is a deliberate and standard trade -- CGS **repeated twice** is as stable as
+        # MGS ("twice is enough"), and the two passes were already here. The coefficients are
+        # still accumulated across both passes, so `Hm` means what it did before.
+        #
+        # ⚠ AND `tensor_inner` IS NEVER CALLED ON THE SYMBOLIC TREE. `w` stays concrete for the
+        # whole pass and only `corr` is lazy, so this does NOT reintroduce the recorded O(k^3)
+        # trap where a symbolic `w` was re-forced one term longer on every inner product.
+        for _pass in 1:2
+            corr = nothing
+            for (i, u) in pairs(vs)
+                c = tensor_inner(u, w)
+                # accumulate across BOTH passes: the second pass's correction is part of the
+                # projection, not a separate quantity
+                Hm[i, k] += c
+                corr = corr === nothing ? c * u : corr + c * u
+            end
+            corr === nothing || (w = to_concrete(w - corr))
         end
         b = norm(w)
         # BREAKDOWN comes first and is unconditional: with no independent direction left there is
@@ -96,6 +127,176 @@ function _krylov_frame(v0, applyH, maxdepth::Int, tol::Float64, tau::ComplexF64)
     # rank the high-order directions against each other rather than against the state.
     vs[1] = to_concrete(b0 * vs[1])
     return vs
+end
+
+# ── STAGE 3: RESIDUAL-DRIVEN K/L KRYLOV ENRICHMENT (plan §4, Tests C and D) ──────────────────
+#
+# The adaptive path's replacement for `_krylov_frame`'s fixed `krylov_basis`/`krylov_tol`.
+#
+# ⛔ TWO SPACES, AND THE TESTS LIVE IN THE SMALLER ONE. The Krylov recursion runs on ONE-SITE
+# TENSORS (`(link, site, g)` on the left), exactly as `_krylov_frame` does. What the half-sweep
+# keeps is a FRAME -- an isometry on the local legs `(link, site)` -- and the plan's `Q` with
+# its projector `I - QQ'` is that frame: a Krylov vector adds something only through the part
+# of its local range the frame does not already span. `Q0` is the CBE output `U_ex = [U_old |
+# U_CBE]`, so the old directions are kept VERBATIM and the CBE-selected ones are reused; the
+# seed `K_ex` already lies in `U_old` (it is the state's own site tensor).
+
+const _TAG_K, _TAG_KR = "cbeK,L", "cbeK,R"
+
+"Safety bound on the adaptive Krylov depth. Reaching it with weight left is REPORTED, not hidden."
+const _KRY_MAXDEPTH = 64
+
+# The norm-difference `sqrt(||psi||^2 - ||S0||^2)` cannot resolve a projection error below
+# ~sqrt(eps): cancellation. A frame that contains `psi` exactly reads ~1e-8 here, so a
+# `tol_basis` tighter than this floor is compared against the floor, not against roundoff.
+const _PROJ_FLOOR = 1e-7
+
+# The root solve's Krylov basis per substep on the adaptive path. A NUMERICAL cap, not an
+# accuracy one: `substeps = 0` splits `tau` whenever this basis cannot reach `tol_expv`.
+const _ROOT_MAXITER = 30
+
+"""
+    _kry_weight(Hm, k, tau) -> Float64
+
+The weight the newest Krylov vector `v_{k+1}` carries in `exp(tau*H) v_1`, from the Arnoldi
+Hessenberg after `k` steps: `|tau * beta_k * [phi_1(tau*H_k)]_{k,1}|`, read off ONE `(k+1)x(k+1)`
+exponential of `[tau*H_k 0; tau*beta_k*e_k' 0]`. This is Saad's a posteriori error of the
+`k`-dimensional Krylov approximation, so it is also the CLOSURE test: once it is below the
+allowance, no later direction can matter more (for `k = 1` it is `|tau| beta_1 (1 + O(tau))`,
+the plan's Test C normalisation `|dt| ||H1 K_ex|| / ||K_ex||`).
+"""
+function _kry_weight(Hm::Matrix{ComplexF64}, k::Int, tau::ComplexF64)
+    A = zeros(ComplexF64, k + 1, k + 1)
+    A[1:k, 1:k] .= tau .* @view Hm[1:k, 1:k]
+    A[k + 1, k] = tau * Hm[k + 1, k]
+    return abs(exp(A)[k + 1, 1])
+end
+
+"""
+    _extend_frame(Q, R, v, side, weight, allowance; room) -> (Q, n_added, fits)
+
+Append to the frame `Q` the local directions of the residual `R = (I - QQ') v` that the
+allowance requires: the smallest number whose weighted discarded tail `weight * sqrt(sum s^2)`
+fits (Test A's rule, `_tail_rank`). Orthogonalised within each charge sector by the block SVD,
+cut only at the numerical floor `_rank_cut`, re-orthogonalised against `Q` before the direct
+sum -- the same guard `cbe_expand` applies to its own appended block.
+
+`room` is what the work ceiling still allows on the frame leg (plan §5): at most that many are
+appended, and `fits = false` reports that the allowance needed more.
+"""
+function _extend_frame(Q, R, v, side::Symbol, weight::Float64, allowance::Float64;
+                       room::Int = typemax(Int))
+    legs = side === :left ? (1, 2) : (2, 3)
+    cut = _rank_cut(0.0, v, norm(R))
+    res = svd(R, legs, _TAG_K, _TAG_KR; cutoff = cut, get_lists = true)
+    nk = length(res.kept_list)
+    k, tail = _tail_rank(res.kept_list, weight, allowance, min(nk, room);
+                         base = _sq_weight(res.trunc_list))
+    fits = tail <= allowance
+    k == 0 && return (Q, 0, fits)
+    k < nk && (res = svd(R, legs, _TAG_K, _TAG_KR; Nkeep = k, cutoff = cut))
+    U = side === :left ? _reortho_left(Q, to_concrete(res.U)) :
+                         _reortho_right(Q, to_concrete(permutedims(res.U, (3, 1, 2))))
+    U === nothing && return (Q, 0, fits)
+    fl = side === :left ? 3 : 1
+    Qn = to_concrete(oplus([Q, to_concrete(setitag(U, fl, Q.inds[fl].itags))], (fl,)))
+    return (Qn, leg_dim(U, fl), fits)
+end
+
+"""
+    _krylov_enrich(v0, applyH, Q0, side, tau, alloc; workcap = 0, maxdepth = _KRY_MAXDEPTH)
+        -> (Q, stats)
+
+Grow the frame `Q0` by the Krylov directions of `applyH` seeded at `v0` that the step needs.
+`side` is `:left` (frame legs `(link, site, g)`, local legs 1-2) or `:right` (`(g, site, link)`,
+local legs 2-3). Each Arnoldi direction `v_k` is scored
+
+    eta_k = weight_k * ||(I - QQ') v_k||          (weight_k from `_kry_weight`)
+
+`eta_1` is TEST C (does the CBE frame already hold the first one-site action?), `eta_{k>=2}`
+TEST D (is the grown frame closed under `H1` on the active frontier?). A score above
+`alloc.krylov` appends that residual's directions. A small `eta_1` is NOT a stop: the plan's
+counterexample (`H e1 = e2`, `H e2 = e1 + e3`, `Q0 = [e1, e2]`) has `eta_1 = 0` and a needed
+`e3`. The loop stops when the propagator weight itself is below the allowance -- every
+remaining direction is then negligible however new -- or when the recursion closes exactly.
+Directions with no amplitude on the seed's Krylov space are never visited, so dormant ones are
+not forced closed.
+
+Returns the grown frame and `stats = (eta_c, eta_d, added, n_h1, d_after_c, capped, met)`.
+`capped` means the work ceiling or the depth bound stopped the search with weight left;
+`met = false` then, and the caller records it -- never a silent pass.
+"""
+function _krylov_enrich(v0, applyH, Q0, side::Symbol, tau::ComplexF64,
+                        alloc::BasisAllocation; workcap::Int = 0,
+                        maxdepth::Int = _KRY_MAXDEPTH)
+    side in (:left, :right) || throw(ArgumentError("side must be :left or :right"))
+    perp = side === :left ? perp_component : perp_component_right
+    fl = side === :left ? 3 : 1
+    Q = Q0
+    eta_c, eta_d, added, added_d, nh = 0.0, 0.0, 0, 0, 0
+    capped, closed = false, false
+    b0 = norm(v0)
+    if b0 > 0
+        # `tau = 0` asks the unit-time closure question, as `basis_allocation` does.
+        teff = iszero(tau) ? one(tau) : tau
+        vs = Any[to_concrete((1.0 / b0) * v0)]
+        Hm = zeros(ComplexF64, maxdepth + 1, maxdepth + 1)
+        for k in 1:maxdepth
+            w = applyH(vs[end])
+            nh += 1
+            # CGS2 against every previous vector, as in `_krylov_frame` (see the notes there).
+            for _pass in 1:2
+                corr = nothing
+                for (t, u) in pairs(vs)
+                    ov = tensor_inner(u, w)
+                    Hm[t, k] += ov
+                    corr = corr === nothing ? ov * u : corr + ov * u
+                end
+                corr === nothing || (w = to_concrete(w - corr))
+            end
+            b = norm(w)
+            b <= _KRY_BREAKDOWN && (closed = true; break)    # invariant: nothing further exists
+            Hm[k + 1, k] = b
+            v = to_concrete((1.0 / b) * w)
+            push!(vs, v)
+            weight = _kry_weight(Hm, k, teff)
+            R = to_concrete(perp(Q, v))
+            eta = weight * norm(R)
+            k == 1 ? (eta_c = eta) : (eta_d = max(eta_d, eta))
+            if eta > alloc.krylov
+                # The ceiling bounds the frame WIDTH, not the number of extensions: a block
+                # may not carry the frame past it either.
+                room = workcap > 0 ? workcap - leg_dim(Q, fl) : typemax(Int)
+                room <= 0 && (capped = true; break)
+                Q, nadd, fits = _extend_frame(Q, R, v, side, weight, alloc.krylov; room = room)
+                added += nadd
+                k >= 2 && (added_d += nadd)
+                fits || (capped = true; break)
+            end
+            weight <= alloc.krylov && (closed = true; break)
+        end
+        closed || (capped = true)                             # depth bound with weight left
+    else
+        closed = true
+    end
+    return (Q, (eta_c = eta_c, eta_d = eta_d, added = added, n_h1 = nh,
+                d_after_c = eta_c <= alloc.krylov && added_d > 0,
+                capped = capped, met = closed && !capped))
+end
+
+"Fold one `_krylov_enrich` verdict into the step ledger (plan §8 Krylov diagnostics)."
+function _record_krylov!(ledger::Union{Nothing, AdaptiveLedger}, st, alloc::BasisAllocation)
+    ledger === nothing && return nothing
+    ledger.max_krylov_c = max(ledger.max_krylov_c, st.eta_c)
+    ledger.max_krylov_d = max(ledger.max_krylov_d, st.eta_d)
+    ledger.max_krylov   = max(ledger.max_krylov, st.eta_c, st.eta_d)
+    ledger.n_krylov += st.added
+    ledger.n_h1     += st.n_h1
+    st.eta_c <= alloc.krylov && (ledger.n_c_pass += 1)
+    st.d_after_c && (ledger.n_d_after_c += 1)
+    st.capped && (ledger.workcap_reached = true)
+    st.met || _unmet!(ledger, :krylov)
+    return nothing
 end
 
 """
@@ -133,7 +334,13 @@ What one [`cbe_bug_step!`](@ref) did.
   - `root`, `root_rank` -- which bond took the Galerkin step, and its kept rank afterwards.
   - `err_pre`, `err_fnl` -- largest preselection / final-selection weight discarded. `err_fnl`
     is the one to watch: a large value means the BUDGET, not the selection, limited accuracy.
-  - `discarded` -- largest relative weight the closing truncation threw away.
+  - `discarded` -- largest relative weight any single SVD of the closing truncation (or the
+    root split) threw away. ⚠ NOT the step's compression error: on the adaptive path that is
+    `ledger.discarded`, the cumulative relative norm over every bond (plan §5).
+  - `ledger` -- the adaptive path's [`AdaptiveLedger`](@ref) (Test A/B/C/D indicators, probe
+    counts, cumulative compression, projection error, ranks, `tolerance_met`,
+    `workcap_reached`); `nothing` on the legacy fixed-knob path. [`budget_status`](@ref) reads
+    `:met` / `:budget_unmet` off it and [`budget_diagnostic`](@ref) says why.
   - `krylov_dims` -- operator applications, summed over the `L` K-steps and the one root solve.
   - `peak_elements` -- working set (`state + accumulated frames + transients alive at that
     moment`), the same definition `TDVP2Info` uses, so the two are comparable.
@@ -193,6 +400,10 @@ struct CBEBugSweepInfo
     t_frame::Float64    # `_frame_from`, which factorises both sides of the bond
     t_env::Float64      # environment stacks and channel pushes
     t_step::Float64     # the whole call, so the shares can be checked to sum to 1
+    # ⛔ THE ADAPTIVE PATH'S VERDICT, `nothing` on the legacy path. Without it a step that failed
+    # Test A/B, or stopped at the work ceiling, returns looking exactly like one that passed --
+    # the silent convergence claim the three-tolerance API exists to rule out.
+    ledger::Union{Nothing, AdaptiveLedger}
 end
 
 """
@@ -223,6 +434,13 @@ retired it, including the three hypotheses that were wrong on the way.
 
 Keywords beyond the [`cbe_expand`](@ref) ones (`dex`, `growth`, `dover`, `comp_ratio`,
 `sulz_cap`, `preselect_only`, `exact`, `stol_pre`, `stol_fnl`):
+
+  ⛔ ON THE ADAPTIVE PATH (no retired knob named) THE HALF-SWEEP FRAME IS BUILT BY
+  [`_krylov_enrich`](@ref): it starts from the CBE frame `U_ex` and appends Krylov directions only
+  when Tests C/D (plan §4) find their weighted residual outside the frame above `tol_basis`'s
+  allowance; the depth follows from that, not from a count. `krylov_basis`, `krylov_tol`,
+  `krylov_grow` and `grow_iters` below are the LEGACY path's controls, and naming any of them
+  together with a tolerance is refused.
 
   - `krylov_tol` -- **THE STOPPING RULE, `1e-6`.** The half-sweep stops adding Krylov vectors when
     the next one's CONTRIBUTION to `exp(tau*H_1)*Theta` falls below it -- Saad's estimate
@@ -275,29 +493,54 @@ Keywords beyond the [`cbe_expand`](@ref) ones (`dex`, `growth`, `dover`, `comp_r
   - `root` -- which bond takes the Galerkin step. Default `L/2`, a fixed point of the reflection
     `b -> L - b` on an even chain, so the sweep is already spatially symmetric there.
   - `split_cutoff`, `split_maxdim` -- truncation on the frame split, applied once per bond as the
-    sweep passes.
+    sweep passes. LEGACY ONLY: the adaptive frame has no split (plan §5), only the numerical
+    rank floor inside `_krylov_enrich`.
   - `root_cutoff`, `root_maxdim` -- truncation on the ROOT CORE SPLIT. **Defaults `0.0`/`0`, i.e.
     NONE**: that SVD splits the Galerkin core into the two centre tensors and nothing more.
     There are exactly TWO truncations in a step -- the half-sweep split and the closing pass --
-    and this used to be an unswitchable third.
-  - `maxdim`, `trunc_thresh` -- the closing [`truncate_recursive!`](@ref). `truncate = false`
+    and this used to be an unswitchable third. The adaptive path pins them to `0.0`/`0`.
+  - `maxdim`, `trunc_thresh` -- the closing [`truncate_recursive!`](@ref). `maxdim` defaults to
+    128 on the adaptive path (plan §1) and 200 on the legacy path. On the adaptive path
+    `tol_trunc` replaces `trunc_thresh` and is a budget on the CUMULATIVE relative discarded
+    norm (`weight_tol`); exceeding it, e.g. because `maxdim` binds, makes the step
+    `:budget_unmet` rather than silently accepted. `truncate = false`
     disables it; with the root defaults above that leaves `split_cutoff` as the only rank control
     anywhere in the step, which is a study configuration and not a production one.
-  - `maxiter`, `tol`, `reorth` -- Krylov budget for the root solve.
+  - `maxiter`, `tol`, `reorth` -- Krylov budget for the root solve. `maxiter`, `tol`,
+    `root_conv_tol` and `root_substeps` are LEGACY knobs: on the adaptive path `tol_expv` is the
+    convergence test and the substep split is adaptive (`ledger.expv_err`, `expv_iters`).
 """
 function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
-                       dex::Int = 0,
-                       growth::Float64 = 2.0,
+                       # ── THE NORMAL API: three tolerances and one resource limit ────────
+                       #
+                       # `nothing` means "not asked for", which is what lets the step tell an
+                       # adaptive caller from a legacy one without a mode flag. See
+                       # `resolve_budget` in `adaptive_budget.jl` for why the two sets of
+                       # keywords are mutually exclusive rather than merged.
+                       tol_basis::Union{Nothing, Float64} = nothing,
+                       tol_trunc::Union{Nothing, Float64} = nothing,
+                       tol_expv::Union{Nothing, Float64} = nothing,
+                       # ── THE RETIRED TUNING PARAMETERS ─────────────────────────────────
+                       #
+                       # ⛔ EACH OF THESE IS A GUESS AT A RANK MADE BEFORE THE SPECTRUM THAT
+                       # ANSWERS IT EXISTS, and each had to be re-guessed per Hamiltonian.
+                       # They survive as a FIXED-KNOB LEGACY PATH so the benchmark suite can
+                       # still drive the historical behaviour for A/B comparison; they are not
+                       # the normal API and naming one opts the whole call out of the adaptive
+                       # solver. `nothing` resolves to the historical default, so a call that
+                       # names none of them and none of the tolerances is unchanged.
+                       dex::Union{Nothing, Int} = nothing,
+                       growth::Union{Nothing, Float64} = nothing,
                        dover::Union{Nothing, Int} = nothing,
-                       comp_ratio::Union{Float64, Nothing} = 1.0,
+                       comp_ratio::Union{Float64, Nothing} = nothing,
                        sulz_cap::Bool = false,
                        preselect_only::Bool = false,
                        exact::Bool = false,
-                       stol_pre::Float64 = 1e-10,
-                       stol_fnl::Float64 = 1e-13,
+                       stol_pre::Union{Nothing, Float64} = nothing,
+                       stol_fnl::Union{Nothing, Float64} = nothing,
                        root::Union{Nothing, Int} = nothing,
-                       krylov_basis::Int = 30,
-                       krylov_tol::Float64 = 1e-6,
+                       krylov_basis::Union{Nothing, Int} = nothing,
+                       krylov_tol::Union{Nothing, Float64} = nothing,
                        krylov_grow::Bool = false,
                        # ⛔ `grow_iters` IS THE SINGLE-KNOB SPELLING OF THE GROWTH PATH, and it is
                        # this sweep's OWN mechanism -- not an import from the retired
@@ -337,15 +580,15 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # `krylov_grow = false, krylov_basis = n` as the control against
                        # `grow_iters = n`.
                        grow_iters::Union{Nothing, Int} = nothing,
-                       split_cutoff::Float64 = 1e-14,
-                       split_maxdim::Int = 0,
+                       split_cutoff::Union{Nothing, Float64} = nothing,
+                       split_maxdim::Union{Nothing, Int} = nothing,
                        truncate::Bool = true,
-                       root_cutoff::Float64 = 0.0,
-                       root_maxdim::Int = 0,
-                       maxdim::Int = 200,
-                       trunc_thresh::Float64 = 1e-12,
-                       maxiter::Int = 30,
-                       tol::Float64 = 1e-15,
+                       root_cutoff::Union{Nothing, Float64} = nothing,
+                       root_maxdim::Union{Nothing, Int} = nothing,
+                       maxdim::Union{Nothing, Int} = nothing,
+                       trunc_thresh::Union{Nothing, Float64} = nothing,
+                       maxiter::Union{Nothing, Int} = nothing,
+                       tol::Union{Nothing, Float64} = nothing,
                        reorth::Bool = true,
                        # ⛔ THE GALERKIN SOLVE IS THE ONE THAT EVOLVES THE STATE. The half-sweeps
                        # only supply DIRECTIONS -- a basis that is short there costs accuracy in
@@ -365,8 +608,8 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        #
                        # Both default to the historical behaviour so nothing already measured
                        # moves; see `BondUpdateBUG/expv.jl` for the full argument.
-                       root_conv_tol::Float64 = 0.0,
-                       root_substeps::Int = 1,
+                       root_conv_tol::Union{Nothing, Float64} = nothing,
+                       root_substeps::Union{Nothing, Int} = nothing,
                        # Build the bases from THIS state instead of from `psi`, while still
                        # evolving `psi` over the full `tau`. `nothing` is the ordinary step.
                        # Exists for [`cbe_bug_midpoint_step!`](@ref); see the comment at `psiL`.
@@ -419,6 +662,68 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     c = root === nothing ? max(1, min(L - 1, L ÷ 2)) : root
     1 <= c <= L - 1 || throw(ArgumentError("root must be a bond in 1:$(L - 1), got $c"))
 
+    # ── WHICH API DID THE CALLER USE? ───────────────────────────────────────────────────────
+    #
+    # `resolve_budget` refuses the mixture and infers the mode from what was named; everything
+    # below then works with CONCRETE values, so no downstream code has to know which path it
+    # is on. `legacy_names` is non-empty exactly on the legacy path and is carried into the
+    # ledger's status so a benchmark can report which solver produced its numbers.
+    budget, adaptive, legacy_names = resolve_budget(
+        tol_basis, tol_trunc, tol_expv,
+        (dex = dex, dover = dover, comp_ratio = comp_ratio, growth = growth,
+         krylov_basis = krylov_basis, split_cutoff = split_cutoff,
+         split_maxdim = split_maxdim, root_cutoff = root_cutoff,
+         root_maxdim = root_maxdim, trunc_thresh = trunc_thresh,
+         stol_pre = stol_pre, stol_fnl = stol_fnl,
+         # `krylov_grow` is a Bool, so only `true` is a request; `false` is its default.
+         krylov_tol = krylov_tol, grow_iters = grow_iters,
+         krylov_grow = krylov_grow ? true : nothing,
+         maxiter = maxiter, tol = tol, root_conv_tol = root_conv_tol,
+         root_substeps = root_substeps))
+
+    dex          = legacy_or_default(dex, :dex)
+    growth       = legacy_or_default(growth, :growth)
+    comp_ratio   = legacy_or_default(comp_ratio, :comp_ratio)
+    krylov_basis = legacy_or_default(krylov_basis, :krylov_basis)
+    krylov_tol   = legacy_or_default(krylov_tol, :krylov_tol)
+    split_cutoff = legacy_or_default(split_cutoff, :split_cutoff)
+    split_maxdim = legacy_or_default(split_maxdim, :split_maxdim)
+    # Plan §5: the root structural SVD is LOSSLESS on the adaptive path (keeps every nonzero
+    # singular value, no `Nkeep`); written out rather than inherited from `LEGACY_DEFAULTS` so
+    # a change to the legacy defaults cannot put a physical cut back on the adaptive root.
+    # Plan §1/§4 (Stage 5): `tol_expv` IS the root solve's convergence test (Saad's estimate) and
+    # drives its substep split (`substeps = 0`), so the iteration count follows from it. The
+    # per-substep basis cap and the breakdown threshold are numerical, not accuracy, settings.
+    maxiter       = adaptive ? _ROOT_MAXITER : legacy_or_default(maxiter, :maxiter)
+    tol           = adaptive ? 1e-15 : legacy_or_default(tol, :tol)
+    root_conv_tol = adaptive ? budget.expv : legacy_or_default(root_conv_tol, :root_conv_tol)
+    root_substeps = adaptive ? 0 : legacy_or_default(root_substeps, :root_substeps)
+    root_cutoff  = adaptive ? 0.0 : legacy_or_default(root_cutoff, :root_cutoff)
+    root_maxdim  = adaptive ? 0 : legacy_or_default(root_maxdim, :root_maxdim)
+    # The adaptive path passes `0.0`: the preselection then cuts only at the numerical rank
+    # floor (`_rank_cut`), and which directions MATTER is decided by Tests A/B against
+    # `tol_basis` -- plan §1 removes `stol_pre` as a physical threshold, not just as a keyword.
+    stol_pre     = adaptive ? 0.0 : legacy_or_default(stol_pre, :stol_pre)
+    # Plan §1 signature: `maxdim = 128`. The legacy path keeps its historical 200 so recorded
+    # fixed-knob benchmarks are unchanged.
+    maxdim       = something(maxdim, adaptive ? 128 : 200)
+    stol_fnl     = legacy_or_default(stol_fnl, :stol_fnl)
+    # ⚠ `trunc_thresh` IS THE ONE THE ADAPTIVE PATH OVERRIDES rather than defaults. It is the
+    # final compression tolerance, which on the normal API is `tol_trunc` BY DEFINITION -- the
+    # plan's "one shared compression budget" instead of a separate per-step cutoff.
+    trunc_thresh = adaptive ? budget.trunc : legacy_or_default(trunc_thresh, :trunc_thresh)
+
+    # The per-bond, per-test allowances `tol_basis` buys, plus the `|tau|/||psi||` scale every
+    # residual is measured in. Unused on the legacy path, which answers the same questions
+    # with fixed counts.
+    # ⚠ THE NORM COMES FROM THE CENTRE TENSOR, which carries the state's whole norm only while
+    # the state is canonical -- true on entry for every caller here, since the sweeps gauge
+    # before they read. Guarded anyway: an out-of-range `center` gives 1.0 (an unnormalised
+    # relative scale) rather than a bounds error from a diagnostic.
+    _nrm = (1 <= psi.center <= L) ? norm(psi[psi.center]) : 1.0
+    alloc  = basis_allocation(budget, L - 1; tau = tau, nrm = _nrm)
+    ledger = AdaptiveLedger()
+    ledger.r_old = maximum(bond_dims(psi); init = 0)
 
     # ── `grow_iters` RESOLVES ONTO THE TWO KNOBS IT IS SHORTHAND FOR ────────────────────────────
     # `nothing` leaves `krylov_grow`/`krylov_basis` exactly as passed, so every existing call and
@@ -468,18 +773,34 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     # is no `_splitU` on that path at all -- so leaving them at a hardcoded 1e-10 / 1e-13 made the
     # basis-only sweep ungovernable by any tolerance the caller sets, and made `split_cutoff` look
     # like the half-sweep's knob when for that sweep it is not used at all.
+    # The ONE work ceiling, shared by the CBE sketch and the Krylov enrichment (plan §4/§5).
+    wcap_step = work_ceiling(maxdim, maximum(bond_dims(psi); init = 0))
     exkw = (dex = dex, growth = growth, dover = dover, comp_ratio = comp_ratio,
             sulz_cap = sulz_cap, rmax = maximum(bond_dims(psi); init = 0),
             preselect_only = preselect_only, exact = exact,
             stol_pre = stol_pre, stol_fnl = stol_fnl, share_ht = share_ht,
-            fold_omega = fold_omega, rng = rng)
+            fold_omega = fold_omega,
+            # `nothing` on the legacy path keeps `cbe_expand`'s fixed-count selection exactly
+            # as it was; an allocation switches on the residual tests.
+            alloc = adaptive ? alloc : nothing,
+            workcap = wcap_step)
+
+    # ⛔ THE LEDGER AND THE RNG ARE PER HALF-SWEEP, because under `parallel = true` the two run
+    # concurrently: a shared `AdaptiveLedger` loses `+=` updates, and a shared `MersenneTwister`
+    # is not thread-safe at all. The right sweep gets a stream SEEDED FROM `rng` only when
+    # parallel, so the serial path draws exactly the sequence it always did. The two ledgers are
+    # folded into the step's after the join.
+    ledgerL, ledgerR = AdaptiveLedger(), AdaptiveLedger()
+    rngR = parallel ? MersenneTwister(rand(rng, UInt64)) : rng
+    halfkw(acc) = acc === accL ? (ledger = adaptive ? ledgerL : nothing, rng = rng) :
+                                 (ledger = adaptive ? ledgerR : nothing, rng = rngR)
 
     troot = Ref(0.0); ttrunc = Ref(0.0)
     _t0step = time_ns()
     """Time one `cbe_expand` into the calling half-sweep's own accumulator."""
     function timed_expand(acc::_HalfAcc, args...; kw...)
         t0 = time_ns()
-        ex = cbe_expand(args...; kw...)
+        ex = cbe_expand(args...; kw..., halfkw(acc)...)
         acc.tcbe += (time_ns() - t0) / 1e9
         return ex
     end
@@ -728,7 +1049,23 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         Vwide[i] = ex.V_ex
         Wcbe[i]  = ex.U_ex
         held += tensor_elements(ex.U_ex) + tensor_elements(ex.V_ex)
-        if krylov_basis > 0
+        if adaptive
+            # ── STAGE 3 (plan §4): THE FRAME GROWS FROM `U_ex` BY TESTS C/D ───────────────
+            # Same seed and same `H1` as the legacy branch below; what changes is that the CBE
+            # frame is KEPT (old directions verbatim, CBE directions reused) and a Krylov
+            # direction is appended only when its weighted residual outside the frame matters.
+            M    = to_concrete!(contract(psiL[i + 1], (2, 3), ex.V_ex', (2, 3)))
+            Kex  = to_concrete!(contract(K, (3,), M, (1,)))
+            rch1 = push_right_channels(right_channels(rstack, i + 2), mpo, ex.V_ex, i + 1)
+            H1   = one_site_h(mpo, i, lch, rch1)
+            tkL0 = time_ns()
+            Wkry, kstL = _krylov_enrich(Kex, x -> (accL.nmv += 1; apply_one_site(H1, x)),
+                                        ex.U_ex, :left, tau, alloc; workcap = wcap_step)
+            accL.tkry += (time_ns() - tkL0) / 1e9
+            _record_krylov!(halfkw(accL).ledger, kstL, alloc)
+            peak!(accL, held + _state_stored(psiL), Wkry)
+            W[i] = to_concrete(setitag(Wkry, 3, _tagW(i)))
+        elseif krylov_basis > 0
             # ── BASIS FROM THE KRYLOV SPACE, NOT FROM ONE APPLICATION OF `H` ───────────────
             #
             # `krylov_basis = 0` builds the frame from `cbe_expand` alone, i.e. from
@@ -813,7 +1150,20 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         Uwide[j] = ex.U_ex
         Zcbe[j]  = ex.V_ex
         held += tensor_elements(ex.U_ex) + tensor_elements(ex.V_ex)
-        if krylov_basis > 0
+        if adaptive
+            # Row mirror of the left sweep's Stage 3 branch; see the comment there.
+            M    = to_concrete!(contract(ex.U_ex', (1, 2), psiR[j], (1, 2)))  # (b_L, link_j)
+            Bex  = to_concrete!(contract(M, (2,), B, (1,)))
+            lch1 = push_left_channels(left_channels(lstack, j), mpo, ex.U_ex, j)
+            H1   = one_site_h(mpo, j + 1, lch1, rch)
+            tkR0 = time_ns()
+            Zkry, kstR = _krylov_enrich(Bex, x -> (accR.nmv += 1; apply_one_site(H1, x)),
+                                        ex.V_ex, :right, tau, alloc; workcap = wcap_step)
+            accR.tkry += (time_ns() - tkR0) / 1e9
+            _record_krylov!(halfkw(accR).ledger, kstR, alloc)
+            peak!(accR, held + _state_stored(psiR), Zkry)
+            Z[j] = to_concrete(setitag(Zkry, 1, _tagZ(j)))
+        elseif krylov_basis > 0
             # Row mirror of the K half-sweep's Krylov basis; see the comment there.
             M   = to_concrete!(contract(ex.U_ex', (1, 2), psiR[j], (1, 2)))    # (b_L, link_j)
             Bex = to_concrete!(contract(M, (2,), B, (1,)))
@@ -879,6 +1229,10 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         half_left!()
         half_right!()
     end
+    if adaptive
+        merge_ledger!(ledger, ledgerL)
+        merge_ledger!(ledger, ledgerR)
+    end
 
     # `n_new` at bond `c` is written by BOTH sweeps; the right one wins, which is what the old
     # sequential order produced.
@@ -913,16 +1267,36 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         AL = to_concrete!(contract(W[i]', (1, 2), T, (1, 2)))         # (b_L, link_{i+1})
     end
     S0 = to_concrete!(contract(AL, (2,), AR, (1,)))                   # (b_L, b_R)
+    # PLAN §5 `state_projection_error`: how much of `psi` the frames miss. `W`/`Z` are
+    # isometries, so `||S0|| = ||P psi||` and the miss is `sqrt(||psi||^2 - ||S0||^2)`. `psi` is
+    # canonical at `L` here on both paths (`half_right!` or the `frame_state` re-gauge above).
+    # On the ordinary step the frames CONTAIN `psi` and this is roundoff -- a K/L cut of a
+    # physical direction would show up here; on the midpoint's second stage it is the genuine
+    # error of projecting `Y_0` onto frames built from `Y_{1/2}`, charged against `tol_basis`.
+    if adaptive
+        npsi = norm(psi[psi.center])
+        ledger.r_aug = max(maximum(expanded; init = 0), leg_dim(Z[c], 1))
+        ledger.proj_err = npsi > 0 ? sqrt(max(npsi^2 - norm(S0)^2, 0.0)) / npsi : 0.0
+        ledger.proj_err > max(budget.basis, _PROJ_FLOOR) && _unmet!(ledger, :projection)
+    end
     peak = accL.peak + accR.peak +
            sum(tensor_elements(t) for t in (W[c], Z[c], S0); init = 0)
 
     H0 = zero_site_h(mpo, c, lenv_root, renv_root, W[c], Z[c])
     nroot = Ref(0)
+    rootrep = Ref{Any}(nothing)
     _t0root = time_ns()
     S1 = expv(x -> (nroot[] += 1; apply_zero_site(H0, x)), tau, S0;
               hermitian = hermitian, maxiter = maxiter, tol = tol, reorth = reorth,
-              conv_tol = root_conv_tol, substeps = root_substeps)
+              conv_tol = root_conv_tol, substeps = root_substeps, report = rootrep)
     troot[] = (time_ns() - _t0root) / 1e9
+    if adaptive && rootrep[] !== nothing
+        ledger.expv_err   = rootrep[].err
+        ledger.expv_iters = rootrep[].iterations
+        # Relative slack: each substep is accepted at `tol_expv`, so only a sum over several
+        # substeps (or a step that could not advance) can exceed it.
+        rootrep[].err > budget.expv * (1 + 1e-8) && _unmet!(ledger, :expv)
+    end
 
     # ⛔ THE ROOT CORE SPLIT DOES NOT TRUNCATE BY DEFAULT. This SVD exists to SPLIT `S1` into
     # the two site tensors below; cutting here was a third, redundant truncation on top of the
@@ -961,10 +1335,22 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
 
     if truncate
         _t0tr = time_ns()
-        _, wtr = truncate_recursive!(psi, c + 1; maxdim = maxdim, cutoff = cut)
+        # Plan §5: ONE compression of the evolved state. On the adaptive path `tol_trunc` is a
+        # budget on the CUMULATIVE discarded norm over all bonds, shared out by
+        # `truncate_recursive!`; the legacy path keeps its per-bond relative cut.
+        _, wtr, cumw, capped = adaptive ?
+            truncate_recursive!(psi, c + 1; maxdim = maxdim, weight_tol = budget.trunc) :
+            truncate_recursive!(psi, c + 1; maxdim = maxdim, cutoff = cut)
         ttrunc[] = (time_ns() - _t0tr) / 1e9
         discarded = max(discarded, wtr)
+        if adaptive
+            ledger.discarded = cumw
+            ledger.maxdim_reached = capped
+            # Relative slack for the rounding in the per-bond shares, which sum to `tol` exactly.
+            cumw > budget.trunc * (1 + 1e-8) && _unmet!(ledger, :trunc)
+        end
     end
+    adaptive && (ledger.r_final = maximum(bond_dims(psi); init = 0))
 
     # ⚠ THE PHASE TIMERS ARE SUMS ACROSS BOTH HALF-SWEEPS, i.e. CPU time, while `t_step` is WALL
     # clock. Under `parallel = false` they are the same clock and the shares sum to ~1 as before.
@@ -976,7 +1362,8 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                            accL.ngrow + accR.ngrow, leg_dim(Z[c], 1),
                            accL.tcbe + accR.tcbe, accL.tkry + accR.tkry, troot[], ttrunc[],
                            accL.tsplit + accR.tsplit, accL.tframe + accR.tframe,
-                           accL.tenv + accR.tenv, (time_ns() - _t0step) / 1e9)
+                           accL.tenv + accR.tenv, (time_ns() - _t0step) / 1e9,
+                           adaptive ? ledger : nothing)
 end
 
 cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::Number; kwargs...) =
@@ -1019,9 +1406,17 @@ comparison lives.
 function cbe_bug_midpoint_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64; kwargs...)
     half = copy(psi)
     # stage 1: bases only. `truncate = false` keeps the augmented rank -- see the docstring.
-    cbe_bug_step!(half, mpo, tau / 2; kwargs..., truncate = false)
+    info1 = cbe_bug_step!(half, mpo, tau / 2; kwargs..., truncate = false)
     # stage 2: full step, frames from the midpoint, START VECTOR still `psi`.
-    return cbe_bug_step!(psi, mpo, tau; kwargs..., frame_state = half)
+    info2 = cbe_bug_step!(psi, mpo, tau; kwargs..., frame_state = half)
+    # Stage 1 built the directions stage 2 integrates in, so a basis test it failed is the
+    # step's failure too, not a discarded intermediate.
+    if info2.ledger !== nothing
+        rfin = info2.ledger.r_final        # the PREDICTOR's rank is uncompressed, not final
+        merge_ledger!(info2.ledger, info1.ledger)
+        info2.ledger.r_final = rfin
+    end
+    return info2
 end
 
 cbe_bug_midpoint_step!(psi::SymMPS, mpo::MPO, tau::Number; kwargs...) =

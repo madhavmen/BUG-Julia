@@ -279,12 +279,12 @@ function truncate_sweep!(psi::SymMPS; maxdim::Int = 200, cutoff::Float64 = 1e-12
 end
 
 """
-    truncate_recursive!(psi, root; maxdim, cutoff) -> (psi, discarded)
+    truncate_recursive!(psi, root; maxdim, cutoff, weight_tol) -> (psi, discarded, cumulative, capped)
 
 `Θ_τ` — the **recursive root-to-leaves rank truncation** of the rank-adaptive tree integrator
 (Ceruti, Lubich & Sulz, *Rank-adaptive time integration of tree tensor networks*,
-arXiv:2201.10291 §4.2, Algorithm 7), specialised to the chain. Returns the largest relative
-weight any single bond threw away.
+arXiv:2201.10291 §4.2, Algorithm 7), specialised to the chain. `discarded` is the largest
+relative weight any single bond threw away.
 
 The paper's sentence is the specification: *"For the truncation of a tree tensor network we
 perform a recursive root-to-leaves SVD-based truncation with a given tolerance ϑ."* At each node
@@ -292,17 +292,73 @@ it takes `Mat_i(Ĉ_τ) = P̂_{τ_i} Σ̂_{τ_i} Q̂*_{τ_i}`, keeps the smallest
 `(Σ_{k>r} σ_k²)^{1/2} ≤ ϑ`, pushes the isometry into the subtree (`U_l = Û_l P_l` at a leaf,
 `C̃_{τ_i} = Ĉ_{τ_i} ×₀ P_{τ_i}^⊤` below one) and then RECURSES into that subtree.
 
+TWO RANK RULES, chosen by which keyword is set:
+
+  - `cutoff` (legacy, `weight_tol = nothing`): Telum's RELATIVE singular-value cut,
+    `σ > cutoff·σ_max`, at every bond independently. Nothing bounds what the bonds discard
+    TOGETHER, and `discarded` is only the worst single bond.
+  - `weight_tol` (the adaptive path's `tol_trunc`, plan §5): the SHARED BUDGET on the relative
+    error `||psi - psi_trunc|| / ||psi||`. Every SVD here is taken at the orthogonality centre,
+    so each cut is an orthogonal projection of the current state removing exactly its
+    discarded Schmidt weight `w_b`. WITHIN ONE SUBTREE the errors are mutually orthogonal (each
+    later state lies in the range the earlier cut kept), so they add in quadrature exactly;
+    ACROSS the two subtrees they need not be (the left cuts project onto right Schmidt spaces,
+    the right cuts onto left ones), so the two are combined by the triangle inequality:
+
+        cumulative = (sqrt(Σ_left w_b) + sqrt(Σ_right w_b)) / ||psi||   >=  true error
+
+    the plan's "conservative accumulated estimate" where one canonical pass does not justify
+    plain Pythagoras. Every bond gets the same fixed share `weight_tol / (sqrt(n_L) +
+    sqrt(n_R))` (the ϑ above, absolute, against `||psi||`; `n_L`, `n_R` the subtrees' bond
+    counts) and keeps the smallest rank that fits it, so `cumulative <= weight_tol` unless
+    `maxdim` binds. The norm the pass removes is `Σ_all w_b` exactly.
+
+`capped` is true when `maxdim` cut a bond past the rank its share asked for -- reported even if
+the total still fits, because the largest single SVD's weight cannot show that a cap, not the
+tolerance, decided the rank. `cumulative` is returned in both modes.
+
+⚠ THE BUDGETED RULE COSTS A SECOND SVD at a bond where it cuts: the first (`cutoff = 0`, keeping
+every nonzero singular value up to `maxdim`) produces the spectrum, the second applies the rank.
 """
 function truncate_recursive!(psi::SymMPS, root::Int; maxdim::Int = 200,
-                             cutoff::Float64 = 1e-12)
+                             cutoff::Float64 = 1e-12,
+                             weight_tol::Union{Nothing, Float64} = nothing)
     L = length(psi)
     1 <= root <= L || throw(ArgumentError("root $root outside 1:$L"))
+    weight_tol === nothing || weight_tol >= 0 ||
+        throw(ArgumentError("weight_tol must be non-negative, got $weight_tol"))
     worst = 0.0
+    cum = [0.0, 0.0]           # absolute squared weight removed, left / right subtree
+    nrm2 = -1.0                # ||psi||^2, read off the first (centre) SVD
+    capped = false
+    nL, nR = root - 1, L - root
+    sdiv = sqrt(nL) + sqrt(nR)
+
+    # One bond's SVD under whichever rule is active. `split` is the legs `svd` keeps on `U`.
+    function cut(T, split)
+        weight_tol === nothing &&
+            return svd(T, split; cutoff = cutoff, Nkeep = maxdim, get_lists = true)
+        res = svd(T, split; cutoff = 0.0, Nkeep = maxdim, get_lists = true)
+        nrm2 < 0 && (nrm2 = _sq_weight(res.kept_list) + _sq_weight(res.trunc_list))
+        share = sdiv > 0 ? weight_tol * sqrt(max(nrm2, 0.0)) / sdiv : 0.0
+        nk = length(res.kept_list)
+        # `trunc_list` holds what `maxdim` (and exact zeros) already removed: it is spent.
+        k, tail = _tail_rank(res.kept_list, 1.0, share, nk; base = _sq_weight(res.trunc_list))
+        tail > share && !isempty(res.trunc_list) && (capped = true)
+        k = max(k, 1)            # a bond never closes; a zero state has nothing to keep anyway
+        k < nk && (res = svd(T, split; cutoff = 0.0, Nkeep = k, get_lists = true))
+        return res
+    end
+    function account!(res, side)
+        worst = max(worst, _trunc_weight(res))
+        cum[side] += _sq_weight(res.trunc_list)
+        nrm2 < 0 && (nrm2 = _sq_weight(res.kept_list) + _sq_weight(res.trunc_list))
+    end
 
     # ── left subtree, root-to-leaf: bonds root-1, root-2, … 1 ──
     for i in root:-1:2
-        res = svd(psi[i], (1,); cutoff = cutoff, Nkeep = maxdim, get_lists = true)
-        worst = max(worst, _trunc_weight(res))
+        res = cut(psi[i], (1,))
+        account!(res, 1)
         tag = psi[i - 1].inds[3].itags
         # `A = U S Vd`: keep `Vd` here and hand `U S` outward, so the child receives the weight
         # and its own SVD is a genuine Schmidt decomposition.
@@ -319,8 +375,8 @@ function truncate_recursive!(psi::SymMPS, root::Int; maxdim::Int = 200,
 
     # ── right subtree, root-to-leaf: bonds root, root+1, … L-1 ──
     for i in root:(L - 1)
-        res = svd(psi[i], (1, 2); cutoff = cutoff, Nkeep = maxdim, get_lists = true)
-        worst = max(worst, _trunc_weight(res))
+        res = cut(psi[i], (1, 2))
+        account!(res, 2)
         tag = psi[i].inds[3].itags
         psi[i]     = to_concrete(setitag(res.U, 3, tag))
         psi[i + 1] = to_concrete(setitag(
@@ -328,7 +384,8 @@ function truncate_recursive!(psi::SymMPS, root::Int; maxdim::Int = 200,
         psi.center = i + 1
     end
 
-    return psi, worst
+    cumulative = nrm2 > 0 ? (sqrt(cum[1]) + sqrt(cum[2])) / sqrt(nrm2) : 0.0
+    return psi, worst, cumulative, capped
 end
 
 # ── the step ─────────────────────────────────────────────────────────────────

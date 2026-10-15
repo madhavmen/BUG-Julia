@@ -197,6 +197,46 @@ function z2_vector(L::Int, idx::Dict{Int, Int})
 end
 
 """
+    zk_vector(L, idx, k) -> Vector{ComplexF64}
+
+`|Z_k>` in the constrained basis; `k = 0` is the polarised vacuum `|∘∘∘…>`. The ED partner of
+[`zk_state`](@ref), and it must agree with it bit for bit -- `|•> = up` at sites `1, 1+k, 1+2k, …`.
+
+⚠ THE `haskey` CHECK IS THE CONVENTION GATE. If the MPS side and this side ever disagree about
+which sites are excited, the pattern simply is not in the constrained basis and this errors,
+rather than silently grading the integrator against a DIFFERENT initial state -- which would show
+up as a plausible-looking disagreement and be blamed on the integrator.
+"""
+function zk_vector(L::Int, idx::Dict{Int, Int}, k::Int)
+    k == 1 && throw(ArgumentError("zk_vector: k=1 violates the blockade"))
+    b = k == 0 ? 0 : sum(1 << (j - 1) for j in 1:k:L)
+    haskey(idx, b) ||
+        error("the Z$k pattern is not in the constrained basis -- convention slip")
+    v = zeros(ComplexF64, length(idx))
+    v[idx[b]] = 1.0
+    return v
+end
+
+"""
+    pxp_dim(L) -> Int
+
+Size of the Rydberg-blockade basis, `Fib(L+2)` with `Fib(1)=Fib(2)=1`.
+
+⛔ THIS IS WHY THE PXP EXACT REFERENCE REACHES MUCH FURTHER THAN THE SPIN ONE, and why gating it
+on `L` alone throws away most of the paper's range. The constrained space grows as the GOLDEN
+RATIO (~1.618^L), not as `2^L`: at `L = 28` it is 832,040 states against `2^28 = 2.7e8`, a factor
+of 323. Grading PXP by `L <= ED_MAX = 20` (a limit set by the MBL model's `C(L, L/2)` sector)
+would refuse an exact reference at sizes where it is entirely affordable.
+"""
+function pxp_dim(L::Int)
+    a, b = 1, 1                       # Fib(1), Fib(2)
+    for _ in 1:L
+        a, b = b, a + b
+    end
+    return b                          # Fib(L+2)
+end
+
+"""
     sz_profile_dense(v, L, states) -> Vector{Float64}
 
 `⟨S^z_j⟩` per site from a vector in ANY bit-pattern basis (the `S^z=0` sector or the constrained
@@ -206,6 +246,107 @@ but naming it here keeps the PXP call sites from reading as if they were in a sp
 """
 sz_profile_dense(v::Vector{ComplexF64}, L::Int, states::Vector{Int}) =
     magnetisation_dense(v, L, states)
+
+# ── THE NON-INTERACTING AUBRY-ANDRÉ CHAIN: EXACT AT ANY `L`, NO ED ───────────────────────────
+#
+# WHY THIS IS THE MOST VALUABLE REFERENCE IN THE FILE. At `U = 0` the model of arXiv:1501.05661 is
+# QUADRATIC, so its dynamics is an `L x L` matrix exponential and the largest object here is
+# `L x L` -- never `2^L`. That removes the scaling wall entirely: the `U = 0` arm can be graded
+# EXACTLY at `L = 40` (the size the paper's own DMRG uses) or `L = 100`, where no ED exists.
+#
+# It also carries a PARAMETER-FREE anchor. The Aubry-André model is self-dual at `Delta = 2J`:
+# below it every single-particle state is extended, above it every one is localised. So the
+# stationary imbalance of Fig. 3 must rise from ~0 to finite AT `Delta/J = 2`, with no fitting.
+# That is a published number our curve either hits or does not.
+#
+# ⚠ WHAT IT CANNOT DO: `U = 0` is ANDERSON-type (single-particle) localisation in a quasiperiodic
+# potential. It is the CONTROL, not the physics -- there is no many-body localisation without
+# interactions, and the rank a `U = 0` state needs stays bounded, so it is also the arm least able
+# to discriminate between integrators. Use it to prove the implementation, not to prove the method.
+
+"""
+    aa_hopping(L; J = 1.0, Delta, beta = 0.721, phi = 0.0) -> Matrix{Float64}
+
+The single-particle Hamiltonian of the OPEN Aubry-André chain in EXPERIMENT units:
+`-J` on the off-diagonal, `Delta cos(2πβi + φ)` on the diagonal. Same `β = 0.721` and same
+`Delta/J` convention as [`aubry_andre_xxz_mpo`](@ref), so a `Delta/J` quoted here and a `Delta/J`
+handed to the MPO mean the same thing -- which is the factor-of-2 trap that builder documents.
+"""
+function aa_hopping(L::Int; J::Float64 = 1.0, Delta::Float64,
+                    beta::Float64 = 0.721, phi::Float64 = 0.0)
+    h = zeros(Float64, L, L)
+    for i in 1:(L - 1)
+        h[i, i + 1] = -J
+        h[i + 1, i] = -J
+    end
+    for i in 1:L
+        h[i, i] = Delta * cos(2π * beta * i + phi)
+    end
+    return h
+end
+
+"""
+    aa_free_fermion(L, t; J, Delta, beta, phi, occupied, nl) -> (; n, imbalance, entropy)
+
+`⟨n_j(t)⟩`, the imbalance and the half-chain entanglement entropy of the CDW quench of the
+NON-INTERACTING Aubry-André chain, from one `L x L` matrix exponential.
+
+`occupied` defaults to the ODD sites, matching [`neel_state`](@ref) on the MPS side.
+
+⚠ THE PAPER FILLS THE EVEN SITES AND WE FILL THE ODD ONES. That is a relabelling with no physical
+content -- it flips the sign of `I` and nothing else -- and it is safe here only BECAUSE the
+potential is incommensurate: `β = 0.721` has period `1/β ≈ 1.386`, so it puts no systematic bias
+on either sublattice. Under a COMMENSURATE potential (`β = 1/2`, say) the two choices would be
+physically different and the sign convention would stop being a convention.
+
+THE ENTROPY IS THE SLATER-DETERMINANT FORMULA: eigenvalues `ν` of the correlation matrix
+restricted to the block give `S = -Σ [ν ln ν + (1-ν) ln(1-ν)]`, in NATS to match
+[`entropy_from_svals`](@ref). It equals the SPIN chain's entropy because Jordan-Wigner is local
+on a CONTIGUOUS block -- which is exactly why `nl` must be a contiguous left block and not an
+arbitrary site subset.
+"""
+function aa_free_fermion(L::Int, t::Float64; J::Float64 = 1.0, Delta::Float64,
+                         beta::Float64 = 0.721, phi::Float64 = 0.0,
+                         occupied::Vector{Int} = collect(1:2:L), nl::Int = L ÷ 2)
+    h = aa_hopping(L; J = J, Delta = Delta, beta = beta, phi = phi)
+    Phi = exp(-im * t * h)[:, occupied]         # evolved occupied orbitals, L x N
+    n = [sum(abs2, @view Phi[j, :]) for j in 1:L]
+    # Same expression as `imbalance_dense`, with `⟨S^z_j⟩ = n_j - 1/2`.
+    imb = (2 / L) * sum((isodd(j) ? 1 : -1) * (n[j] - 0.5) for j in 1:L)
+    A = @view Phi[1:nl, :]
+    nu = real.(eigvals(Hermitian(A * A')))
+    S = 0.0
+    for v in nu
+        v = clamp(v, 0.0, 1.0)
+        (v > 1e-12 && v < 1 - 1e-12) && (S -= v * log(v) + (1 - v) * log(1 - v))
+    end
+    return (; n = n, imbalance = imb, entropy = S)
+end
+
+# ── WHAT WOULD BE NEEDED FOR THE PAPER'S INTERACTING FIGURES ─────────────────────────────────
+#
+# arXiv:1501.05661 Fig. 4 (the `U/J` vs `Delta/J` map, the "W" shape) and Fig. 5 (entropy growth
+# resolved by `U/J`) are SPINFUL: `U Σ_i n_{i↑} n_{i↓}`, an ON-SITE interaction between two
+# species. Spinless fermions cannot have one -- `n_i² = n_i` -- so no parameter choice of the
+# spinless model in this file reproduces those two figures. What it does reproduce is Fig. 2
+# (`I(t)` vs `Delta/J`) and Fig. 3 (non-interacting, where `U` is absent by construction).
+#
+# THE ROUTE, recorded so the size of the job is not underestimated later. Two species on `L` sites
+# = one spin chain on `2L` sites, and the ORDERING decides the cost:
+#
+#   INTERLEAVED  (↑₁ ↓₁ ↑₂ ↓₂ …)  `U n_{i↑}n_{i↓}` is NEAREST-NEIGHBOUR `S^z S^z`, but a hop
+#                                  ↑ᵢ → ↑ᵢ₊₁ jumps over ↓ᵢ, so its Jordan-Wigner string makes it
+#                                  a THREE-SITE term `S⁺ σ^z S⁻`. Bond dimension stays O(1), and
+#                                  the three-site automaton is exactly the shape `pxp_mpo` already
+#                                  builds (`1→2→3→4`, no self-loops).
+#   BLOCKED      (↑₁…↑_L ↓₁…↓_L)   every hop is nearest-neighbour and string-free, but `U` becomes
+#                                  a distance-`L` `S^z S^z` coupling. `pair_mpo` represents that
+#                                  EXACTLY for an arbitrary `J[i,j]`, at the cost of one channel
+#                                  per live opening, i.e. `w ~ L`.
+#
+# Interleaved is the right choice: O(1) bond dimension, and the only new object is a three-site
+# vertex. It needs a field on `pair_mpo`/`mpo_from_terms` (the same `id -> done` slot
+# `field_mpo_from_terms` uses) and the `σ^z` string operator, which is `2 S^z` and already exists.
 
 # ── the entanglement entropy, for both models from one function ──────────────────────────────
 

@@ -44,6 +44,22 @@ include(joinpath(@__DIR__, "..", "common", "free_fermion.jl"))
 
 @testset "sweeps (RSVD-CBE: DMRG, 1-site TDVP, fixed-rank BUG)" begin
     include(joinpath(@__DIR__, "..", "common", "test_analytic_reference.jl"))
+    # 0  the accuracy API itself, BEFORE anything that runs on it. These tests touch no
+    #    physics -- they pin the three-tolerance budget, its fixed allocation rule, and the
+    #    refusal to mix the tolerances with the retired tuning knobs. First, because if the
+    #    migration silently honours an old knob then every tolerance claim below is a claim
+    #    about a fixed rank instead, and they would all agree with each other while being
+    #    wrong in the same direction.
+    include("test_adaptive_api.jl")
+    # ...and then the RSVD controller the tolerances drive: sector coverage, the tail test
+    # and the holdout test, which are what turn `tol_basis` into a rank.
+    include("test_adaptive_rsvd.jl")
+    # ...and the K/L Krylov enrichment (Tests C/D) that turns it into the half-sweep frames.
+    include("test_adaptive_krylov.jl")
+    # ...and the one budgeted compression plus the rank cap that bounds all of it (Stage 4).
+    include("test_adaptive_compression.jl")
+    # ...and the root `expv`, whose accuracy `tol_expv` now sets (Stage 5).
+    include("test_adaptive_expv.jl")
     include("test_pair_mpo.jl")
     include("test_tfim_mpo.jl")
     include("test_sweeps.jl")

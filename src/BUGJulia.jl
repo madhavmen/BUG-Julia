@@ -166,6 +166,77 @@ using PrecompileTools: @setup_workload, @compile_workload
             # this never ran on the throwing path, and precompilation baked :SU2 into the image.
             BondUpdateBUG.set_symmetry!(:U1)     # leave the global where it started
         end
+
+        # ⛔⛔ THE FUSED d=4 BLOCK, AND IT IS HERE BECAUSE THE MISSING COVERAGE WAS MEASURED AT
+        # 334 SECONDS IN A SINGLE STEP. Job 16341790, `phase_hub4prod`, L=20, **chi = 32**:
+        #
+        #     step 1   0.8 s      (product state -> bd 32)
+        #     step 2   334.3 s    <- at bond dimension 32
+        #
+        # A bd=32 step is microseconds of arithmetic, so 334 s is compilation, and it matches the
+        # ~313 s this file already documents for an uncached first step. Two separate holes put it
+        # there and BOTH are closed below:
+        #
+        #   1. d=4 WAS NEVER IN THE WORKLOAD. Every entry point above runs the SPIN chain, whose
+        #      local space is a different type, and this file's own SU(2) note says it plainly --
+        #      "compiling `:U1` teaches the cache nothing about it". The fused Hubbard site is
+        #      another such type, so the whole spinful campaign ran uncached.
+        #
+        #   2. ⛔ ONE STEP FROM A PRODUCT STATE DOES NOT COMPILE THE TRUNCATION PATH, which is the
+        #      subtler half and it also invalidates the `warm!` docstring in `benchmarks/mbl_scars.jl`
+        #      ("one step is enough -- specialisation is per method, not per step"). Starting at
+        #      bd = 1, the augmented rank never reaches `maxdim`, so the truncate-to-cap branch is
+        #      never entered and its kernels are never specialised. Step 2 is the FIRST step that
+        #      has to truncate, and it pays for all of them at once. That is exactly why the cost
+        #      appeared at step 2 rather than step 1, and why it was identical at bd=32 and bd=43 --
+        #      a compile does not care how big the tensors are.
+        #
+        # ⇒ `maxdim = 4` WITH THREE STEPS IS THE LOAD-BEARING CHOICE, not an arbitrary size. The cap
+        # must BIND (a d=4 site reaches bd 4 after one step, so step 2 truncates) and there must be
+        # a step AFTER the first truncating one, or the branch stays cold. `L = 6` keeps the tensors
+        # tiny; the runtime here is negligible and the compile time is the entire point.
+        #
+        # ⚠ DOUBLONS ARE DELIBERATE (`doublon_frac = 0.5`). They are the physically relevant start
+        # state for arXiv:1501.05661 Figs. 4-5 and the cells where the integrators differ most, so
+        # the workload should exercise the same branches production does.
+        try
+            BondUpdateBUG.set_symmetry!(:none)
+            let occ = RSVDCBEBondUpdate.hub4_cdw_occupations(6; doublon_frac = 0.5, seed = 1),
+                psi = RSVDCBEBondUpdate.hub4_product_state(occ),
+                mpo = RSVDCBEBondUpdate.hubbard_aa_mpo_d4(6; J = 1.0, Delta = 8.0, U = 4.0,
+                                                          beta = 532 / 738, phi = 0.0),
+                tau = ComplexF64(-0.05im)
+                # The four schemes `benchmarks/mbl_scars.jl::stepper` can return, at the keywords it
+                # actually passes -- a different keyword set is a different specialisation.
+                for mk in (
+                    (p, t) -> RSVDCBEBondUpdate.cbe_bug_step!(p, mpo, t; maxdim = 4,
+                                  trunc_thresh = 1e-10, split_cutoff = 1e-10, maxiter = 5,
+                                  krylov_basis = 5, root_conv_tol = 0.0, root_substeps = 1),
+                    (p, t) -> RSVDCBEBondUpdate.cbe_bug_midpoint_step!(p, mpo, t; maxdim = 4,
+                                  trunc_thresh = 1e-10, split_cutoff = 1e-10, maxiter = 5,
+                                  krylov_basis = 5, root_conv_tol = 0.0, root_substeps = 1),
+                    (p, t) -> RSVDCBEBondUpdate.tdvp2_step!(p, mpo, t; maxdim = 4,
+                                  trunc_thresh = 1e-10, maxiter = 5, conv_tol = 0.0),
+                    (p, t) -> RSVDCBEBondUpdate.tdvp_cbe1s_step!(p, mpo, t; maxdim = 4,
+                                  trunc_thresh = 1e-10, maxiter = 5, conv_tol = 0.0),
+                )
+                    p = copy(psi)
+                    for _ in 1:3          # 3, NOT 1 -- see the truncation note above
+                        mk(p, tau)
+                    end
+                    # The sampling path is timed inside the same loop, so it belongs in the cache
+                    # too: an uncached observable sweep would land on whichever arm ran first.
+                    RSVDCBEBondUpdate.hub4_density(p, 3)
+                    RSVDCBEBondUpdate.mpo_energy(copy(p), mpo)
+                end
+            end
+        catch err
+            @warn "BUGJulia precompile workload: the fused d=4 Hubbard block did not complete; " *
+                  "the spinful campaign will pay full JIT (~334 s MEASURED for the first " *
+                  "truncating step at chi=32)" exception = (err, catch_backtrace())
+        finally
+            BondUpdateBUG.set_symmetry!(:U1)
+        end
     end
 end
 

@@ -231,11 +231,13 @@ basis; that is more stable but is *not* what the reference kernel does.
 """
 function lanczos_expv(apply, tau::ComplexF64, x;
                       tol::Float64 = 1e-13, maxiter::Int = 60, reorth::Bool = false,
-                      conv_tol::Float64 = 0.0, substeps::Int = 1)
+                      conv_tol::Float64 = 0.0, substeps::Int = 1,
+                      report::Union{Nothing, Base.RefValue} = nothing)
     xc = _as_complex(x)
     beta0 = norm(xc)
     if beta0 == 0
         _record_krylov(0)
+        _report!(report, 0, 0, 0.0)
         return xc
     end
 
@@ -244,6 +246,7 @@ function lanczos_expv(apply, tau::ComplexF64, x;
     logscale = 0.0 + 0.0im         # imaginary-time growth carried in log space, never overflowed
     total = 0
     nsub = 0
+    err = 0.0
 
     while true
         nsub += 1
@@ -288,8 +291,36 @@ function lanczos_expv(apply, tau::ComplexF64, x;
             # `tensor_inner` forced the tree anyway on the very next line.
             w = to_concrete(w + (-a) * v + (-b) * basis[end - 1])
             if reorth
-                for _pass in 1:2, u in basis
-                    w = to_concrete(w - tensor_inner(u, w) * u)
+                # ⛔⛔ ONE MATERIALISATION PER PASS, NOT ONE PER BASIS VECTOR. The previous form
+                # rebuilt `w` inside the inner loop, so a solve did `~m^2` full-tensor
+                # materialisations. Measured on the fused d=4 chain (L=20, chi=32, m=30) the
+                # sibling loop in `cbe_bug.jl::_krylov_frame` allocated **28.6 GiB per step rising
+                # to 237 GiB** with `maxbond` pinned at 32; allocation attribution put
+                # `_compress_sum_sector` at 24.6% of bytes and `copy` at 37.9%, against ~6.6% for
+                # all SVD sites combined.
+                #
+                # ⚠ FIXED HERE AS WELL AS THERE, AND THE REASON IS FAIRNESS, NOT TIDINESS.
+                # `_krylov_frame` is the CBE-BUG path; this is the one `tdvp2` and `tdvp_cbe1s`
+                # take. Repairing only BUG's would have optimised one arm of the very comparison
+                # this campaign exists to make, which is exactly the unmatched-knob trap that has
+                # already corrupted results here once.
+                #
+                # ⚠ THIS SWITCHES THE REORTHOGONALISATION FROM MODIFIED TO CLASSICAL
+                # GRAM-SCHMIDT, and the note above on the `a`/`b` line explains why that is what
+                # unlocks it: MGS cannot defer, because `tensor_inner` forces the tree on the very
+                # next line. Taking every inner product against a FIXED `w` removes that
+                # dependency. CGS applied TWICE is as stable as MGS ("twice is enough"), and both
+                # passes were already being done.
+                # ⚠ `w` STAYS CONCRETE all pass; only `corr` is lazy. So this does not
+                # reintroduce the O(k^3) trap where a symbolic `w` was re-forced one term longer
+                # on every inner product.
+                for _pass in 1:2
+                    corr = nothing
+                    for u in basis
+                        c = tensor_inner(u, w)
+                        corr = corr === nothing ? c * u : corr + c * u
+                    end
+                    corr === nothing || (w = to_concrete(w - corr))
                 end
             end
         end
@@ -307,6 +338,7 @@ function lanczos_expv(apply, tau::ComplexF64, x;
         end
 
         coeff, ls = evalcoeff(tau_s)
+        err += _tail(coeff, betak) * b0 / beta0
         cur = _combine(coeff, basis, b0)
         logscale += ls                 # already a log: never round-trips through a huge scalar
         tau_rem -= tau_s
@@ -315,8 +347,22 @@ function lanczos_expv(apply, tau::ComplexF64, x;
     end
 
     _record_krylov(total)
+    _report!(report, total, nsub, err)
     return _apply_scale(cur, logscale)
 end
+
+"""
+    _report!(report, iterations, substeps, err)
+
+Hand a solve's own account back to a caller that passed `report = Ref{Any}()`:
+`(iterations, substeps, err)`. `err` is Saad's a-posteriori estimate summed over the substeps,
+relative to `||x||` -- exact bookkeeping in REAL time, where every substep's propagator is
+unitary so the local errors cannot grow; in imaginary time the shift makes it a per-substep
+relative figure. It is what `tol_expv` is checked against (plan §4, UT15).
+"""
+_report!(::Nothing, ::Int, ::Int, ::Float64) = nothing
+_report!(r::Base.RefValue, total::Int, nsub::Int, err::Float64) =
+    (r[] = (iterations = total, substeps = nsub, err = err); nothing)
 
 """
 Largest norm a returned state may carry.
@@ -391,11 +437,13 @@ start to align.
 """
 function arnoldi_expv(apply, tau::ComplexF64, x;
                       tol::Float64 = 1e-13, maxiter::Int = 60,
-                      conv_tol::Float64 = 0.0, substeps::Int = 1)
+                      conv_tol::Float64 = 0.0, substeps::Int = 1,
+                      report::Union{Nothing, Base.RefValue} = nothing)
     xc = _as_complex(x)
     beta0 = norm(xc)
     if beta0 == 0
         _record_krylov(0)
+        _report!(report, 0, 0, 0.0)
         return xc
     end
 
@@ -404,6 +452,7 @@ function arnoldi_expv(apply, tau::ComplexF64, x;
     logscale = 0.0 + 0.0im
     total = 0
     nsub = 0
+    err = 0.0
 
     while true
         nsub += 1
@@ -417,16 +466,26 @@ function arnoldi_expv(apply, tau::ComplexF64, x;
 
         for j in 1:maxiter
             w = apply(basis[j]); total += 1
-            for _pass in 1:2                       # double Gram-Schmidt
+            for _pass in 1:2                       # double Gram-Schmidt (CLASSICAL, applied twice)
+                # ⛔ ONE MATERIALISATION PER PASS. Updating `w` inside this loop cost `~k^2`
+                # full-tensor materialisations per iteration -- see the same repair in
+                # `lanczos_expv` above and in `cbe_bug.jl::_krylov_frame`, where it was measured
+                # at 28.6 GiB per step rising to 237 GiB at PINNED bond dimension.
+                #
+                # ⚠ The warning this comment used to carry is still true and is precisely what is
+                # avoided here: a SYMBOLIC `w` makes the next `tensor_inner` force a sum tree one
+                # term longer each time, which is O(k^2 N) of pure allocation. `w` therefore stays
+                # CONCRETE for the whole pass; only the correction `corr` is lazy, and it is
+                # forced exactly once. Taking every inner product against the same `w` is what
+                # makes this classical rather than modified Gram-Schmidt, and CGS twice is as
+                # stable as MGS -- which is why both passes were already here.
+                corr = nothing
                 for i in 1:length(basis)
                     h = tensor_inner(basis[i], w)
                     H[i, j] += h
-                    # Materialised per projection, for the reason `lanczos_expv` spells out:
-                    # Telum's `-` is lazy, so a symbolic `w` makes the NEXT `tensor_inner` force
-                    # a sum tree one term longer each time, turning this double Gram-Schmidt
-                    # from O(k N) into O(k^2 N) per iteration -- all of it allocation.
-                    w = to_concrete(w - h * basis[i])
+                    corr = corr === nothing ? h * basis[i] : corr + h * basis[i]
                 end
+                corr === nothing || (w = to_concrete(w - corr))
             end
             m = j
             b = norm(w)
@@ -453,6 +512,7 @@ function arnoldi_expv(apply, tau::ComplexF64, x;
         end
 
         coeff, ls = evalcoeff(tau_s)
+        err += _tail(coeff, betak) * b0 / beta0
         cur = _combine(coeff, basis[1:m], b0)
         logscale += ls                 # already a log: never round-trips through a huge scalar
         tau_rem -= tau_s
@@ -461,6 +521,7 @@ function arnoldi_expv(apply, tau::ComplexF64, x;
     end
 
     _record_krylov(total)
+    _report!(report, total, nsub, err)
     return _apply_scale(cur, logscale)
 end
 
@@ -485,16 +546,18 @@ Hermitian.
 
 `conv_tol > 0` stops on Saad's contribution estimate rather than on breakdown; `substeps = 0`
 splits `tau` adaptively so a large step needs no larger `maxiter`. Both default to the historical
-behaviour -- see the file header.
+behaviour -- see the file header. `report = Ref{Any}()` receives `(iterations, substeps, err)`,
+see [`_report!`](@ref).
 """
 function expv(apply, tau::ComplexF64, x;
               hermitian::Bool = true, maxiter::Int = 60, tol::Float64 = 1e-13,
-              reorth::Bool = false, conv_tol::Float64 = 0.0, substeps::Int = 1)
+              reorth::Bool = false, conv_tol::Float64 = 0.0, substeps::Int = 1,
+              report::Union{Nothing, Base.RefValue} = nothing)
     return hermitian ?
         lanczos_expv(apply, tau, x; tol = tol, maxiter = maxiter, reorth = reorth,
-                     conv_tol = conv_tol, substeps = substeps) :
+                     conv_tol = conv_tol, substeps = substeps, report = report) :
         arnoldi_expv(apply, tau, x; tol = tol, maxiter = maxiter,
-                     conv_tol = conv_tol, substeps = substeps)
+                     conv_tol = conv_tol, substeps = substeps, report = report)
 end
 
 expv(apply, tau::Number, x; kwargs...) = expv(apply, ComplexF64(tau), x; kwargs...)
