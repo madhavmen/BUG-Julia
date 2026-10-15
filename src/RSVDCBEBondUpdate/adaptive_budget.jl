@@ -197,11 +197,15 @@ mutable struct AdaptiveLedger
     # estimates WITH their uncertainty, and §8 for `n_reachable_sectors`/`probes_per_sector`;
     # a step-level maximum cannot say which sector or how sure.
     sample_log::Vector{Any}
+    # Plan §8 "track by bond and timestep": one entry per half-sweep bond visit, written by
+    # `_log_bond!` -- the bond's own Test A/B/C/D indicators, its counts, its verdict and the
+    # width of the frame it produced. The step-level fields above are the max/sum over these.
+    bond_log::Vector{Any}
 end
 
 AdaptiveLedger() = AdaptiveLedger(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
                                   0, 0, 0, 0, 0, 0, 0, 0, false, true,
-                                  false, 0.0, 0, 0, 0, 0, Symbol[], Any[])
+                                  false, 0.0, 0, 0, 0, 0, Symbol[], Any[], Any[])
 
 """
     _unmet!(ledger, what) -> ledger
@@ -287,7 +291,31 @@ function merge_ledger!(a::AdaptiveLedger, b::AdaptiveLedger)
     a.r_final  = max(a.r_final, b.r_final)
     a.expv_iters += b.expv_iters
     union!(a.unmet, b.unmet)
+    append!(a.bond_log, b.bond_log)
     return a
+end
+
+"""
+    _log_bond!(ledger, bl, bond, side, width) -> ledger
+
+Close one bond of a half-sweep: `bl` is the fresh ledger that bond's CBE (Tests A/B) and Krylov
+(Tests C/D) decisions wrote into. Its summary goes into `bl.bond_log`, then `bl` is folded into
+the half-sweep's `ledger` -- so the step-level maxima and sums are exactly the aggregate of the
+logged bonds, by construction rather than by a second bookkeeping path. `nothing` (legacy) is a
+no-op.
+"""
+_log_bond!(::Nothing, ::Nothing, ::Int, ::Symbol, ::Int) = nothing
+function _log_bond!(ledger::AdaptiveLedger, bl::AdaptiveLedger, bond::Int, side::Symbol,
+                    width::Int)
+    push!(bl.bond_log,
+          (bond = bond, side = side, sample = bl.max_sample, tail = bl.max_tail,
+           krylov_c = bl.max_krylov_c, krylov_d = bl.max_krylov_d,
+           n_probes = bl.n_probes, n_holdout = bl.n_holdout, n_selected = bl.n_selected,
+           n_targeted = bl.n_targeted, n_krylov = bl.n_krylov, n_h1 = bl.n_h1,
+           c_pass = bl.n_c_pass > 0, d_after_c = bl.n_d_after_c > 0,
+           workcap = bl.workcap_reached, met = bl.tolerance_met, unmet = copy(bl.unmet),
+           width = width))
+    return merge_ledger!(ledger, bl)
 end
 
 """
@@ -382,6 +410,23 @@ function resolve_budget(tol_basis, tol_trunc, tol_expv, legacy::NamedTuple)
                             something(tol_trunc, TOL_DEFAULTS.trunc),
                             something(tol_expv,  TOL_DEFAULTS.expv))
     return (budget, isempty(named), named)
+end
+
+"""
+    _legacy_hint(named) -> Union{Nothing, String}
+
+Plan §1 ("may"): the migration hint for a caller who named retired knobs. Naming one is a
+legitimate request for the fixed-knob path -- the recorded benchmarks use it -- so this informs
+rather than refuses, and only ONCE per session: a scan of thousands of legacy steps should not
+print thousands of lines. Returns the message (for tests), `nothing` on the adaptive path.
+"""
+function _legacy_hint(named)
+    isempty(named) && return nothing
+    msg = "$(join(named, ", ")) selected the fixed-knob legacy path, which makes no accuracy " *
+          "claim (budget_status = :legacy). The adaptive solver takes only tol_basis, " *
+          "tol_trunc, tol_expv and maxdim; see README \"Three tolerances and one resource limit\"."
+    @warn msg maxlog=1
+    return msg
 end
 
 "Resolve one legacy keyword to a concrete value, falling back to its historical default."

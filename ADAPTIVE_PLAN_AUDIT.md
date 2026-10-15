@@ -21,7 +21,7 @@ Line numbers are as of the audit date; symbols are the durable reference.
 | 1.2 | Default `maxdim = 128` (§1 signature) | `cbe_bug_step!`: `maxdim = something(maxdim, adaptive ? 128 : 200)` | DONE | Fixed 2026-10-14. The legacy path keeps 200 so recorded benchmarks are unchanged. |
 | 1.3 | Midpoint uses the same accuracy controls (§1) | `cbe_bug_midpoint_step!` forwards `kwargs...` | DONE | Ledger now merged across both stages (`cbe_bug.jl:1140`). |
 | 1.4 | Retired knobs cannot be mixed with the tolerances; no silent double honouring (§1) | `resolve_budget` `adaptive_budget.jl:251`, called `cbe_bug.jl:483` | DONE | Refused with `ArgumentError`. |
-| 1.5 | Old names: optional deprecation warning with migration hint (§1, "may") | naming a retired knob silently selects the legacy path | PARTIAL | Allowed by "may", but there is no hint at all. |
+| 1.5 | Old names: optional deprecation warning with migration hint (§1, "may") | `_legacy_hint` in `cbe_bug_step!` (see R.3) | DONE (R.3) | Closed 2026-10-15, job 17198444. |
 | 1.6 | Normal API has ONLY three tolerances + `maxdim` as accuracy knobs (§1, UT01, acceptance) | `krylov_tol`, `grow_iters`, `krylov_grow` (S3) and `maxiter`, `tol`, `root_conv_tol`, `root_substeps` (S5) are in `LEGACY_KNOBS`: refused alongside a tolerance | DONE (S3, S5) | Remaining public keywords are method/diagnostic inputs, not accuracy knobs: `root`, `truncate`, `hermitian`, `parallel`, `rng`, `share_ht`, `fold_omega`, `reorth`, `frame_state`. |
 | 1.7 | `tol_expv` drives the root `expv` (§1, §4) | adaptive: `root_conv_tol = budget.expv`, `root_substeps = 0` in `cbe_bug_step!` | DONE (S5) | See 5.1. |
 | 1.8 | `tol_trunc` is the final compression tolerance (§1) | `cbe_bug.jl:504` `trunc_thresh = budget.trunc` on the adaptive path | DONE | Single final pass is S4. |
@@ -118,6 +118,14 @@ baseline (T = 0.5), 17195155 sweeps, 17195335 combos, 17195336 maxdim (T = 2).
 | 6.8 | Acceptance: XX L=20 accuracy for multiple seeds and both profiles; explicit unmet status; only 3 tolerances + maxdim | 6.1-6.7; UT01 | DONE | |
 | 6.9 | Acceptance: fewer samples/retained directions OR fewer H applications than the fixed baseline at comparable accuracy (simulation_plan §6) | matched-accuracy job 17195550 (legacy and adaptive arms in ONE process) | DONE | Ordinary BUG, Neel/DW, T = 0.5/2: at matched or better error, 5-8x fewer trial directions, 2-6x less rank, H applications within +8% to 2x fewer, faster wall clock than legacy `krylov_basis = 3` (and better than the legacy default on every count). Midpoint at ~1e-9: more H applications than kry3 (1222 vs 900) but a narrower trial space (58 vs 94), so the "or" holds. |
 
+## Re-read of §1/§7/§8 (2026-10-15): requirements outside the stage rows. Audited before submission; job 17198444
+
+| # | Requirement (plan §) | Evidence | Status | Note |
+|---|---|---|---|---|
+| R.1 | §8 "Track by bond and timestep" | each half-sweep bond gets its own `AdaptiveLedger` (`bondlg` in `half_left!`/`half_right!`), passed to `cbe_expand` (explicit `ledger` wins in `timed_expand`) and `_record_krylov!`; `_log_bond!` pushes `(bond, side, sample, tail, krylov_c, krylov_d, counts, c_pass, d_after_c, workcap, met, unmet, width)` into `bond_log` and merges into the half-sweep ledger; midpoint tags `stage = 1/2` | DONE | Step-level fields are the max/sum of the bond entries BY CONSTRUCTION (every A-D counter is written inside `cbe_expand`/`_record_krylov!`, i.e. per bond). Driver writes `*_bonds.csv` (one row per run, step, visit); analyzer "Per bond" table. Legacy path: `bondlg = nothing`, `_log_bond!` no-op, `cbe_expand` kwargs unchanged. `test_adaptive_diagnostics.jl` (83/83, job 17198444): L visits per step, every step counter = sum/max of the bond entries, widths = built frames, failed bonds named, midpoint stages tagged. Driver smoke wrote `_bonds.csv` (688 rows); analyzer table mirror-symmetric on XX/Neel as it must be. |
+| R.2 | §7 "Use both Float64 and complex state tensors where applicable" | `product_state`/`neel_state`/`domain_wall_state(...; eltype = ComplexF64)`; `test_adaptive_diagnostics.jl` runs a Float64 Neel through ordinary and midpoint, real and imaginary time, against its complex twin, and the RSVD path against free fermions | DONE | The step itself works in `ComplexF64` (`tau` is promoted), so "where applicable" = the START state the step receives. Default unchanged: every existing caller still gets complex tensors. 83/83 (job 17198444): Float64 Neel, ordinary + midpoint, real + imaginary time, all `:met`, Sz within 1e-6 of the complex twin; RSVD path from a real state within 1e-4 of free fermions. |
+| R.3 | §1 old names: deprecation warning with migration hint (row 1.5) | `_legacy_hint(legacy_names)` right after `resolve_budget` in `cbe_bug_step!`: one `@warn` per session (`maxlog=1`) naming the knobs and the four adaptive keywords | DONE | Informs, does not refuse: the legacy path is a supported study arm. Test asserts the message, the public-entry warning, and no warning on an adaptive step. 83/83 (job 17198444): message, public-entry warning, no warning on an adaptive step. |
+
 ## Open items, by when they must close
 
 - **Before Stage 3:** none of Stage 1/2 scope. **Stages 1-2 are closed** (job 17190027): UT01-02
@@ -131,8 +139,9 @@ baseline (T = 0.5), 17195155 sweeps, 17195335 combos, 17195336 maxdim (T = 2).
   runs as written (QUICKSTART-OK); per-component sweeps re-run on isotropic Heisenberg (exact
   sparse reference) and on XX at dt = 0.1 -- the looseness rules hold, see finding 9 in
   `ADAPTIVE_XX_L20_RESULTS.md`.
-- **Found by a line-by-line re-read of §7/§8 (not rows above):** §8 "Track by bond and timestep"
-  -- the ledger aggregates over bonds (max/sum per step); only Test B's `sample_log` is per bond.
-  §7 "Float64 and complex state tensors" -- the adaptive tests build complex states only.
-- Kept by design: 1.5 has no deprecation hint (the plan says "may"); `_range_find` stops on a
+- **Found by a line-by-line re-read of §7/§8:** per-bond tracking (§8) and Float64 states (§7)
+  were missing; added as rows R.1/R.2 with the row-1.5 hint as R.3.
+- **R.1-R.3 closed (job 17198444):** new tests 83/83; full `tests/sweeps` 1186/2/2 = the 4 baseline
+  reds only (`exact_refs:310`, `physics:82,116,153`); MaxRSS 11.4 GB (cold precompile).
+- Kept by design: `_range_find` stops on a
   global count, and Test B covers the gap that leaves.

@@ -256,7 +256,11 @@ of that job reloads the source). Changes:
 - Driver takes `[model]` (`xx` | `heis`, exact sparse Sz=0 reference in `benchmarks/exact_sparse.jl`)
   and `dt`. 17197998 Heisenberg sweeps+combos, 17197999 XX dt 0.1 sweeps (T=2): rules hold; finding
   9 + "Robustness" tables in `ADAPTIVE_XX_L20_RESULTS.md`. Gate 9 clean (MaxRSS 2.5/1.6 GB).
-- Open plan gaps found by re-reading §7/§8: per-bond diagnostics, Float64 test states; row 1.5 by design.
+- Re-reading §7/§8 found two gaps, closed with row 1.5 in job 17198444 (audit R.1-R.3):
+  `ledger.bond_log` (one entry per half-sweep bond visit; step fields = its max/sum; driver
+  `*_bonds.csv`, analyzer "Per bond"), `neel_state(L; eltype = Float64)` etc. + Float64 tests,
+  `_legacy_hint` (one warning per session). New tests 83/83; full sweeps 1186/2/2 = 4 baseline reds.
+  EVERY ROW OF THE PLAN AUDIT IS NOW DONE.
 
 ## 5) Quick resume commands (cluster)
 

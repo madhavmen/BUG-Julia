@@ -207,9 +207,11 @@ LinearAlgebra.dot(bra::SymMPS, ket::SymMPS) = overlap(bra, ket)
 # ── construction ────────────────────────────────────────────────────────────
 
 """
-    product_state(spins) -> SymMPS
+    product_state(spins; eltype = ComplexF64) -> SymMPS
 
-Build a product state from `spins::Vector{Symbol}`, each `:up` or `:down`.
+Build a product state from `spins::Vector{Symbol}`, each `:up` or `:down`. `eltype` is the
+element type of the site tensors: complex by default because BUG evolves complex amplitudes;
+`Float64` gives a real state (the adaptive plan's §7 asks the solver to be tested on both).
 
 Each site tensor is a two-leg fusion isometry `getIdentity((prev_link), (site))`
 restricted to the requested physical sector. The physical leg keeps its FULL
@@ -217,7 +219,7 @@ space (`preserve_space=true`) so local operators stay contractible against it;
 the outgoing link is trimmed to the sectors actually populated, which is what
 makes a product state report bond dimension 1.
 """
-function product_state(spins::Vector{Symbol})
+function product_state(spins::Vector{Symbol}; eltype::Type{<:Number} = ComplexF64)
     L = length(spins)
     L >= 1 || throw(ArgumentError("product_state needs at least one site"))
     # NOT a missing feature. An `:SU2` MPS carries total-spin multiplets, and a definite-Sz
@@ -233,11 +235,11 @@ function product_state(spins::Vector{Symbol})
     symmetry_mode() === :SU2 && throw(ArgumentError(
         "product_state is not representable under :SU2 -- a definite-Sz product state has " *
         "weight in many total-spin sectors. Use dimer_state(L) for an S = 0 start."))
-    return symmetry_mode() === :none ? _product_state_none(spins) :
-                                       _product_state_u1(spins)
+    return symmetry_mode() === :none ? _product_state_none(spins, eltype) :
+                                       _product_state_u1(spins, eltype)
 end
 
-function _product_state_u1(spins::Vector{Symbol})
+function _product_state_u1(spins::Vector{Symbol}, T::Type{<:Number} = ComplexF64)
     L = length(spins)
     q = local_space(:U1)
 
@@ -267,8 +269,8 @@ function _product_state_u1(spins::Vector{Symbol})
         present = Set(ql[3] for ql in A.qlabels)
         A = to_concrete(getsub(A, 3, s -> s in present ? Colon() : nothing))
 
-        # BUG evolves complex amplitudes; promote once, here.
-        A = to_concrete(A * (1.0 + 0.0im))
+        # BUG evolves complex amplitudes; promote once, here (unless a real state was asked for).
+        A = to_concrete(A * one(T))
 
         push!(tensors, A)
         prev = (A, 3)
@@ -345,14 +347,14 @@ function _dense_up_index(q)
 end
 
 """
-    _product_state_none(spins) -> SymMPS
+    _product_state_none(spins, T = ComplexF64) -> SymMPS
 
 No-symmetry product state. The physical leg is a single dense sector of
 dimension 2, so a spin is selected by INDEX on the outgoing link (`getsub`
 returns an `Int`), not by charge sector. The physical leg keeps its full
 2-dimensional space so local operators stay contractible.
 """
-function _product_state_none(spins::Vector{Symbol})
+function _product_state_none(spins::Vector{Symbol}, T::Type{<:Number} = ComplexF64)
     L = length(spins)
     q = local_space(:none)
     up = _dense_up_index(q)
@@ -373,7 +375,7 @@ function _product_state_none(spins::Vector{Symbol})
         # One trivial sector on the outgoing link; keep the chosen spin index,
         # which trims that link to dimension 1 (product state ⇒ bond dim 1).
         A = to_concrete(getsub(F, 3, s -> idx))
-        A = to_concrete(A * (1.0 + 0.0im))
+        A = to_concrete(A * one(T))
 
         push!(tensors, A)
         prev = (A, 3)
@@ -383,20 +385,20 @@ function _product_state_none(spins::Vector{Symbol})
 end
 
 """
-    domain_wall_state(L) -> SymMPS
+    domain_wall_state(L; eltype = ComplexF64) -> SymMPS
 
 `↑…↑↓…↓` with the wall in the middle. Total Sz is 0 for even `L`.
 """
-domain_wall_state(L::Int) =
-    product_state([i <= L ÷ 2 ? :up : :down for i in 1:L])
+domain_wall_state(L::Int; eltype::Type{<:Number} = ComplexF64) =
+    product_state([i <= L ÷ 2 ? :up : :down for i in 1:L]; eltype = eltype)
 
 """
-    neel_state(L) -> SymMPS
+    neel_state(L; eltype = ComplexF64) -> SymMPS
 
 `↑↓↑↓…`.
 """
-neel_state(L::Int) =
-    product_state([isodd(i) ? :up : :down for i in 1:L])
+neel_state(L::Int; eltype::Type{<:Number} = ComplexF64) =
+    product_state([isodd(i) ? :up : :down for i in 1:L]; eltype = eltype)
 
 # ── canonical form ──────────────────────────────────────────────────────────
 

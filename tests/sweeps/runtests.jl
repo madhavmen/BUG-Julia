@@ -60,6 +60,8 @@ include(joinpath(@__DIR__, "..", "common", "free_fermion.jl"))
     include("test_adaptive_compression.jl")
     # ...and the root `expv`, whose accuracy `tol_expv` now sets (Stage 5).
     include("test_adaptive_expv.jl")
+    # ...and the per-bond log, real start states and the migration hint (§8, §7, §1).
+    include("test_adaptive_diagnostics.jl")
     include("test_pair_mpo.jl")
     include("test_tfim_mpo.jl")
     include("test_sweeps.jl")

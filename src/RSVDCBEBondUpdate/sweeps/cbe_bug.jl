@@ -680,6 +680,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
          krylov_grow = krylov_grow ? true : nothing,
          maxiter = maxiter, tol = tol, root_conv_tol = root_conv_tol,
          root_substeps = root_substeps))
+    _legacy_hint(legacy_names)
 
     dex          = legacy_or_default(dex, :dex)
     growth       = legacy_or_default(growth, :growth)
@@ -797,10 +798,11 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
 
     troot = Ref(0.0); ttrunc = Ref(0.0)
     _t0step = time_ns()
-    """Time one `cbe_expand` into the calling half-sweep's own accumulator."""
+    """Time one `cbe_expand` into the calling half-sweep's own accumulator. An explicit
+    `ledger` (the bond's own, see `_log_bond!`) wins over the half-sweep's."""
     function timed_expand(acc::_HalfAcc, args...; kw...)
         t0 = time_ns()
-        ex = cbe_expand(args...; kw..., halfkw(acc)...)
+        ex = cbe_expand(args...; halfkw(acc)..., kw...)
         acc.tcbe += (time_ns() - t0) / 1e9
         return ex
     end
@@ -1043,8 +1045,9 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         K = C === nothing ? psiL[i] : to_concrete!(contract(C, (2,), psiL[i], (1,)))
         _fr = (t0 = time_ns(); f = _frame_from(K, psiL[i + 1]);
                accL.tframe += (time_ns() - t0) / 1e9; f)
+        bondlg = adaptive ? AdaptiveLedger() : nothing         # this bond's own ledger (§8)
         ex = record!(accL, n_newL, timed_expand(accL, _fr, mpo, i, lch,
-                                right_channels(rstack, i + 2); exkw...), i, :left)
+                                right_channels(rstack, i + 2); exkw..., ledger = bondlg), i, :left)
         peak!(accL, held + _state_stored(psiL), ex.U_ex, ex.V_ex)
         Vwide[i] = ex.V_ex
         Wcbe[i]  = ex.U_ex
@@ -1062,7 +1065,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             Wkry, kstL = _krylov_enrich(Kex, x -> (accL.nmv += 1; apply_one_site(H1, x)),
                                         ex.U_ex, :left, tau, alloc; workcap = wcap_step)
             accL.tkry += (time_ns() - tkL0) / 1e9
-            _record_krylov!(halfkw(accL).ledger, kstL, alloc)
+            _record_krylov!(bondlg, kstL, alloc)
             peak!(accL, held + _state_stored(psiL), Wkry)
             W[i] = to_concrete(setitag(Wkry, 3, _tagW(i)))
         elseif krylov_basis > 0
@@ -1108,6 +1111,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             W[i] = Wcbe[i]                                          # reproduces cbe_lubich
         end
         expanded[i] = leg_dim(W[i], 3)
+        _log_bond!(halfkw(accL).ledger, bondlg, i, :left, expanded[i])
         held += tensor_elements(W[i])
 
         # (d) carry the ORIGINAL amplitude into the new basis. `K`, not `Kex`: `W[i]` touches
@@ -1144,8 +1148,9 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             to_concrete!(contract(psiR[j + 1], (3,), D, (1,)))
         _fr = (t0 = time_ns(); f = _frame_from(psiR[j], B);
                accR.tframe += (time_ns() - t0) / 1e9; f)
+        bondlg = adaptive ? AdaptiveLedger() : nothing         # this bond's own ledger (§8)
         ex = record!(accR, n_newR, timed_expand(accR, _fr, mpo, j,
-                                left_channels(lstack, j), rch; exkw...), j, :right)
+                                left_channels(lstack, j), rch; exkw..., ledger = bondlg), j, :right)
         peak!(accR, held + _state_stored(psiR), ex.U_ex, ex.V_ex)
         Uwide[j] = ex.U_ex
         Zcbe[j]  = ex.V_ex
@@ -1160,7 +1165,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             Zkry, kstR = _krylov_enrich(Bex, x -> (accR.nmv += 1; apply_one_site(H1, x)),
                                         ex.V_ex, :right, tau, alloc; workcap = wcap_step)
             accR.tkry += (time_ns() - tkR0) / 1e9
-            _record_krylov!(halfkw(accR).ledger, kstR, alloc)
+            _record_krylov!(bondlg, kstR, alloc)
             peak!(accR, held + _state_stored(psiR), Zkry)
             Z[j] = to_concrete(setitag(Zkry, 1, _tagZ(j)))
         elseif krylov_basis > 0
@@ -1188,6 +1193,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             Z[j] = Zcbe[j]
         end
         j != c && (expanded[j] = leg_dim(Z[j], 1))
+        _log_bond!(halfkw(accR).ledger, bondlg, j, :right, leg_dim(Z[j], 1))
         held += tensor_elements(Z[j])
 
         D = to_concrete!(contract(B, (2, 3), Z[j]', (2, 3)))          # (link_j, b_j)
@@ -1413,6 +1419,10 @@ function cbe_bug_midpoint_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64; kwargs..
     # step's failure too, not a discarded intermediate.
     if info2.ledger !== nothing
         rfin = info2.ledger.r_final        # the PREDICTOR's rank is uncompressed, not final
+        # Both stages sweep every bond; say which visit each per-bond entry is.
+        for (lg, st) in ((info1.ledger, 1), (info2.ledger, 2))
+            lg.bond_log = Any[merge(e, (stage = st,)) for e in lg.bond_log]
+        end
         merge_ledger!(info2.ledger, info1.ledger)
         info2.ledger.r_final = rfin
     end

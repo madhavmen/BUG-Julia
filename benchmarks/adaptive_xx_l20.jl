@@ -37,7 +37,9 @@
 # point.
 #
 # Output: one streamed CSV row per (run, step) in OUTDIR/adaptive_xx_<phase>.csv, so a killed job
-# keeps everything up to the kill. The script exits non-zero if it graded nothing.
+# keeps everything up to the kill, and (plan §8 "track by bond and timestep") one row per (run,
+# step, half-sweep bond visit) in the matching `_bonds.csv` from the ledger's `bond_log`. The
+# script exits non-zero if it graded nothing.
 
 using LinearAlgebra, Printf
 using LurCGT, Telum
@@ -106,15 +108,25 @@ const COLS = ["phase", "arm", "state", "scheme", "seed", "path", "exact",
               "expv_err", "expv_iters", "peak_elements", "status", "unmet", "workcap",
               "maxdim_reached", "t_step", "t_cbe", "t_kry", "t_root", "t_trunc"]
 
+"Per-bond columns: the run's identity, then one `AdaptiveLedger.bond_log` entry."
+const BCOLS = ["phase", "arm", "state", "scheme", "seed", "exact", "tol_basis", "tol_trunc",
+               "tol_expv", "maxdim", "step", "stage", "bond", "side", "width", "sample", "tail",
+               "krylov_c", "krylov_d", "n_probes", "n_holdout", "n_selected", "n_targeted",
+               "n_krylov", "n_h1", "c_pass", "d_after_c", "workcap", "met", "unmet"]
+const BFIELDS = (:bond, :side, :width, :sample, :tail, :krylov_c, :krylov_d, :n_probes,
+                 :n_holdout, :n_selected, :n_targeted, :n_krylov, :n_h1, :c_pass, :d_after_c,
+                 :workcap, :met)
+
 _f(x) = x === nothing ? "" : x isa AbstractFloat ? @sprintf("%.6e", x) : string(x)
 
 """
-    run_arm(io, phase, arm, state, scheme; seed, kw...) -> Int
+    run_arm(io, bio, phase, arm, state, scheme; seed, kw...) -> Int
 
-Evolve `NSTEP` steps and write one CSV row per step. `kw` goes to the step VERBATIM, so the
-knob under test is exactly what the integrator received (and is echoed in the row).
+Evolve `NSTEP` steps and write one CSV row per step to `io` and one per bond visit to `bio`.
+`kw` goes to the step VERBATIM, so the knob under test is exactly what the integrator received
+(and is echoed in the row).
 """
-function run_arm(io, phase, arm, state, scheme; seed::Int, legacy::Bool = false, kw...)
+function run_arm(io, bio, phase, arm, state, scheme; seed::Int, legacy::Bool = false, kw...)
     set_symmetry!(:U1)
     mpo = model_mpo()
     psi, occ = initial(state)
@@ -156,6 +168,15 @@ function run_arm(io, phase, arm, state, scheme; seed::Int, legacy::Bool = false,
                   info.t_step, info.t_cbe, info.t_kry, info.t_root, info.t_trunc]
         println(io, join(_f.(row), ","))
         flush(io)
+        if lg !== nothing
+            for e in lg.bond_log
+                brow = Any[phase, arm, state, scheme, seed, ex, tb, tt, te,
+                           get(nkw, :maxdim, MAXDIM), n, get(e, :stage, 0),
+                           (getfield(e, f) for f in BFIELDS)..., join(e.unmet, "+")]
+                println(bio, join(_f.(brow), ","))
+            end
+            flush(bio)
+        end
         graded += 1
     end
     @info "$phase $arm $state $scheme seed=$seed tb=$tb tt=$tt te=$te exact=$ex: " *
@@ -171,8 +192,10 @@ function main()
     path = joinpath(OUTDIR, "adaptive_xx_$(PHASE)_L$(L)$(tag).csv")
     graded = 0
     open(path, "w") do io
+    open(replace(path, r"\.csv$" => "_bonds.csv"), "w") do bio
         println(io, join(COLS, ","))
-        go(args...; kw...) = (graded += run_arm(io, args...; kw...))
+        println(bio, join(BCOLS, ","))
+        go(args...; kw...) = (graded += run_arm(io, bio, args...; kw...))
         phases = PHASE == "all" ? ("profiles", "sweeps", "baseline") : (PHASE,)
 
         if "profiles" in phases
@@ -255,6 +278,7 @@ function main()
                    trunc_thresh = 1e-10, krylov_basis = 3, krylov_tol = 0.0, maxdim = MAXDIM)
             end
         end
+    end
     end
     println("GRADED-ROWS=$graded FILE=$path")
     graded > 0 || (println("EXIT-GRADED-ZERO"); exit(1))

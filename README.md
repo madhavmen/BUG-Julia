@@ -82,17 +82,23 @@ mpo_energy(psi, W)
 
 Everything else (`dex`, `dover`, `comp_ratio`, `growth`, `krylov_basis`, `krylov_tol`,
 `split_*`, `root_*`, `trunc_thresh`, `stol_*`, `maxiter`, `tol`) belongs to the **legacy
-fixed-knob path**: naming any of them selects it, and mixing them with a tolerance is an error.
-`info.ledger` (`nothing` on the legacy path) records every indicator; `budget_status(info.ledger)`
+fixed-knob path**: naming any of them selects it (with a one-time warning saying so), and mixing
+them with a tolerance is an error.
+`info.ledger` (`nothing` on the legacy path) records every indicator, per step and, in
+`info.ledger.bond_log`, per half-sweep bond visit (Tests A-D, probes, Krylov directions, frame
+width, verdict); `budget_status(info.ledger)`
 is `:met` or `:budget_unmet`, and `budget_diagnostic` says which check failed and what to change
 (smaller `dt`, larger `maxdim`, looser `tol_trunc`) -- a rank cap is reported, never silently
-accepted. `exact = true` replaces the random sketch by the complete local basis.
+accepted. `exact = true` replaces the random sketch by the complete local basis. Start states
+are complex by default; `neel_state(L; eltype = Float64)` (likewise `domain_wall_state`,
+`product_state`) gives a real one.
 
 What each tolerance buys, measured on XX L=20 against the exact solution, and starting
 settings per target error: [ADAPTIVE_XX_L20_RESULTS.md](ADAPTIVE_XX_L20_RESULTS.md). In short:
 `tol_basis` sets the accuracy (err ~ tol_basis), `tol_trunc` can be 10-100x looser and is the
-speed knob, `tol_expv = 1e-2` suffices at `dt = 0.05`, and the ordinary/midpoint choice sets
-the floor. Plan conformance: [ADAPTIVE_PLAN_AUDIT.md](ADAPTIVE_PLAN_AUDIT.md).
+speed knob, `tol_expv = 1e-2` suffices at `dt = 0.05` (use `1e-4` near 1e-5 on interacting
+models), and the ordinary/midpoint choice sets the floor; re-checked on isotropic Heisenberg and
+at `dt = 0.1`. Plan conformance: [ADAPTIVE_PLAN_AUDIT.md](ADAPTIVE_PLAN_AUDIT.md).
 
 ### The legacy fixed-knob path
 

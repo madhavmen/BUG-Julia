@@ -10,7 +10,8 @@ Reads the streamed per-step CSVs and prints (and optionally writes as Markdown):
     be before the error moves;
   * the loosest tolerance per sweep that still reaches each accuracy target;
   * profiles (IT01-IT04, IT06): error after 1 and NSTEP steps, spread over seeds, rank, status;
-  * baseline (IT05): the legacy fixed-knob solver, for cost at matched accuracy.
+  * baseline (IT05): the legacy fixed-knob solver, for cost at matched accuracy;
+  * per bond (`*_bonds.csv`): width, probes, Krylov directions, Test C/D counts and verdicts.
 
 Standard library only (csv, statistics), so it runs anywhere.
 """
@@ -25,11 +26,43 @@ SWEEP_KNOB = {"basis": "tol_basis", "exact": "tol_basis", "mid": "tol_basis",
 
 
 def load(paths):
-    rows = []
+    """Step rows and per-bond rows (`*_bonds.csv`, plan §8 "by bond and timestep")."""
+    rows, bonds = [], []
     for p in paths:
         with open(p, newline="") as fh:
-            rows.extend(csv.DictReader(fh))
-    return rows
+            (bonds if p.endswith("_bonds.csv") else rows).extend(csv.DictReader(fh))
+    return rows, bonds
+
+
+def bond_report(bonds):
+    """Per bond, over every run and step given: where the trial space grows and why."""
+    if not bonds:
+        return ""
+    agg = defaultdict(lambda: defaultdict(float))
+    for b in bonds:
+        a = agg[(int(b["bond"]), b["side"])]
+        a["visits"] += 1
+        a["width"] += num(b["width"])
+        a["wmax"] = max(a["wmax"], num(b["width"]))
+        for col in ("n_probes", "n_krylov", "n_h1"):
+            a[col] += num(b[col])
+        a["c_pass"] += b["c_pass"] == "true"
+        a["d_after_c"] += b["d_after_c"] == "true"
+        a["workcap"] += b["workcap"] == "true"
+        a["unmet"] += b["met"] == "false"
+        a["sample"] = max(a["sample"], num(b["sample"]))
+        a["tail"] = max(a["tail"], num(b["tail"]))
+    lines = ["## Per bond (plan §8): totals over every run and step given\n",
+             "| bond | side | visits | mean / max width | probes | Krylov dirs | H1 | "
+             "C pass | D after C | workcap | unmet | worst B | worst A |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for (bond, side), a in sorted(agg.items()):
+        v = a["visits"]
+        lines.append(f"| {bond} | {side} | {int(v)} | {a['width'] / v:.1f} / {int(a['wmax'])} | "
+                     f"{int(a['n_probes'])} | {int(a['n_krylov'])} | {int(a['n_h1'])} | "
+                     f"{int(a['c_pass'])} | {int(a['d_after_c'])} | {int(a['workcap'])} | "
+                     f"{int(a['unmet'])} | {a['sample']:.1e} | {a['tail']:.1e} |")
+    return "\n".join(lines) + "\n"
 
 
 def num(x):
@@ -186,10 +219,11 @@ def main(argv):
     if not argv:
         print(__doc__)
         return 2
-    text = report(load(argv))
+    rows, bonds = load(argv)
+    text = "\n".join(t for t in (report(rows), bond_report(bonds)) if t)
     print(text)
     if md:
-        with open(md, "w") as fh:
+        with open(md, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
     return 0
 
