@@ -9,7 +9,9 @@
 #
 # Per cap D (ascending) and per arm it reports:
 #   1. per-step WALL under the production configuration (`parallel = true`, threads 2), and the
-#      ratio to tdvp2 -- the cost axis of the "BUG beats TDVP at large chi" claim;
+#      ratio to the TDVP arm of the SAME order at the same dt (bug2/bugmid vs tdvp2, bug4 vs
+#      tdvp4), with the pair's infidelity at the same simulated time -- the cost axis of the
+#      "BUG beats TDVP at large chi" claim;
 #   2. the PHASE BREAKDOWN from `CBEBugSweepInfo` (cbe / kry / split / frame / env / root /
 #      trunc / closure) on ONE SERIAL step, where the phases are one clock and must sum to the
 #      step -- the unattributed remainder is printed, not hidden;
@@ -20,9 +22,10 @@
 # a timing job); BP_MODE=profile loads the cache (solving whatever is missing) and times.
 #
 # Run:  julia -t 2 --project=PKG benchmarks/spectral/bug_profile_2d.jl Lx Ly OUTDIR
-# Env:  BP_MODE (profile) BP_DS ("256,512,1024") BP_ARMS ("tdvp2,tdvp4,bug1,bug4")
-#       BP_PROF ("bug1,bug4"); tdvp4 = `tdvp2_composed_step!` order 4 (Suzuki, 5 stages) at BP_DT4
-#       BP_NSTEP (3) BP_TDVP_NSTEP (2) BP_DT (0.1) BP_DT4 (0.2)
+# Env:  BP_MODE (profile) BP_DS ("256,512,1024") BP_ARMS ("tdvp2,bug2")
+#       BP_PROF ("bug2"); tdvp4 = `tdvp2_composed_step!` order 4 (Suzuki, 5 stages) at BP_DT4,
+#       the partner of bug4 (also at BP_DT4)
+#       BP_NSTEP (3) BP_TDVP_NSTEP (= BP_NSTEP) BP_DT (0.1) BP_DT4 (0.2)
 #       BP_VARIANTS ("wide:1e-4:0,thin:1e-4:0,thin:1e-4:1,thin:1e-3:0,thin:1e-3:1")
 #             each BUG arm runs once per `search:tol_basis:fold`. search = thin (Test B sets the
 #             width, the default) | wide (the old full-rank widening, `thin_search = false`);
@@ -48,10 +51,11 @@ const LY    = parse(Int, get(ARGS, 2, "4"))
 const OUT   = get(ARGS, 3, joinpath(@__DIR__, "..", "results"))
 const MODE  = get(ENV, "BP_MODE", "profile")
 const DS    = parse.(Int, split(get(ENV, "BP_DS", "256,512,1024"), ","))
-const ARMS  = split(get(ENV, "BP_ARMS", "tdvp2,tdvp4,bug1,bug4"), ",")
-const PROF  = split(get(ENV, "BP_PROF", "bug1,bug4"), ",")
+const ARMS  = split(get(ENV, "BP_ARMS", "tdvp2,bug2"), ",")
+const PROF  = split(get(ENV, "BP_PROF", "bug2"), ",")
 const NSTEP = parse(Int, get(ENV, "BP_NSTEP", "3"))
-const NTDVP = parse(Int, get(ENV, "BP_TDVP_NSTEP", "2"))
+# Same step count as the BUG arms by default, so a pair is compared at one simulated time.
+const NTDVP = parse(Int, get(ENV, "BP_TDVP_NSTEP", string(NSTEP)))
 const DT    = parse(Float64, get(ENV, "BP_DT", "0.1"))
 const DT4   = parse(Float64, get(ENV, "BP_DT4", "0.2"))
 function parse_variant(v)
@@ -73,7 +77,15 @@ MODE in ("gs", "profile") || error("BP_MODE must be gs or profile, got $MODE")
 const T0 = time()
 say(msg) = (@printf("[%8.1fs] %s\n", time() - T0, msg); flush(stdout))
 
-armdt(arm) = arm in ("bug4", "tdvp4") ? DT4 : DT
+# ⛔ A TIMING RATIO IS ONLY MEANINGFUL BETWEEN ARMS OF THE SAME ORDER (USER 2026-10-16). bug4 vs
+# tdvp2 compared a 4th-order step at 2x dt with a 2nd-order one: different methods, not a cost
+# comparison. Each BUG arm is ratioed against the TDVP arm of its own nominal order, at the same
+# dt; bug1 has no first-order TDVP partner and gets no ratio.
+const ARM_ORDER = Dict("tdvp2" => 2, "tdvp4" => 4, "bug1" => 1, "bugmid" => 2, "bug2" => 2,
+                       "bug4" => 4)
+const TDVP_OF_ORDER = Dict(2 => "tdvp2", 4 => "tdvp4")
+
+armdt(arm) = ARM_ORDER[arm] == 4 ? DT4 : DT
 istdvp(arm) = startswith(arm, "tdvp")
 
 "Every (arm, variant) run: tdvp2 once, each BUG arm once per `VARIANTS` entry."
@@ -219,6 +231,12 @@ function profile_step(arm, W, D, p; v = VARIANTS[1])
 end
 
 function main()
+    for (k, arm) in enumerate(ARMS)
+        haskey(ARM_ORDER, arm) || error("unknown arm $arm")
+        pr = get(TDVP_OF_ORDER, ARM_ORDER[arm], nothing)
+        istdvp(arm) || pr === nothing || !(pr in ARMS) || findfirst(==(pr), ARMS) < k ||
+            error("BP_ARMS: $pr must come before $arm, which is graded against it")
+    end
     mkpath(OUT)
     set_symmetry!(:U1)
     N  = LX * LY
@@ -249,6 +267,8 @@ function main()
         # variants are compared with at the same simulated time -- a cheaper variant is only a
         # saving if it lands on the same state.
         refs = Dict{String, Any}()
+        tdvpfinal = Dict{String, Any}()         # TDVP arm => (simulated time, final state)
+        pairinf = Dict{String, Float64}()       # BUG label => infidelity vs its same-order TDVP
         for (arm, v) in runs()
             lab = label(arm, v)
             step! = stepper(arm, W, D; parallel = PARALLEL,
@@ -289,8 +309,16 @@ function main()
                 CLOSURE_LOG && closure_lines(info)
                 flush(stdout)
             end
-            # Per unit of SIMULATED time, so bug4 at its larger dt is compared fairly.
             perstep[lab] = sum(walls) / (n * armdt(arm))
+            # Only the TDVP finals are kept (a D=1024 state is ~1 GB); a BUG arm is graded against
+            # its same-order partner here, which must therefore come first in BP_ARMS.
+            if istdvp(arm)
+                tdvpfinal[arm] = (n * armdt(arm), deepcopy(p))
+            elseif haskey(tdvpfinal, get(TDVP_OF_ORDER, ARM_ORDER[arm], ""))
+                tt, pt = tdvpfinal[TDVP_OF_ORDER[ARM_ORDER[arm]]]
+                pairinf[lab] = isapprox(tt, n * armdt(arm)) ?
+                               1 - abs(overlap(pt, p)) / (norm(pt) * norm(p)) : NaN
+            end
             if !haskey(refs, arm)
                 refs[arm] = (lab, deepcopy(p))
             else
@@ -302,17 +330,21 @@ function main()
             arm in PROF && (v === nothing || v in PROFV) && profile_step(arm, W, D, p;
                                                                        v = something(v, VARIANTS[1]))
         end
-        if haskey(perstep, "tdvp2")
-            for (arm, v) in runs()
-                istdvp(arm) && continue
-                lab = label(arm, v)
-                @printf("  D=%4d  wall per unit time: %-12s %.1f s  tdvp2 %.1f s  -> tdvp2/%s = %.2fx\n",
-                        D, lab, perstep[lab], perstep["tdvp2"], lab,
-                        perstep["tdvp2"] / perstep[lab])
-                haskey(perstep, "tdvp4") &&
-                    @printf("  D=%4d  wall per unit time: %-12s vs tdvp4 %.1f s -> tdvp4/%s = %.2fx\n",
-                            D, lab, perstep["tdvp4"], lab, perstep["tdvp4"] / perstep[lab])
+        for (arm, v) in runs()
+            istdvp(arm) && continue
+            lab = label(arm, v)
+            ord = ARM_ORDER[arm]
+            partner = get(TDVP_OF_ORDER, ord, nothing)
+            if partner === nothing || !haskey(perstep, partner)
+                @printf("  D=%4d  %-12s order %d: no same-order TDVP arm in this run -- no ratio\n",
+                        D, lab, ord)
+                continue
             end
+            # The pair must land on the same state for the ratio to be a cost comparison.
+            @printf("  D=%4d  order %d dt %.3f  wall per unit time: %-12s %.1f s  %s %.1f s  -> %s/%s = %.2fx  infidelity vs %s at t=%.2f: %.2e\n",
+                    D, ord, armdt(arm), lab, perstep[lab], partner, perstep[partner], partner,
+                    lab, perstep[partner] / perstep[lab], partner, NSTEP * armdt(arm),
+                    get(pairinf, lab, NaN))
         end
         flush(stdout)
     end
