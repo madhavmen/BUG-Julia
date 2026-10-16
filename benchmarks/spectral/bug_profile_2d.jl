@@ -35,6 +35,11 @@
 #       BP_PROFV ("wide:1e-4:0,thin:1e-4:1")  the variants that also get a sampled profile
 #       BP_TT/BP_TE (1e-6/1e-6: medium-to-tight, USER 2026-10-16 -- tol_trunc 1e-4 let the
 #             per-step compression losses accumulate, TASK4_VALIDATION_RESULTS.md)
+#       BP_TDVP_TT (= BP_TT) the TDVP arms' truncation cutoff (was a fixed 1e-12)
+#       BP_BOND_TASKS (1) 0 measures the closure's bonds in order (A/B of parallel plan (b));
+#       `julia --heap-size-hint` (parallel plan (d)) is read back from the runtime and printed
+#       BP_OBS (0) 1 writes the correlator G(x,t) per arm and D after every step, untimed
+#             (`gwriter`); graded against a reference by `benchmarks/spectral/matched_error.py`
 #       BP_GS_TB/BP_GS_TT (1e-4/1e-6: tight enough that the ground state reaches the cap)
 #       BP_CLOSURE_LOG (0) 1 prints the order-p closure ledger after every step (`closure_lines`)
 #       BP_BLAS_TDVP (julia threads) BP_BLAS_BUG (julia threads / 2): BLAS threads per arm family
@@ -70,9 +75,11 @@ const VARIANTS = parse_variant.(split(get(ENV, "BP_VARIANTS",
 const PROFV = parse_variant.(split(get(ENV, "BP_PROFV", "wide:1e-4:0,thin:1e-4:1"), ","))
 const TT    = parse(Float64, get(ENV, "BP_TT", "1e-6"))
 const TE    = parse(Float64, get(ENV, "BP_TE", "1e-6"))
+const TDVP_TT = parse(Float64, get(ENV, "BP_TDVP_TT", string(TT)))
 const GS_TB = parse(Float64, get(ENV, "BP_GS_TB", "1e-4"))
 const GS_TT = parse(Float64, get(ENV, "BP_GS_TT", "1e-6"))
 const CLOSURE_LOG = get(ENV, "BP_CLOSURE_LOG", "0") == "1"
+const OBS = get(ENV, "BP_OBS", "0") == "1"
 # ⚠ SAME CORES, EACH ARM'S BEST USE OF THEM. TDVP2's sweep is sequential, so its only parallelism
 # is BLAS: it gets every thread. The BUG runs its half-sweeps (and, from 4 threads, its closure
 # frontiers) as concurrent tasks, each calling BLAS, so it gets fewer BLAS threads per call to
@@ -80,7 +87,14 @@ const CLOSURE_LOG = get(ENV, "BP_CLOSURE_LOG", "0") == "1"
 const BLAS_TDVP = parse(Int, get(ENV, "BP_BLAS_TDVP", string(Threads.nthreads())))
 const BLAS_BUG  = parse(Int, get(ENV, "BP_BLAS_BUG", string(max(1, Threads.nthreads() ÷ 2))))
 const PARALLEL = Threads.nthreads() >= 2
+# Measuring sweeps' bonds as concurrent tasks (from 4 threads; parallel plan (b)). 0 = in order,
+# for the A/B; it changes timing only.
+const BOND_TASKS = get(ENV, "BP_BOND_TASKS", "1") == "1"
+BUGJulia.RSVDCBEBondUpdate._BOND_TASKS[] = BOND_TASKS
 MODE in ("gs", "profile") || error("BP_MODE must be gs or profile, got $MODE")
+
+heap_hint() = (h = Base.JLOptions().heap_size_hint;
+               h == 0 ? "none" : @sprintf("%.1f GiB", h / 2^30))
 
 const T0 = time()
 say(msg) = (@printf("[%8.1fs] %s\n", time() - T0, msg); flush(stdout))
@@ -110,8 +124,10 @@ function stepper(arm, W, D; parallel::Bool, v = VARIANTS[1])
     # tdvp2/tdvp4: a FIXED 8-vector Lanczos per local exponential (the campaign's old setting).
     # tdvp2e/tdvp4e: the same step stopped at `tol_expv` by Saad's estimate with adaptive
     # substeps -- the rule the BUG root solve uses, so both arms get one exponential accuracy.
-    tkw = (maxdim = D, trunc_thresh = 1e-12, maxiter = 8)
-    tkwe = (maxdim = D, trunc_thresh = 1e-12, maxiter = 30, conv_tol = TE, substeps = 0)
+    # Both truncate at BP_TDVP_TT (default BP_TT): the medium-tight tolerance the BUG arms get
+    # (USER 2026-10-16), here a per-bond singular-value cutoff relative to the largest.
+    tkw = (maxdim = D, trunc_thresh = TDVP_TT, maxiter = 8)
+    tkwe = (maxdim = D, trunc_thresh = TDVP_TT, maxiter = 30, conv_tol = TE, substeps = 0)
     arm == "tdvp2"  && return (p, tau) -> tdvp2_step!(p, W, tau; tkw...)
     arm == "tdvp2e" && return (p, tau) -> tdvp2_step!(p, W, tau; tkwe...)
     arm == "tdvp4"  && return (p, tau) -> tdvp2_composed_step!(p, W, tau; order = 4, tkw...)
@@ -166,6 +182,32 @@ function ground_state(W, N, D, prev)
         say("WARNING GS not cached ($(err))")
     end
     return psi
+end
+
+"""
+The correlator `G(x,t) = e^{i E0 t} <Om| S^z_x |phi(t)> / <Om|Om>`, `phi(0) = S^z_c |Om>`
+(`fig45_2209.jl` Eq. (6)), written per (arm, D) to `bp_G_<Lx>x<Ly>_<label>_D<D>.csv` after each
+step and outside its clock -- the record a matched-error comparison grades (Phase 6 pilot). One
+`sz_overlaps` pass per time instead of `N` stored states `S^z_x|Om>`. Prints the t = 0 sum rules
+(`G(c,0) = 1/4`, `sum_x G(x,0) = 0`) and, at close, the observable wall.
+"""
+function gwriter(lab, D, Om, W)
+    E0, n0 = energy(Om, W), real(overlap(Om, Om))
+    io = open(joinpath(OUT, "bp_G_$(LX)x$(LY)_$(replace(lab, "/" => "_"))_D$(D).csv"), "w")
+    println(io, "site,t,ReG,ImG")
+    tobs = Ref(0.0)
+    function row!(p, t)
+        tobs[] += @elapsed G = sz_overlaps(Om, p) .* (cis(E0 * t) / n0)
+        for (x, g) in enumerate(G)
+            @printf(io, "%d,%.4f,%.12e,%.12e\n", x, t, real(g), imag(g))
+        end
+        flush(io)
+        t == 0.0 && @printf("  %-12s D=%4d  G(c,0) = %.6f (must be 0.25)  sum_x G(x,0) = %+.2e (must be 0)\n",
+                            lab, D, real(G[centre_site(LX, LY)]), real(sum(G)))
+    end
+    close!() = (close(io); @printf("  %-12s D=%4d  observable G(x,t): %.1f s total (untimed)\n",
+                                   lab, D, tobs[]))
+    return (row! = row!, close! = close!)
 end
 
 const PHASES = (:t_cbe, :t_kry, :t_split, :t_frame, :t_env, :t_root, :t_trunc)
@@ -266,10 +308,11 @@ function main()
     Jm = square_cylinder_couplings(LX, LY; periodic_y = true)
     W  = pair_mpo(N, Jm, spin_vertices(N))
     c  = centre_site(LX, LY)
-    say(@sprintf("square %dx%d N=%d  centre %d  caps %s  mode %s  threads %d  BLAS %d", LX, LY, N,
-                 c, string(DS), MODE, Threads.nthreads(), BLAS.get_num_threads()))
-    say(@sprintf("evolution %s  tol_trunc %.0e  tol_expv %.0e  dt %.3f  bug4 dt %.3f  GS tol (%.0e, %.0e)",
-                 join(label.("bug", VARIANTS), " "), TT, TE, DT, DT4, GS_TB, GS_TT))
+    say(@sprintf("square %dx%d N=%d  centre %d  caps %s  mode %s  threads %d  BLAS %d  bond tasks %s  heap hint %s",
+                 LX, LY, N, c, string(DS), MODE, Threads.nthreads(), BLAS.get_num_threads(),
+                 string(BOND_TASKS), heap_hint()))
+    say(@sprintf("evolution %s  tol_trunc %.0e  tol_expv %.0e  TDVP trunc %.0e  dt %.3f  bug4 dt %.3f  GS tol (%.0e, %.0e)",
+                 join(label.("bug", VARIANTS), " "), TT, TE, TDVP_TT, DT, DT4, GS_TB, GS_TT))
 
     gs = Dict{Int, Any}()
     prev = nothing
@@ -306,6 +349,8 @@ function main()
             p = deepcopy(phi)
             n = istdvp(arm) ? NTDVP : NSTEP
             walls = Float64[]
+            gobs = OBS ? gwriter(lab, D, gs[D], W) : nothing
+            gobs === nothing || gobs.row!(p, 0.0)
             for k in 1:n
                 # GC time and bytes from the runtime's own counters: the sampled profile put GC at
                 # ~40% of active samples at D=256 (job 17283685) but lost most main-thread samples,
@@ -334,8 +379,10 @@ function main()
                 pl = phase_line(info)
                 isempty(pl) || println("         CPU phases: ", pl)
                 CLOSURE_LOG && closure_lines(info)
+                gobs === nothing || gobs.row!(p, k * armdt(arm))   # after the clock: untimed
                 flush(stdout)
             end
+            gobs === nothing || gobs.close!()
             perstep[lab] = sum(walls) / (n * armdt(arm))
             # Only the TDVP finals are kept (a D=1024 state is ~1 GB); a BUG arm is graded against
             # its same-order partner here, which must therefore come first in BP_ARMS.
