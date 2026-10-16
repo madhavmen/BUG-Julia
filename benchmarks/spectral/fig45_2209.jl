@@ -53,6 +53,10 @@
 # Out:  results/fig45_G_<lat>_<Lx>x<Ly>_<arm>.csv     G(x,t), one row per (site,time)
 #       results/fig45_Sqw_<lat>_<Lx>x<Ly>_<arm>.csv   S(q,w) on the path
 #       results/fig45_cost_<lat>_<Lx>x<Ly>.csv        the integrator comparison
+#       results/fig45_steps_<tag>_<arm>.csv           per step: wall, chi, discarded norm, unmet
+# Arms: tdvp2 cbe1s bug (legacy knobs); bug1 bugmid bug2 bug4 (adaptive); tdvp2e cbe1se (Saad-
+#       stopped exponentials at F_TE; tdvp2e discards by the BUG's F_TT budget). F_ARMS=none
+#       solves and caches the ground state only. F_OUT may be absolute (cluster: under $SCRATCH).
 
 using LinearAlgebra, Printf, Serialization
 import Random
@@ -133,31 +137,35 @@ function correlator(psi0::SymMPS, E0::Float64, step!, nt::Int, dt::Float64)
     phi = deepcopy(psi0)
     apply_sz!(phi, c)
 
-    # Built ONCE: `psi0` never changes and `apply_sz!` runs two canonical sweeps, so rebuilding
-    # per step would cost L*nt canonicalisations of L distinct states.
-    bras = map(1:L) do i
-        b = deepcopy(psi0); apply_sz!(b, i); b
-    end
-
     ts = collect(0:nt) .* dt
     G  = zeros(ComplexF64, L, nt + 1)
     cost = (mv = Ref(0), sec = Ref(0.0), chi = Ref(0), unmet = Ref(0),
-            why = Dict{Symbol, Int}(), first = Ref{Any}(nothing))
+            why = Dict{Symbol, Int}(), first = Ref{Any}(nothing),
+            steps = NamedTuple[])
 
-    row!(col) = for i in 1:L
-        G[i, col] = overlap(bras[i], phi)
-    end
+    # Every <Om|S^z_i|phi> in one transfer pass: storing the L states S^z_i|Om> instead costs L
+    # ground states of memory, ~40 GB on a 10x4 cylinder at D = 1024 (simulation_plan_2 Phase 6).
+    row!(col) = (G[:, col] .= sz_overlaps(psi0, phi))
 
     row!(1)
     for n in 1:nt
         t0 = time()
         info = step!(phi, ComplexF64(-im * dt))
-        cost.sec[] += time() - t0
+        tw = time() - t0
+        cost.sec[] += tw
         cost.mv[]  += info === nothing ? 0 : _matvec(info)
-        cost.chi[]  = max(cost.chi[], maximum(bond_dims(phi)))
+        chin = maximum(bond_dims(phi))
+        cost.chi[]  = max(cost.chi[], chin)
         # Adaptive arms carry their verdict; a step that could not meet its budget is counted,
         # never silently folded into the spectrum.
         lg = (info !== nothing && hasproperty(info, :ledger)) ? info.ledger : nothing
+        # the step's discarded norm: tdvp2's `cumulative` (bounded by `weight_tol`), the BUG
+        # ledger's, else the legacy largest single cut
+        disc = info === nothing ? NaN : hasproperty(info, :cumulative) ? info.cumulative :
+               lg isa AdaptiveLedger ? lg.discarded :
+               hasproperty(info, :discarded) ? Float64(info.discarded) : NaN
+        push!(cost.steps, (step = n, t = n * dt, wall = tw, chi = chin, discarded = disc,
+                           unmet = lg isa AdaptiveLedger ? join(string.(lg.unmet), "+") : ""))
         if lg isa AdaptiveLedger
             n == 1 && (cost.first[] = (r_old = lg.r_old, r_aug = lg.r_aug, r_final = lg.r_final,
                                        discarded = lg.discarded, unmet = copy(lg.unmet)))
@@ -469,6 +477,14 @@ function main()
     steps["bugmid"] = (p, tau) -> cbe_bug_midpoint_step!(p, W, tau; akw...)
     steps["bug2"]   = (p, tau) -> cbe_bug_step!(p, W, tau; order = 2, akw...)
     steps["bug4"]   = (p, tau) -> cbe_bug_step!(p, W, tau; order = 4, akw...)
+    # The comparison arms on the BUG's accuracy rules (Phase 6, USER 2026-10-16): exponentials
+    # stopped at `tol_expv` by Saad's estimate, and tdvp2 discarding by the BUG's `tol_trunc`
+    # budget (`weight_tol`, as `bug_profile_2d.jl`'s tdvp2e). cbe1s has no budgeted cut; it keeps
+    # the per-bond relative cutoff, set to `tol_trunc`.
+    steps["tdvp2e"] = (p, tau) -> tdvp2_step!(p, W, tau; maxdim = DCAP, maxiter = 30, conv_tol = TE,
+                                              substeps = 0, weight_tol = TT)
+    steps["cbe1se"] = (p, tau) -> tdvp_cbe1s_step!(p, W, tau; maxdim = DCAP, maxiter = 30,
+                                                   conv_tol = TE, substeps = 0, trunc_thresh = TT)
     armdt(arm) = arm == "bug4" ? DT4 : DT
     @printf("adaptive BUG arms: tol_basis %.0e tol_trunc %.0e tol_expv %.0e maxdim %d; bug4 dt %.3f; parallel=%s (threads %d)\n",
             TB, TT, TE, DCAP, DT4, string(PARALLEL), Threads.nthreads())
@@ -552,6 +568,15 @@ function main()
                 ix, iy = coords(i, LY); rx, ry = site_position(LAT, i, LY)
                 @printf(io, "%d,%d,%d,%.6f,%.6f,%.4f,%.10e,%.10e\n",
                         i, ix, iy, rx, ry, ts[n], real(G[i, n]), imag(G[i, n]))
+            end
+        end
+
+        # per step: bond growth and discarded norm vs time (plan §8 figures 1 and 5)
+        open(joinpath(OUT, "fig45_steps_$(tag)_$(arm).csv"), "w") do io
+            println(io, "step,t,wall,chi,discarded,unmet")
+            for s in cost.steps
+                @printf(io, "%d,%.4f,%.3f,%d,%.3e,%s\n", s.step, s.t, s.wall, s.chi, s.discarded,
+                        s.unmet)
             end
         end
 
