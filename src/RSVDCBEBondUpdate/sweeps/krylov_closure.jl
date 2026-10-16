@@ -78,6 +78,14 @@ const _FRONTIER_THREADS = 4
 _frontier_parallel(parallel::Bool) = parallel && Threads.nthreads() >= _FRONTIER_THREADS
 
 """
+Whether a measuring sweep runs its bonds as concurrent tasks ([`_bond_measurements`](@ref)) when
+[`_frontier_parallel`](@ref) holds. A switch, not a tolerance: it changes no result at
+`fold = false` and exists so a timing job can A/B it in one build (`bug_profile_2d.jl`,
+`BP_BOND_TASKS`).
+"""
+const _BOND_TASKS = Ref(true)
+
+"""
     _prime_caches!(fr, psi, mpo, core)
 
 Build this generation's shared environments ([`_side_cache!`](@ref)) before frontier sweeps run
@@ -348,6 +356,58 @@ function _bond_action(f::BondFrame, mpo, i::Int, lch, rch, U0, V0, side::Symbol,
     return (skl, skr, side === :left ? _left_leak(U0, X) : _right_leak(V0, X), 1)
 end
 
+"""
+    _bond_measurements(Fm, mpo, fr, chain, stack, side; fold, nsample, rng) -> Vector
+
+A MEASURING half-sweep's bonds, CONCURRENTLY (parallel plan (b)). With the frames fixed, the only
+bond-to-bond dependency is the carry (`C = W[i]' K` on the left, `D = B Z[j]'` on the right): a
+cheap sequential chain. Each bond's frame, two-site action and leak (~1/3 of a measuring sweep,
+`_bond_action`) then depend on nothing else, so they run one task per bond, each with its own RNG
+drawn in bond order from `rng`. Entry `i` (a bond of `side`) is `(K, leak, nh2, sleak)`, `K` the
+carry the sequential loop would have built there; `sleak = 0` unless `nsample > 0`.
+"""
+function _bond_measurements(Fm::SymMPS, mpo, fr::KLFrames, chain, stack, side::Symbol;
+                            fold::Bool, nsample::Int, rng::AbstractRNG)
+    L, c = length(Fm), fr.c
+    bonds = side === :left ? (1:c) : ((L - 1):-1:c)
+    carry = Vector{Any}(undef, L - 1)
+    X = nothing
+    for i in bonds
+        if side === :left
+            carry[i] = X === nothing ? Fm[i] : to_concrete!(contract(X, (2,), Fm[i], (1,)))
+            X = to_concrete!(contract(fr.W[i]', (1, 2), carry[i], (1, 2)))
+        else
+            carry[i] = X === nothing ? Fm[i + 1] :
+                       to_concrete!(contract(Fm[i + 1], (3,), X, (1,)))
+            X = to_concrete!(contract(carry[i], (2, 3), fr.Z[i]', (2, 3)))
+        end
+    end
+    rngs = Vector{Any}(undef, L - 1)
+    for i in bonds
+        rngs[i] = MersenneTwister(rand(rng, UInt64))
+    end
+    function one(i)
+        f, a = if side === :left
+            f = _frame_onto_left(fr.W[i], carry[i], Fm[i + 1])
+            (f, _bond_action(f, mpo, i, chain[i], right_channels(stack, i + 2), fr.W[i],
+                             nothing, :left, fold, rngs[i]))
+        else
+            f = _frame_onto_right(Fm[i], carry[i], fr.Z[i])
+            (f, _bond_action(f, mpo, i, left_channels(stack, i), chain[i], nothing, fr.Z[i],
+                             :right, fold, rngs[i]))
+        end
+        skl, skr, leak, nh2 = a
+        sl = nsample > 0 ? _sampled_leak(f, skl, skr, side, nsample, rngs[i]) : 0.0
+        return (K = carry[i], leak = leak, nh2 = nh2, sleak = sl)
+    end
+    tasks = Dict(i => Threads.@spawn(one(i)) for i in bonds)
+    out = Vector{Any}(undef, L - 1)
+    for i in bonds
+        out[i] = fetch(tasks[i])
+    end
+    return out
+end
+
 "How many charge sectors `new` carries on `leg` that `old` did not (plan §3.5)."
 function _new_sectors(old, new, leg::Int)
     have = Set(first(s) for s in old.spaces[leg])
@@ -371,12 +431,13 @@ generation `gen`), the root environment, the bond ledger and the per-bond misses
 A MEASURING sweep (`enrich = false`) grows nothing, so it runs in the frames themselves: `U0 =
 fr.W[i]` with no overlap `Pm` (identity there) and the generation's cached frame chain for `lch`
 ([`_side_cache!`](@ref)). `chain` returns the `lch` an enriching sweep built from the new frames,
-which is the next generation's chain.
+which is the next generation's chain. With `bonds` its bonds are measured concurrently
+([`_bond_measurements`](@ref)) and the loop only logs them.
 """
 function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
                         alloc::BasisAllocation, ckw::NamedTuple; enrich::Bool, gen::Int,
                         workcap::Int, amp::Float64, rng::AbstractRNG, nsample::Int = 0,
-                        fold::Bool = false)
+                        fold::Bool = false, bonds::Bool = false)
     c, L = fr.c, length(Fm)
     canonical!(Fm, 1)
     chain, zst = _side_cache!(fr, Fm, mpo, :left)
@@ -387,6 +448,8 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
         E[k] = env
     end
     rstack = MPORightEnvStack(E)
+    pre = bonds && !enrich ? _bond_measurements(Fm, mpo, fr, chain, rstack, :left; fold = fold,
+                                                nsample = nsample, rng = rng) : nothing
     lch = boundary_channels(mpo)
     lenv = lch
     lchs = Vector{Any}(undef, L - 1)
@@ -398,13 +461,18 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
     nh1 = Ref(0)
     for i in 1:c
         enrich || (lch = chain[i])
-        K = C === nothing ? Fm[i] : to_concrete!(contract(C, (2,), Fm[i], (1,)))
         U0 = Pm === nothing ? fr.W[i] : to_concrete!(contract(Pm, (2,), fr.W[i], (1,)))
-        f = _frame_onto_left(U0, K, Fm[i + 1])
-        rch = right_channels(rstack, i + 2)
-        skl, skr, leak[i], k2 = _bond_action(f, mpo, i, lch, rch, U0, nothing, :left, fold, rng)
+        if pre === nothing
+            K = C === nothing ? Fm[i] : to_concrete!(contract(C, (2,), Fm[i], (1,)))
+            f = _frame_onto_left(U0, K, Fm[i + 1])
+            rch = right_channels(rstack, i + 2)
+            skl, skr, leak[i], k2 = _bond_action(f, mpo, i, lch, rch, U0, nothing, :left, fold,
+                                                 rng)
+            nsample > 0 && (sleak[i] = _sampled_leak(f, skl, skr, :left, nsample, rng))
+        else
+            K, leak[i], k2, sleak[i] = pre[i]
+        end
         nh2 += k2
-        nsample > 0 && (sleak[i] = _sampled_leak(f, skl, skr, :left, nsample, rng))
         bl = AdaptiveLedger()
         quiet = indicator(alloc, leak[i]) <= alloc.per_bond
         Wi = if enrich && !quiet
@@ -429,7 +497,7 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
         _tag_last!(lg, (leak = indicator(alloc, leak[i]), skipped = quiet || !enrich,
                         added = nadd, new_sectors = nsec, width_before = leg_dim(U0, 3)))
         enrich && (Pm = to_concrete!(contract(Wn[i]', (1, 2), U0, (1, 2))))  # (new_i, old_i)
-        C = to_concrete!(contract(Wn[i]', (1, 2), K, (1, 2)))
+        pre === nothing && (C = to_concrete!(contract(Wn[i]', (1, 2), K, (1, 2))))
         lchs[i] = lch
         i == c && (lenv = lch)
         enrich && i < c && (lch = push_left_channels(lch, mpo, Wn[i], i))
@@ -442,7 +510,7 @@ end
 function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
                          alloc::BasisAllocation, ckw::NamedTuple; enrich::Bool, gen::Int,
                          workcap::Int, amp::Float64, rng::AbstractRNG, nsample::Int = 0,
-                         fold::Bool = false)
+                         fold::Bool = false, bonds::Bool = false)
     c, L = fr.c, length(Fm)
     canonical!(Fm, L)
     chain, wst = _side_cache!(fr, Fm, mpo, :right)
@@ -453,6 +521,8 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
         E[i + 1] = env
     end
     lstack = MPOLeftEnvStack(E)
+    pre = bonds && !enrich ? _bond_measurements(Fm, mpo, fr, chain, lstack, :right; fold = fold,
+                                                nsample = nsample, rng = rng) : nothing
     rch = boundary_channels(mpo)
     renv = rch
     rchs = Vector{Any}(undef, L - 1)
@@ -464,13 +534,18 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
     nh1 = Ref(0)
     for j in (L - 1):-1:c
         enrich || (rch = chain[j])
-        B = D === nothing ? Fm[j + 1] : to_concrete!(contract(Fm[j + 1], (3,), D, (1,)))
         V0 = Pm === nothing ? fr.Z[j] : to_concrete!(contract(fr.Z[j], (3,), Pm, (1,)))
-        f = _frame_onto_right(Fm[j], B, V0)
-        lch = left_channels(lstack, j)
-        skl, skr, leak[j], k2 = _bond_action(f, mpo, j, lch, rch, nothing, V0, :right, fold, rng)
+        if pre === nothing
+            B = D === nothing ? Fm[j + 1] : to_concrete!(contract(Fm[j + 1], (3,), D, (1,)))
+            f = _frame_onto_right(Fm[j], B, V0)
+            lch = left_channels(lstack, j)
+            skl, skr, leak[j], k2 = _bond_action(f, mpo, j, lch, rch, nothing, V0, :right, fold,
+                                                 rng)
+            nsample > 0 && (sleak[j] = _sampled_leak(f, skl, skr, :right, nsample, rng))
+        else
+            B, leak[j], k2, sleak[j] = pre[j]
+        end
         nh2 += k2
-        nsample > 0 && (sleak[j] = _sampled_leak(f, skl, skr, :right, nsample, rng))
         bl = AdaptiveLedger()
         quiet = indicator(alloc, leak[j]) <= alloc.per_bond
         Zj = if enrich && !quiet
@@ -495,7 +570,7 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
         _tag_last!(lg, (leak = indicator(alloc, leak[j]), skipped = quiet || !enrich,
                         added = nadd, new_sectors = nsec, width_before = leg_dim(V0, 1)))
         enrich && (Pm = to_concrete!(contract(V0, (2, 3), Zn[j]', (2, 3))))  # (old_j, new_j)
-        D = to_concrete!(contract(B, (2, 3), Zn[j]', (2, 3)))
+        pre === nothing && (D = to_concrete!(contract(B, (2, 3), Zn[j]', (2, 3))))
         rchs[j] = rch
         j == c && (renv = rch)
         enrich && j > c && (rch = push_right_channels(rch, mpo, Zn[j], j + 1))
@@ -547,7 +622,8 @@ function _frontier_sweep!(fr::KLFrames, psi::SymMPS, mpo, F::KrylovFrontier, tau
     amp = nF / max(nrm, eps())
     rngR = parallel ? MersenneTwister(rand(rng, UInt64)) : rng
     kw(r) = (enrich = enrich, gen = gen, workcap = workcap, amp = amp, rng = r,
-             nsample = nsample, fold = fold)
+             nsample = nsample, fold = fold,
+             bonds = !enrich && _BOND_TASKS[] && _frontier_parallel(parallel))
     rl, rr = if parallel
         tR = Threads.@spawn _frontier_right(FmR, mpo, fr, tau, alloc, ckw; kw(rngR)...)
         l = _frontier_left(Fm, mpo, fr, tau, alloc, ckw; kw(rng)...)
