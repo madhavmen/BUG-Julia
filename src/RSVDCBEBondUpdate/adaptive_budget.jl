@@ -436,6 +436,14 @@ const LEGACY_DEFAULTS = (dex = 0, dover = nothing, comp_ratio = 1.0, growth = 2.
                          krylov_tol = 1e-6, grow_iters = nothing, krylov_grow = false,
                          maxiter = 30, tol = 1e-15, root_conv_tol = 0.0, root_substeps = 1)
 
+"""
+The adaptive search's STARTING width schedule (`budget = ceil(growth*dmax) - r`, probe `1.2x` that).
+USER 2026-10-16: 1.2, not the legacy 2.0 -- at 2.0 the first probe is ~1.2chi columns against a
+local space of 2chi, so the RSVD starts as wide as the space it sketches. Only a start: Test B
+widens a side that fails (`_certified_range(...; thin = true)`). The legacy path keeps 2.0.
+"""
+const ADAPTIVE_GROWTH = 1.2
+
 "Default tolerances of the normal API. Plan §1; starting settings, not certified bounds."
 const TOL_DEFAULTS = (basis = 1e-5, trunc = 1e-7, expv = 1e-10)
 

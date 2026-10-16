@@ -171,6 +171,8 @@ function dmrg_cbe1s_sweep!(psi::SymMPS, mpo::MPO;
                            maxiter::Int = 30,
                            restol::Float64 = 1e-6,
                            seed_expanded::Bool = false,
+                           # Adaptive search width from Test B (`_certified_range`); `false` = old.
+                           thin_search::Bool = true,
                            rng::AbstractRNG = MersenneTwister(0x5EED))
     L = length(psi)
     length(mpo) == L || throw(DimensionMismatch(
@@ -209,7 +211,9 @@ function dmrg_cbe1s_sweep!(psi::SymMPS, mpo::MPO;
 
     # `rmax` read ONCE, before anything widens, so an (optional) global rank bound is a
     # statement about the state rather than about whichever bond is being looked at.
-    exkw = (dex = legacy_or_default(dex, :dex), growth = legacy_or_default(growth, :growth),
+    exkw = (dex = legacy_or_default(dex, :dex),
+            growth = adaptive ? ADAPTIVE_GROWTH : legacy_or_default(growth, :growth),
+            thin_search = thin_search,
             dover = dover, comp_ratio = legacy_or_default(comp_ratio, :comp_ratio),
             sulz_cap = sulz_cap, rmax = rmax, preselect_only = preselect_only, exact = exact,
             rng = rng,

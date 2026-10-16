@@ -794,7 +794,19 @@ function _certified_range(draw, wleg::Int, select, qleg::Int, project, sketch, s
                           ledger::Union{Nothing, AdaptiveLedger};
                           # A SEPARATE DISTRIBUTION ONLY IN TESTS: UT06 cripples the sketch to
                           # miss a sector, and the audit must not share the crippling.
-                          holdout = w -> draw(w, nothing))
+                          holdout = w -> draw(w, nothing),
+                          # ⛔ THIN SEARCH: TEST B, NOT THE NUMERICAL RANK, DECIDES THE WIDTH. The
+                          # adaptive path runs the preselection at `stol_pre = 0`, so
+                          # `_range_find`'s "the SVD cut something" stop fires only at numerical
+                          # rank -- and `P_perp (H Theta)` is numerically full rank up to the local
+                          # room (~chi), so every bond doubled its probe to ~chi columns before
+                          # Test B was asked anything. The sketch was then as wide as the space it
+                          # sketches, `tol_basis` bought no speed, and the RSVD could not beat
+                          # exact CBE at any chi. `thin = true` draws ONE pass at each width and
+                          # widens only when the holdout fails (targeted sectors doubled, else the
+                          # base width), so the width -- the cost -- follows `tol_basis`.
+                          # `thin = false` is the old full-rank widening, kept as the A/B.
+                          thin::Bool = false)
     alloc === nothing &&
         return _range_find(w -> draw(w, nothing), wleg, select, qleg, w0, wcap, ncap)
 
@@ -810,8 +822,11 @@ function _certified_range(draw, wleg::Int, select, qleg::Int, project, sketch, s
         return Om
     end
     width_of() = last[] === nothing ? 0 : leg_dim(last[], wleg)
+    # One pass at width `w` (its own cap is `w`), or the full widening.
+    search(w) = thin ? _range_find(drawn, wleg, select, qleg, w, min(w, wcap), ncap) :
+                       _range_find(drawn, wleg, select, qleg, w, wcap, ncap)
 
-    Q, err, n = _range_find(drawn, wleg, select, qleg, w0, wcap, ncap)
+    Q, err, n = search(w0)
     prev = -1
     while true
         width = width_of()
@@ -838,7 +853,8 @@ function _certified_range(draw, wleg::Int, select, qleg::Int, project, sketch, s
         nt = _target_sectors!(boost, per, last[], wleg, alloc)
         ledger === nothing || (ledger.n_targeted += nt)
         prev = width
-        Q, err, n = _range_find(drawn, wleg, select, qleg, lastw[], wcap, ncap)
+        # Thin: the targeted sectors were doubled; if the holdout named none, double the base.
+        Q, err, n = search(thin && nt == 0 ? min(2 * lastw[], wcap) : lastw[])
     end
 end
 
@@ -982,6 +998,9 @@ function cbe_expand(f::BondFrame, skl, skr;
                     alloc::Union{Nothing, BasisAllocation} = nothing,
                     ledger::Union{Nothing, AdaptiveLedger} = nothing,
                     workcap::Int = 0,
+                    # Adaptive path only (`alloc !== nothing`): Test B sets the sketch width --
+                    # see `_certified_range(...; thin)`. `false` is the old full-rank widening.
+                    thin_search::Bool = true,
                     rng::AbstractRNG = MersenneTwister(0x5EED))
     U0, V0 = f.U0, f.V0
     r = f.old_rank
@@ -1173,7 +1192,7 @@ function cbe_expand(f::BondFrame, skl, skr;
         _certified_range((w, b) -> probe(V0, :right, w, b), 1,
                          Y -> _preselect_left(U0, skl(Y), stol_pre), 3,
                          X -> perp_component(U0, X), skl, :left,
-                         npre, wcap_l, cap_l, alloc_b, ledger)
+                         npre, wcap_l, cap_l, alloc_b, ledger; thin = thin_search)
     else
         (nothing, 0.0, 0)
     end
@@ -1182,7 +1201,7 @@ function cbe_expand(f::BondFrame, skl, skr;
         _certified_range((w, b) -> probe(U0, :left, w, b), 3,
                          Y -> _preselect_right(V0, skr(Y), stol_pre), 1,
                          X -> perp_component_right(V0, X), skr, :right,
-                         npre, wcap_r, cap_r, alloc_b, ledger)
+                         npre, wcap_r, cap_r, alloc_b, ledger; thin = thin_search)
     else
         (nothing, 0.0, 0)
     end

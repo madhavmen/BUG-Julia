@@ -682,6 +682,9 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # `dex = 0` the width comes from `growth = 2.0` and is ~chi/2, far past the
                        # crossover. MPO path only.
                        fold_omega::Bool = false,
+                       # Adaptive path: Test B, not the numerical rank, sets the sketch width
+                       # (`_certified_range`). `false` is the old full-rank widening, an A/B.
+                       thin_search::Bool = true,
                        rng::AbstractRNG = MersenneTwister(0x5EED))
     L = length(psi)
     length(mpo) == L || throw(DimensionMismatch(
@@ -719,7 +722,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         "closure_probe = $closure_probe needs the adaptive solver and a non-negative count"))
 
     dex          = legacy_or_default(dex, :dex)
-    growth       = legacy_or_default(growth, :growth)
+    growth       = adaptive ? ADAPTIVE_GROWTH : legacy_or_default(growth, :growth)
     comp_ratio   = legacy_or_default(comp_ratio, :comp_ratio)
     krylov_basis = legacy_or_default(krylov_basis, :krylov_basis)
     krylov_tol   = legacy_or_default(krylov_tol, :krylov_tol)
@@ -819,7 +822,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             sulz_cap = sulz_cap, rmax = maximum(bond_dims(psi); init = 0),
             preselect_only = preselect_only, exact = exact,
             stol_pre = stol_pre, stol_fnl = stol_fnl, share_ht = share_ht,
-            fold_omega = fold_omega,
+            fold_omega = fold_omega, thin_search = thin_search,
             # `nothing` on the legacy path keeps `cbe_expand`'s fixed-count selection exactly
             # as it was; an allocation switches on the residual tests.
             alloc = adaptive ? alloc : nothing,
