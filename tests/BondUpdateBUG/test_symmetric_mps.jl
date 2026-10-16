@@ -1,4 +1,5 @@
 using Test, LinearAlgebra, LurCGT, Telum
+import BUGJulia
 using BUGJulia.BondUpdateBUG
 
 @testset "SymMPS" begin
@@ -165,5 +166,33 @@ using BUGJulia.BondUpdateBUG
         phi2 = deepcopy(psi); apply_sz!(phi2, 2); apply_sz!(phi2, 2)
         @test isapprox(norm(phi2), 0.25; atol = 1e-12)
         @test isapprox(abs(overlap(psi, phi2)), 0.25; atol = 1e-12)
+    end
+
+    # `sz_overlaps` is the correlator row <Om|S^z_x|phi> for every x in one transfer pass. Checked
+    # site by site against the slow route (L states S^z_x|bra>, one `overlap` each) on ENTANGLED
+    # states of different bond dimension: product states would not exercise the environments.
+    @testset "sz_overlaps = <bra|S^z_x|ket> for every x" begin
+        set_symmetry!(:U1)
+        RC = BUGJulia.RSVDCBEBondUpdate
+        L = 8
+        mpo = RC.xxz_mpo(L; J = 1.0, delta = 1.0)
+        bra = neel_state(L)
+        for _ in 1:6
+            RC.tdvp2_step!(bra, mpo, ComplexF64(-0.1); maxdim = 12, trunc_thresh = 1e-12)
+        end
+        ket = deepcopy(bra)
+        apply_sz!(ket, 3)
+        for _ in 1:4
+            RC.tdvp2_step!(ket, mpo, ComplexF64(-0.2im); maxdim = 16, trunc_thresh = 1e-12)
+        end
+        @test maximum(bond_dims(bra)) > 2 && bond_dims(bra) != bond_dims(ket)   # non-vacuous
+        G = sz_overlaps(bra, ket)
+        slow = [overlap(apply_sz!(deepcopy(bra), x), ket) for x in 1:L]
+        @test maximum(abs, G .- slow) <= 1e-12 * maximum(abs, slow)
+        @test maximum(abs, slow) > 1e-3                                        # non-vacuous
+        # sum_x S^z_x = S^z_tot: on the S^z = 0 bra the row sums to zero
+        @test abs(sum(G)) <= 1e-12 * maximum(abs, slow)
+        # a ket in another total-charge sector gives exact zeros
+        @test all(iszero, sz_overlaps(bra, product_state([fill(:up, 5); fill(:down, 3)])))
     end
 end
