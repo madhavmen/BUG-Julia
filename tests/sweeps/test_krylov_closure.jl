@@ -406,6 +406,24 @@ end
     res = RC._closure_loop!(j -> nothing, (F, j, pass) -> (added = 1, leak = 1.0, met = true),
                             3; maxpass = 4)
     @test res.exhausted && !res.converged && res.passes == 4
+    # ...and the working-rank limit (plan step 3): a pass that grows but hits the ceiling with a
+    # share unmet stops at once, not converged and not exhausted
+    res = RC._closure_loop!(j -> nothing,
+                            (F, j, pass) -> (added = 1, leak = 1.0, met = false, capped = true),
+                            3; maxpass = 4)
+    @test res.capped && !res.converged && !res.exhausted && res.passes == 1
+    # control: the same sweep without the ceiling runs to the pass bound
+    res = RC._closure_loop!(j -> nothing,
+                            (F, j, pass) -> (added = 1, leak = 1.0, met = false, capped = false),
+                            3; maxpass = 4)
+    @test !res.capped && res.exhausted && res.passes == 4
+    # a capped sweep that meets its share is not stopped early
+    res = RC._closure_loop!(j -> nothing, (F, j, pass) -> (added = pass == 1 ? 1 : 0, leak = 0.0,
+                                                           met = true, capped = true),
+                            3; maxpass = 4)
+    @test res.converged && !res.capped && res.passes == 2
+    # the step reports the stop: UT7's undersized step stopped at the ceiling, not at the bound
+    @test lg.n_passes < RC._closure_maxpass(4)
 end
 
 @testset "UT8: one root_out compression, tol_trunc, cumulative vs worst" begin

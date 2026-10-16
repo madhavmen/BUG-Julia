@@ -426,7 +426,7 @@ function _frontier_sweep!(fr::KLFrames, psi::SymMPS, mpo, F::KrylovFrontier, tau
                                norm = nF / max(nrm, eps()), leak = 0.0, added = 0,
                                zero = true, t = 0.0))
         return (added = 0, leak = 0.0, leak_left = 0.0, leak_right = 0.0, met = true,
-                ledger = lg, leaks_left = zero_leaks[1], leaks_right = zero_leaks[2],
+                capped = false, ledger = lg, leaks_left = zero_leaks[1], leaks_right = zero_leaks[2],
                 sleaks_left = zero_leaks[1], sleaks_right = zero_leaks[2])
     end
     Fm = _frontier_mps(psi, fr, F.core)
@@ -476,9 +476,11 @@ function _frontier_sweep!(fr::KLFrames, psi::SymMPS, mpo, F::KrylovFrontier, tau
            width_before = wbefore, width_after = _frame_width(fr, L),
            n_h2 = lg.n_h2_leak, n_h1 = lg.n_h1_closure, n_probes = lg.n_probes,
            n_selected = lg.n_selected, n_krylov = lg.n_krylov, zero = false,
-           t = (time_ns() - t0) / 1e9))
+           capped = enrich && lg.workcap_reached, t = (time_ns() - t0) / 1e9))
+    # `capped`: an enrichment of this sweep stopped at the work ceiling (`_closure_loop!`).
     return (added = added, leak = leak, leak_left = indicator(alloc, lL),
-            leak_right = indicator(alloc, lR), met = met, ledger = lg,
+            leak_right = indicator(alloc, lR), met = met,
+            capped = enrich && lg.workcap_reached, ledger = lg,
             leaks_left = rl.leak, leaks_right = rr.leak,
             sleaks_left = rl.sleak, sleaks_right = rr.sleak)
 end
@@ -575,6 +577,14 @@ nothing was added and every sweep met its share: every frontier was then built f
 `B` and tested against the final frames. A pass that adds nothing but fails a share stops too
 (not converged), so every non-final pass grows the space by at least one direction: termination
 is guaranteed by the work ceiling, and `maxpass` is a safety bound whose hit is reported.
+
+THE WORKING-RANK LIMIT ENDS THE LOOP TOO (plan step 3: "until every ... estimate fits the
+internally allocated `tol_basis` budget OR A DERIVED WORKING-RANK LIMIT IS REACHED"). A pass in
+which some enriching sweep hit the work ceiling (`r.capped`) and a share was still unmet stops
+the loop, not converged (`capped = true`): the bonds that leak cannot widen, so another pass
+re-measures the same leak (10x4 D=256/512 order 2 and 4, jobs 17284922/17285201: every pass
+after the first added nothing and left the leak unchanged). The final `j = 0` measurement still
+runs; the `j >= 1` leaks are the last measured, before that pass's enrichment.
 """
 function _closure_loop!(frontier, sweep!, order::Int; maxpass::Int,
                         include_zero::Bool = true)
@@ -582,21 +592,27 @@ function _closure_loop!(frontier, sweep!, order::Int; maxpass::Int,
     log = Any[]
     later = 1:(order - 1)
     initial = include_zero ? (0:(order - 1)) : later
-    isempty(initial) && return (passes = 0, converged = true, exhausted = false, log = log)
+    isempty(initial) &&
+        return (passes = 0, converged = true, exhausted = false, capped = false, log = log)
     ok0 = true
     for pass in 1:maxpass
-        grew, allmet = false, true
+        grew, allmet, capped = false, true, false
         for j in (pass == 1 ? initial : later)
             r = sweep!(frontier(j), j, pass)
             push!(log, (pass = pass, frontier = j, added = r.added, leak = r.leak, met = r.met))
             grew |= r.added > 0
             allmet &= r.met
+            capped |= get(r, :capped, false)
             j == 0 && (ok0 = r.met)
         end
         (!grew || isempty(later)) &&
-            return (passes = pass, converged = allmet && ok0, exhausted = false, log = log)
+            return (passes = pass, converged = allmet && ok0, exhausted = false,
+                    capped = false, log = log)
+        capped && !allmet &&
+            return (passes = pass, converged = false, exhausted = false, capped = true,
+                    log = log)
     end
-    return (passes = maxpass, converged = false, exhausted = true, log = log)
+    return (passes = maxpass, converged = false, exhausted = true, capped = false, log = log)
 end
 
 """
@@ -614,7 +630,8 @@ new frames, and once the loop stops `j = 0` is MEASURED (not enriched) on the fi
 `ledger.defect = sum_j leak[j]/(j+1)` the integrated-defect estimate (a bound for a
 nearest-neighbour `H` and exact per-bond measurements; with RSVD selections the leftovers they
 measure are those of sampled directions). Not converging -- pass bound or work ceiling -- is
-`:closure`, never a silent pass. Returns the final `S0`, the loop's verdict and its counters.
+`:closure`, never a silent pass; `capped` says the loop stopped at the working-rank limit
+([`_closure_loop!`](@ref)). Returns the final `S0`, the loop's verdict and its counters.
 """
 function _krylov_closure!(fr::KLFrames, psi::SymMPS, mpo, S0, tau::ComplexF64,
                           alloc::BasisAllocation, ckw::NamedTuple; order::Int,
@@ -636,7 +653,7 @@ function _krylov_closure!(fr::KLFrames, psi::SymMPS, mpo, S0, tau::ComplexF64,
     S = Ref{Any}(S0)
     final_leak = Dict{Int, Float64}(j - 1 => pre.leak[j] for j in 1:order)
     res = if pre.met && (pre.met0 || !include_zero)
-        (passes = 0, converged = true, exhausted = false, log = Any[])
+        (passes = 0, converged = true, exhausted = false, capped = false, log = Any[])
     else
         H0 = Ref{Any}(_root_generator(mpo, fr))
         applyB = x -> (nroot[] += 1; apply_zero_site(H0[], x))
@@ -668,6 +685,7 @@ function _krylov_closure!(fr::KLFrames, psi::SymMPS, mpo, S0, tau::ComplexF64,
     lg.t_closure = (time_ns() - t0) / 1e9
     ledger === nothing || merge_ledger!(ledger, lg)
     return (S0 = S[], passes = res.passes, converged = res.converged,
-            exhausted = res.exhausted, log = res.log, ledger = lg, n_root = nroot[],
+            exhausted = res.exhausted, capped = res.capped, log = res.log, ledger = lg,
+            n_root = nroot[],
             n_h1 = lg.n_h1_closure)
 end
