@@ -50,6 +50,10 @@ The K/L frames of one step and the root environments they imply: `W[1..c]` left 
 `Z[c..L-1]` right frames (`Z[j]` absorbs site `j+1`), `lenv` the environment at link `c` through
 `W[1..c-1]`, `renv` the one at link `c+2` through `Z[c+1..L-1]`. `gen` counts the enrichments,
 so a [`KrylovFrontier`](@ref) built in older frames is refused rather than silently misread.
+
+`lcache` / `rcache` hold the environments every frontier sweep of ONE generation shares
+([`_side_cache!`](@ref)); each half-sweep writes only its own, so the parallel halves never
+write the same field.
 """
 mutable struct KLFrames
     W::Vector{Any}
@@ -58,6 +62,64 @@ mutable struct KLFrames
     lenv::Any
     renv::Any
     gen::Int
+    lcache::Any
+    rcache::Any
+end
+
+KLFrames(W, Z, c, lenv, renv, gen) = KLFrames(W, Z, c, lenv, renv, gen, nothing, nothing)
+
+"""
+    _side_cache!(fr, Fm, mpo, side) -> (chain, stack)
+
+The environments of one half-sweep that do not depend on the frontier, built once per frame
+generation. ⛔ EVERY FRONTIER OF A GENERATION IS `(W ⊗ Z) core` WITH ONLY THE CORE DIFFERENT, so
+re-gauging `Fm` to site 1 (left half) changes sites `1..c` only: the right stack on links
+`c+1..L+1` and the frame chain `<W[1..i-1]| H |W[1..i-1]>` (the non-enriching sweep's `lch`)
+are the same for every frontier. Rebuilding them per sweep was ~1/3 of a measuring sweep
+(bug4 10x4 D=256 profile, job 17283685). `chain[i]` is the left channels at bond `i` (`i = 1..c`),
+`stack` the right-stack entries on links `>= c+1`; the right half mirrors both (`chain[j]` the
+right channels at bond `j = c..L-1`, `stack` the left-stack entries on links `<= c`).
+"""
+function _side_cache!(fr::KLFrames, Fm::SymMPS, mpo, side::Symbol)
+    L, c = length(Fm), fr.c
+    cur = side === :left ? fr.lcache : fr.rcache
+    valid = cur !== nothing && cur.gen == fr.gen
+    chain = valid ? cur.chain : nothing          # an enriching sweep seeds the chain only
+    E = valid ? cur.stack : nothing
+    (chain !== nothing && E !== nothing) && return (chain, E)
+    if chain === nothing
+        chain = Vector{Any}(undef, L - 1)
+        ch = boundary_channels(mpo)
+        if side === :left
+            for i in 1:c
+                chain[i] = ch
+                i < c && (ch = push_left_channels(ch, mpo, fr.W[i], i))
+            end
+        else
+            for j in (L - 1):-1:c
+                chain[j] = ch
+                j > c && (ch = push_right_channels(ch, mpo, fr.Z[j], j + 1))
+            end
+        end
+    end
+    E = Any[missing for _ in 1:(L + 1)]
+    env = nothing
+    if side === :left
+        E[L + 1] = nothing
+        for k in L:-1:(c + 1)
+            env = _mpo_right_step(env, Fm[k], mpo[k])
+            E[k] = env
+        end
+        fr.lcache = (gen = fr.gen, chain = chain, stack = E)
+    else
+        E[1] = nothing
+        for i in 1:(c - 1)
+            env = _mpo_left_step(env, Fm[i], mpo[i])
+            E[i + 1] = env
+        end
+        fr.rcache = (gen = fr.gen, chain = chain, stack = E)
+    end
+    return (chain, E)
 end
 
 """
@@ -281,16 +343,29 @@ overlap, not an assumption), the exact outside-space action of the frontier's tw
 measured, and -- if it exceeds the bond's share and `enrich` -- `cbe_expand` and `_krylov_enrich`
 append validated directions to `U0`, which is kept verbatim. Returns the new frames (re-tagged to
 generation `gen`), the root environment, the bond ledger and the per-bond misses.
+
+A MEASURING sweep (`enrich = false`) grows nothing, so it runs in the frames themselves: `U0 =
+fr.W[i]` with no overlap `Pm` (identity there) and the generation's cached frame chain for `lch`
+([`_side_cache!`](@ref)). `chain` returns the `lch` an enriching sweep built from the new frames,
+which is the next generation's chain.
 """
 function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
                         alloc::BasisAllocation, ckw::NamedTuple; enrich::Bool, gen::Int,
                         workcap::Int, amp::Float64, rng::AbstractRNG, nsample::Int = 0,
                         fold::Bool = false)
-    c = fr.c
+    c, L = fr.c, length(Fm)
     canonical!(Fm, 1)
-    rstack = right_env_stack(Fm, mpo; downto = 3)
+    chain, zst = _side_cache!(fr, Fm, mpo, :left)
+    E = copy(zst)                                # links >= c+1: shared by every frontier
+    env = E[c + 1]
+    for k in c:-1:3                              # links 3..c: this frontier's own gauge
+        env = _mpo_right_step(env, Fm[k], mpo[k])
+        E[k] = env
+    end
+    rstack = MPORightEnvStack(E)
     lch = boundary_channels(mpo)
     lenv = lch
+    lchs = Vector{Any}(undef, L - 1)
     C, Pm = nothing, nothing
     Wn = Vector{Any}(undef, c)
     lg = AdaptiveLedger()
@@ -298,6 +373,7 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
     added, newsec, nskip, nh2 = 0, 0, 0, 0
     nh1 = Ref(0)
     for i in 1:c
+        enrich || (lch = chain[i])
         K = C === nothing ? Fm[i] : to_concrete!(contract(C, (2,), Fm[i], (1,)))
         U0 = Pm === nothing ? fr.W[i] : to_concrete!(contract(Pm, (2,), fr.W[i], (1,)))
         f = _frame_onto_left(U0, K, Fm[i + 1])
@@ -320,7 +396,7 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
             nskip += 1
             U0
         end
-        Wn[i] = to_concrete(setitag(Wi, 3, _tagWg(i, gen)))
+        Wn[i] = enrich ? to_concrete(setitag(Wi, 3, _tagWg(i, gen))) : U0
         nadd = leg_dim(Wn[i], 3) - leg_dim(U0, 3)
         nsec = _new_sectors(U0, Wn[i], 3)
         added += nadd
@@ -328,13 +404,14 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
         _log_bond!(lg, bl, i, :left, leg_dim(Wn[i], 3))
         _tag_last!(lg, (leak = indicator(alloc, leak[i]), skipped = quiet || !enrich,
                         added = nadd, new_sectors = nsec, width_before = leg_dim(U0, 3)))
-        Pm = to_concrete!(contract(Wn[i]', (1, 2), U0, (1, 2)))          # (new_i, old_i)
+        enrich && (Pm = to_concrete!(contract(Wn[i]', (1, 2), U0, (1, 2))))  # (new_i, old_i)
         C = to_concrete!(contract(Wn[i]', (1, 2), K, (1, 2)))
+        lchs[i] = lch
         i == c && (lenv = lch)
-        i < c && (lch = push_left_channels(lch, mpo, Wn[i], i))
+        enrich && i < c && (lch = push_left_channels(lch, mpo, Wn[i], i))
     end
-    return (frames = Wn, env = lenv, ledger = lg, leak = leak, sleak = sleak, added = added,
-            new_sectors = newsec, skipped = nskip, n_h2 = nh2, n_h1 = nh1[])
+    return (frames = Wn, env = lenv, chain = lchs, ledger = lg, leak = leak, sleak = sleak,
+            added = added, new_sectors = newsec, skipped = nskip, n_h2 = nh2, n_h1 = nh1[])
 end
 
 "Row mirror of [`_frontier_left`](@ref): grows `fr.Z[L-1..c]`."
@@ -344,9 +421,17 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
                          fold::Bool = false)
     c, L = fr.c, length(Fm)
     canonical!(Fm, L)
-    lstack = left_env_stack(Fm, mpo; upto = L - 2)
+    chain, wst = _side_cache!(fr, Fm, mpo, :right)
+    E = copy(wst)                                # links <= c: shared by every frontier
+    env = E[c]
+    for i in c:(L - 2)                           # links c+1..L-1: this frontier's own gauge
+        env = _mpo_left_step(env, Fm[i], mpo[i])
+        E[i + 1] = env
+    end
+    lstack = MPOLeftEnvStack(E)
     rch = boundary_channels(mpo)
     renv = rch
+    rchs = Vector{Any}(undef, L - 1)
     D, Pm = nothing, nothing
     Zn = Vector{Any}(undef, L - 1)
     lg = AdaptiveLedger()
@@ -354,6 +439,7 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
     added, newsec, nskip, nh2 = 0, 0, 0, 0
     nh1 = Ref(0)
     for j in (L - 1):-1:c
+        enrich || (rch = chain[j])
         B = D === nothing ? Fm[j + 1] : to_concrete!(contract(Fm[j + 1], (3,), D, (1,)))
         V0 = Pm === nothing ? fr.Z[j] : to_concrete!(contract(fr.Z[j], (3,), Pm, (1,)))
         f = _frame_onto_right(Fm[j], B, V0)
@@ -376,7 +462,7 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
             nskip += 1
             V0
         end
-        Zn[j] = to_concrete(setitag(Zj, 1, _tagZg(j, gen)))
+        Zn[j] = enrich ? to_concrete(setitag(Zj, 1, _tagZg(j, gen))) : V0
         nadd = leg_dim(Zn[j], 1) - leg_dim(V0, 1)
         nsec = _new_sectors(V0, Zn[j], 1)
         added += nadd
@@ -384,12 +470,14 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
         _log_bond!(lg, bl, j, :right, leg_dim(Zn[j], 1))
         _tag_last!(lg, (leak = indicator(alloc, leak[j]), skipped = quiet || !enrich,
                         added = nadd, new_sectors = nsec, width_before = leg_dim(V0, 1)))
-        Pm = to_concrete!(contract(V0, (2, 3), Zn[j]', (2, 3)))          # (old_j, new_j)
+        enrich && (Pm = to_concrete!(contract(V0, (2, 3), Zn[j]', (2, 3))))  # (old_j, new_j)
         D = to_concrete!(contract(B, (2, 3), Zn[j]', (2, 3)))
+        rchs[j] = rch
         j == c && (renv = rch)
-        j > c && (rch = push_right_channels(rch, mpo, Zn[j], j + 1))
+        enrich && j > c && (rch = push_right_channels(rch, mpo, Zn[j], j + 1))
     end
-    return (frames = Zn, env = renv, ledger = lg, leak = leak, sleak = sleak, added = added,
+    return (frames = Zn, env = renv, chain = rchs, ledger = lg, leak = leak, sleak = sleak,
+            added = added,
             new_sectors = newsec, skipped = nskip, n_h2 = nh2, n_h1 = nh1[])
 end
 
@@ -463,6 +551,9 @@ function _frontier_sweep!(fr::KLFrames, psi::SymMPS, mpo, F::KrylovFrontier, tau
             fr.Z[j] = rr.frames[j]
         end
         fr.lenv, fr.renv, fr.gen = rl.env, rr.env, gen
+        # the channels this sweep carried through the new frames ARE the new generation's chain
+        fr.lcache = (gen = gen, chain = rl.chain, stack = nothing)
+        fr.rcache = (gen = gen, chain = rr.chain, stack = nothing)
     end
     lg.n_closure_sweeps = 1
     lg.n_h2_leak = rl.n_h2 + rr.n_h2

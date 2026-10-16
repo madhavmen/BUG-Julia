@@ -191,6 +191,14 @@ end
                 @test exact <= est.bound * (1 + 1e-8)
             end
             @info "UT2 c=$c core $k: exact $(exact), left $(est.left), right $(est.right)"
+            # cores 2, 3 ran on the generation's cached environments (`_side_cache!`): the
+            # same per-bond misses as frames built afresh, and the cache is this generation's
+            @test fr.lcache.gen == fr.gen && fr.rcache.gen == fr.gen
+            fresh = RC.estimate_global_complement_action(psi, mpo,
+                                                         RC.frames_from_state(psi, mpo, c), core)
+            sc = max(est.left, est.right)
+            @test all(abs.(est.per_left .- fresh.per_left) .<= 1e-10 * sc)
+            @test all(abs.(est.per_right .- fresh.per_right) .<= 1e-10 * sc)
         end
     end
 
