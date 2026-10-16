@@ -69,6 +69,8 @@ include(joinpath(@__DIR__, "..", "common", "free_fermion.jl"))
     include("test_adaptive_search.jl")
     include("test_pair_mpo.jl")
     include("test_tfim_mpo.jl")
+    # the environment kernels every sweep below calls, bit-identical without their copies
+    include("test_env_inplace.jl")
     include("test_sweeps.jl")
     # 3b the sweep itself, pinned against EXACT references on three
     #    models at L=12. `test_sweeps.jl` only checks it reproduces `cbe_lubich_sweep`, which is

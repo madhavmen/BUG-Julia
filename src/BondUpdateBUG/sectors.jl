@@ -277,6 +277,9 @@ combined rank. Contracting over legs 1 and 2 never touches either bond leg.
 function perp_component(U0, K1)
     ov = contract(U0', (1, 2), K1, (1, 2))     # (U0 bond, K1 bond)
     proj = contract(U0, (3,), ov, (1,))        # (link, site, K1 bond)
+    # The copying form, not `to_concrete!`: a Telum sum reuses `K1`'s block for any sector
+    # `proj` lacks, and the in-place cleanup would rescale it. The result is then a fresh tensor
+    # the caller owns -- wrapping it in another `to_concrete` only copies it again.
     return to_concrete(K1 - proj)
 end
 

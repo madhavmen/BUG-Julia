@@ -405,7 +405,7 @@ function sector_graded_sketch(frame, side::Symbol, npre::Int;
     # Complement half: random, then the frame projected OUT.
     RC = _trim_per_sector(_randomize_like(F, rng), 3, cc)
     if RC !== nothing
-        C = to_concrete(perp_of(frame, tolayout(RC)))
+        C = perp_of(frame, tolayout(RC))
         norm(C) > 0 && push!(blocks, C)
     end
 
@@ -415,7 +415,7 @@ function sector_graded_sketch(frame, side::Symbol, npre::Int;
     RT = _trim_per_sector(_randomize_like(F, rng), 3, ct)
     if RT !== nothing
         R = tolayout(RT)
-        T = to_concrete(R - to_concrete(perp_of(frame, R)))
+        T = to_concrete(R - perp_of(frame, R))
         norm(T) > 0 && push!(blocks, T)
     end
 
@@ -497,13 +497,13 @@ value: the new directions are O(tau)-small in absolute terms, and thresholding r
 their own scale is what keeps a meaningful tolerance (the trap recorded in `augment.jl`).
 """
 function _preselect_left(U0, Y, stol::Float64)
-    R = to_concrete(perp_component(U0, Y))
+    R = perp_component(U0, Y)
     n = norm(R)
     n <= _CBE_EPS * max(norm(Y), 1.0) && return (nothing, 0.0)
     res = svd(to_concrete((1.0 / n) * R), (1, 2), _TAG_L, _TAG_LR;
               cutoff = _rank_cut(stol, Y, n), get_lists = true)
     Q = to_concrete(res.U)
-    R2 = to_concrete(perp_component(U0, Q))            # RepairOrtho
+    R2 = perp_component(U0, Q)            # RepairOrtho
     norm(R2) <= _CBE_EPS * norm(Q) && return (nothing, 0.0)
     Q = to_concrete(svd(R2, (1, 2), _TAG_L, _TAG_LR; cutoff = 1e-13).U)
     return (Q, _trunc_weight(res))
@@ -516,13 +516,13 @@ Row mirror: `Y` and `Q` carry `(bond, site_r, link_r)`, the frame leg is 1 and t
 orthonormalisation is over `(site_r, link_r)`.
 """
 function _preselect_right(V0, Y, stol::Float64)
-    R = to_concrete(perp_component_right(V0, Y))
+    R = perp_component_right(V0, Y)
     n = norm(R)
     n <= _CBE_EPS * max(norm(Y), 1.0) && return (nothing, 0.0)
     res = svd(to_concrete((1.0 / n) * R), (2, 3), _TAG_R, _TAG_RR;
               cutoff = _rank_cut(stol, Y, n), get_lists = true)
     Q = to_concrete(permutedims(res.U, (3, 1, 2)))
-    R2 = to_concrete(perp_component_right(V0, Q))      # RepairOrtho
+    R2 = perp_component_right(V0, Q)      # RepairOrtho
     norm(R2) <= _CBE_EPS * norm(Q) && return (nothing, 0.0)
     Q = to_concrete(permutedims(svd(R2, (2, 3), _TAG_R, _TAG_RR; cutoff = 1e-13).U,
                                 (3, 1, 2)))

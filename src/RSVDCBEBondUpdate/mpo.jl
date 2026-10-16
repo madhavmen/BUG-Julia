@@ -494,14 +494,17 @@ function _mpo_left_step(E, A, W)
         # Boundary: `link_l` is the dim-1 vacuum, contracted bra-to-ket, and `W`'s `w_l`
         # is the dim-1 leg left by trimming, dropped rather than contracted.
         T = contract(W, (2,), A, (2,))                  # (w_l, s_bra, w_r, ℓ_l, ℓ_r)
-        T = contract(to_concrete(T), (2, 4), _bra_left_boundary(A), (2, 1))
-        T = to_concrete(deleteSingleton(to_concrete(T), 1))   # (w_r, ℓ_r, ℓ_r')
+        T = contract(to_concrete!(T), (2, 4), _bra_left_boundary(A), (2, 1))
+        T = to_concrete(deleteSingleton(to_concrete!(T), 1))   # (w_r, ℓ_r, ℓ_r')
         return to_concrete(permutedims(T, (3, 1, 2)))
     end
+    # `to_concrete!` on each fresh `contract` result: the copying form deep-copied the
+    # chi^2*w*d intermediates nobody else holds, on the most-called kernel of every sweep.
+    # The outer `to_concrete` stays -- `permutedims`/`deleteSingleton` return views.
     T = contract(E, (3,), A, (1,))                       # (bra, w, s, ℓ_r)
-    T = contract(to_concrete(T), (2, 3), W, (1, 2))      # (bra, ℓ_r, s_bra, w_r)
-    T = contract(to_concrete(T), (1, 3), _bra_interior(A), (1, 2))  # (ℓ_r, w_r, ℓ_r')
-    return to_concrete(permutedims(to_concrete(T), (3, 2, 1)))
+    T = contract(to_concrete!(T), (2, 3), W, (1, 2))      # (bra, ℓ_r, s_bra, w_r)
+    T = contract(to_concrete!(T), (1, 3), _bra_interior(A), (1, 2))  # (ℓ_r, w_r, ℓ_r')
+    return to_concrete(permutedims(to_concrete!(T), (3, 2, 1)))
 end
 
 """
@@ -516,14 +519,14 @@ object read the other way, which is the second reason this file exists.
 function _mpo_right_step(E, A, W)
     if E === nothing
         T = contract(W, (2,), A, (2,))                   # (w_l, s_bra, w_r, ℓ_l, ℓ_r)
-        T = contract(to_concrete(T), (2, 5), _bra_right_boundary(A), (2, 3))
-        T = to_concrete(deleteSingleton(to_concrete(T), 2))   # (w_l, ℓ_l, ℓ_l')
+        T = contract(to_concrete!(T), (2, 5), _bra_right_boundary(A), (2, 3))
+        T = to_concrete(deleteSingleton(to_concrete!(T), 2))   # (w_l, ℓ_l, ℓ_l')
         return to_concrete(permutedims(T, (3, 1, 2)))
     end
     T = contract(A, (3,), E, (3,))                       # (ℓ_l, s, bra, w)
-    T = contract(to_concrete(T), (2, 4), W, (2, 4))      # (ℓ_l, bra, w_l, s_bra)
-    T = contract(to_concrete(T), (2, 4), _bra_interior(A), (3, 2))  # (ℓ_l, w_l, ℓ_l')
-    return to_concrete(permutedims(to_concrete(T), (3, 2, 1)))
+    T = contract(to_concrete!(T), (2, 4), W, (2, 4))      # (ℓ_l, bra, w_l, s_bra)
+    T = contract(to_concrete!(T), (2, 4), _bra_interior(A), (3, 2))  # (ℓ_l, w_l, ℓ_l')
+    return to_concrete(permutedims(to_concrete!(T), (3, 2, 1)))
 end
 
 "Carry the left environment on link `i` through site `i` onto link `i+1`. `open_next` is
@@ -610,8 +613,8 @@ assertion that the trimming really did leave a singleton there.
 """
 function _mpo_left_close(E, A, W)
     T = contract(E, (3,), A, (1,))                       # (bra, w, s, ℓ_r)
-    T = contract(to_concrete(T), (2, 3), W, (1, 2))       # (bra, ℓ_r, s_bra, w_r)
-    T = to_concrete(deleteSingleton(to_concrete(T), 4))   # (bra, ℓ_r, s_bra)
+    T = contract(to_concrete!(T), (2, 3), W, (1, 2))       # (bra, ℓ_r, s_bra, w_r)
+    T = to_concrete(deleteSingleton(to_concrete!(T), 4))   # (bra, ℓ_r, s_bra)
     s = contract(T, (1, 3, 2), _bra_right_boundary(A), (1, 2, 3))
     return ComplexF64(to_concrete(s)[])
 end
@@ -658,18 +661,18 @@ function _mpo2_left_step(E, A, W)
     Wa = _mpo_outer(W)
     if E === nothing
         T = contract(W, (2,), A, (2,))                    # (wb_l, s1, wb_r, ℓ_l, ℓ_r)
-        T = contract(to_concrete(T), (2,), Wa, (2,))      # (wb_l, wb_r, ℓ_l, ℓ_r, wa_l, s2, wa_r)
-        T = contract(to_concrete(T), (6, 3), _bra_left_boundary(A), (2, 1))
+        T = contract(to_concrete!(T), (2,), Wa, (2,))      # (wb_l, wb_r, ℓ_l, ℓ_r, wa_l, s2, wa_r)
+        T = contract(to_concrete!(T), (6, 3), _bra_left_boundary(A), (2, 1))
         #                                                   (wb_l, wb_r, ℓ_r, wa_l, wa_r, ℓ_r')
-        T = to_concrete(deleteSingleton(to_concrete(T), 1))   # (wb_r, ℓ_r, wa_l, wa_r, ℓ_r')
+        T = to_concrete(deleteSingleton(to_concrete!(T), 1))   # (wb_r, ℓ_r, wa_l, wa_r, ℓ_r')
         T = to_concrete(deleteSingleton(T, 3))                # (wb_r, ℓ_r, wa_r, ℓ_r')
         return to_concrete(permutedims(T, (4, 3, 1, 2)))
     end
     T = contract(E, (4,), A, (1,))                        # (bra, wa, wb, s, ℓ_r)
-    T = contract(to_concrete(T), (3, 4), W, (1, 2))       # (bra, wa, ℓ_r, s1, wb_r)
-    T = contract(to_concrete(T), (2, 4), Wa, (1, 2))      # (bra, ℓ_r, wb_r, s2, wa_r)
-    T = contract(to_concrete(T), (1, 4), _bra_interior(A), (1, 2))  # (ℓ_r, wb_r, wa_r, ℓ_r')
-    return to_concrete(permutedims(to_concrete(T), (4, 3, 2, 1)))
+    T = contract(to_concrete!(T), (3, 4), W, (1, 2))       # (bra, wa, ℓ_r, s1, wb_r)
+    T = contract(to_concrete!(T), (2, 4), Wa, (1, 2))      # (bra, ℓ_r, wb_r, s2, wa_r)
+    T = contract(to_concrete!(T), (1, 4), _bra_interior(A), (1, 2))  # (ℓ_r, wb_r, wa_r, ℓ_r')
+    return to_concrete(permutedims(to_concrete!(T), (4, 3, 2, 1)))
 end
 
 """
@@ -693,10 +696,10 @@ function mpo_variance(psi::SymMPS, mpo::MPO)
     end
     A, W = psi[L], mpo[L]
     T = contract(E, (4,), A, (1,))                        # (bra, wa, wb, s, ℓ_r)
-    T = contract(to_concrete(T), (3, 4), W, (1, 2))       # (bra, wa, ℓ_r, s1, wb_r)
-    T = to_concrete(deleteSingleton(to_concrete(T), 5))   # (bra, wa, ℓ_r, s1)
+    T = contract(to_concrete!(T), (3, 4), W, (1, 2))       # (bra, wa, ℓ_r, s1, wb_r)
+    T = to_concrete(deleteSingleton(to_concrete!(T), 5))   # (bra, wa, ℓ_r, s1)
     T = contract(T, (2, 4), _mpo_outer(W), (1, 2))        # (bra, ℓ_r, s2, wa_r)
-    T = to_concrete(deleteSingleton(to_concrete(T), 4))   # (bra, ℓ_r, s2)
+    T = to_concrete(deleteSingleton(to_concrete!(T), 4))   # (bra, ℓ_r, s2)
     h2 = real(ComplexF64(to_concrete(contract(T, (1, 3, 2), _bra_right_boundary(A),
                                               (1, 2, 3)))[]))
     n2 = norm(psi)^2
@@ -875,7 +878,7 @@ function _fold_sketch_closures(f::BondFrame, mpo::MPO, i::Int,
             to_concrete(permutedims(X, (2, 3, 1)))           # (g, s_bra_r, ℓ_r)
         else
             X = to_concrete!(contract(E, (1, 4), renv.E, (3, 2)))  # (g, s_bra_r, bra_r)
-            _unprime(to_concrete(X), 3)
+            _unprime(X, 3)
         end
         return _project_right(f, Y)
     end
