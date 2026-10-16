@@ -68,6 +68,7 @@ include(joinpath(@__DIR__, "..", "common", "free_fermion.jl"))
     include("test_adaptive_parallel.jl")
     include("test_adaptive_search.jl")
     include("test_tdvp2_order.jl")
+    include("test_tdvp2_truncation.jl")
     include("test_pair_mpo.jl")
     include("test_tfim_mpo.jl")
     # the environment kernels every sweep below calls, bit-identical without their copies

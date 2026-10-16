@@ -76,6 +76,10 @@ the same size on both sides: this sweep applies a TWO-site `H_eff` plus a one-si
 update per bond, while `cbe_bug_step!` applies `L` one-site operators and one zero-site operator.
 So a ratio of these counts understates the two-site sweep's per-application cost, and the wall
 clock is the honest arbiter -- the count is here to say WHERE the time goes.
+
+`cumulative` is the step's relative discarded norm, accounted as `truncate_recursive!` accounts
+the BUG's final compression: quadrature within each half-sweep (every cut is a Schmidt cut at the
+orthogonality centre), the two half-sweeps added (triangle). The quantity `weight_tol` bounds.
 """
 struct TDVP2Info
     max_bond::Int
@@ -83,7 +87,10 @@ struct TDVP2Info
     discarded::Float64
     peak_elements::Int
     krylov_dims::Int
+    cumulative::Float64
 end
+
+TDVP2Info(m, t, d, p, k) = TDVP2Info(m, t, d, p, k, NaN)
 
 "Total stored elements of a TLArray -- the honest size of the object, block-sparse."
 tensor_elements(t) = sum(length(r) for r in t.RMTs; init = 0)
@@ -98,7 +105,9 @@ through the freshly written tensor, which is the O(1) alternative to rebuilding 
 function _tdvp2_bond!(psi::SymMPS, h::Union{XXZChain, MPO}, i::Int, tau::ComplexF64,
                       dir::Symbol, lch, rch;
                       maxdim, trunc_thresh, maxiter, tol, acc, hermitian = true,
-                      conv_tol::Float64 = 0.0, substeps::Int = 1)
+                      conv_tol::Float64 = 0.0, substeps::Int = 1,
+                      weight_tol::Union{Nothing, Float64} = nothing, wdiv::Float64 = 1.0,
+                      sweep::Int = 1)
     Theta = to_concrete(psi[i] * psi[i + 1])        # rank 4 -- the object being compared
     acc[2] = max(acc[2], tensor_elements(Theta))
     acc[4] = max(acc[4], _state_stored(psi) + tensor_elements(Theta))
@@ -108,9 +117,16 @@ function _tdvp2_bond!(psi::SymMPS, h::Union{XXZChain, MPO}, i::Int, tau::Complex
                  hermitian = hermitian, maxiter = maxiter, tol = tol,
                  conv_tol = conv_tol, substeps = substeps)
 
-    res = svd(Theta, (1, 2); cutoff = max(trunc_thresh, 1e-14), Nkeep = maxdim,
-              get_lists = true)
+    # Two rank rules, as in `truncate_recursive!`: Telum's relative singular-value `cutoff`
+    # (legacy), or with `weight_tol` the BUG's own budgeted cut (`_budget_svd`): the smallest
+    # rank whose discarded Schmidt norm fits the fixed share `weight_tol ||Theta|| / wdiv`.
+    res = weight_tol === nothing ?
+          svd(Theta, (1, 2); cutoff = max(trunc_thresh, 1e-14), Nkeep = maxdim,
+              get_lists = true) :
+          first(_budget_svd(Theta, (1, 2), maxdim, n2 -> weight_tol * sqrt(n2) / wdiv))
     acc[3] = max(acc[3], _trunc_weight(res))
+    acc[4 + sweep] += _sq_weight(res.trunc_list)
+    acc[7] = max(acc[7], _sq_weight(res.kept_list) + _sq_weight(res.trunc_list))
     tag = psi[i].inds[3].itags
 
     if dir === :right
@@ -183,12 +199,26 @@ function tdvp2_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::ComplexF64;
                      # them, because handing one arm a better exponential than the other would
                      # make the comparison meaningless.
                      conv_tol::Float64 = 0.0,
-                     substeps::Int = 1)
+                     substeps::Int = 1,
+                     # THE BUG'S DISCARD RULE (USER 2026-10-16: "discard the singular values the
+                     # same for both"). `nothing` keeps the legacy relative `trunc_thresh`. A
+                     # Float64 is `tol_trunc`'s budget on the step's relative discarded norm,
+                     # cut by `_budget_svd` exactly as the BUG's final compression
+                     # (`truncate_recursive!`) cuts: each of the 2(L-1) cuts gets the fixed
+                     # share `weight_tol ||Theta|| / (2 sqrt(L-1))` -- quadrature over a
+                     # half-sweep's L-1 Schmidt cuts, the two half-sweeps added -- so
+                     # `info.cumulative <= weight_tol` unless `maxdim` binds. `trunc_thresh` is
+                     # then unused.
+                     weight_tol::Union{Nothing, Float64} = nothing)
     L = length(psi)
     L >= 2 || throw(ArgumentError("tdvp2_step! needs at least two sites"))
     length(h) == L || throw(DimensionMismatch(
         "chain has $(length(h)) sites, state has $L"))
-    acc = Any[0, 0, 0.0, 0]
+    weight_tol === nothing || weight_tol >= 0 ||
+        throw(ArgumentError("weight_tol must be non-negative, got $weight_tol"))
+    # [applications, Theta elements, worst bond weight, peak, sum w forward, sum w backward, ||psi||^2]
+    acc = Any[0, 0, 0.0, 0, 0.0, 0.0, 0.0]
+    wkw = (weight_tol = weight_tol, wdiv = 2 * sqrt(L - 1))
     half = tau / 2
 
     # O(L) environments, as in `cbe_lubich_sweep`: each half-sweep carries its own side
@@ -202,7 +232,7 @@ function tdvp2_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::ComplexF64;
         lch = _tdvp2_bond!(psi, h, i, half, :right,
                            lch, right_channels(rstack, i + 2);
                            maxdim, trunc_thresh, maxiter, tol, acc, hermitian = hermitian,
-                           conv_tol = conv_tol, substeps = substeps)
+                           conv_tol = conv_tol, substeps = substeps, wkw..., sweep = 1)
     end
 
     lstack = left_env_stack(psi, h; upto = L - 2)
@@ -212,10 +242,11 @@ function tdvp2_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::ComplexF64;
         rch = _tdvp2_bond!(psi, h, i, half, :left,
                            left_channels(lstack, i), rch;
                            maxdim, trunc_thresh, maxiter, tol, acc, hermitian = hermitian,
-                           conv_tol = conv_tol, substeps = substeps)
+                           conv_tol = conv_tol, substeps = substeps, wkw..., sweep = 2)
     end
 
-    return TDVP2Info(maximum(bond_dims(psi); init = 0), acc[2], acc[3], acc[4], acc[1])
+    cum = acc[7] > 0 ? (sqrt(acc[5]) + sqrt(acc[6])) / sqrt(acc[7]) : 0.0
+    return TDVP2Info(maximum(bond_dims(psi); init = 0), acc[2], acc[3], acc[4], acc[1], cum)
 end
 
 # ⛔ `h` MUST be the same `Union` as the method above. When the main method was widened from
@@ -253,7 +284,8 @@ const _TDVP2_COMPOSITIONS = Dict(
 One 2-site TDVP step of order `order` (2 or 4) in the time step, in place: `order = 2` is
 [`tdvp2_step!`](@ref); `order = 4` composes it over the stages of `composition` (`:yoshida`, 3
 stages; `:suzuki`, 5 stages). `kwargs` go to every stage. The returned info has the largest bond,
-Theta and peak over the stages, the worst discarded weight and the summed operator applications.
+Theta and peak over the stages, the worst discarded weight, the summed operator applications and
+the summed per-stage `cumulative` discarded norms.
 """
 function tdvp2_composed_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::Number;
                               order::Int = 4, composition::Symbol = :suzuki, kwargs...)
@@ -265,5 +297,5 @@ function tdvp2_composed_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::Number;
              for g in _TDVP2_COMPOSITIONS[composition]]
     return TDVP2Info(maximum(i.max_bond for i in infos), maximum(i.theta_elements for i in infos),
                      maximum(i.discarded for i in infos), maximum(i.peak_elements for i in infos),
-                     sum(i.krylov_dims for i in infos))
+                     sum(i.krylov_dims for i in infos), sum(i.cumulative for i in infos))
 end

@@ -35,7 +35,9 @@
 #       BP_PROFV ("wide:1e-4:0,thin:1e-4:1")  the variants that also get a sampled profile
 #       BP_TT/BP_TE (1e-6/1e-6: medium-to-tight, USER 2026-10-16 -- tol_trunc 1e-4 let the
 #             per-step compression losses accumulate, TASK4_VALIDATION_RESULTS.md)
-#       BP_TDVP_TT (= BP_TT) the TDVP arms' truncation cutoff (was a fixed 1e-12)
+#       BP_TDVP_TRUNC (budget) the TDVP arms' discard rule: budget = the BUG's `tol_trunc` rule
+#             (`tdvp2_step!(...; weight_tol = BP_TT)`); cutoff = per-bond relative singular-value
+#             cutoff BP_TDVP_TT (= BP_TT; was a fixed 1e-12)
 #       BP_BOND_TASKS (1) 0 measures the closure's bonds in order (A/B of parallel plan (b));
 #       `julia --heap-size-hint` (parallel plan (d)) is read back from the runtime and printed
 #       BP_OBS (0) 1 writes the correlator G(x,t) per arm and D after every step, untimed
@@ -77,6 +79,8 @@ const PROFV = parse_variant.(split(get(ENV, "BP_PROFV", "wide:1e-4:0,thin:1e-4:1
 const TT    = parse(Float64, get(ENV, "BP_TT", "1e-6"))
 const TE    = parse(Float64, get(ENV, "BP_TE", "1e-6"))
 const TDVP_TT = parse(Float64, get(ENV, "BP_TDVP_TT", string(TT)))
+const TDVP_TRUNC = get(ENV, "BP_TDVP_TRUNC", "budget")
+TDVP_TRUNC in ("budget", "cutoff") || error("BP_TDVP_TRUNC must be budget or cutoff, got $TDVP_TRUNC")
 const GS_TB = parse(Float64, get(ENV, "BP_GS_TB", "1e-4"))
 const GS_TT = parse(Float64, get(ENV, "BP_GS_TT", "1e-6"))
 const CLOSURE_LOG = get(ENV, "BP_CLOSURE_LOG", "0") == "1"
@@ -126,10 +130,14 @@ function stepper(arm, W, D; parallel::Bool, v = VARIANTS[1])
     # tdvp2/tdvp4: a FIXED 8-vector Lanczos per local exponential (the campaign's old setting).
     # tdvp2e/tdvp4e: the same step stopped at `tol_expv` by Saad's estimate with adaptive
     # substeps -- the rule the BUG root solve uses, so both arms get one exponential accuracy.
-    # Both truncate at BP_TDVP_TT (default BP_TT): the medium-tight tolerance the BUG arms get
-    # (USER 2026-10-16), here a per-bond singular-value cutoff relative to the largest.
-    tkw = (maxdim = D, trunc_thresh = TDVP_TT, maxiter = 8)
-    tkwe = (maxdim = D, trunc_thresh = TDVP_TT, maxiter = 30, conv_tol = TE, substeps = 0)
+    # Discard rule (USER 2026-10-16: "discard the singular values the same for both"): by
+    # default the TDVP arms cut by the BUG's own budget, `weight_tol = BP_TT` -- the step's
+    # relative discarded norm, `_budget_svd` at every cut. BP_TDVP_TRUNC=cutoff keeps the old
+    # per-bond relative singular-value cutoff BP_TDVP_TT, which at the same number discarded
+    # far more (D=1024 sat at chi 790 where the BUG kept 1024, job 17287152).
+    trunc = TDVP_TRUNC == "budget" ? (weight_tol = TT,) : (trunc_thresh = TDVP_TT,)
+    tkw = (maxdim = D, maxiter = 8, trunc...)
+    tkwe = (maxdim = D, maxiter = 30, conv_tol = TE, substeps = 0, trunc...)
     arm == "tdvp2"  && return (p, tau) -> tdvp2_step!(p, W, tau; tkw...)
     arm == "tdvp2e" && return (p, tau) -> tdvp2_step!(p, W, tau; tkwe...)
     arm == "tdvp4"  && return (p, tau) -> tdvp2_composed_step!(p, W, tau; order = 4, tkw...)
@@ -315,8 +323,9 @@ function main()
                  string(BOND_TASKS), heap_hint()))
     say(@sprintf("package load %.1f s (once per process, shared by every arm; each arm's JIT is its timed warm-up step)",
                  T_LOAD))
-    say(@sprintf("evolution %s  tol_trunc %.0e  tol_expv %.0e  TDVP trunc %.0e  dt %.3f  bug4 dt %.3f  GS tol (%.0e, %.0e)",
-                 join(label.("bug", VARIANTS), " "), TT, TE, TDVP_TT, DT, DT4, GS_TB, GS_TT))
+    say(@sprintf("evolution %s  tol_trunc %.0e  tol_expv %.0e  TDVP discard %s %.0e  dt %.3f  bug4 dt %.3f  GS tol (%.0e, %.0e)",
+                 join(label.("bug", VARIANTS), " "), TT, TE, TDVP_TRUNC,
+                 TDVP_TRUNC == "budget" ? TT : TDVP_TT, DT, DT4, GS_TB, GS_TT))
 
     gs = Dict{Int, Any}()
     prev = nothing
@@ -327,7 +336,7 @@ function main()
 
     io = open(joinpath(OUT, "bp_cost_$(LX)x$(LY).csv"), "w")
     println(io, "D,arm,search,tol_basis,fold,dt,step,wall,chi,krylov_dims," * join(string.(PHASES), ",") *
-                ",t_closure,t_step,unmet,gc_s,alloc_gib,gc_pauses,gc_full")
+                ",t_closure,t_step,unmet,gc_s,alloc_gib,gc_pauses,gc_full,discarded")
     for D in DS
         phi = deepcopy(gs[D])
         apply_sz!(phi, c)
@@ -358,7 +367,7 @@ function main()
             isnan(twarm) || println(io, join([D, arm, v === nothing ? "" : (v.thin ? "thin" : "wide"),
                                               v === nothing ? NaN : v.tb, v === nothing ? false : v.fold,
                                               armdt(arm), 0, @sprintf("%.3f", twarm),
-                                              fill("", 16)...], ","))
+                                              fill("", 17)...], ","))
             p = deepcopy(phi)
             n = istdvp(arm) ? NTDVP : NSTEP
             walls = Float64[]
@@ -378,16 +387,21 @@ function main()
                      fill(NaN, length(PHASES))
                 ts = hasproperty(info, :t_step) ? info.t_step : NaN
                 um = unmet_reasons(info)
+                # the step's relative discarded norm -- the quantity tol_trunc / weight_tol bounds
+                disc = hasproperty(info, :cumulative) ? info.cumulative :
+                       (hasproperty(info, :ledger) && info.ledger isa AdaptiveLedger) ?
+                       info.ledger.discarded : NaN
                 println(io, join([D, arm, v === nothing ? "" : (v.thin ? "thin" : "wide"),
                                   v === nothing ? NaN : v.tb, v === nothing ? false : v.fold,
                                   armdt(arm), k, @sprintf("%.3f", tw), chi, kd,
                                   (@sprintf("%.3f", x) for x in ph)...,
                                   @sprintf("%.3f", closure_time(info)), @sprintf("%.3f", ts),
                                   um, @sprintf("%.3f", gd.total_time / 1e9),
-                                  @sprintf("%.3f", gd.allocd / 2^30), gd.pause, gd.full_sweep], ","))
+                                  @sprintf("%.3f", gd.allocd / 2^30), gd.pause, gd.full_sweep,
+                                  @sprintf("%.3e", disc)], ","))
                 flush(io)
-                @printf("  %-12s D=%4d step %d  %8.1f s  chi %4d  matvec %6d  gc %6.1f s (%4.1f%%) alloc %7.1f GiB pauses %d full %d  %s\n",
-                        lab, D, k, tw, chi, kd, gd.total_time / 1e9, 100 * gd.total_time / 1e9 / tw,
+                @printf("  %-12s D=%4d step %d  %8.1f s  chi %4d  discarded %.2e  matvec %6d  gc %6.1f s (%4.1f%%) alloc %7.1f GiB pauses %d full %d  %s\n",
+                        lab, D, k, tw, chi, disc, kd, gd.total_time / 1e9, 100 * gd.total_time / 1e9 / tw,
                         gd.allocd / 2^30, gd.pause, gd.full_sweep, isempty(um) ? "" : "unmet " * um)
                 pl = phase_line(info)
                 isempty(pl) || println("         CPU phases: ", pl)
