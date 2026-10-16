@@ -388,18 +388,18 @@ end
     mp = RC._measure_frontiers(frp, psi, mpo, S0, tau, alloc, ckw, 3; parallel = true)
     @test isapprox(ms.leak, mp.leak; rtol = 1e-10) && ms.met == mp.met
     @test all(>(0), ms.leak)                                  # non-vacuous
-    # the measuring sweeps' bonds as concurrent tasks (`_BOND_TASKS`, on by default) vs in order
-    mo = try
-        RC._BOND_TASKS[] = false
-        RC._measure_frontiers(RC.frames_from_state(psi, mpo, c), psi, mpo, S0, tau, alloc, ckw,
-                              3; parallel = true)
-    finally
+    # the measuring sweeps' bonds as concurrent tasks (`_BOND_TASKS`, off by default) vs in order
+    mo, mf = try
         RC._BOND_TASKS[] = true
+        (RC._measure_frontiers(RC.frames_from_state(psi, mpo, c), psi, mpo, S0, tau, alloc, ckw,
+                               3; parallel = true),
+         # folded probes draw one RNG per bond under the tasks: an estimate, finite and nonzero
+         RC._measure_frontiers(RC.frames_from_state(psi, mpo, c), psi, mpo, S0, tau, alloc, ckw,
+                               3; parallel = true, fold = true))
+    finally
+        RC._BOND_TASKS[] = false
     end
     @test isapprox(mo.leak, mp.leak; rtol = 1e-10) && mo.met == mp.met
-    # folded probes draw one RNG per bond under the tasks: an estimate, finite and nonzero
-    mf = RC._measure_frontiers(RC.frames_from_state(psi, mpo, c), psi, mpo, S0, tau, alloc, ckw,
-                               3; parallel = true, fold = true)
     @test all(isfinite, mf.leak) && all(>(0), mf.leak)
     cls = RC._krylov_closure!(frs, psi, mpo, S0, tau, alloc, ckw; order = 3, workcap = 64,
                               nrm = 1.0, parallel = false)

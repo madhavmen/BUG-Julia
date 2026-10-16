@@ -81,9 +81,9 @@ _frontier_parallel(parallel::Bool) = parallel && Threads.nthreads() >= _FRONTIER
 Whether a measuring sweep runs its bonds as concurrent tasks ([`_bond_measurements`](@ref)) when
 [`_frontier_parallel`](@ref) holds. A switch, not a tolerance: it changes no result at
 `fold = false` and exists so a timing job can A/B it in one build (`bug_profile_2d.jl`,
-`BP_BOND_TASKS`).
+`BP_BOND_TASKS`). Off by default: at 4 threads, D = 512 it gained nothing (job 17287169).
 """
-const _BOND_TASKS = Ref(true)
+const _BOND_TASKS = Ref(false)
 
 """
     _prime_caches!(fr, psi, mpo, core)

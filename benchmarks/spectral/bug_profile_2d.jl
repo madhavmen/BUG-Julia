@@ -38,7 +38,7 @@
 #       BP_TDVP_TRUNC (budget) the TDVP arms' discard rule: budget = the BUG's `tol_trunc` rule
 #             (`tdvp2_step!(...; weight_tol = BP_TT)`); cutoff = per-bond relative singular-value
 #             cutoff BP_TDVP_TT (= BP_TT; was a fixed 1e-12)
-#       BP_BOND_TASKS (1) 0 measures the closure's bonds in order (A/B of parallel plan (b));
+#       BP_BOND_TASKS (0) 1 measures the closure's bonds as concurrent tasks (A/B of parallel plan (b));
 #       `julia --heap-size-hint` (parallel plan (d)) is read back from the runtime and printed
 #       BP_OBS (0) 1 writes the correlator G(x,t) per arm and D after every step, untimed
 #             (`gwriter`); graded against a reference by `benchmarks/spectral/matched_error.py`
@@ -92,9 +92,9 @@ const OBS = get(ENV, "BP_OBS", "0") == "1"
 const BLAS_TDVP = parse(Int, get(ENV, "BP_BLAS_TDVP", string(Threads.nthreads())))
 const BLAS_BUG  = parse(Int, get(ENV, "BP_BLAS_BUG", string(max(1, Threads.nthreads() ÷ 2))))
 const PARALLEL = Threads.nthreads() >= 2
-# Measuring sweeps' bonds as concurrent tasks (from 4 threads; parallel plan (b)). 0 = in order,
-# for the A/B; it changes timing only.
-const BOND_TASKS = get(ENV, "BP_BOND_TASKS", "1") == "1"
+# Measuring sweeps' bonds as concurrent tasks (from 4 threads; parallel plan (b)). 1 = tasks, for
+# the A/B; it changes timing only.
+const BOND_TASKS = get(ENV, "BP_BOND_TASKS", "0") == "1"
 BUGJulia.RSVDCBEBondUpdate._BOND_TASKS[] = BOND_TASKS
 MODE in ("gs", "profile") || error("BP_MODE must be gs or profile, got $MODE")
 
