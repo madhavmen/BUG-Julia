@@ -115,6 +115,26 @@ speed knob, `tol_expv = 1e-2` suffices at `dt = 0.05` (use `1e-4` near 1e-5 on i
 models), and the ordinary/midpoint choice sets the floor; re-checked on isotropic Heisenberg and
 at `dt = 0.1`. Plan conformance: [ADAPTIVE_PLAN_AUDIT.md](ADAPTIVE_PLAN_AUDIT.md).
 
+**Search width and large χ.** The RSVD probe starts at `ADAPTIVE_GROWTH = 1.2` times the bond's
+budget and is widened only where Test B's holdout finds range missing (`thin_search = true`, the
+default; `false` keeps the old doubling, which ran every bond up to its numerical rank before
+Test B was asked). At large χ `tol_basis` is the speed knob: on the 10x4 Heisenberg cylinder at
+χ = 256 (`benchmarks/spectral/bug_profile_2d.jl`, `tol_trunc = tol_expv = 1e-6`), `tol_basis`
+1e-4 → 1e-3 cut the first-order step from 31 to 20 s at an infidelity of 5e-6 after t = 0.3.
+Timing against TDVP is only quoted between arms of the same order at the same dt (bug2/bugmid
+vs `tdvp2_step!`, bug4 vs `tdvp2_composed_step!(...; order = 4)`) or at matched physical error.
+`tdvp2_composed_step!(psi, h, tau; order = 4, composition = :suzuki)` composes the symmetric
+`tdvp2_step!` (Suzuki 5 stages or Yoshida 3) and is of order 4 *in the step* only where the step
+error dominates: on an L = 24 XXZ quench with the rank set by `trunc_thresh = 1e-10`
+(`benchmarks/tdvp2_order_probe.jl`, `tests/sweeps/test_tdvp2_order.jl`), max|ΔS^z| falls with
+slope 2.1 (order 2) and 5.6 (Suzuki order 4) from dt 0.2 to 0.1, while Yoshida needs a finer dt
+(2.8, then 4.8). At a binding cap the truncation sets the error and composing buys nothing (L = 8
+cap 6: order-4 errors no smaller than order 2; 6x4 D=512: `tdvp2_step!` slopes 0.95–0.99).
+`fold_omega = true` folds the probe into the environment contractions instead of forming
+`H Theta` (with `order > 1` the closure's leak estimate then uses the folded sketches and a Test-B
+holdout); it pays only when the probe is much thinner than χ (3·width < χ), was slower at every
+χ ≤ 256 measured, and is off by default.
+
 **Ground states use the same engine.** `dmrg_cbe1s!(psi, mpo; tol_basis, tol_trunc, maxdim)`
 (and `rsvd_cbe_dmrg1s!`) runs the one-site CBE-DMRG with the adaptive Test A/B selection and the
 `maxdim`-derived work ceiling. With no time step, a bond's indicator is

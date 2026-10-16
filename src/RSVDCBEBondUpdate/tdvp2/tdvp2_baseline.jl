@@ -226,3 +226,44 @@ end
 # passes an `MPO` -- only the `XXZChain` + complex-`tau` combination the tests use hits it.
 tdvp2_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::Number; kwargs...) =
     tdvp2_step!(psi, h, ComplexF64(tau); kwargs...)
+
+# ── HIGHER ORDER BY COMPOSITION ──────────────────────────────────────────────────────────────
+#
+# `tdvp2_step!` is a SYMMETRIC composition (left->right at tau/2, then its adjoint right->left at
+# tau/2), so it is time-reversible and second order in the step. A symmetric second-order map
+# composes to fourth order with real coefficients (Yoshida 1990; Suzuki 1990): the stage weights
+# sum to 1 and their cubes sum to 0, which forces one BACKWARD stage. Backward stages are
+# harmless for real time (`exp(-i H t)` is unitary either way); in imaginary time they amplify,
+# so this is for real time.
+#
+# ⚠ ORDER IN THE STEP, NOT IN THE PROJECTION. Composition removes the splitting error of the
+# projected dynamics. The 2-site TDVP projection error (a fixed-rank manifold, truncation at every
+# bond) is not a time-step error and is untouched -- measured from a Neel start on 6x4 the plain
+# step is FIRST order globally (TASK4_VALIDATION_RESULTS.md, job 17282573), i.e. projection-limited,
+# and no composition can change that. The gain is where the step error dominates.
+const _TDVP2_COMPOSITIONS = Dict(
+    # Yoshida's triple jump: 3 stages, the backward one -1.70 tau.
+    :yoshida => let g = 1 / (2 - cbrt(2)); (g, 1 - 2g, g) end,
+    # Suzuki's fractal: 5 stages, the backward one only -0.66 tau, a smaller error constant.
+    :suzuki  => let p = 1 / (4 - cbrt(4)); (p, p, 1 - 4p, p, p) end)
+
+"""
+    tdvp2_composed_step!(psi, h, tau; order = 4, composition = :suzuki, kwargs...) -> TDVP2Info
+
+One 2-site TDVP step of order `order` (2 or 4) in the time step, in place: `order = 2` is
+[`tdvp2_step!`](@ref); `order = 4` composes it over the stages of `composition` (`:yoshida`, 3
+stages; `:suzuki`, 5 stages). `kwargs` go to every stage. The returned info has the largest bond,
+Theta and peak over the stages, the worst discarded weight and the summed operator applications.
+"""
+function tdvp2_composed_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::Number;
+                              order::Int = 4, composition::Symbol = :suzuki, kwargs...)
+    order == 2 && return tdvp2_step!(psi, h, ComplexF64(tau); kwargs...)
+    order == 4 || throw(ArgumentError("order must be 2 or 4, got $order"))
+    haskey(_TDVP2_COMPOSITIONS, composition) || throw(ArgumentError(
+        "composition must be one of $(collect(keys(_TDVP2_COMPOSITIONS))), got $composition"))
+    infos = [tdvp2_step!(psi, h, ComplexF64(g * tau); kwargs...)
+             for g in _TDVP2_COMPOSITIONS[composition]]
+    return TDVP2Info(maximum(i.max_bond for i in infos), maximum(i.theta_elements for i in infos),
+                     maximum(i.discarded for i in infos), maximum(i.peak_elements for i in infos),
+                     sum(i.krylov_dims for i in infos))
+end

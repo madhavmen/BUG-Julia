@@ -264,7 +264,7 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        SStepSolver, Propagate, LowestEigen,
        GroundState,
        ZeroSiteH, zero_site_h, apply_zero_site,
-       OneSiteH, one_site_h, apply_one_site, TDVP2Info, tdvp2_step!, tensor_elements,
+       OneSiteH, one_site_h, apply_one_site, TDVP2Info, tdvp2_step!, tdvp2_composed_step!, tensor_elements,
        TDVP1CBEInfo, tdvp1_cbe_step!,
        tdvp1_rsvd_cbe_step!, tdvp1_cbe_exact_step!,
        # multiplet vs state accounting -- `maxdim` is in MULTIPLETS, so cross-symmetry
