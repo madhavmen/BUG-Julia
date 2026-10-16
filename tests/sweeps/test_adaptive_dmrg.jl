@@ -136,6 +136,24 @@ include(joinpath(@__DIR__, "..", "..", "benchmarks", "exact_sparse.jl"))
                   for e in r.ledgers[end].bond_log)
     end
 
+    @testset "stopping threshold derived from the tolerances (dmrg_etol)" begin
+        @test RSVDCBEBondUpdate.dmrg_etol(1e-3, 1e-4, 20) ≈ 0.1 * 20 * (2.5e-9 + 2e-9)
+        @test RSVDCBEBondUpdate.dmrg_etol(1e-8, 1e-10, 20) == 1e-12 * 20      # round-off floor
+        # Small on purpose: the fixed-etol arm is the slow one by construction (job 17265882 took
+        # 12 min at L = 12 / 40 sweeps); L = 8 shows the same ordering in seconds.
+        L = 8
+        mpo = xxz_mpo(L; J = 1.0, delta = 1.0)
+        e_ed = eigen(Hermitian(Matrix(dense_heisenberg(L)))).values[1]
+        tb, tt = 0.1, 1e-8
+        auto = dmrg_cbe1s!(neel_state(L), mpo; n_sweeps = 20, tol_basis = tb, tol_trunc = tt,
+                           maxdim = 16)
+        fixed = dmrg_cbe1s!(neel_state(L), mpo; n_sweeps = 20, etol = 1e-10, tol_basis = tb,
+                            tol_trunc = tt, maxdim = 16)
+        @test length(auto.energies) <= length(fixed.energies)
+        # ...and still within what the tolerances allow (square law, 10x slack)
+        @test auto.energies[end] - e_ed <= 10 * L * (2.5e-3 * tb^2 + 0.2 * tt^2)
+    end
+
     @testset "legacy path unchanged; mixing refused" begin
         L = 8
         mpo = xxz_mpo(L; J = 1.0, delta = 1.0)

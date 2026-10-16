@@ -41,7 +41,8 @@ def report(path):
     if not rows:
         return ""
     model = rows[0]["model"]
-    md = [f"## {model} (maxdim {rows[0]['maxdim']})", ""]
+    mode = " -- derived stopping threshold (dmrg_etol)" if path.endswith("_autoetol.csv") else ""
+    md = [f"## {model} (maxdim {rows[0]['maxdim']}){mode}", ""]
     leg = [r for r in rows if r["study"] == "legacy"]
     for study, title in (("legacy", "Legacy fixed-knob DMRG (cost baseline)"),
                          ("basis", "tol_basis sweep (tol_trunc = 1e-8)"),
@@ -51,6 +52,23 @@ def report(path):
         sel = [r for r in rows if r["study"] == study]
         if sel:
             md += [f"### {title}", "", table(sel), ""]
+    # HOW LOOSE: per target, the loosest tol_basis (basis sweep) and tol_trunc (trunc sweep)
+    # whose run still reaches it, with the rank and cost that buys.
+    md += ["### Loosest tolerance reaching each energy target", "",
+           "| target dE/N | loosest tol_basis | dE/N | chi | wall s | loosest tol_trunc | dE/N | chi | wall s |",
+           "|---|---|---|---|---|---|---|---|---|"]
+    for t in TARGETS:
+        cells = []
+        for study, key in (("basis", "tol_basis"), ("trunc", "tol_trunc")):
+            ok = [r for r in rows if r["study"] == study and abs(fnum(r["dE_site"])) <= t]
+            if ok:
+                b = max(ok, key=lambda r: fnum(r[key]))
+                cells += [f"{fnum(b[key]):.0e}", f"{fnum(b['dE_site']):.1e}", b["chi"],
+                          f"{fnum(b['wall']):.1f}"]
+            else:
+                cells += ["none", "", "", ""]
+        md.append(f"| {t:.0e} | " + " | ".join(cells) + " |")
+    md.append("")
     # Loosest setting per target: among adaptive runs reaching |dE/N| <= target, the cheapest
     # by wall time (ties by matvec), reported with its cost relative to legacy.
     ad = [r for r in rows if r["study"] != "legacy" and r["exact"] == "false"]

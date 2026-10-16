@@ -45,6 +45,14 @@ using Preferences: @load_preference
 #                         d = 4 Hubbard -- set it for those campaigns
 #                         (`Preferences.set_preferences!(BUGJulia, "workload" => "full")`).
 #   "none"                no workload (fastest edit cycle; every process pays its own JIT).
+#
+# THE TRADE, MEASURED on one node (jobs 17208934, 17230469; x86-64-v3, 2 threads):
+#                     precompile   `using`   first adaptive BUG step   first process total
+#   "adaptive"          565 s       96 s            2 s                      107 s
+#   "none"               32 s        3 s          218 s                      385 s
+# The `using` cost IS the cached specialisations (dependencies load in ~2 s), so it cannot be
+# had without them. Break-even is ~2 processes per edit: keep "adaptive" for jobs, and run many
+# test files in ONE process; "none" only for a single quick process.
 const _WORKLOAD = @load_preference("workload", "adaptive")
 
 @setup_workload begin

@@ -80,6 +80,20 @@ energy accuracy (results: `ADAPTIVE_DMRG_TOLERANCE_RESULTS.md`).
 const DMRG_TOL_DEFAULTS = (basis = 1e-3, trunc = 1e-4)
 
 """
+    dmrg_etol(tol_basis, tol_trunc, N) -> Float64
+
+The adaptive CBE-DMRG's sweep-to-sweep stopping threshold, DERIVED from its two tolerances
+rather than set as a fourth accuracy knob. MEASURED (ADAPTIVE_DMRG_TOLERANCE_RESULTS.md, N = 20
+Heisenberg / XX chains and 5x4 square cylinder): the returned state's energy error obeys
+`dE/N <~ 2.5e-3 tol_basis^2 + 0.2 tol_trunc^2` (largest coefficients seen). The run stops once a
+sweep changes the energy by less than a tenth of that, since further sweeps cannot buy more than
+the tolerances allow. Floor `1e-12 N` (round-off). A fixed `etol = 1e-10` made loose settings
+sweep up to the 40-sweep limit (34-40 sweeps at `tol_basis = 0.1`).
+"""
+dmrg_etol(tb::Real, tt::Real, N::Int) =
+    max(0.1 * N * (2.5e-3 * tb^2 + 0.2 * tt^2), 1e-12 * N)
+
+"""
     dmrg_cbe1s_sweep!(psi, mpo; kwargs...) -> DMRGCBEInfo
 
 One full CBE-DMRG sweep (left to right, then right to left), in place.
@@ -399,7 +413,7 @@ function _spread(v::Vector{Float64})
 end
 
 """
-    dmrg_cbe1s!(psi, h; n_sweeps=20, etol=1e-10, kwargs...) -> DMRGCBERun
+    dmrg_cbe1s!(psi, h; n_sweeps=20, etol=nothing, kwargs...) -> DMRGCBERun
 
 Ground state of `h` by CBE-DMRG sweeps, in place. `h` may be an `MPO` or an `XXZChain`.
 
@@ -417,8 +431,16 @@ total spin is, so this finds the ground state OF THAT SECTOR. `dimer_state` is t
 sector, which is where the Heisenberg and Haldane-Shastry ground states live.
 """
 function dmrg_cbe1s!(psi::SymMPS, h::Union{XXZChain, MPO};
-                     n_sweeps::Int = 20, etol::Float64 = 1e-10, kwargs...)
+                     n_sweeps::Int = 20, etol::Union{Nothing, Float64} = nothing, kwargs...)
     mpo = h isa MPO ? h : mpo_from_terms(h)
+    kw = values(kwargs)
+    # The stopping threshold, decided after the first sweep says which path ran: an explicit
+    # `etol` always wins; the legacy path keeps its historical 1e-10; the adaptive path derives it
+    # from its own tolerances (`dmrg_etol`).
+    etol_of(info) = etol !== nothing ? etol :
+        info.ledger === nothing ? 1e-10 :
+        dmrg_etol(something(get(kw, :tol_basis, nothing), DMRG_TOL_DEFAULTS.basis),
+                  something(get(kw, :tol_trunc, nothing), DMRG_TOL_DEFAULTS.trunc), length(psi))
     es = Float64[]; spread = Float64[]; bds = Vector{Int}[]; maxbd = Int[]
     sbds = Vector{Int}[]; maxsbd = Int[]; secs = Float64[]
     maxexp = Int[]; epre = Float64[]; efnl = Float64[]; disc = Float64[]; kd = Int[]
@@ -440,7 +462,7 @@ function dmrg_cbe1s!(psi::SymMPS, h::Union{XXZChain, MPO};
         push!(epre, info.err_pre); push!(efnl, info.err_fnl)
         push!(disc, info.discarded); push!(kd, info.krylov_dims)
         push!(status, budget_status(info.ledger)); push!(ledgers, info.ledger)
-        if abs(info.energy - prev) < etol
+        if abs(info.energy - prev) < etol_of(info)
             converged = true
             break
         end

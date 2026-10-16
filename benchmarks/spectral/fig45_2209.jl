@@ -41,7 +41,13 @@
 # resolution along the open direction is 2*pi/Lx and only the circumference momenta are exact --
 # `geometry_report` prints which high-symmetry points survive BEFORE any run starts.
 #
-# Run:  julia -t 2 --project=. benchmarks/spectral/fig45_2209.jl <square|triangle> [Lx Ly]
+# simulation_plan_2 TASK 4 (2026-10-15): the ground state is the ADAPTIVE CBE-DMRG by default
+# (`F_GS=adaptive`, `F_GS_TB`/`F_GS_TT`, `F_GS_STARTS` starts, exact variance printed); the adaptive
+# BUG arms `bug1`, `bugmid`, `bug2`, `bug4` take only `F_TB`/`F_TT`/`F_TE` and `F_D`, with `bug4`
+# at its own larger step `F_DT4`; `kagome` (Lx, Ly in UNIT CELLS) and square `F_J2` are supported;
+# a bond-length gate ties the coupling matrix to the Fourier positions before anything runs.
+#
+# Run:  julia -t 2 --project=. benchmarks/spectral/fig45_2209.jl <square|triangle|kagome> [Lx Ly]
 # Env:  F_TMAX (40) F_DT (0.1) F_D (128) F_ARMS (tdvp2,cbe1s,bug) F_J2 (0.0) F_NPTS (12)
 #       F_BUG_M (3)  pinned Krylov depth m; F_BUG_M=0 uses the adaptive beta rule instead
 # Out:  results/fig45_G_<lat>_<Lx>x<Ly>_<arm>.csv     G(x,t), one row per (site,time)
@@ -49,6 +55,7 @@
 #       results/fig45_cost_<lat>_<Lx>x<Ly>.csv        the integrator comparison
 
 using LinearAlgebra, Printf, Serialization
+import Random
 using LurCGT, Telum
 using BUGJulia
 using BUGJulia.BondUpdateBUG
@@ -56,6 +63,8 @@ using BUGJulia.RSVDCBEBondUpdate
 
 include(joinpath(@__DIR__, "lattice2d.jl"))
 include(joinpath(@__DIR__, "bug_knobs.jl"))
+include(joinpath(@__DIR__, "..", "exact_sparse.jl"))      # pairs_sparse (S^z = 0 sector)
+include(joinpath(@__DIR__, "..", "sparse_krylov.jl"))     # sparse_ground, exact_correlator
 
 const LATNAME = length(ARGS) >= 1 ? ARGS[1] : "square"
 const LX   = length(ARGS) >= 3 ? parse(Int, ARGS[2]) : 5
@@ -69,6 +78,27 @@ const J2   = parse(Float64, get(ENV, "F_J2",   "0.0"))
 const NPTS = parse(Int,     get(ENV, "F_NPTS", "12"))
 const BUGM = parse(Int,     get(ENV, "F_BUG_M", "3"))
 const ARMS = split(get(ENV, "F_ARMS", "tdvp2,cbe1s,bug"), ',')
+# simulation_plan_2 Task 4: the ADAPTIVE solvers. The ground state comes from the adaptive
+# CBE-DMRG (same Test A/B RSVD engine as the BUG step) unless `F_GS=legacy`; the adaptive BUG
+# arms are `bug1` (ordinary), `bugmid` (midpoint), `bug2` / `bug4` (Krylov-closure order 2 / 4).
+# `bug4` runs at its OWN, larger step `F_DT4`: the point of a fourth-order step is to buy dt.
+# Tolerance defaults follow ADAPTIVE_XX_L20_RESULTS.md: tol_basis ~ target accuracy, tol_trunc
+# 10-100x looser, tol_expv 1e-4 on Heisenberg.
+const GSMODE = get(ENV, "F_GS", "adaptive")
+# Ground-state tolerances: the DMRG's own medium-loose defaults unless overridden.
+const GS_TB  = parse(Float64, get(ENV, "F_GS_TB", string(RSVDCBEBondUpdate.DMRG_TOL_DEFAULTS.basis)))
+const GS_TT  = parse(Float64, get(ENV, "F_GS_TT", string(RSVDCBEBondUpdate.DMRG_TOL_DEFAULTS.trunc)))
+const TB     = parse(Float64, get(ENV, "F_TB", "1e-5"))
+const TT     = parse(Float64, get(ENV, "F_TT", "1e-4"))
+const TE     = parse(Float64, get(ENV, "F_TE", "1e-4"))
+const DT4    = parse(Float64, get(ENV, "F_DT4", string(2 * DT)))
+const PARALLEL = get(ENV, "F_PARALLEL", Threads.nthreads() >= 2 ? "1" : "0") == "1"
+# Ground-state starts (Neel + random S^z = 0 products): more by default on the frustrated models.
+# Exact sparse reference up to this many sites (S^z = 0 sector, C(20,10) = 184756 states).
+const EXACT_N = parse(Int, get(ENV, "F_EXACT_N", "20"))
+const NSTART = parse(Int, get(ENV, "F_GS_STARTS",
+                              (J2 != 0.0 || LATNAME == "kagome") ? "3" : "1"))
+GSMODE in ("adaptive", "legacy") || error("F_GS must be adaptive or legacy, got $GSMODE")
 # `F_OUT` is a subdirectory UNDER results/, so a study's CSVs and its figures stay together
 # instead of accumulating in one flat directory where a `fig45_*` glob picks up every campaign
 # ever run. Empty default = results/ itself, so every existing invocation is unchanged.
@@ -78,7 +108,7 @@ const ARMS = split(get(ENV, "F_ARMS", "tdvp2,cbe1s,bug"), ',')
 const OUT  = normpath(joinpath(@__DIR__, "..", "results", get(ENV, "F_OUT", "")))
 
 const LAT = lattice(LATNAME)
-const N   = LX * LY
+const N   = nsites(LAT, LX, LY)          # kagome: LX, LY count unit cells
 # Eq. (12) Gaussian broadening. ⚠ THIS IS A PHYSICS KNOB, NOT COSMETIC SMOOTHING. Sec. IID makes it
 # the reliability criterion: "we choose eta as small as possible so that the spectral function is
 # positive", and the reliable window is then T_max ~ 1/eta. So when the positivity gate fails, this
@@ -99,7 +129,7 @@ same trajectory that produced the physics rather than in a separate microbenchma
 """
 function correlator(psi0::SymMPS, E0::Float64, step!, nt::Int, dt::Float64)
     L = length(psi0)
-    c = centre_site(LX, LY)
+    c = centre_site(LAT, LX, LY)
     phi = deepcopy(psi0)
     apply_sz!(phi, c)
 
@@ -111,7 +141,8 @@ function correlator(psi0::SymMPS, E0::Float64, step!, nt::Int, dt::Float64)
 
     ts = collect(0:nt) .* dt
     G  = zeros(ComplexF64, L, nt + 1)
-    cost = (mv = Ref(0), sec = Ref(0.0), chi = Ref(0))
+    cost = (mv = Ref(0), sec = Ref(0.0), chi = Ref(0), unmet = Ref(0),
+            why = Dict{Symbol, Int}(), first = Ref{Any}(nothing))
 
     row!(col) = for i in 1:L
         G[i, col] = overlap(bras[i], phi)
@@ -124,6 +155,19 @@ function correlator(psi0::SymMPS, E0::Float64, step!, nt::Int, dt::Float64)
         cost.sec[] += time() - t0
         cost.mv[]  += info === nothing ? 0 : _matvec(info)
         cost.chi[]  = max(cost.chi[], maximum(bond_dims(phi)))
+        # Adaptive arms carry their verdict; a step that could not meet its budget is counted,
+        # never silently folded into the spectrum.
+        lg = (info !== nothing && hasproperty(info, :ledger)) ? info.ledger : nothing
+        if lg isa AdaptiveLedger
+            n == 1 && (cost.first[] = (r_old = lg.r_old, r_aug = lg.r_aug, r_final = lg.r_final,
+                                       discarded = lg.discarded, unmet = copy(lg.unmet)))
+            if budget_status(lg) === :budget_unmet
+                cost.unmet[] += 1
+                for r in lg.unmet
+                    cost.why[r] = get(cost.why, r, 0) + 1
+                end
+            end
+        end
         row!(n + 1)
         # `e^{i E0 t}` removes the ground state's own phase; without it every G winds at E0 and
         # the whole spectrum is rigidly shifted.
@@ -177,7 +221,7 @@ function structure_factor_2d(G::Matrix{ComplexF64}, ts::Vector{Float64},
                              eta2::Float64, ws::Vector{Float64})
     L, nt = size(G)
     dt = length(ts) > 1 ? ts[2] - ts[1] : 1.0
-    rc = site_position(LAT, centre_site(LX, LY), LY)
+    rc = site_position(LAT, centre_site(LAT, LX, LY), LY)
     dr = [(site_position(LAT, i, LY)[1] - rc[1], site_position(LAT, i, LY)[2] - rc[2]) for i in 1:L]
     Wt = [exp(-eta2 * t^2) for t in ts]                       # Eq. (12), Gaussian
 
@@ -208,7 +252,7 @@ cannot produce (see `lattice2d.jl`).
 """
 function static_structure_factor(G::Matrix{ComplexF64}, qs::Vector{NTuple{2, Float64}})
     L = size(G, 1)
-    rc = site_position(LAT, centre_site(LX, LY), LY)
+    rc = site_position(LAT, centre_site(LAT, LX, LY), LY)
     dr = [(site_position(LAT, i, LY)[1] - rc[1], site_position(LAT, i, LY)[2] - rc[2]) for i in 1:L]
     return [real(sum(G[i, 1] * cis(-(q[1] * dr[i][1] + q[2] * dr[i][2])) for i in 1:L))
             for q in qs]
@@ -232,10 +276,12 @@ end
 # chain's Brillouin-zone path. The energy would have looked plausible and the spectrum would have
 # been of a different Hamiltonian.
 function couplings()
-    LAT.name == "square"   && return square_cylinder_couplings(LX, LY; periodic_y = true)
+    LAT.name == "square"   && return square_cylinder_couplings(LX, LY; J2 = J2,
+                                                                 periodic_y = true)
     LAT.name == "triangle" && return triangular_cylinder_couplings(LX, LY; J2 = J2,
                                                                    geometry = LAT.wrap,
                                                                    periodic_y = true)
+    LAT.name == "kagome"   && return kagome_cylinder_couplings(LX, LY; periodic_y = true)
     if LAT.name == "chain"
         LY == 1 || throw(ArgumentError("the chain is Lx=L, Ly=1; got Ly=$LY"))
         return chain_couplings_1d(LX)
@@ -249,13 +295,21 @@ function main()
     Jm = couplings()
     W  = pair_mpo(N, Jm, spin_vertices(N))
     nt = round(Int, TMAX / DT)
-    c  = centre_site(LX, LY)
+    c  = centre_site(LAT, LX, LY)
 
     @printf("\n%s\nFig.%s  %s cylinder  Lx(length)=%d Ly(circumference)=%d  N=%d  J2=%.3f\n",
             "="^100, LATNAME == "square" ? "4" : "5", LATNAME, LX, LY, N, J2)
     @printf("U(1) S^z=0; centre c=%d at r=%s; dt=%.3f Tmax=%.1f (%d steps) D=%d eta2=%.3f\n",
             c, string(round.(site_position(LAT, c, LY); digits = 3)), DT, TMAX, nt, DCAP, ETA2)
     full = geometry_report(stdout, LAT, LX, LY)
+    # ⛔ The coupling matrix and the Fourier positions must describe ONE lattice (plan U17).
+    badb = bond_length_gate(LAT, Jm, LY; J2 = J2)
+    isempty(badb) || error("bond-length gate FAILED (coupling matrix vs positions):
+  " *
+                           join(first(badb, 10), "
+  "))
+    @printf("  bond-length gate: %d bonds at their lattice lengths
+", count(!iszero, Jm))
     @printf("  MPO virtual dim max %d\n%s\n", maximum(mpo_virtual_dims(W)), "="^100)
 
     # ── ground state: rsvd 1-site CBE-DMRG ──────────────────────────────────────────────────
@@ -281,10 +335,13 @@ function main()
     # the cache safe rather than merely fast. A cache miss is silent-wrong physics if unchecked.
     # ⛔ EVERY cache path is wrapped: a truncated, corrupt or version-skewed `.jls` must fall back
     # to solving, never take the campaign down with it. `F_GS_CACHE=0` disables the whole thing.
-    gskey = (LATNAME, LX, LY, N, J2, DGS, :U1, RSVD_KNOBS.dex, RSVD_KNOBS.dover,
+    gskey = GSMODE == "adaptive" ?
+            (LATNAME, LX, LY, N, J2, DGS, :U1, :adaptive, GS_TB, GS_TT, NSTART) :
+            (LATNAME, LX, LY, N, J2, DGS, :U1, RSVD_KNOBS.dex, RSVD_KNOBS.dover,
              RSVD_KNOBS.comp_ratio, RSVD_KNOBS.growth)
     gsfile = joinpath(OUT, "gs_$(LATNAME)_$(LX)x$(LY)_" *
-                           "J2$(replace(@sprintf("%.4f", J2), "." => "p"))_Dgs$(DGS).jls")
+                           "J2$(replace(@sprintf("%.4f", J2), "." => "p"))_Dgs$(DGS)" *
+                           (GSMODE == "adaptive" ? "_adaptive" : "") * ".jls")
     usecache = get(ENV, "F_GS_CACHE", "1") == "1"
 
     psi0   = nothing
@@ -311,16 +368,51 @@ function main()
 
     tgs, nsw, conv = 0.0, 0, true
     if psi0 === nothing
-        psi0 = neel_state(N)                # half filling = the S^z = 0 sector
-        tgs = @elapsed gs = rsvd_cbe_dmrg1s!(psi0, W; n_sweeps = 60, etol = 1e-12,
-                                             maxdim = DGS, trunc_thresh = 1e-12,
-                                             maxiter = 30, restol = 1e-10,
-                                             dex = RSVD_KNOBS.dex, dover = RSVD_KNOBS.dover,
-                                             comp_ratio = RSVD_KNOBS.comp_ratio,
-                                             growth = RSVD_KNOBS.growth)
-        nsw, conv = length(gs.energies), gs.converged
+        # simulation_plan_2 Task 4: "several initial MPS guesses for strongly frustrated models
+        # and report suspected metastability". Start 1 is Neel; starts 2.. are random S^z = 0
+        # product states (fixed seeds). The lowest variational energy is kept and the spread over
+        # starts is printed -- a spread above the solver's own convergence is a metastable start.
+        best = nothing
+        estarts = Float64[]
+        for k in 1:NSTART
+            spins = k == 1 ? [isodd(j) ? :up : :down for j in 1:N] :
+                    Random.shuffle(Random.MersenneTwister(1000 + k),
+                                   [j <= N ÷ 2 ? :up : :down for j in 1:N])
+            cand = product_state(spins)                 # half filling = the S^z = 0 sector
+            tk = @elapsed gs = GSMODE == "adaptive" ?
+                rsvd_cbe_dmrg1s!(cand, W; n_sweeps = 60, etol = 1e-12, maxdim = DGS,
+                                 tol_basis = GS_TB, tol_trunc = GS_TT, maxiter = 30,
+                                 restol = 1e-10) :
+                rsvd_cbe_dmrg1s!(cand, W; n_sweeps = 60, etol = 1e-12,
+                                 maxdim = DGS, trunc_thresh = 1e-12,
+                                 maxiter = 30, restol = 1e-10,
+                                 dex = RSVD_KNOBS.dex, dover = RSVD_KNOBS.dover,
+                                 comp_ratio = RSVD_KNOBS.comp_ratio,
+                                 growth = RSVD_KNOBS.growth)
+            tgs += tk
+            ek = real(mpo_energy(copy(cand), W)) / max(norm(cand)^2, eps())
+            push!(estarts, ek)
+            @printf("  start %d (%s): E=%.12f  sweeps=%d  conv=%s  %s  %.1fs\n", k,
+                    k == 1 ? "Neel" : "random", ek, length(gs.energies), string(gs.converged),
+                    string(gs.status[end]), tk)
+            if GSMODE == "adaptive"
+                lg = gs.ledgers[end]
+                @printf("    adaptive GS (tol_basis %.0e, tol_trunc %.0e): TestB %.2e TestA %.2e  r_aug %d  discarded %.2e  %s\n",
+                        GS_TB, GS_TT, lg.max_sample, lg.max_tail, lg.r_aug, lg.discarded,
+                        budget_diagnostic(lg))
+            end
+            if best === nothing || ek < best[1]
+                best = (ek, cand, length(gs.energies), gs.converged)
+            end
+        end
+        _, psi0, nsw, conv = best
+        NSTART > 1 && @printf("  energy spread over %d starts: %.3e (metastability if >> etol)\n",
+                              NSTART, maximum(estarts) - minimum(estarts))
     end
     E0 = real(mpo_energy(copy(psi0), W)) / max(norm(psi0)^2, eps())
+    # The accuracy measure that survives past ED sizes: zero on an eigenstate (Task 4).
+    VAR0 = mpo_variance(psi0, W)
+    @printf("ground-state energy variance <H^2>-<H>^2 = %.3e  (per site %.3e)\n", VAR0, VAR0 / N)
     chi0 = maximum(state_bond_dims(psi0))
     if cached
         @printf("ground state: E0=%.10f  E0/N=%.10f  chi=%d  REUSED from %s (solve skipped)\n",
@@ -366,6 +458,17 @@ function main()
         "tdvp2" => (p, tau) -> tdvp2_step!(p, W, tau; kw...),
         "cbe1s" => (p, tau) -> tdvp_cbe1s_step!(p, W, tau; kw...),
         "bug"   => (p, tau) -> cbe_bug_step!(p, W, tau; kw..., bugkw...))
+    # The adaptive arms: three tolerances + maxdim and nothing else (plan §1).
+    # Parallel half-sweeps (also the closure's frontier sweeps): on whenever the process has the
+    # threads for it -- with one thread the two tasks only interleave and it is pure overhead.
+    akw = (tol_basis = TB, tol_trunc = TT, tol_expv = TE, maxdim = DCAP, parallel = PARALLEL)
+    steps["bug1"]   = (p, tau) -> cbe_bug_step!(p, W, tau; akw...)
+    steps["bugmid"] = (p, tau) -> cbe_bug_midpoint_step!(p, W, tau; akw...)
+    steps["bug2"]   = (p, tau) -> cbe_bug_step!(p, W, tau; order = 2, akw...)
+    steps["bug4"]   = (p, tau) -> cbe_bug_step!(p, W, tau; order = 4, akw...)
+    armdt(arm) = arm == "bug4" ? DT4 : DT
+    @printf("adaptive BUG arms: tol_basis %.0e tol_trunc %.0e tol_expv %.0e maxdim %d; bug4 dt %.3f; parallel=%s (threads %d)\n",
+            TB, TT, TE, DCAP, DT4, string(PARALLEL), Threads.nthreads())
 
     qs, labels, dists = bz_path(LAT, NPTS)
     ws = collect(range(0.0, 4.0; length = 401))
@@ -373,15 +476,54 @@ function main()
     # the chi=64 one -- same lattice, same Lx x Ly, same arm -- and the pair that was supposed to
     # be a convergence comparison becomes one run twice. (This is the same failure `gate_l20.jl`
     # already hit when one fixed filename let a later geometry erase an earlier one.)
-    tag = "$(LATNAME)_$(LX)x$(LY)_D$(DCAP)"
+    tag = "$(LATNAME)_$(LX)x$(LY)" * (J2 == 0.0 ? "" : "_J2$(replace(@sprintf("%.3f", J2), "." => "p"))") *
+          "_D$(DCAP)"
+
+    # ── exact reference (plan Phase 5): the same cluster by sparse Krylov, N <= F_EXACT_N ─────
+    # One coupling matrix feeds both the MPO and `pairs_sparse`, so a disagreement is solver
+    # error, not two models. The DMRG energy is scored against it (and may never lie BELOW it),
+    # and every arm's G(x,t) gets its max deviation on the arm's own time grid.
+    Gex_cache = Dict{Float64, Matrix{ComplexF64}}()
+    exact = nothing
+    if EXACT_N > 0 && N <= EXACT_N && iseven(N)
+        Hs, states, _ = pairs_sparse(N, Jm)
+        Ex, Om, res, E1, _ = sparse_ground(Hs, length(states))
+        @printf("EXACT (S^z=0, dim %d): E0=%.12f  resid %.1e  E1~%.6f  DMRG-exact %+.3e\n",
+                length(states), Ex, res, E1, E0 - Ex)
+        res < 1e-8 || error("exact ground state unconverged (resid $res) -- no reference")
+        E0 >= Ex - 1e-9 || error("DMRG energy BELOW the exact one: the two model definitions differ")
+        exact = (H = Hs, states = states, Om = Om, E0 = Ex, gap = E1 - Ex)
+        tsx = collect(0:round(Int, TMAX / DT)) .* DT
+        Gx, _ = exact_correlator(Hs, states, Om, Ex, c, N, tsx)
+        Gex_cache[DT] = Gx
+        Sx = structure_factor_2d(Gx, tsx, qs; eta2 = ETA2, ws = ws)
+        Sqx = static_structure_factor(Gx, qs)
+        open(joinpath(OUT, "fig45_Sqw_$(tag)_exact.csv"), "w") do io
+            println(io, "iq,qx,qy,label,dist,allowed,Sq,w,S")
+            for iq in eachindex(qs), iw in eachindex(ws)
+                @printf(io, "%d,%.6f,%.6f,%s,%.6f,%d,%.10e,%.6f,%.10e\n",
+                        iq, qs[iq][1], qs[iq][2], labels[iq], dists[iq],
+                        allowed_q(LAT, qs[iq], LY) ? 1 : 0, Sqx[iq], ws[iw], Sx[iq, iw])
+            end
+        end
+    end
+    gexact(ts) = exact === nothing ? nothing : get!(Gex_cache, ts[2] - ts[1]) do
+        first(exact_correlator(exact.H, exact.states, exact.Om, exact.E0, c, N, ts))
+    end
 
     costio = open(joinpath(OUT, "fig45_cost_$tag.csv"), "w")
     println(costio, "arm,lattice,Lx,Ly,N,J2,D,dt,tmax,bug_m,E0,E0_site,chi_gs,chi,matvec," *
-                    "seconds,sumrule,gc0,t_farsite,full_bz")
+                    "seconds,sumrule,gc0,t_farsite,full_bz,unmet_steps,gerr_max,gerr_T,gs_var,gs_dE")
     for arm in ARMS
         haskey(steps, arm) || (@printf("  unknown arm %s -- skipped\n", arm); continue)
         @printf("-- %s --\n", arm)
-        ts, G, cost = correlator(psi0, E0, steps[arm], nt, DT)
+        dta = armdt(arm)
+        nta = round(Int, TMAX / dta)
+        ts, G, cost = correlator(psi0, E0, steps[arm], nta, dta)
+        Gx = gexact(ts)
+        gerr = Gx === nothing ? NaN : maximum(abs, G .- Gx)
+        gerrT = Gx === nothing ? NaN : maximum(abs, G[:, end] .- Gx[:, end])
+        Gx === nothing || @printf("   vs EXACT: max|G - G_ex| = %.3e   at T: %.3e\n", gerr, gerrT)
 
         # ⛔ SUM RULES BEFORE ANY SPECTRUM. `sum_i G(i,0) = <Om| S^z_tot S^z_c |Om> = 0` in the
         # S^z = 0 sector and `G(c,0) = <(S^z_c)^2> = 1/4` exactly for spin-1/2. If either fails,
@@ -398,12 +540,12 @@ function main()
         rc = site_position(LAT, c, LY)
         far = argmax([hypot(site_position(LAT, i, LY)[1] - rc[1],
                             site_position(LAT, i, LY)[2] - rc[2]) for i in 1:N])
-        hit = findfirst(n -> abs(G[far, n]) > 0.05 * abs(G[c, 1]), 2:(nt + 1))
-        tfar = hit === nothing ? TMAX : DT * hit
+        hit = findfirst(n -> abs(G[far, n]) > 0.05 * abs(G[c, 1]), 2:(nta + 1))
+        tfar = hit === nothing ? TMAX : dta * hit
 
         open(joinpath(OUT, "fig45_G_$(tag)_$(arm).csv"), "w") do io
             println(io, "site,x,y,rx,ry,t,ReG,ImG")
-            for i in 1:N, n in 1:(nt + 1)
+            for i in 1:N, n in 1:(nta + 1)
                 ix, iy = coords(i, LY); rx, ry = site_position(LAT, i, LY)
                 @printf(io, "%d,%d,%d,%.6f,%.6f,%.4f,%.10e,%.10e\n",
                         i, ix, iy, rx, ry, ts[n], real(G[i, n]), imag(G[i, n]))
@@ -420,11 +562,13 @@ function main()
                         allowed_q(LAT, qs[iq], LY) ? 1 : 0, Sq[iq], ws[iw], S[iq, iw])
             end
         end
-        @printf(costio, "%s,%s,%d,%d,%d,%.4f,%d,%.3f,%.1f,%d,%.8f,%.8f,%d,%d,%d,%.2f,%.3e,%.6f,%.2f,%d\n",
-                arm, LATNAME, LX, LY, N, J2, DCAP, DT, TMAX, BUGM, E0, E0 / N, chi0,
-                cost.chi[], cost.mv[], cost.sec[], g0, gc, tfar, full ? 1 : 0)
-        @printf("   chi=%-4d matvec=%-8d %8.1fs   far-site arrival t~%.1f\n",
-                cost.chi[], cost.mv[], cost.sec[], tfar)
+        @printf(costio, "%s,%s,%d,%d,%d,%.4f,%d,%.3f,%.1f,%d,%.8f,%.8f,%d,%d,%d,%.2f,%.3e,%.6f,%.2f,%d,%d,%.3e,%.3e,%.3e,%.3e\n",
+                arm, LATNAME, LX, LY, N, J2, DCAP, dta, TMAX, BUGM, E0, E0 / N, chi0,
+                cost.chi[], cost.mv[], cost.sec[], g0, gc, tfar, full ? 1 : 0, cost.unmet[], gerr, gerrT, VAR0,
+                exact === nothing ? NaN : E0 - exact.E0)
+        @printf("   chi=%-4d matvec=%-8d %8.1fs   far-site arrival t~%.1f   budget_unmet steps %d\n",
+                cost.chi[], cost.mv[], cost.sec[], tfar, cost.unmet[])
+        cost.first[] === nothing || println("   first step: r_old $(cost.first[].r_old) -> r_aug $(cost.first[].r_aug) -> r_final $(cost.first[].r_final), discarded $(cost.first[].discarded), unmet $(cost.first[].unmet);  unmet reasons over the run: $(cost.why)")
         flush(costio)
     end
     close(costio)

@@ -14,7 +14,8 @@
 #   legacy  the fixed-knob DMRG (`trunc_thresh = 1e-10`) as the cost baseline
 #
 # usage:  julia -t 2 --project=. benchmarks/ground_state/adaptive_dmrg_tolerance.jl MODEL OUTDIR [smoke]
-#   MODEL = heis | xx | square | j1j2   (smoke: L = 10 chain / 4x3 cylinder, two settings)
+#   MODEL = heis | xx | square | j1j2   (smoke: L = 10 chain / 4x3 cylinder, two settings;
+#   auto: same grid with the derived stopping threshold `dmrg_etol`)
 # Output: OUTDIR/dmrgtol_<model>.csv, one row per run, streamed.
 
 using LinearAlgebra, Printf, SparseArrays
@@ -29,6 +30,9 @@ include(joinpath(@__DIR__, "..", "sparse_krylov.jl"))
 const MODEL  = isempty(ARGS) ? "heis" : ARGS[1]
 const OUTDIR = length(ARGS) >= 2 ? ARGS[2] : joinpath(@__DIR__, "..", "results")
 const SMOKE  = length(ARGS) >= 3 && ARGS[3] == "smoke"
+# `auto`: the adaptive runs use the stopping threshold DERIVED from their tolerances
+# (`dmrg_etol`) instead of the fixed 1e-10 the first study measured with; output `_autoetol`.
+const AUTO   = length(ARGS) >= 3 && ARGS[3] == "auto"
 const NSW    = 40
 const ETOL   = 1e-10
 
@@ -68,7 +72,7 @@ function run_one(io, S, E0, study; tb = nothing, tt = nothing, exact = false, le
     psi = neel_state(S.N)
     kw = legacy ? (maxdim = S.maxdim, trunc_thresh = 1e-10) :
                   (maxdim = S.maxdim, tol_basis = tb, tol_trunc = tt, exact = exact)
-    r = dmrg_cbe1s!(psi, S.W; n_sweeps = NSW, etol = ETOL, kw...)
+    r = dmrg_cbe1s!(psi, S.W; n_sweeps = NSW, etol = (AUTO && !legacy) ? nothing : ETOL, kw...)
     n2 = norm(psi)^2
     E = real(mpo_energy(psi, S.W)) / n2
     var = mpo_variance(psi, S.W)
@@ -111,7 +115,7 @@ function main()
         mpo_variance(neel_state(6), w)
     end
 
-    io = open(joinpath(OUTDIR, "dmrgtol_$(MODEL)$(SMOKE ? "_smoke" : "").csv"), "w")
+    io = open(joinpath(OUTDIR, "dmrgtol_$(MODEL)$(SMOKE ? "_smoke" : AUTO ? "_autoetol" : "").csv"), "w")
     println(io, join(COLS, ","))
     if SMOKE
         run_one(io, S, E0, "basis"; tb = 1e-3, tt = 1e-4)

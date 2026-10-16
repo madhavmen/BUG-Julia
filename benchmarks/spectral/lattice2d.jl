@@ -129,12 +129,37 @@ is the cheapest available check that the Fourier transform and the site position
 chain_lattice() = Lattice2D("chain", (1.0, 0.0), (0.0, 0.0), :open, 0.03,
     [(0.0, 0.0), (pi, 0.0), (2pi, 0.0)], ["Γ", "π", "2π"])
 
+"""
+Kagome lattice (simulation_plan_2 Task 6, the third model family), in the geometry of
+`src/RSVDCBEBondUpdate/models/kagome.jl`: Bravais vectors `a1 = (2,0)`, `a2 = (1,sqrt3)`, three
+sublattices per cell at `A = (0,0)`, `B = a1/2`, `C = a2/2`, wrapped along `a2`. `Lx`, `Ly` count
+UNIT CELLS (`N = 3 Lx Ly`); see [`nsites`](@ref).
+
+⛔ THE PATH IS THE EXTENDED ZONE, `Gamma -> K = (4pi/3, 0) -> M = (pi, pi/sqrt3) -> Gamma`, i.e. the
+zone of the underlying triangular lattice of bond length 1. The kagome Bravais zone is half that
+size, but the three sublattice phases make `S(q)` periodic only in the extended zone, which is
+where kagome structure factors are conventionally shown. Positions carry the sublattice offsets,
+so the transform is the true one.
+
+⚠ `eta2 = 0.045` is the plan's pilot broadening `eta = 0.3` (`exp(-(eta t)^2/2)` in the plan is
+`exp(-eta2 t^2)` here), not a published kagome value.
+"""
+kagome_lattice() = Lattice2D("kagome", (2.0, 0.0), (1.0, SQRT3), :kagome, 0.045,
+    [(0.0, 0.0), (4pi / 3, 0.0), (pi, pi / SQRT3), (0.0, 0.0)], ["Γ", "K", "M", "Γ"])
+
 lattice(name::AbstractString) =
     name == "square"      ? square_lattice() :
     name == "triangle"    ? triangular_lattice(:xc) :
     name == "triangle_yc" ? triangular_lattice(:yc) :
     name == "chain"       ? chain_lattice() :
-    error("unknown lattice $name (square | triangle | triangle_yc | chain)")
+    name == "kagome"      ? kagome_lattice() :
+    error("unknown lattice $name (square | triangle | triangle_yc | chain | kagome)")
+
+"Number of sites of an `Lx x Ly` geometry: `Lx Ly`, or `3 Lx Ly` for kagome (Lx, Ly in cells)."
+nsites(lat::Lattice2D, Lx::Int, Ly::Int) = lat.name == "kagome" ? 3 * Lx * Ly : Lx * Ly
+
+"Kagome sublattice offsets A, B, C (models/kagome.jl)."
+const KAGOME_SUB = ((0.0, 0.0), (1.0, 0.0), (0.5, SQRT3 / 2))
 
 """
     geom_key(name, Lx, Ly) -> String
@@ -167,6 +192,13 @@ function site_position(lat::Lattice2D, i::Int, Ly::Int)
     # smallest column count that contains `i` rather than plumbing the real `Lx` through here.
     lat.name == "triangle" &&
         return triangular_site_position(cld(i, Ly), Ly, i; geometry = lat.wrap)
+    if lat.name == "kagome"
+        # site(i, j, s) = 3((i-1)Ly + (j-1)) + s, the ordering of `kagome_cylinder_couplings`.
+        cell, sub = divrem(i - 1, 3)
+        u, v = div(cell, Ly), mod(cell, Ly)
+        o = KAGOME_SUB[sub + 1]
+        return (u * lat.a1[1] + v * lat.a2[1] + o[1], u * lat.a1[2] + v * lat.a2[2] + o[2])
+    end
     u, v = coords(i, Ly)
     return (u * lat.a1[1] + v * lat.a2[1], u * lat.a1[2] + v * lat.a2[2])
 end
@@ -202,7 +234,7 @@ is the paper's Eq. (10), `O(Rq) = O(q)` for any `R` leaving the lattice invarian
 Fig. 2's orange points are generated from the blue ones.
 """
 function c6_images(lat::Lattice2D, q::NTuple{2, Float64})
-    n = lat.name == "triangle" ? 6 : 4
+    n = lat.name in ("triangle", "kagome") ? 6 : 4
     out = NTuple{2, Float64}[]
     for k in 0:(n - 1)
         t = 2pi * k / n
@@ -267,7 +299,7 @@ Fig. 5 -- the two must not be confused after the fact.
 function geometry_report(io::IO, lat::Lattice2D, Lx::Int, Ly::Int)
     T = wrap_vector(lat, Ly)
     println(io, "  lattice $(lat.name)  wrap=:$(lat.wrap)  a1=$(lat.a1)  a2=$(lat.a2)")
-    println(io, "    L=$Lx (length, columns)  C=$Ly (circumference)  N=$(Lx*Ly)  " *
+    println(io, "    L=$Lx (length, columns)  C=$Ly (circumference)  N=$(nsites(lat, Lx, Ly))  " *
                 "T=$(round.(T; digits=4))  |T|=$(round(hypot(T...); digits=4))")
     if lat.name == "triangle" && lat.wrap === :xc && isodd(Ly)
         println(io, "  ⛔ XC needs an EVEN circumference; C=$Ly cannot close the zigzag ring.")
@@ -302,3 +334,31 @@ takes the lower-middle column and row; every `x` in `G(x,t)` is measured from it
 is written into the output rather than assumed.
 """
 centre_site(Lx::Int, Ly::Int) = (cld(Lx, 2) - 1) * Ly + cld(Ly, 2)
+
+"The same choice on any lattice: for kagome, the A site of the lower-middle cell."
+centre_site(lat::Lattice2D, Lx::Int, Ly::Int) =
+    lat.name == "kagome" ? 3 * centre_site(Lx, Ly) - 2 : centre_site(Lx, Ly)
+
+"""
+    bond_length_gate(lat, Jm, Ly) -> Vector{String}
+
+Plan U17 / `xc_gate.jl` gate 4, for every lattice: tie the COUPLING MATRIX to the CARTESIAN
+EMBEDDING the Fourier transform uses. Every bond's minimum-image length (images along the wrap
+vector) must be the one its family has -- nearest neighbours 1, square diagonals sqrt2, triangular
+`J2` sqrt3 -- grouped by coupling value `J1 = 1`, `J2`. Returns the failures (empty = pass). A
+coupling matrix and a position map describing different lattices give a plausible energy AND a
+plausible spectrum; this is the check that they do not.
+"""
+function bond_length_gate(lat::Lattice2D, Jm::AbstractMatrix, Ly::Int; J2::Float64 = 0.0)
+    T = wrap_vector(lat, Ly)
+    nnn = lat.name == "square" ? sqrt(2.0) : SQRT3
+    bad = String[]
+    for i in axes(Jm, 1), j in (i + 1):size(Jm, 2)
+        Jm[i, j] == 0 && continue
+        ri, rj = site_position(lat, i, Ly), site_position(lat, j, Ly)
+        d = minimum(hypot(rj[1] - ri[1] - n * T[1], rj[2] - ri[2] - n * T[2]) for n in -2:2)
+        want = (J2 != 0.0 && J2 != 1.0 && Jm[i, j] == J2) ? nnn : 1.0
+        abs(d - want) < 1e-9 || push!(bad, "($i,$j) J=$(Jm[i, j]) length $d, want $want")
+    end
+    return bad
+end
