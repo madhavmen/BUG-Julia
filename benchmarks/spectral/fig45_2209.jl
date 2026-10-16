@@ -380,7 +380,10 @@ function main()
                                    [j <= N ÷ 2 ? :up : :down for j in 1:N])
             cand = product_state(spins)                 # half filling = the S^z = 0 sector
             tk = @elapsed gs = GSMODE == "adaptive" ?
-                rsvd_cbe_dmrg1s!(cand, W; n_sweeps = 60, etol = 1e-12, maxdim = DGS,
+                # No `etol`: the adaptive path derives its stopping threshold from the two
+                # tolerances (`dmrg_etol`). A fixed 1e-12 made random kagome starts run to the
+                # 60-sweep cap (job 17261137).
+                rsvd_cbe_dmrg1s!(cand, W; n_sweeps = 60, maxdim = DGS,
                                  tol_basis = GS_TB, tol_trunc = GS_TT, maxiter = 30,
                                  restol = 1e-10) :
                 rsvd_cbe_dmrg1s!(cand, W; n_sweeps = 60, etol = 1e-12,

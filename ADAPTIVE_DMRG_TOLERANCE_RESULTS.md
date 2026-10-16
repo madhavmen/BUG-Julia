@@ -109,6 +109,36 @@ than a tenth of what its tolerances allow, using the measured law with the large
 and the legacy path keeps 1e-10. Verification reruns the same grid with the derived threshold
 (`adaptive_dmrg_tolerance.jl MODEL DIR auto`, job 17265883).
 
+**Chains, derived threshold (job 17265883).** Every adaptive run now converges in 4-6 sweeps, and
+every energy matches the fixed-`etol` run to the printed digits, so stopping earlier costs no
+accuracy:
+
+| Run | fixed `etol` = 1e-10 | derived `dmrg_etol` | dE/N |
+|---|---|---|---|
+| XX, `tol_basis` 0.1 | 34 sweeps, 59.9 s | 5 sweeps, 10.2 s | 2.65e-5 |
+| XX, `tol_basis` 1e-2 | 14 sweeps, 26.4 s | 5 sweeps, 10.5 s | 3.17e-7 |
+| XX, `tol_trunc` 3e-3 | 14 sweeps, 28.6 s | 4 sweeps, 9.0 s | 4.8e-7 |
+| XX, `tol_trunc` 1e-3 | 10 sweeps, 21.8 s | 4 sweeps, 9.1 s | 5.5e-8 |
+| Heisenberg, `tol_basis` 0.1 | 7 sweeps, 12.7 s | 4 sweeps, 8.0 s | 2.0e-5 |
+| Heisenberg, defaults `1e-3 / 1e-4` | 6 sweeps, 12.3 s | 5 sweeps, 10.7 s | 1.9e-9 |
+
+On the chains the loose and medium settings now beat the legacy run on wall time (12.9 s), at
+0.65-0.85x; with the fixed `etol` they did not.
+
+**2D cylinders, derived threshold (same job).** Every adaptive run converges in 5-8 sweeps, with
+the same energies as before:
+
+| Run | fixed `etol` = 1e-10 | derived `dmrg_etol` | dE/N |
+|---|---|---|---|
+| square, `tol_basis` 0.1 | 40 sweeps, 114 s | 5 sweeps, 17.0 s | 1.0e-5 |
+| square, `tol_basis` 3e-2 | 40 sweeps, 149 s | 6 sweeps, 23.6 s | 5.7e-7 |
+| square, defaults `1e-3 / 1e-4` | 8 sweeps, 49.9 s | 6 sweeps, 34.6 s | 2.0e-9 |
+| J1-J2, `tol_basis` 3e-3 | 18 sweeps, 123 s | 6 sweeps, 31.5 s | 5.8e-9 |
+| J1-J2, defaults `1e-3 / 1e-4` | 7 sweeps, 44.6 s | 6 sweeps, 34.5 s | 2.7e-9 |
+| J1-J2, defaults, `exact = true` | 7 sweeps, 39.4 s | 6 sweeps, 29.7 s | 2.7e-9 |
+
+Legacy runs: square 65.4 s, J1-J2 73.2 s (dE/N ~1.4e-11, chi 512 = the cap).
+
 ## J1-J2 square cylinder 5x4, J2/J1 = 0.5, N = 20 (maxdim 512; job 17208958)
 
 | `tol_basis` (`tol_trunc` 1e-8) | 1e-1 | 3e-2 | 1e-2 | 3e-3 | 1e-3 | 1e-4 |
@@ -136,8 +166,8 @@ reach **2.7e-9 at chi 321 in 44.6 s (0.59x legacy)**, and 39.4 s with `exact = t
 
 | Use | `tol_basis` | `tol_trunc` | Typical dE/N (chain / 2D) | chi at N = 20, 2D | Cost vs legacy (2D) |
 |---|---|---|---|---|---|
-| loose: starting states, quick scans | 1e-2 | 1e-3 | 3e-7 / 3e-7 | ~150-170 | (pending the derived-etol rerun) |
-| **medium: the default** | **1e-3** | **1e-4** | **2e-9 / 2-3e-9** | **~320-350** | **0.6-0.8x** |
+| loose: starting states, quick scans | 1e-2 | 1e-3 | 3e-7 / 3e-7 | ~150-170 | 0.33-0.39x |
+| **medium: the default** | **1e-3** | **1e-4** | **2e-9 / 2-3e-9** | **~320-350** | **0.47-0.53x** |
 | tight | 1e-4 | 1e-5 | 2e-11 / cap-limited | maxdim | ~1x (cap binds) |
 
 - Both knobs act QUADRATICALLY on the energy (variational square law), across chains, a 2D
@@ -145,6 +175,7 @@ reach **2.7e-9 at chi 321 in 44.6 s (0.59x legacy)**, and 39.4 s with `exact = t
 - Keep `tol_trunc ~ tol_basis / 10`: in 2D the truncation term dominates at equal settings.
 - Every run is honest. Settings that cannot be met within `maxdim` end `:budget_unmet` and floor at
   the legacy value; no run reports `:met` with an energy worse than its tolerances allow.
-- The loose end is limited by the stopping test, not by the method; see `dmrg_etol`.
+- With the derived stopping threshold (`dmrg_etol`) every setting converges in 4-8 sweeps; the
+  fixed `etol = 1e-10` had cost the loose settings up to 40 sweeps.
 - The exact local basis is 10-15% faster than the RSVD sketch at these sizes (chi <= 512), the
   same crossover as the BUG.
