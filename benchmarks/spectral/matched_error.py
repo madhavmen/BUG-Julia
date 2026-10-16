@@ -33,8 +33,10 @@ def maxdiff(a, b):
 
 
 def wall_per_time(cost_path):
-    """{(D, label): wall per unit time} with label as bug_profile_2d's `label` (search/tol/fold)."""
-    acc = defaultdict(lambda: [0.0, 0.0])
+    """{(D, label): (wall per unit time, JIT overhead)} with label as bug_profile_2d's `label`
+    (search/tol/fold). Step 0 is the timed warm-up: its excess over the mean step is the JIT
+    overhead, reported beside the steady-state rate rather than folded into it."""
+    acc = defaultdict(lambda: [0.0, 0.0, 0, None])
     with open(cost_path, newline="") as f:
         for r in csv.DictReader(f):
             if r["search"]:
@@ -43,9 +45,17 @@ def wall_per_time(cost_path):
             else:
                 lab = r["arm"]
             a = acc[(int(r["D"]), lab)]
+            if int(r["step"]) == 0:
+                a[3] = float(r["wall"])
+                continue
             a[0] += float(r["wall"])
             a[1] += float(r["dt"])
-    return {k: w / t for k, (w, t) in acc.items() if t > 0}
+            a[2] += 1
+    out = {}
+    for k, (w, t, n, warm) in acc.items():
+        if t > 0:
+            out[k] = (w / t, max(warm - w / n, 0.0) if warm is not None else None)
+    return out
 
 
 def parse_name(path):
@@ -77,7 +87,7 @@ def main():
     print("reference uncertainty max_x|G_a-G_b|/2: " +
           "  ".join("t=%.1f %.2e" % (t, unc[t]) for t in pick) +
           "  (max over t %.2e)" % max(unc.values()))
-    print("%-24s %5s %12s %s %12s  %s" % ("arm", "D", "wall/unit t", " ".join(
+    print("%-24s %5s %12s %9s %s %12s  %s" % ("arm", "D", "wall/unit t", "JIT", " ".join(
         "%10s" % ("err t=%.1f" % t) for t in pick), "max err", "resolved"))
     for path in a.tests:
         lab, D = parse_name(path)
@@ -86,9 +96,10 @@ def main():
         err = {t: maxdiff(g[t], ref[t]) for t in common}
         emax = max(err.values())
         res = "yes" if emax > 3 * max(unc[t] for t in common) else "NO (within 3x ref unc.)"
-        w = walls.get((D, lab))
-        print("%-24s %5d %12s %s %12.3e  %s" % (
+        w, jit = walls.get((D, lab), (None, None))
+        print("%-24s %5d %12s %9s %s %12.3e  %s" % (
             lab, D, "%.1f s" % w if w is not None else "n/a",
+            "%.1f s" % jit if jit is not None else "n/a",
             " ".join("%10s" % ("%.2e" % err[t] if t in err else "-") for t in pick), emax, res))
 
 

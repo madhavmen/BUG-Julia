@@ -123,6 +123,9 @@ Test B was asked). At large χ `tol_basis` is the speed knob: on the 10x4 Heisen
 1e-4 → 1e-3 cut the first-order step from 31 to 20 s at an infidelity of 5e-6 after t = 0.3.
 Timing against TDVP is only quoted between arms of the same order at the same dt (bug2/bugmid
 vs `tdvp2_step!`, bug4 vs `tdvp2_composed_step!(...; order = 4)`) or at matched physical error.
+Measured that way (10x4, dt 0.1, 3 steps, 2 CPUs, job 17285246), order-2 BUG at `tol_basis =
+1e-3` runs at 0.43x `tdvp2_step!`'s speed at χ = 256 (139 vs 60 s/step) and 0.95x at χ = 512
+(227 vs 216 s/step), landing within 1e-7 infidelity of it; `tol_basis = 1e-4` costs 3x more.
 `tdvp2_composed_step!(psi, h, tau; order = 4, composition = :suzuki)` composes the symmetric
 `tdvp2_step!` (Suzuki 5 stages or Yoshida 3) and is of order 4 *in the step* only where the step
 error dominates: on an L = 24 XXZ quench with the rank set by `trunc_thresh = 1e-10`

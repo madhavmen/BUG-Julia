@@ -44,6 +44,7 @@
 #       BP_CLOSURE_LOG (0) 1 prints the order-p closure ledger after every step (`closure_lines`)
 #       BP_BLAS_TDVP (julia threads) BP_BLAS_BUG (julia threads / 2): BLAS threads per arm family
 
+const T_LOAD0 = time()           # package loading is a per-process cost both arms share
 using LinearAlgebra, Printf, Serialization, Profile
 using LurCGT, Telum
 using BUGJulia
@@ -97,6 +98,7 @@ heap_hint() = (h = Base.JLOptions().heap_size_hint;
                h == 0 ? "none" : @sprintf("%.1f GiB", h / 2^30))
 
 const T0 = time()
+const T_LOAD = T0 - T_LOAD0
 say(msg) = (@printf("[%8.1fs] %s\n", time() - T0, msg); flush(stdout))
 
 # ⛔ A TIMING RATIO IS ONLY MEANINGFUL BETWEEN ARMS OF THE SAME ORDER (USER 2026-10-16). bug4 vs
@@ -311,6 +313,8 @@ function main()
     say(@sprintf("square %dx%d N=%d  centre %d  caps %s  mode %s  threads %d  BLAS %d  bond tasks %s  heap hint %s",
                  LX, LY, N, c, string(DS), MODE, Threads.nthreads(), BLAS.get_num_threads(),
                  string(BOND_TASKS), heap_hint()))
+    say(@sprintf("package load %.1f s (once per process, shared by every arm; each arm's JIT is its timed warm-up step)",
+                 T_LOAD))
     say(@sprintf("evolution %s  tol_trunc %.0e  tol_expv %.0e  TDVP trunc %.0e  dt %.3f  bug4 dt %.3f  GS tol (%.0e, %.0e)",
                  join(label.("bug", VARIANTS), " "), TT, TE, TDVP_TT, DT, DT4, GS_TB, GS_TT))
 
@@ -329,6 +333,7 @@ function main()
         apply_sz!(phi, c)
         say(@sprintf("== D=%d  start chi %d", D, maximum(state_bond_dims(phi))))
         perstep = Dict{String, Float64}()
+        jit = Dict{String, Float64}()           # label => warm-up overhead over the mean step
         # Each arm's FIRST variant (by default the old wide search) is the reference its other
         # variants are compared with at the same simulated time -- a cheaper variant is only a
         # saving if it lands on the same state.
@@ -342,10 +347,18 @@ function main()
                          BLAS.get_num_threads()))
             step! = stepper(arm, W, D; parallel = PARALLEL,
                             v = v === nothing ? VARIANTS[1] : v)
-            # JIT, untimed. tdvp4 is five tdvp2 stages -- nothing new to compile, and at large chi
-            # a warm-up would cost five full TDVP2 steps.
-            (istdvp(arm) && ARM_ORDER[arm] == 4) ||
-                let q = deepcopy(phi); step!(q, ComplexF64(-im * armdt(arm))); end
+            # The warm-up step absorbs JIT, so the per-step walls are steady-state. It is TIMED and
+            # reported (USER 2026-10-16: JIT is part of the cost): CSV step 0, and the overhead
+            # over the mean step is added to the pair's wall below. JIT is per process, so the
+            # first D carries it; kernels both arms share compile in whichever arm runs first.
+            # tdvp4 is five tdvp2 stages -- nothing new to compile, and at large chi a warm-up
+            # would cost five full TDVP2 steps.
+            twarm = (istdvp(arm) && ARM_ORDER[arm] == 4) ? NaN :
+                    @elapsed(let q = deepcopy(phi); step!(q, ComplexF64(-im * armdt(arm))); end)
+            isnan(twarm) || println(io, join([D, arm, v === nothing ? "" : (v.thin ? "thin" : "wide"),
+                                              v === nothing ? NaN : v.tb, v === nothing ? false : v.fold,
+                                              armdt(arm), 0, @sprintf("%.3f", twarm),
+                                              fill("", 16)...], ","))
             p = deepcopy(phi)
             n = istdvp(arm) ? NTDVP : NSTEP
             walls = Float64[]
@@ -384,6 +397,9 @@ function main()
             end
             gobs === nothing || gobs.close!()
             perstep[lab] = sum(walls) / (n * armdt(arm))
+            jit[lab] = isnan(twarm) ? 0.0 : max(twarm - sum(walls) / n, 0.0)
+            isnan(twarm) || @printf("  %-12s D=%4d  warm-up step %.1f s = JIT overhead %.1f s + one step (mean %.1f s)\n",
+                                    lab, D, twarm, jit[lab], sum(walls) / n)
             # Only the TDVP finals are kept (a D=1024 state is ~1 GB); a BUG arm is graded against
             # its same-order partner here, which must therefore come first in BP_ARMS.
             if istdvp(arm) && tdvp_partner(arm) == arm
@@ -426,6 +442,11 @@ function main()
                     D, ord, armdt(arm), lab, perstep[lab], partner, perstep[partner], partner,
                     lab, perstep[partner] / perstep[lab], partner, NSTEP * armdt(arm),
                     get(pairinf, lab, NaN))
+            # The same pair over the whole run INCLUDING each arm's JIT overhead (warm-up step).
+            tot(l) = perstep[l] * (istdvp(l) ? NTDVP : NSTEP) * armdt(arm) + get(jit, l, 0.0)
+            @printf("  D=%4d  order %d  wall to t=%.2f incl. JIT: %-12s %.1f s (JIT %.1f s)  %s %.1f s (JIT %.1f s)  -> %s/%s = %.2fx\n",
+                    D, ord, NSTEP * armdt(arm), lab, tot(lab), get(jit, lab, 0.0), partner,
+                    tot(partner), get(jit, partner, 0.0), partner, lab, tot(partner) / tot(lab))
         end
         flush(stdout)
     end
