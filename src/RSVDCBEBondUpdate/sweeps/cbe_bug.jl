@@ -1299,7 +1299,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         ckw = Base.structdiff(exkw, NamedTuple{(:share_ht, :fold_omega)})
         cl = _krylov_closure!(fr, psi, mpo, S0, tau, alloc, ckw; order = order,
                               workcap = wcap_step, nrm = _nrm, parallel = parallel, rng = rng,
-                              ledger = ledger)
+                              ledger = ledger, fold = fold_omega)
         lenv_root, renv_root, S0 = fr.lenv, fr.renv, cl.S0
         for i in 1:(c - 1)
             expanded[i] = leg_dim(W[i], 3)
@@ -1312,7 +1312,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         # A copied `rng` and untouched frames: the step itself stays bit-identical.
         pr = _measure_frontiers(KLFrames(W, Z, c, lenv_root, renv_root, 0), psi, mpo, S0, tau,
                                 alloc, NamedTuple(), closure_probe; nrm = _nrm,
-                                parallel = parallel, rng = copy(rng))
+                                parallel = parallel, rng = copy(rng), fold = fold_omega)
         merge_ledger!(ledger, pr.ledger)
     end
     # PLAN §5 `state_projection_error`: how much of `psi` the frames miss. `W`/`Z` are

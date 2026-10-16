@@ -219,14 +219,14 @@ function _right_leak(V0, X)
 end
 
 """
-    _sampled_leak(f, X, side, n, rng) -> Float64
+    _sampled_leak(f, skl, skr, side, n, rng) -> Float64
 
 The randomised estimate of the same miss: `n` sector-graded Gaussian columns on the FULL opposite
-local space (no projector in the probe), through the production sketch closure and Test B's
-per-sector unbiased normalisation (`_sample_residual`). An estimate, not a bound.
+local space (no projector in the probe), through the production sketch closures `(skl, skr)` --
+shared or folded -- and Test B's per-sector unbiased normalisation (`_sample_residual`). An
+estimate, not a bound.
 """
-function _sampled_leak(f::BondFrame, X, side::Symbol, n::Int, rng::AbstractRNG)
-    skl, skr = _sketch_closures(f, () -> X)
+function _sampled_leak(f::BondFrame, skl, skr, side::Symbol, n::Int, rng::AbstractRNG)
     if side === :left
         draw = w -> sector_graded_sketch(f.V0, :right, w; comp_ratio = nothing, rng = rng)
         return first(_sample_residual(nothing, Y -> perp_component(f.U0, Y), skl, draw, n,
@@ -235,6 +235,31 @@ function _sampled_leak(f::BondFrame, X, side::Symbol, n::Int, rng::AbstractRNG)
     draw = w -> sector_graded_sketch(f.U0, :left, w; comp_ratio = nothing, rng = rng)
     return first(_sample_residual(nothing, Y -> perp_component_right(f.V0, Y), skr, draw, n,
                                   3, :right))
+end
+
+"""
+    _bond_action(f, mpo, i, lch, rch, U0, V0, side, fold, rng) -> (skl, skr, leak, nh2)
+
+One frontier bond's sketch closures and outside-space action on `side`.
+
+`fold = false`: the exact two-site action `X = H Theta_F` is formed once, the leak is exact and the
+closures share `X` (`nh2 = 1`). `fold = true` (`cbe_bug_step!(...; fold_omega = true)`): `X` is
+NEVER formed -- the probe is folded into the environment contractions (`_fold_sketch_closures`)
+and the leak is Test B's holdout estimate at a quarter of the frame width, the same convention
+`_certified_range` uses. ⛔ This is the large-chi path: `X` lives on the frame width ~2chi, so the
+exact action costs `O((2chi)^3 d^2 D_w)` per bond per frontier sweep, the dominant cost of an
+order-p step at large chi, while the folded probe costs `O((2chi)^2 d n D_w)`.
+"""
+function _bond_action(f::BondFrame, mpo, i::Int, lch, rch, U0, V0, side::Symbol, fold::Bool,
+                      rng::AbstractRNG)
+    if fold
+        skl, skr = _fold_sketch_closures(f, mpo, i, lch, rch)
+        n = max(8, cld(leg_dim(side === :left ? U0 : V0, side === :left ? 3 : 1), 4))
+        return (skl, skr, _sampled_leak(f, skl, skr, side, n, rng), 0)
+    end
+    X = apply_h_two_site(frame_theta(f), mpo, i, lch, rch)
+    skl, skr = _sketch_closures(f, () -> X)
+    return (skl, skr, side === :left ? _left_leak(U0, X) : _right_leak(V0, X), 1)
 end
 
 "How many charge sectors `new` carries on `leg` that `old` did not (plan §3.5)."
@@ -259,7 +284,8 @@ generation `gen`), the root environment, the bond ledger and the per-bond misses
 """
 function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
                         alloc::BasisAllocation, ckw::NamedTuple; enrich::Bool, gen::Int,
-                        workcap::Int, amp::Float64, rng::AbstractRNG, nsample::Int = 0)
+                        workcap::Int, amp::Float64, rng::AbstractRNG, nsample::Int = 0,
+                        fold::Bool = false)
     c = fr.c
     canonical!(Fm, 1)
     rstack = right_env_stack(Fm, mpo; downto = 3)
@@ -276,14 +302,13 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
         U0 = Pm === nothing ? fr.W[i] : to_concrete!(contract(Pm, (2,), fr.W[i], (1,)))
         f = _frame_onto_left(U0, K, Fm[i + 1])
         rch = right_channels(rstack, i + 2)
-        X = apply_h_two_site(frame_theta(f), mpo, i, lch, rch)
-        nh2 += 1
-        leak[i] = _left_leak(U0, X)
-        nsample > 0 && (sleak[i] = _sampled_leak(f, X, :left, nsample, rng))
+        skl, skr, leak[i], k2 = _bond_action(f, mpo, i, lch, rch, U0, nothing, :left, fold, rng)
+        nh2 += k2
+        nsample > 0 && (sleak[i] = _sampled_leak(f, skl, skr, :left, nsample, rng))
         bl = AdaptiveLedger()
         quiet = indicator(alloc, leak[i]) <= alloc.per_bond
         Wi = if enrich && !quiet
-            ex = cbe_expand(f, _sketch_closures(f, () -> X)...; ckw..., ledger = bl, rng = rng)
+            ex = cbe_expand(f, skl, skr; ckw..., ledger = bl, rng = rng)
             M = to_concrete!(contract(Fm[i + 1], (2, 3), ex.V_ex', (2, 3)))
             Kex = to_concrete!(contract(K, (3,), M, (1,)))
             H1 = one_site_h(mpo, i, lch, push_right_channels(rch, mpo, ex.V_ex, i + 1))
@@ -315,7 +340,8 @@ end
 "Row mirror of [`_frontier_left`](@ref): grows `fr.Z[L-1..c]`."
 function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
                          alloc::BasisAllocation, ckw::NamedTuple; enrich::Bool, gen::Int,
-                         workcap::Int, amp::Float64, rng::AbstractRNG, nsample::Int = 0)
+                         workcap::Int, amp::Float64, rng::AbstractRNG, nsample::Int = 0,
+                         fold::Bool = false)
     c, L = fr.c, length(Fm)
     canonical!(Fm, L)
     lstack = left_env_stack(Fm, mpo; upto = L - 2)
@@ -332,14 +358,13 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
         V0 = Pm === nothing ? fr.Z[j] : to_concrete!(contract(fr.Z[j], (3,), Pm, (1,)))
         f = _frame_onto_right(Fm[j], B, V0)
         lch = left_channels(lstack, j)
-        X = apply_h_two_site(frame_theta(f), mpo, j, lch, rch)
-        nh2 += 1
-        leak[j] = _right_leak(V0, X)
-        nsample > 0 && (sleak[j] = _sampled_leak(f, X, :right, nsample, rng))
+        skl, skr, leak[j], k2 = _bond_action(f, mpo, j, lch, rch, nothing, V0, :right, fold, rng)
+        nh2 += k2
+        nsample > 0 && (sleak[j] = _sampled_leak(f, skl, skr, :right, nsample, rng))
         bl = AdaptiveLedger()
         quiet = indicator(alloc, leak[j]) <= alloc.per_bond
         Zj = if enrich && !quiet
-            ex = cbe_expand(f, _sketch_closures(f, () -> X)...; ckw..., ledger = bl, rng = rng)
+            ex = cbe_expand(f, skl, skr; ckw..., ledger = bl, rng = rng)
             M = to_concrete!(contract(ex.U_ex', (1, 2), Fm[j], (1, 2)))
             Bex = to_concrete!(contract(M, (2,), B, (1,)))
             H1 = one_site_h(mpo, j + 1, push_left_channels(lch, mpo, ex.U_ex, j), rch)
@@ -387,7 +412,7 @@ function _frontier_sweep!(fr::KLFrames, psi::SymMPS, mpo, F::KrylovFrontier, tau
                           alloc::BasisAllocation, ckw::NamedTuple; enrich::Bool = true,
                           workcap::Int = 0, nrm::Float64 = 1.0, parallel::Bool = false,
                           rng::AbstractRNG = MersenneTwister(0x5EED), pass::Int = 0,
-                          nsample::Int = 0)
+                          nsample::Int = 0, fold::Bool = false)
     F.gen == fr.gen || throw(ArgumentError(
         "stale frontier: built in frames generation $(F.gen), the frames are at $(fr.gen) -- " *
         "the root operator and frontiers must be rebuilt whenever the frames change"))
@@ -410,7 +435,7 @@ function _frontier_sweep!(fr::KLFrames, psi::SymMPS, mpo, F::KrylovFrontier, tau
     amp = nF / max(nrm, eps())
     rngR = parallel ? MersenneTwister(rand(rng, UInt64)) : rng
     kw(r) = (enrich = enrich, gen = gen, workcap = workcap, amp = amp, rng = r,
-             nsample = nsample)
+             nsample = nsample, fold = fold)
     rl, rr = if parallel
         tR = Threads.@spawn _frontier_right(FmR, mpo, fr, tau, alloc, ckw; kw(rngR)...)
         l = _frontier_left(Fm, mpo, fr, tau, alloc, ckw; kw(rng)...)
@@ -511,7 +536,7 @@ function _measure_frontiers(fr::KLFrames, psi::SymMPS, mpo, S0, tau::ComplexF64,
                             alloc::BasisAllocation, ckw::NamedTuple, m::Int;
                             nrm::Float64 = 1.0, parallel::Bool = false,
                             rng::AbstractRNG = MersenneTwister(0x5EED), pass::Int = 0,
-                            workcap::Int = 0)
+                            workcap::Int = 0, fold::Bool = false)
     H0 = _root_generator(mpo, fr)
     nroot = Ref(0)
     F = m > 1 ? _projected_frontiers(x -> (nroot[] += 1; apply_zero_site(H0, x)), S0, tau,
@@ -522,7 +547,7 @@ function _measure_frontiers(fr::KLFrames, psi::SymMPS, mpo, S0, tau::ComplexF64,
         core = j == 0 ? S0 : F[j]
         r = _frontier_sweep!(fr, psi, mpo, KrylovFrontier(core, j, fr.gen), tau, alloc, ckw;
                              enrich = false, workcap = workcap, nrm = nrm,
-                             parallel = parallel, rng = rng, pass = pass)
+                             parallel = parallel, rng = rng, pass = pass, fold = fold)
         merge_ledger!(lg, r.ledger)
         nF = norm(core)
         raw = sqrt(sum(abs2, r.leaks_left) + sum(abs2, r.leaks_right))
@@ -597,11 +622,11 @@ function _krylov_closure!(fr::KLFrames, psi::SymMPS, mpo, S0, tau::ComplexF64,
                           rng::AbstractRNG = MersenneTwister(0x5EED),
                           ledger::Union{Nothing, AdaptiveLedger} = nothing,
                           include_zero::Bool = false,
-                          maxpass::Int = _closure_maxpass(order))
+                          maxpass::Int = _closure_maxpass(order), fold::Bool = false)
     t0 = time_ns()
     lg = AdaptiveLedger()
     lg.order = order
-    sweepkw = (workcap = workcap, nrm = nrm, parallel = parallel, rng = rng)
+    sweepkw = (workcap = workcap, nrm = nrm, parallel = parallel, rng = rng, fold = fold)
     # CHECK FIRST: what the incoming frames (the ordinary CBE + local-Krylov half-sweeps)
     # already capture of the global Krylov sequence. If they close every frontier, no closure
     # sweep runs and the frames stay exactly as the half-sweeps built them.
