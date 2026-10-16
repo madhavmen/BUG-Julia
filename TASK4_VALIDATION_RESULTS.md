@@ -1,5 +1,27 @@
 # simulation_plan_2 Phase 5: small-cluster validation of the integrators
 
+## Summary
+
+On three 2D models (4x4 square, 4x4 J1-J2 at J2 = 0.5, 18-site kagome) against the EXACT
+correlator:
+
+1. **There is a cap below which the BUG is truncation-limited and worse than TDVP.** Each BUG step
+   evolves in a 2chi trial space and compresses back to chi. When the cap binds hard, every step
+   discards 1e-3 to 6e-3 of the state, the error accumulates, and the BUG is 25-50x worse than TDVP
+   (which projects onto the fixed-rank manifold). The ledger flags every such step
+   `:budget_unmet` (`:trunc`, `:krylov`), so the failure is never silent.
+2. **Above that cap the adaptive BUG matches TDVP's accuracy at 0.46-0.56x its wall time, and
+   order 4 at 4x the step is the most accurate arm** (0.29-0.72x the wall time). The crossover cap is
+   set by the model's entanglement: 128 for the square and J1-J2, 256 for kagome.
+3. **With no binding cap the BUG is limited by its own tolerances**, because every step's
+   compression discards up to `tol_trunc`'s share and the losses add per step. At the loose
+   `1e-5 / 1e-4` the BUG is therefore worse at SMALLER dt, the same for all schemes. Tight
+   tolerances remove this (1.85e-8 at every dt), and fewer, larger steps always help.
+4. **The CBE-DMRG ground states are sound**: three starts agree to 1e-10 to 2e-7 on every model and
+   cap, and the energies sit above the exact ones by the rank-limited amount.
+5. **The order of the schemes is NOT measured here.** At 16 sites cap 256 is full rank and the BUG
+   is exact at any dt. Measuring order on 2D needs a larger cylinder (Phase 6).
+
 This is the S^zz real-time correlator `G(x,t) = e^{i E0 t} <Om| S^z_x e^{-iHt} S^z_c |Om>` on 2D
 cylinders. Each arm is scored against the EXACT correlator (sparse Krylov in the S^z = 0 sector,
 same coupling matrix as the MPO): `max_{x,t} |G - G_exact|`. Every arm starts from the SAME adaptive
@@ -55,6 +77,28 @@ are more accurate. The "`tol_trunc` 10-100x looser than the target" rule from th
 ~1e-6 target, and TDVP is at 2e-8 here. A tight-tolerance ladder (`1e-8 / 1e-8 / 1e-10`, dt 0.4 to
 0.05) is running to expose the schemes' orders (job 17282199).
 
+### Tight tolerances `1e-8 / 1e-8 / 1e-10`, cap 256, T = 4 (job 17282199)
+
+| dt | tdvp2 | bug1 = bugmid = bug2 = bug4 | wall time tdvp2 / bug1 / bug4 |
+|---|---|---|---|
+| 0.4 | 2.5e-7 | **1.85e-8** | 48.8 / 39.9 / 54.1 s |
+| 0.2 | 1.97e-8 | 1.85e-8 | 94.0 / 59.9 / 96.6 s |
+| 0.1 | 1.85e-8 | 1.85e-8 | 184.3 / 99.0 / 181.8 s |
+| 0.05 | 1.86e-8 | 1.86e-8 | 367.4 / 167.8 / 357.7 s |
+
+Every BUG step discards nothing (`discarded 0.0`), with final rank 256. The common 1.85e-8 floor is
+the ground state's own error (1e-8 in energy), shared by every arm.
+
+**This ladder cannot measure the schemes' orders, and the reason is the system size.** At 16 sites,
+cap 256 IS the full space at the centre bond (2^8). The BUG trial space then contains everything,
+its projected evolution is exact at any dt, and all four schemes agree to the digit. The BUG at
+dt = 0.4 is therefore exact while TDVP2 shows its own step error (2.5e-7). As a cost statement this
+is real: the BUG at dt = 0.4 matches TDVP2 at dt = 0.2 in 40 s against 94 s. But it is a
+small-system artefact, not a general result. Order differences need a cap BELOW full rank and a
+truncation tolerance BELOW the step error. The L = 16 XX closure study met both conditions and
+measured slopes 2/3/4/5 (KRYLOV_CLOSURE_AUDIT.md IT2); the 2D version needs a cylinder too large
+for full rank at the working cap (Phase 6).
+
 ## 4x4 J1-J2 square cylinder, J2/J1 = 0.5, T = 8, dt = 0.05 (bug4: 0.2)
 
 | cap | ground state dE (variance), 3 starts | tdvp2 | cbe1s | bug1 | bugmid | bug2 | bug4 |
@@ -78,11 +122,18 @@ the time step, sets the error. At cap 256 every step is `:met` and the BUG is to
 | cap | ground state dE (variance), 3 starts | tdvp2 | cbe1s | bug1 | bugmid | bug2 | bug4 |
 |---|---|---|---|---|---|---|---|
 | 64 (job 17261137) | 4.2e-3 (1.7e-2), spread 4.0e-8 | 1.65e-2 / 581 s | 1.65e-2 / 633 s | 1.24e-1 / 232 s | 1.27e-1 / 416 s | 1.22e-1 / 798 s | 1.14e-1 / 357 s |
-| 128 | pending | | | | | | |
-| 256 | pending | | | | | | |
+| 128 (job 17261138) | 2.0e-4 (1.1e-3), spread 8.8e-11 | 3.2e-3 / 825 s | 3.2e-3 / 980 s | 6.3e-2 / 392 s | 6.5e-2 / 763 s | 6.3e-2 / 1400 s | 7.0e-2 / 676 s |
+| 256 (job 17261139) | 5.8e-7 (4.0e-6), spread 1.9e-8 | 4.9e-5 / 1287 s | 4.9e-5 / 1634 s | **4.6e-5 / 721 s** | 4.6e-5 / 1417 s | 4.6e-5 / 1226 s | **3.3e-5 / 924 s** |
 
 Kagome is the hardest of the three models at a given rank. At cap 64 even the ground state is
 rank-limited (4.2e-3 above exact), and every arm inherits that floor. The BUG arms are
 truncation-limited as on the square (every step `:budget_unmet`, about 6e-3 discarded per step).
 Two random starts ran to the 60-sweep cap because the driver passed a fixed `etol = 1e-12`; the
 driver now leaves the adaptive ground state to `dmrg_etol`.
+
+At cap 128 the kagome cylinder is still truncation-limited for the BUG: every step is unmet
+(`:trunc`, `:krylov`) and discards about 1.7e-3, against about 1.2e-4 on the square at the same cap.
+The cap at which the BUG overtakes TDVP therefore depends on the model's entanglement growth. On
+the square and J1-J2 it is 128; on kagome it is 256. At cap 256 (half the 512 full rank of 18 sites)
+the kagome BUG matches TDVP2 (4.6e-5 against 4.9e-5) at 0.56x its wall time, and bug4 beats it
+(3.3e-5) at 0.72x. Only `:trunc` remains unmet (about 1.1e-4 per step against 1e-4).

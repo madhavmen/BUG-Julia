@@ -25,33 +25,33 @@ Krylov-closure step used by the `bug2` / `bug4` arms is audited in `KRYLOV_CLOSU
 
 | # | Requirement | Evidence (call site) | Status | Note |
 |---|---|---|---|---|
-| 4.1 | CBE-DMRG ground state shares the adaptive RSVD discovery/selection (Tests A/B) | `dmrg_cbe1s_sweep!`: `resolve_budget` -> `basis_allocation(...; tau = 1)` -> `expand_bond!(...; exkw..., ledger = bondlg)` with `alloc`, `workcap = work_ceiling(maxdim, rmax)`, `stol_pre = 0` | PENDING | job 17208254, `test_adaptive_dmrg.jl` |
+| 4.1 | CBE-DMRG ground state shares the adaptive RSVD discovery/selection (Tests A/B) | `dmrg_cbe1s_sweep!`: `resolve_budget` -> `basis_allocation(...; tau = 1)` -> `expand_bond!(...; exkw..., ledger = bondlg)` with `alloc`, `workcap = work_ceiling(maxdim, rmax)`, `stol_pre = 0` | DONE | `test_adaptive_dmrg.jl` 45/45 (job 17282132); Test A/B per bond in `bond_log` |
 | 4.1b | Ground-state tolerances medium-loose by default, looseness measured (user decision 2026-10-16) | `DMRG_TOL_DEFAULTS` (provisional 1e-3 / 1e-4) applied after `resolve_budget`; `benchmarks/ground_state/adaptive_dmrg_tolerance.jl` vs exact N = 20 (heis, xx, square 5x4, J1-J2 5x4) | DONE | study job 17208958 (heis, xx, square 5x4, J1-J2 5x4 vs exact): `1e-3 / 1e-4` confirmed as the medium default (dE/N 2-3e-9, 0.6-0.8x legacy wall in 2D) -- ADAPTIVE_DMRG_TOLERANCE_RESULTS.md. Stopping threshold now derived from the tolerances (`dmrg_etol`); its rerun is job 17265883 |
 | 4.2 | Its local stopping criterion is a Ritz residual, not the BUG root error | `lanczos_lowest(...; restol)` unchanged; `restol`/`maxiter` not routed through `resolve_budget` | DONE | design statement in the docstring |
-| 4.3 | Budgeted split, no hidden truncation knob; `maxdim` binding reported | `split!` -> `_budget_svd(A, legs, maxdim, n2 -> tol_trunc/sqrt(L-1)*sqrt(n2))`; `capped` -> `:trunc`, `maxdim_reached` | PENDING | the same `_budget_svd` now serves `truncate_recursive!` (refactor, `test_adaptive_compression.jl` in the same job) |
-| 4.4 | Per-bond telemetry (Test A/B, probes, widths, discarded) per sweep | `_log_bond!` + `(r_old, r_final, discarded)`; `DMRGCBERun.status` / `.ledgers` | PENDING | |
-| 4.5 | Legacy fixed-knob DMRG unchanged | every existing caller names `trunc_thresh` -> legacy; `rmax` read before the gauge as before | PENDING | `test_sweeps.jl` DMRG sets in the same job |
-| 4.6 | Converged energy AND variance | `mpo_variance` (two-layer MPO environment), printed by the driver (`VAR0`) and written to the cost CSV | PENDING | test vs dense `<H^2>-<H>^2` (chain, 3x3 J1-J2) in `test_adaptive_dmrg.jl` -- added after 17208254 was submitted, runs in the next job |
-| 4.7 | Several initial guesses for frustrated models, metastability reported | `fig45_2209.jl`: `NSTART` (default 3 when `J2 != 0` or kagome), Neel + seeded random S^z = 0 products, spread printed | PENDING | validation job |
+| 4.3 | Budgeted split, no hidden truncation knob; `maxdim` binding reported | `split!` -> `_budget_svd(A, legs, maxdim, n2 -> tol_trunc/sqrt(L-1)*sqrt(n2))`; `capped` -> `:trunc`, `maxdim_reached` | DONE | `_budget_svd` shared with `truncate_recursive!`; `test_adaptive_compression.jl` 67/67 (job 17208254); `maxdim` binding gives `:trunc` (test) |
+| 4.4 | Per-bond telemetry (Test A/B, probes, widths, discarded) per sweep | `_log_bond!` + `(r_old, r_final, discarded)`; `DMRGCBERun.status` / `.ledgers` | DONE | asserted in `test_adaptive_dmrg.jl` (2(L-1) entries, fields, split budget) |
+| 4.5 | Legacy fixed-knob DMRG unchanged | every existing caller names `trunc_thresh` -> legacy; `rmax` read before the gauge as before | DONE | `test_sweeps.jl` 91/91 (job 17208254) |
+| 4.6 | Converged energy AND variance | `mpo_variance` (two-layer MPO environment), printed by the driver (`VAR0`) and written to the cost CSV | DONE | vs dense `<H^2>-<H>^2` (chain, 3x3 J1-J2) in `test_adaptive_dmrg.jl` (jobs 17208955, 17282132); printed on every validation ground state |
+| 4.7 | Several initial guesses for frustrated models, metastability reported | `fig45_2209.jl`: `NSTART` (default 3 when `J2 != 0` or kagome), Neel + seeded random S^z = 0 products, spread printed | DONE | J1-J2 and kagome, 3 starts each, spreads 9e-11 to 2.3e-7: no metastability (TASK4_VALIDATION_RESULTS.md) |
 | 4.8 | `S^zz(q,omega)` from `C(t)`, U(1)-preserving excitation | `fig45_2209.jl` `correlator` (local `S^z_c` source, plan's allowed alternative) + Eq. (14) transform | CARRIED | campaign arXiv:2209.00739 |
 | 4.9 | Common conditions for all integrators (same GS, MPO, source, grid, window, cap) | one `psi0`, one `W`, one `ETA2`, one `DCAP` for every arm; only `bug4` changes dt (user decision: 4th order at larger dt), recorded per row (`dt` column) | DONE | |
-| 4.10 | Adaptive CBE-BUG arms, ordinary and midpoint | `steps["bug1"]`, `steps["bugmid"]` with `akw = (tol_basis, tol_trunc, tol_expv, maxdim)` only | PENDING | |
-| 4.11 | Higher order (§9 Phase 7, pulled forward by user): order 2 and 4, larger dt for order 4 | `steps["bug2"]`, `steps["bug4"]` (`order = 4`, `armdt = F_DT4`) | PENDING | |
+| 4.10 | Adaptive CBE-BUG arms, ordinary and midpoint | `steps["bug1"]`, `steps["bugmid"]` with `akw = (tol_basis, tol_trunc, tol_expv, maxdim, parallel)` only | DONE | 9 validation jobs + dt ladders (TASK4_VALIDATION_RESULTS.md) |
+| 4.11 | Higher order (§9 Phase 7, pulled forward by user): order 2 and 4, larger dt for order 4 | `steps["bug2"]`, `steps["bug4"]` (`order = 4`, `armdt = F_DT4`) | DONE | bug4 at 4x dt is the most accurate arm above the crossover cap (0.29-0.72x TDVP2 wall) |
 
 ## §6 Task 5 -- validation tests used so far
 
 | # | Requirement | Evidence | Status | Note |
 |---|---|---|---|---|
-| U17 | Independent edge checks: NN, J2 diagonals, kagome, cylinder wrap | `bond_length_gate` (every lattice, run before physics in the driver); `test_adaptive_dmrg.jl` square-J2 edge list; `test_kagome.jl` (existing) | PENDING | |
-| U18 | Small-system operator consistency vs sparse | `pairs_sparse` and the MPO from ONE `Jm`; DMRG E0 vs exact, refused if below | PENDING | |
+| U17 | Independent edge checks: NN, J2 diagonals, kagome, cylinder wrap | `bond_length_gate` (every lattice, run before physics in the driver); `test_adaptive_dmrg.jl` square-J2 edge list; `test_kagome.jl` (existing) | DONE | gate passed on square, J1-J2 and kagome in every validation job |
+| U18 | Small-system operator consistency vs sparse | `pairs_sparse` and the MPO from ONE `Jm`; DMRG E0 vs exact, refused if below | DONE | every validation job; DMRG always at or above exact |
 | U19 | Fourier/source normalisation | `G(c,0) = 1/4`, `sum_i G(i,0) = 0` gates (existing) | CARRIED | |
-| U20 | Correlator vs independent reference | `exact_correlator` per arm on its own grid -> `gerr_max`, `gerr_T`; exact `S(q,w)` written as arm `exact` | PENDING | N <= `F_EXACT_N` (20) |
-| U22 | Order checks, measured not assumed | `KRYLOV_CLOSURE_AUDIT.md` IT2 (chain); on 2D: `gerr` of bug1/bug2/bug4 vs dt | OPEN | needs a dt ladder on the 4x4 square |
+| U20 | Correlator vs independent reference | `exact_correlator` per arm on its own grid -> `gerr_max`, `gerr_T`; exact `S(q,w)` written as arm `exact` | DONE | all arms graded in jobs 17261124-17261139, 17261140, 17282199 |
+| U22 | Order checks, measured not assumed | `KRYLOV_CLOSURE_AUDIT.md` IT2 (chain); on 2D: `gerr` of bug1/bug2/bug4 vs dt | PARTIAL | dt ladders run (17261140, 17282199), but at 16 sites cap 256 is full rank and the BUG is exact at any dt, so the order is not measurable there. Chain orders measured (closure IT2). 2D order needs a larger cylinder (Phase 6) |
 
 ## Models
 
 | Model | Code | Status |
 |---|---|---|
 | Square Heisenberg | `square_cylinder_couplings` | CARRIED |
-| Square J1-J2 | `square_cylinder_couplings(...; J2)` diagonals `(x,y)-(x+1,y+-1)`, wrapped | PENDING |
-| Kagome | `kagome_cylinder_couplings`; `lattice2d.jl` `kagome_lattice` (positions with sublattice offsets, extended-zone path, `nsites`, `centre_site(lat, ...)`) | PENDING |
+| Square J1-J2 | `square_cylinder_couplings(...; J2)` diagonals `(x,y)-(x+1,y+-1)`, wrapped | DONE |
+| Kagome | `kagome_cylinder_couplings`; `lattice2d.jl` `kagome_lattice` (positions with sublattice offsets, extended-zone path, `nsites`, `centre_site(lat, ...)`) | DONE |
