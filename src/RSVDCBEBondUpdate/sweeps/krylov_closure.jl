@@ -69,6 +69,30 @@ end
 KLFrames(W, Z, c, lenv, renv, gen) = KLFrames(W, Z, c, lenv, renv, gen, nothing, nothing)
 
 """
+Threads below which the closure keeps its frontier sweeps in sequence. Each sweep already runs
+its two halves concurrently under `parallel = true`, so two concurrent sweeps need four threads
+to gain anything; below that the 2-thread production path stays exactly what it was.
+"""
+const _FRONTIER_THREADS = 4
+
+_frontier_parallel(parallel::Bool) = parallel && Threads.nthreads() >= _FRONTIER_THREADS
+
+"""
+    _prime_caches!(fr, psi, mpo, core)
+
+Build this generation's shared environments ([`_side_cache!`](@ref)) before frontier sweeps run
+concurrently, so the concurrent sweeps only READ them. `core` is any root core: the cached
+parts do not depend on it. The two sides are separate fields and are built concurrently.
+"""
+function _prime_caches!(fr::KLFrames, psi::SymMPS, mpo, core)
+    Fm = _frontier_mps(psi, fr, core)
+    t = Threads.@spawn _side_cache!(fr, Fm, mpo, :right)
+    _side_cache!(fr, Fm, mpo, :left)
+    fetch(t)
+    return fr
+end
+
+"""
     _side_cache!(fr, Fm, mpo, side) -> (chain, stack)
 
 The environments of one half-sweep that do not depend on the frontier, built once per frame
@@ -624,6 +648,11 @@ the ordinary step's own closure, `rho_j = ||(I - P) A F_j|| / ||F_j||` (the boun
 time-weighted `leak[j+1]`, the scale-free `rho[j+1]`, `met` (every bond of every frontier
 `j >= 1` within its share -- `j = 0` is the half-sweeps' own test), the merged `ledger` and
 `n_root` zero-site applications; `met0` is the `j = 0` verdict.
+
+The frontiers are independent measurements on one set of frames, so with `parallel` and at
+least [`_FRONTIER_THREADS`](@ref) threads they run CONCURRENTLY (each with its own RNG stream
+drawn from `rng`, after the shared environments are built once by [`_prime_caches!`](@ref));
+otherwise in order, exactly as before. The results are merged in `j` order either way.
 """
 function _measure_frontiers(fr::KLFrames, psi::SymMPS, mpo, S0, tau::ComplexF64,
                             alloc::BasisAllocation, ckw::NamedTuple, m::Int;
@@ -636,11 +665,19 @@ function _measure_frontiers(fr::KLFrames, psi::SymMPS, mpo, S0, tau::ComplexF64,
                                      m - 1) : Any[]
     lg = AdaptiveLedger()
     leak, rho, met, met0 = zeros(m), zeros(m), true, true
+    cores = Any[j == 0 ? S0 : F[j] for j in 0:(m - 1)]
+    measure(j, r) = _frontier_sweep!(fr, psi, mpo, KrylovFrontier(cores[j + 1], j, fr.gen), tau,
+                                     alloc, ckw; enrich = false, workcap = workcap, nrm = nrm,
+                                     parallel = parallel, rng = r, pass = pass, fold = fold)
+    rs = if _frontier_parallel(parallel) && m > 1
+        _prime_caches!(fr, psi, mpo, S0)
+        rngs = [MersenneTwister(rand(rng, UInt64)) for _ in 1:m]
+        fetch.([Threads.@spawn(measure(j, rngs[j + 1])) for j in 0:(m - 1)])
+    else
+        [measure(j, rng) for j in 0:(m - 1)]
+    end
     for j in 0:(m - 1)
-        core = j == 0 ? S0 : F[j]
-        r = _frontier_sweep!(fr, psi, mpo, KrylovFrontier(core, j, fr.gen), tau, alloc, ckw;
-                             enrich = false, workcap = workcap, nrm = nrm,
-                             parallel = parallel, rng = rng, pass = pass, fold = fold)
+        core, r = cores[j + 1], rs[j + 1]
         merge_ledger!(lg, r.ledger)
         nF = norm(core)
         raw = sqrt(sum(abs2, r.leaks_left) + sum(abs2, r.leaks_right))
@@ -743,6 +780,7 @@ function _krylov_closure!(fr::KLFrames, psi::SymMPS, mpo, S0, tau::ComplexF64,
     nroot = Ref(pre.n_root)
     S = Ref{Any}(S0)
     final_leak = Dict{Int, Float64}(j - 1 => pre.leak[j] for j in 1:order)
+    gen0 = fr.gen
     res = if pre.met && (pre.met0 || !include_zero)
         (passes = 0, converged = true, exhausted = false, capped = false, log = Any[])
     else
@@ -750,7 +788,23 @@ function _krylov_closure!(fr::KLFrames, psi::SymMPS, mpo, S0, tau::ComplexF64,
         applyB = x -> (nroot[] += 1; apply_zero_site(H0[], x))
         frontier = j -> KrylovFrontier(j == 0 ? S[] :
                                        _projected_frontiers(applyB, S[], tau, j)[j], j, fr.gen)
+        # ⚠ SPECULATIVE FINAL MEASUREMENT (>= _FRONTIER_THREADS threads). A later pass usually
+        # adds nothing and is then the last; its last sweep cannot change the frames unless it
+        # adds. So `j = 0` is measured CONCURRENTLY on a snapshot of the frames, and kept only
+        # if the loop ends in that generation -- otherwise it is discarded and redone below.
+        spec = Ref{Any}(nothing)
+        r0kw = (workcap = workcap, nrm = nrm, parallel = parallel, fold = fold, enrich = false)
         sweep! = (F, j, pass) -> begin
+            if _frontier_parallel(parallel) && pass >= 2 && j == order - 1
+                spec[] === nothing || fetch(spec[].task)
+                snap = KLFrames(copy(fr.W), copy(fr.Z), fr.c, fr.lenv, fr.renv, fr.gen,
+                                fr.lcache, fr.rcache)
+                F0 = KrylovFrontier(S[], 0, snap.gen)
+                rs0 = MersenneTwister(rand(rng, UInt64))
+                spec[] = (gen = snap.gen, task = Threads.@spawn(
+                    _frontier_sweep!(snap, psi, mpo, F0, tau, alloc, ckw; r0kw...,
+                                     rng = rs0, pass = pass + 1)))
+            end
             r = _frontier_sweep!(fr, psi, mpo, F, tau, alloc, ckw; sweepkw..., pass = pass)
             merge_ledger!(lg, r.ledger)
             final_leak[j] = r.leak
@@ -762,10 +816,19 @@ function _krylov_closure!(fr::KLFrames, psi::SymMPS, mpo, S0, tau::ComplexF64,
         end
         loop = _closure_loop!(frontier, sweep!, order; maxpass = maxpass,
                               include_zero = include_zero)
-        r0 = _frontier_sweep!(fr, psi, mpo, frontier(0), tau, alloc, ckw; sweepkw...,
-                              enrich = false, pass = loop.passes + 1)
-        merge_ledger!(lg, r0.ledger)
-        final_leak[0] = r0.leak
+        sr = spec[] === nothing ? nothing : (gen = spec[].gen, r = fetch(spec[].task))
+        if fr.gen == gen0
+            # Nothing grew: the frames and `S0` are the ones `pre` measured `j = 0` on, so its
+            # measurement IS the final one (`final_leak[0]` already holds it).
+        elseif sr !== nothing && sr.gen == fr.gen
+            merge_ledger!(lg, sr.r.ledger)
+            final_leak[0] = sr.r.leak
+        else
+            r0 = _frontier_sweep!(fr, psi, mpo, frontier(0), tau, alloc, ckw; r0kw...,
+                                  rng = rng, pass = loop.passes + 1)
+            merge_ledger!(lg, r0.ledger)
+            final_leak[0] = r0.leak
+        end
         loop
     end
     lg.n_passes = res.passes

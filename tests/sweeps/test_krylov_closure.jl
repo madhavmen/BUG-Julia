@@ -370,6 +370,39 @@ end
     @test grew > 0                                       # non-vacuous: frames did grow
 end
 
+@testset "parallel closure: concurrent frontiers, final j = 0 measurement" begin
+    # With >= RC._FRONTIER_THREADS threads `parallel = true` measures the frontiers concurrently
+    # and takes the final j = 0 measurement speculatively; below it, the same calls run in order.
+    # `exact = true` draws no random sketch, so serial and parallel must agree to roundoff.
+    @info "parallel closure test on $(Threads.nthreads()) threads " *
+          "(concurrent frontiers from $(RC._FRONTIER_THREADS))"
+    L, c = 8, 4
+    mpo, psi = _xx_warm(L, 2)
+    tau = ComplexF64(-0.1im)
+    alloc = basis_allocation(AdaptiveBudget(1e-8, 0.0, 1.0), L - 1; tau = tau, nrm = 1.0,
+                             nfront = 3)
+    ckw = _kc_ckw(alloc, 64)
+    frs, frp = RC.frames_from_state(psi, mpo, c), RC.frames_from_state(psi, mpo, c)
+    S0 = RC._project_root(psi, frs)
+    ms = RC._measure_frontiers(frs, psi, mpo, S0, tau, alloc, ckw, 3; parallel = false)
+    mp = RC._measure_frontiers(frp, psi, mpo, S0, tau, alloc, ckw, 3; parallel = true)
+    @test isapprox(ms.leak, mp.leak; rtol = 1e-10) && ms.met == mp.met
+    @test all(>(0), ms.leak)                                  # non-vacuous
+    cls = RC._krylov_closure!(frs, psi, mpo, S0, tau, alloc, ckw; order = 3, workcap = 64,
+                              nrm = 1.0, parallel = false)
+    clp = RC._krylov_closure!(frp, psi, mpo, S0, tau, alloc, ckw; order = 3, workcap = 64,
+                              nrm = 1.0, parallel = true)
+    @test cls.passes == clp.passes && cls.converged == clp.converged
+    @test isapprox(cls.ledger.leak, clp.ledger.leak; rtol = 1e-8)
+    @test cls.passes >= 1 && frs.gen > 0                      # non-vacuous: the frames grew
+    # the reported final j = 0 leak -- reused, speculative or recomputed -- is the one the FINAL
+    # frames give, measured afresh
+    for (fr, cl) in ((frs, cls), (frp, clp))
+        fresh = RC._measure_frontiers(fr, psi, mpo, cl.S0, tau, alloc, ckw, 1)
+        @test isapprox(cl.ledger.leak[1], fresh.leak[1]; rtol = 1e-10)
+    end
+end
+
 @testset "UT6: eigenstates -- no growth, exact root phase" begin
     set_symmetry!(:U1)
     L, dt = 8, 0.3
