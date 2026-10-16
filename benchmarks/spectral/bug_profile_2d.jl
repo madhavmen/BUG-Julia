@@ -24,7 +24,8 @@
 # Run:  julia -t 2 --project=PKG benchmarks/spectral/bug_profile_2d.jl Lx Ly OUTDIR
 # Env:  BP_MODE (profile) BP_DS ("256,512,1024") BP_ARMS ("tdvp2,bug2")
 #       BP_PROF ("bug2"); tdvp4 = `tdvp2_composed_step!` order 4 (Suzuki, 5 stages) at BP_DT4,
-#       the partner of bug4 (also at BP_DT4)
+#       the partner of bug4 (also at BP_DT4); tdvp2e / tdvp4e stop each local exponential at
+#       BP_TE (Saad) instead of a fixed 8 Lanczos vectors -- list one first to make it the partner
 #       BP_NSTEP (3) BP_TDVP_NSTEP (= BP_NSTEP) BP_DT (0.1) BP_DT4 (0.2)
 #       BP_VARIANTS ("wide:1e-4:0,thin:1e-4:0,thin:1e-4:1,thin:1e-3:0,thin:1e-3:1")
 #             each BUG arm runs once per `search:tol_basis:fold`. search = thin (Test B sets the
@@ -36,6 +37,7 @@
 #             per-step compression losses accumulate, TASK4_VALIDATION_RESULTS.md)
 #       BP_GS_TB/BP_GS_TT (1e-4/1e-6: tight enough that the ground state reaches the cap)
 #       BP_CLOSURE_LOG (0) 1 prints the order-p closure ledger after every step (`closure_lines`)
+#       BP_BLAS_TDVP (julia threads) BP_BLAS_BUG (julia threads / 2): BLAS threads per arm family
 
 using LinearAlgebra, Printf, Serialization, Profile
 using LurCGT, Telum
@@ -71,6 +73,12 @@ const TE    = parse(Float64, get(ENV, "BP_TE", "1e-6"))
 const GS_TB = parse(Float64, get(ENV, "BP_GS_TB", "1e-4"))
 const GS_TT = parse(Float64, get(ENV, "BP_GS_TT", "1e-6"))
 const CLOSURE_LOG = get(ENV, "BP_CLOSURE_LOG", "0") == "1"
+# ⚠ SAME CORES, EACH ARM'S BEST USE OF THEM. TDVP2's sweep is sequential, so its only parallelism
+# is BLAS: it gets every thread. The BUG runs its half-sweeps (and, from 4 threads, its closure
+# frontiers) as concurrent tasks, each calling BLAS, so it gets fewer BLAS threads per call to
+# avoid oversubscribing the same cores. Both are printed per arm.
+const BLAS_TDVP = parse(Int, get(ENV, "BP_BLAS_TDVP", string(Threads.nthreads())))
+const BLAS_BUG  = parse(Int, get(ENV, "BP_BLAS_BUG", string(max(1, Threads.nthreads() ÷ 2))))
 const PARALLEL = Threads.nthreads() >= 2
 MODE in ("gs", "profile") || error("BP_MODE must be gs or profile, got $MODE")
 
@@ -81,12 +89,15 @@ say(msg) = (@printf("[%8.1fs] %s\n", time() - T0, msg); flush(stdout))
 # tdvp2 compared a 4th-order step at 2x dt with a 2nd-order one: different methods, not a cost
 # comparison. Each BUG arm is ratioed against the TDVP arm of its own nominal order, at the same
 # dt; bug1 has no first-order TDVP partner and gets no ratio.
-const ARM_ORDER = Dict("tdvp2" => 2, "tdvp4" => 4, "bug1" => 1, "bugmid" => 2, "bug2" => 2,
-                       "bug4" => 4)
-const TDVP_OF_ORDER = Dict(2 => "tdvp2", 4 => "tdvp4")
+# The partner is the FIRST TDVP arm of that order in BP_ARMS, so `tdvp2e,tdvp2,bug2` grades bug2
+# against the tolerance-stopped TDVP2 and keeps the fixed-depth one as the A/B.
+const ARM_ORDER = Dict("tdvp2" => 2, "tdvp4" => 4, "tdvp2e" => 2, "tdvp4e" => 4, "bug1" => 1,
+                       "bugmid" => 2, "bug2" => 2, "bug4" => 4)
 
 armdt(arm) = ARM_ORDER[arm] == 4 ? DT4 : DT
 istdvp(arm) = startswith(arm, "tdvp")
+tdvp_partner(arm) = (k = findfirst(a -> istdvp(a) && ARM_ORDER[a] == ARM_ORDER[arm], ARMS);
+                     k === nothing ? nothing : ARMS[k])
 
 "Every (arm, variant) run: tdvp2 once, each BUG arm once per `VARIANTS` entry."
 runs() = [(arm, v) for arm in ARMS for v in (istdvp(arm) ? [nothing] : VARIANTS)]
@@ -96,11 +107,15 @@ label(arm, v) = v === nothing ? arm :
 function stepper(arm, W, D; parallel::Bool, v = VARIANTS[1])
     akw = (tol_basis = v.tb, tol_trunc = TT, tol_expv = TE, maxdim = D, parallel = parallel,
            fold_omega = v.fold, thin_search = v.thin)
-    arm == "tdvp2"  && return (p, tau) -> tdvp2_step!(p, W, tau; maxdim = D, trunc_thresh = 1e-12,
-                                                       maxiter = 8)
-    arm == "tdvp4"  && return (p, tau) -> tdvp2_composed_step!(p, W, tau; order = 4,
-                                                                maxdim = D, trunc_thresh = 1e-12,
-                                                                maxiter = 8)
+    # tdvp2/tdvp4: a FIXED 8-vector Lanczos per local exponential (the campaign's old setting).
+    # tdvp2e/tdvp4e: the same step stopped at `tol_expv` by Saad's estimate with adaptive
+    # substeps -- the rule the BUG root solve uses, so both arms get one exponential accuracy.
+    tkw = (maxdim = D, trunc_thresh = 1e-12, maxiter = 8)
+    tkwe = (maxdim = D, trunc_thresh = 1e-12, maxiter = 30, conv_tol = TE, substeps = 0)
+    arm == "tdvp2"  && return (p, tau) -> tdvp2_step!(p, W, tau; tkw...)
+    arm == "tdvp2e" && return (p, tau) -> tdvp2_step!(p, W, tau; tkwe...)
+    arm == "tdvp4"  && return (p, tau) -> tdvp2_composed_step!(p, W, tau; order = 4, tkw...)
+    arm == "tdvp4e" && return (p, tau) -> tdvp2_composed_step!(p, W, tau; order = 4, tkwe...)
     arm == "bug1"   && return (p, tau) -> cbe_bug_step!(p, W, tau; akw...)
     arm == "bugmid" && return (p, tau) -> cbe_bug_midpoint_step!(p, W, tau; akw...)
     arm == "bug2"   && return (p, tau) -> cbe_bug_step!(p, W, tau; order = 2, akw...)
@@ -121,8 +136,14 @@ function ground_state(W, N, D, prev)
         try
             blob = Serialization.deserialize(file)
             if blob.key == key && abs(energy(blob.psi, W) - blob.E0) < 1e-8 * max(1.0, abs(blob.E0))
-                say(@sprintf("GS D=%d REUSED  E0=%.10f  chi=%d", D, blob.E0,
-                             maximum(state_bond_dims(blob.psi))))
+                # The adaptive CBE-DMRG (RSVD) solve wall is part of the method's cost, kept in
+                # the cache since it was first solved; caches older than that print "n/a" and
+                # the time is in the solving job's log (`GS D=... s` line).
+                tg = hasproperty(blob, :t_solve) ?
+                     @sprintf("%.1f s (%d sweeps, %d threads)", blob.t_solve, blob.sweeps,
+                              blob.threads) : "n/a (older cache)"
+                say(@sprintf("GS D=%d REUSED  E0=%.10f  chi=%d  CBE-DMRG solve wall %s", D,
+                             blob.E0, maximum(state_bond_dims(blob.psi)), tg))
                 return blob.psi
             end
             say("GS cache $(basename(file)) rejected (key or energy mismatch), re-solving")
@@ -138,7 +159,9 @@ function ground_state(W, N, D, prev)
                  E0 / N, maximum(state_bond_dims(psi)), length(gs.energies),
                  string(gs.converged), string(gs.status[end]), t))
     try
-        Serialization.serialize(file, (key = key, psi = psi, E0 = E0))
+        Serialization.serialize(file, (key = key, psi = psi, E0 = E0, t_solve = t,
+                                       sweeps = length(gs.energies),
+                                       threads = Threads.nthreads()))
     catch err
         say("WARNING GS not cached ($(err))")
     end
@@ -233,8 +256,8 @@ end
 function main()
     for (k, arm) in enumerate(ARMS)
         haskey(ARM_ORDER, arm) || error("unknown arm $arm")
-        pr = get(TDVP_OF_ORDER, ARM_ORDER[arm], nothing)
-        istdvp(arm) || pr === nothing || !(pr in ARMS) || findfirst(==(pr), ARMS) < k ||
+        pr = tdvp_partner(arm)
+        istdvp(arm) || pr === nothing || findfirst(==(pr), ARMS) < k ||
             error("BP_ARMS: $pr must come before $arm, which is graded against it")
     end
     mkpath(OUT)
@@ -271,11 +294,15 @@ function main()
         pairinf = Dict{String, Float64}()       # BUG label => infidelity vs its same-order TDVP
         for (arm, v) in runs()
             lab = label(arm, v)
+            BLAS.set_num_threads(istdvp(arm) ? BLAS_TDVP : BLAS_BUG)
+            say(@sprintf("%s D=%d  julia threads %d  BLAS threads %d", lab, D, Threads.nthreads(),
+                         BLAS.get_num_threads()))
             step! = stepper(arm, W, D; parallel = PARALLEL,
                             v = v === nothing ? VARIANTS[1] : v)
             # JIT, untimed. tdvp4 is five tdvp2 stages -- nothing new to compile, and at large chi
             # a warm-up would cost five full TDVP2 steps.
-            arm == "tdvp4" || let q = deepcopy(phi); step!(q, ComplexF64(-im * armdt(arm))); end
+            (istdvp(arm) && ARM_ORDER[arm] == 4) ||
+                let q = deepcopy(phi); step!(q, ComplexF64(-im * armdt(arm))); end
             p = deepcopy(phi)
             n = istdvp(arm) ? NTDVP : NSTEP
             walls = Float64[]
@@ -312,10 +339,17 @@ function main()
             perstep[lab] = sum(walls) / (n * armdt(arm))
             # Only the TDVP finals are kept (a D=1024 state is ~1 GB); a BUG arm is graded against
             # its same-order partner here, which must therefore come first in BP_ARMS.
-            if istdvp(arm)
+            if istdvp(arm) && tdvp_partner(arm) == arm
                 tdvpfinal[arm] = (n * armdt(arm), deepcopy(p))
-            elseif haskey(tdvpfinal, get(TDVP_OF_ORDER, ARM_ORDER[arm], ""))
-                tt, pt = tdvpfinal[TDVP_OF_ORDER[ARM_ORDER[arm]]]
+            elseif istdvp(arm)
+                # a TDVP A/B arm (e.g. fixed-depth tdvp2 next to tdvp2e): same state, or not?
+                tt, pt = tdvpfinal[tdvp_partner(arm)]
+                @printf("  %-12s D=%4d  infidelity vs %s at t=%.2f: %.2e  wall per unit time %.1f s vs %.1f s\n",
+                        lab, D, tdvp_partner(arm), tt,
+                        1 - abs(overlap(pt, p)) / (norm(pt) * norm(p)), perstep[lab],
+                        perstep[tdvp_partner(arm)])
+            elseif haskey(tdvpfinal, something(tdvp_partner(arm), ""))
+                tt, pt = tdvpfinal[tdvp_partner(arm)]
                 pairinf[lab] = isapprox(tt, n * armdt(arm)) ?
                                1 - abs(overlap(pt, p)) / (norm(pt) * norm(p)) : NaN
             end
@@ -334,7 +368,7 @@ function main()
             istdvp(arm) && continue
             lab = label(arm, v)
             ord = ARM_ORDER[arm]
-            partner = get(TDVP_OF_ORDER, ord, nothing)
+            partner = tdvp_partner(arm)
             if partner === nothing || !haskey(perstep, partner)
                 @printf("  D=%4d  %-12s order %d: no same-order TDVP arm in this run -- no ratio\n",
                         D, lab, ord)
