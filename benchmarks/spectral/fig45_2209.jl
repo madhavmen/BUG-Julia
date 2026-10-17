@@ -53,7 +53,9 @@
 # Out:  results/fig45_G_<lat>_<Lx>x<Ly>_<arm>.csv     G(x,t), one row per (site,time)
 #       results/fig45_Sqw_<lat>_<Lx>x<Ly>_<arm>.csv   S(q,w) on the path
 #       results/fig45_cost_<lat>_<Lx>x<Ly>.csv        the integrator comparison
-#       results/fig45_steps_<tag>_<arm>.csv           per step: wall, chi, discarded norm, unmet
+#       results/fig45_steps_<tag>_<arm>.csv           per step: wall, chi, discarded norm, unmet,
+#                                                     bond dims; G and steps written as they run
+#       results/fig45_G_<tag>_exact.csv               exact G(x,t) when N <= F_EXACT_N
 # Arms: tdvp2 cbe1s bug (legacy knobs); bug1 bugmid bug2 bug4 (adaptive); tdvp2e cbe1se (Saad-
 #       stopped exponentials at F_TE; tdvp2e discards by the BUG's F_TT budget). F_ARMS=none
 #       solves and caches the ground state only. F_OUT may be absolute (cluster: under $SCRATCH).
@@ -120,6 +122,16 @@ const N   = nsites(LAT, LX, LY)          # kagome: LX, LY count unit cells
 # value (eta^2 = 0.03 square, 0.02 triangle).
 const ETA2 = parse(Float64, get(ENV, "F_ETA2", string(LAT.eta2)))
 
+"One time column of `G` as `fig45_G_*.csv` rows (readers key on (site, t), not on row order)."
+function write_gcol(io::IO, G::AbstractMatrix, ts, n::Int)
+    for i in axes(G, 1)
+        ix, iy = coords(i, LY); rx, ry = site_position(LAT, i, LY)
+        @printf(io, "%d,%d,%d,%.6f,%.6f,%.4f,%.10e,%.10e\n",
+                i, ix, iy, rx, ry, ts[n], real(G[i, n]), imag(G[i, n]))
+    end
+end
+const GHEADER = "site,x,y,rx,ry,t,ReG,ImG"
+
 """
     correlator(psi0, E0, step!, nt, dt) -> (ts, G, cost)
 
@@ -131,7 +143,8 @@ one displacement index cannot carry on a cylinder.
 `cost` accumulates what the arm actually spent, so the integrator comparison is measured on the
 same trajectory that produced the physics rather than in a separate microbenchmark.
 """
-function correlator(psi0::SymMPS, E0::Float64, step!, nt::Int, dt::Float64)
+function correlator(psi0::SymMPS, E0::Float64, step!, nt::Int, dt::Float64;
+                    stepio::Union{IO, Nothing} = nothing, gio::Union{IO, Nothing} = nothing)
     L = length(psi0)
     c = centre_site(LAT, LX, LY)
     phi = deepcopy(psi0)
@@ -148,6 +161,7 @@ function correlator(psi0::SymMPS, E0::Float64, step!, nt::Int, dt::Float64)
     row!(col) = (G[:, col] .= sz_overlaps(psi0, phi))
 
     row!(1)
+    gio === nothing || (write_gcol(gio, G, ts, 1); flush(gio))
     for n in 1:nt
         t0 = time()
         info = step!(phi, ComplexF64(-im * dt))
@@ -164,8 +178,16 @@ function correlator(psi0::SymMPS, E0::Float64, step!, nt::Int, dt::Float64)
         disc = info === nothing ? NaN : hasproperty(info, :cumulative) ? info.cumulative :
                lg isa AdaptiveLedger ? lg.discarded :
                hasproperty(info, :discarded) ? Float64(info.discarded) : NaN
-        push!(cost.steps, (step = n, t = n * dt, wall = tw, chi = chin, discarded = disc,
-                           unmet = lg isa AdaptiveLedger ? join(string.(lg.unmet), "+") : ""))
+        srow = (step = n, t = n * dt, wall = tw, chi = chin, discarded = disc,
+                unmet = lg isa AdaptiveLedger ? join(string.(lg.unmet), "+") : "")
+        push!(cost.steps, srow)
+        # Written as it happens: at a non-binding cap an arm can run for days, and chi(t) up to
+        # wherever it stopped is the measurement.
+        if stepio !== nothing
+            @printf(stepio, "%d,%.4f,%.3f,%d,%.3e,%s,%s\n", srow.step, srow.t, srow.wall, srow.chi,
+                    srow.discarded, srow.unmet, join(bond_dims(phi), ";"))
+            flush(stepio)
+        end
         if lg isa AdaptiveLedger
             n == 1 && (cost.first[] = (r_old = lg.r_old, r_aug = lg.r_aug, r_final = lg.r_final,
                                        discarded = lg.discarded, unmet = copy(lg.unmet)))
@@ -180,6 +202,7 @@ function correlator(psi0::SymMPS, E0::Float64, step!, nt::Int, dt::Float64)
         # `e^{i E0 t}` removes the ground state's own phase; without it every G winds at E0 and
         # the whole spectrum is rigidly shifted.
         G[:, n + 1] .*= cis(E0 * ts[n + 1])
+        gio === nothing || (write_gcol(gio, G, ts, n + 1); flush(gio))
     end
     return ts, G, cost
 end
@@ -522,6 +545,13 @@ function main()
         tsx = collect(0:round(Int, TMAX / DT)) .* DT
         Gx, _ = exact_correlator(Hs, states, Om, Ex, c, N, tsx)
         Gex_cache[DT] = Gx
+        # error vs t, also for an arm graded from its partial record
+        open(joinpath(OUT, "fig45_G_$(tag)_exact.csv"), "w") do io
+            println(io, GHEADER)
+            for n in eachindex(tsx)
+                write_gcol(io, Gx, tsx, n)
+            end
+        end
         Sx = structure_factor_2d(Gx, tsx, qs; eta2 = ETA2, ws = ws)
         Sqx = static_structure_factor(Gx, qs)
         open(joinpath(OUT, "fig45_Sqw_$(tag)_exact.csv"), "w") do io
@@ -545,7 +575,16 @@ function main()
         @printf("-- %s --\n", arm)
         dta = armdt(arm)
         nta = round(Int, TMAX / dta)
-        ts, G, cost = correlator(psi0, E0, steps[arm], nta, dta)
+        gio = open(joinpath(OUT, "fig45_G_$(tag)_$(arm).csv"), "w")
+        println(gio, GHEADER)
+        # per step: bond growth (max and over bonds) and discarded norm vs time (plan §8 figs 1, 5)
+        stepio = open(joinpath(OUT, "fig45_steps_$(tag)_$(arm).csv"), "w")
+        println(stepio, "step,t,wall,chi,discarded,unmet,bonds")
+        ts, G, cost = try
+            correlator(psi0, E0, steps[arm], nta, dta; stepio = stepio, gio = gio)
+        finally
+            close(gio); close(stepio)
+        end
         Gx = gexact(ts)
         gerr = Gx === nothing ? NaN : maximum(abs, G .- Gx)
         gerrT = Gx === nothing ? NaN : maximum(abs, G[:, end] .- Gx[:, end])
@@ -568,24 +607,6 @@ function main()
                             site_position(LAT, i, LY)[2] - rc[2]) for i in 1:N])
         hit = findfirst(n -> abs(G[far, n]) > 0.05 * abs(G[c, 1]), 2:(nta + 1))
         tfar = hit === nothing ? TMAX : dta * hit
-
-        open(joinpath(OUT, "fig45_G_$(tag)_$(arm).csv"), "w") do io
-            println(io, "site,x,y,rx,ry,t,ReG,ImG")
-            for i in 1:N, n in 1:(nta + 1)
-                ix, iy = coords(i, LY); rx, ry = site_position(LAT, i, LY)
-                @printf(io, "%d,%d,%d,%.6f,%.6f,%.4f,%.10e,%.10e\n",
-                        i, ix, iy, rx, ry, ts[n], real(G[i, n]), imag(G[i, n]))
-            end
-        end
-
-        # per step: bond growth and discarded norm vs time (plan §8 figures 1 and 5)
-        open(joinpath(OUT, "fig45_steps_$(tag)_$(arm).csv"), "w") do io
-            println(io, "step,t,wall,chi,discarded,unmet")
-            for s in cost.steps
-                @printf(io, "%d,%.4f,%.3f,%d,%.3e,%s\n", s.step, s.t, s.wall, s.chi, s.discarded,
-                        s.unmet)
-            end
-        end
 
         S  = structure_factor_2d(G, ts, qs; eta2 = ETA2, ws = ws)
         Sq = static_structure_factor(G, qs)
