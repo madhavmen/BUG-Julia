@@ -354,6 +354,7 @@ function main()
 
     psi0   = nothing
     cached = false
+    varc   = nothing                       # the cached variance, if the payload carries one
     if usecache && isfile(gsfile)
         try
             blob = Serialization.deserialize(gsfile)
@@ -364,6 +365,7 @@ function main()
                 Ec   = real(mpo_energy(copy(cand), W)) / max(norm(cand)^2, eps())
                 if abs(Ec - blob.E0) < 1e-8 * max(1.0, abs(blob.E0))
                     psi0, cached = cand, true
+                    hasproperty(blob, :var) && blob.var !== nothing && (varc = blob.var)
                 else
                     @printf("  GS cache %s REJECTED -- E0 %.10f vs stored %.10f, re-solving\n",
                             basename(gsfile), Ec, blob.E0)
@@ -412,6 +414,7 @@ function main()
                         GS_TB, GS_TT, lg.max_sample, lg.max_tail, lg.r_aug, lg.discarded,
                         budget_diagnostic(lg))
             end
+            flush(stdout)                        # a long solve is otherwise invisible in a job log
             if best === nothing || ek < best[1]
                 best = (ek, cand, length(gs.energies), gs.converged)
             end
@@ -421,9 +424,6 @@ function main()
                               NSTART, maximum(estarts) - minimum(estarts))
     end
     E0 = real(mpo_energy(copy(psi0), W)) / max(norm(psi0)^2, eps())
-    # The accuracy measure that survives past ED sizes: zero on an eigenstate (Task 4).
-    VAR0 = mpo_variance(psi0, W)
-    @printf("ground-state energy variance <H^2>-<H>^2 = %.3e  (per site %.3e)\n", VAR0, VAR0 / N)
     chi0 = maximum(state_bond_dims(psi0))
     if cached
         @printf("ground state: E0=%.10f  E0/N=%.10f  chi=%d  REUSED from %s (solve skipped)\n",
@@ -432,21 +432,28 @@ function main()
         @printf("ground state: E0=%.10f  E0/N=%.10f  chi=%d  conv=%s  sweeps=%d  %.1fs\n",
                 E0, E0 / N, chi0, string(conv), nsw, tgs)
     end
+    flush(stdout)
     # ⛔ A GROUND STATE THAT NEVER GREW IS THE FROZEN-START FAILURE, not a rank-1 ground state.
     # This also runs on the CACHE path -- a frozen state that once got serialised must not be
     # trusted a second time just because it came off disk.
     (chi0 <= 2 && (cached || nsw <= 3)) &&
         error("ground state FROZE at the product start (chi=$chi0) -- nothing below is physics; " *
               "see gate_l20.jl")
-
-    if usecache && !cached
-        try
-            Serialization.serialize(gsfile, (key = gskey, psi = psi0, E0 = E0))
-            @printf("  cached ground state -> %s\n", basename(gsfile))
-        catch err
-            @printf("  WARNING ground state not cached (%s)\n", string(err))
-        end
+    gssave(v) = usecache && try
+        Serialization.serialize(gsfile, (key = gskey, psi = psi0, E0 = E0, var = v)); true
+    catch err
+        @printf("  WARNING ground state not cached (%s)\n", string(err)); false
     end
+    # The state is cached BEFORE the variance, so a variance that runs out of memory costs only
+    # the variance, not the solve.
+    !cached && gssave(nothing) && @printf("  cached ground state -> %s\n", basename(gsfile))
+    # The accuracy measure that survives past ED sizes: zero on an eigenstate (Task 4).
+    # Computed once and cached with the state: its two-layer environment is chi^2 w^2 per bond,
+    # gigabytes at D = 1024 (the 10x4 GS job died at 12 G), and every arm's job would otherwise
+    # repeat it.
+    VAR0 = varc === nothing ? mpo_variance(psi0, W) : varc
+    varc === nothing && gssave(VAR0)
+    @printf("ground-state energy variance <H^2>-<H>^2 = %.3e  (per site %.3e)\n", VAR0, VAR0 / N)
     println()
 
     # ⛔ THE BUG SETTINGS COME FROM THE chi=128 SCAN WHEN ONE EXISTS, and the driver says which.
