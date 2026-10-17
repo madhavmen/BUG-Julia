@@ -283,3 +283,31 @@ Hubbard track. Leave them alone.
   - `order-p-step-is-half-sweeps-plus-one-enriching-sweep-checks-off`;
   - `fair-truncation-is-the-same-per-cut-rule-not-a-per-step-budget`;
   - `focus-shift-errors-and-bond-growth-before-walltime`.
+
+## 8. Continuation (2026-10-17 late)
+
+**USER answers to §6.1:** commit §3 (done); rerun the Phase 6 tdvp2e arms only (references stay
+on the old rule); bug2: profile first, then (a) + (b).
+
+- **Commits:** `86dea31` code + tests + plan §8, `5dfd528` benchmarks, `f588ef9` docs/figures.
+  s27 matches HEAD (md5).
+- **fair10 graded** vs the mean of ref1024t and ref1536t (t ≤ 4.5; refs agree to ≤ 9e-7):
+
+  | arm | D | wall/unit t | err t=1 | t=2 | t=4.5 |
+  |---|---|---|---|---|---|
+  | tdvp2e | 256 | 321 s | 7.9e-6 | 3.0e-5 | 2.4e-4 |
+  | bug2 1e-3 | 256 | 479 s | 2.9e-4 | 2.1e-3 | 1.5e-2 |
+  | bug2 1e-4 | 256 | 440 s | 7.2e-4 | 7.4e-3 | 6.6e-2 |
+  | tdvp2e | 512 | 797 s | 2.8e-7 | 2.7e-6 | 2.2e-5 |
+  | bug2 1e-3 | 512 (to t=1.7) | 1207 s | 2.2e-5 | — | — |
+
+  The per-step discarded norm is equal (1.4e-2 vs 1.1e-2 at D = 256), and bug2's `closure` is
+  unmet on every step: at a binding cap bug2 is basis-limited, and tighter `tol_basis` is WORSE
+  (not diagnosed).
+- **Jobs:**
+  - prof24 17339380 (TIMING, th-cl-hua07; `2026-10-17-prof24/`): bug_profile_2d 6x4, cap
+    4096, dt 0.05, 10 steps; tdvp2e vs bug2 `tol_basis` 1e-5, fold 0 and 1; serial-step
+    profiles; closure log.
+  - Phase 6 reruns (`2026-10-17-p6s26/square/D*/`, they exclude hua07):
+    - 17339381–83: p6r_tdvp2e 256/512/1024 (s27, 4/5/6 G);
+    - 17339384: p6r_cbe1se_1024 (s23 like its siblings, 8 G).
