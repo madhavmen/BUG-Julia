@@ -1039,3 +1039,26 @@ function apply_zero_site(H0::MPOZeroSiteH, S)
     T = to_concrete!(contract(T, (2, 3), H0.r, (2, 3)))    # (bra_l, bra_r)
     return _unprime(_unprime(T, 1), 2)
 end
+
+"""
+    shift_h(H, s) -> H or ShiftedH
+
+The effective Hamiltonian `H - s` (one-site or zero-site), for the GENERATORS of a step whose
+operator is `H - Eshift` (imaginary time: `exp[-dbeta (H - Eshift)]`). `s = 0` returns `H` itself,
+so an unshifted step is bit-identical.
+
+⚠ ONLY THE GENERATORS ARE SHIFTED, and nothing else needs to be. A shift by a multiple of the
+identity leaves every Krylov SPACE unchanged and changes only the WEIGHTS the tests read off them
+(`_kry_weight`, the closure frontiers `(tau^j/j!)(B - s)^j S0`, the root). The CBE sketches see
+`P_perp (H - s) Theta = P_perp H Theta` because `Theta` lies in the frame, so they are exact as
+they stand.
+"""
+struct ShiftedH{T}
+    h::T
+    s::Float64
+end
+
+shift_h(h, s::Real) = iszero(s) ? h : ShiftedH(h, Float64(s))
+
+apply_one_site(H::ShiftedH, A) = to_concrete(apply_one_site(H.h, A) - H.s * A)
+apply_zero_site(H::ShiftedH, S) = to_concrete(apply_zero_site(H.h, S) - H.s * S)

@@ -64,9 +64,12 @@ mutable struct KLFrames
     gen::Int
     lcache::Any
     rcache::Any
+    # The generators' energy shift (`shift_h`): the root `B - eshift` and the frontier sweeps'
+    # one-site Krylov operators. `0.0` is the unshifted step.
+    eshift::Float64
 end
 
-KLFrames(W, Z, c, lenv, renv, gen) = KLFrames(W, Z, c, lenv, renv, gen, nothing, nothing)
+KLFrames(W, Z, c, lenv, renv, gen) = KLFrames(W, Z, c, lenv, renv, gen, nothing, nothing, 0.0)
 
 """
 Threads below which the closure keeps its frontier sweeps in sequence. Each sweep already runs
@@ -237,7 +240,7 @@ _project_root(psi::SymMPS, fr::KLFrames) =
 
 "`B = P H P` at the root, from the frames' cached environments (plan: `root_generator`)."
 _root_generator(mpo, fr::KLFrames) =
-    zero_site_h(mpo, fr.c, fr.lenv, fr.renv, fr.W[fr.c], fr.Z[fr.c])
+    shift_h(zero_site_h(mpo, fr.c, fr.lenv, fr.renv, fr.W[fr.c], fr.Z[fr.c]), fr.eshift)
 
 _scaled(a::Number, x::Array{<:Number}) = a .* x
 _scaled(a::Number, x) = to_concrete(a * x)
@@ -479,7 +482,8 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
             ex = cbe_expand(f, skl, skr; ckw..., ledger = bl, rng = rng)
             M = to_concrete!(contract(Fm[i + 1], (2, 3), ex.V_ex', (2, 3)))
             Kex = to_concrete!(contract(K, (3,), M, (1,)))
-            H1 = one_site_h(mpo, i, lch, push_right_channels(rch, mpo, ex.V_ex, i + 1))
+            H1 = shift_h(one_site_h(mpo, i, lch, push_right_channels(rch, mpo, ex.V_ex, i + 1)),
+                         fr.eshift)
             Q, st = _krylov_enrich(Kex, x -> (nh1[] += 1; apply_one_site(H1, x)), ex.U_ex,
                                    :left, tau, alloc; workcap = workcap, amp = amp)
             _record_krylov!(bl, st, alloc)
@@ -552,7 +556,8 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
             ex = cbe_expand(f, skl, skr; ckw..., ledger = bl, rng = rng)
             M = to_concrete!(contract(ex.U_ex', (1, 2), Fm[j], (1, 2)))
             Bex = to_concrete!(contract(M, (2,), B, (1,)))
-            H1 = one_site_h(mpo, j + 1, push_left_channels(lch, mpo, ex.U_ex, j), rch)
+            H1 = shift_h(one_site_h(mpo, j + 1, push_left_channels(lch, mpo, ex.U_ex, j), rch),
+                         fr.eshift)
             Q, st = _krylov_enrich(Bex, x -> (nh1[] += 1; apply_one_site(H1, x)), ex.V_ex,
                                    :right, tau, alloc; workcap = workcap, amp = amp)
             _record_krylov!(bl, st, alloc)
@@ -891,7 +896,7 @@ function _krylov_closure!(fr::KLFrames, psi::SymMPS, mpo, S0, tau::ComplexF64,
             if _frontier_parallel(parallel) && pass >= 2 && j == order - 1
                 spec[] === nothing || fetch(spec[].task)
                 snap = KLFrames(copy(fr.W), copy(fr.Z), fr.c, fr.lenv, fr.renv, fr.gen,
-                                fr.lcache, fr.rcache)
+                                fr.lcache, fr.rcache, fr.eshift)
                 F0 = KrylovFrontier(S[], 0, snap.gen)
                 rs0 = MersenneTwister(rand(rng, UInt64))
                 spec[] = (gen = snap.gen, task = Threads.@spawn(

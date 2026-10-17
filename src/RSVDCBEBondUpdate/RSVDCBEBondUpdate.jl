@@ -67,7 +67,7 @@ using LurCGT, Telum
 
 using ..BondUpdateBUG: SymMPS, canonical!, bond_dims, leg_dim, local_space,
                        symmetry_mode, BondFrame, bond_frame, frame_theta,
-                       expv, hermitian_tridiagonal_exp_coeffs,
+                       expv, hermitian_tridiagonal_exp_coeffs, ROOT_METHODS, overlap,
                        tensor_inner, perp_component, perp_component_right,
                        fusion_basis, reachable_sectors, sector_dim, dual_charge,
                        align_charge, left_isometry_defect, right_isometry_defect,
@@ -222,6 +222,10 @@ include("sweeps/cbe_bug.jl")
 #                          global Krylov frontiers of the root generator, embedded as MPS and
 #                          swept with the same CBE / Tests C/D kernels until they close.
 include("sweeps/krylov_closure.jl")
+#   sweeps/imaginary_time.jl  NORMALISED IMAGINARY TIME around `cbe_bug_step!` (imaginary-time /
+#                          open-system plan, Task 1): `Eshift`, the energy split root/compression,
+#                          the outside-Galerkin defect, reject/re-enrich/retry, and the panel grids.
+include("sweeps/imaginary_time.jl")
 
 # The modes come last: each imports from the parent, so everything they name must already be
 # defined. A submodule rather than a file so `GroundState.solve!` reads as what it is at the
@@ -307,6 +311,8 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        DMRGCBEInfo, DMRGCBERun, dmrg_cbe1s_sweep!, dmrg_cbe1s!,
        rsvd_cbe_dmrg1s!, exact_cbe_dmrg1s!, rsvd_cbe_dmrg1s_seeded!,
        TDVPCBEInfo, tdvp_cbe1s_step!,
-       CBEBugSweepInfo, cbe_bug_step!, cbe_bug_midpoint_step!
+       CBEBugSweepInfo, cbe_bug_step!, cbe_bug_midpoint_step!,
+       # sweeps/imaginary_time.jl -- normalised imaginary time (plan Task 1)
+       ite_step!, ite_evolve!, log_panel_steps, uniform_beta_steps, beta_grid, shift_h
 
 end # module
