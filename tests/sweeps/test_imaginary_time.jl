@@ -128,11 +128,11 @@ end
 end
 
 set_symmetry!(:U1)
-const _IT_L = 10
-const _IT_MPO = xxz_mpo(_IT_L; J = 1.0, delta = 1.0)
-const _IT_HD = dense_heisenberg(_IT_L)
-const _IT_HNORM = opnorm(_IT_HD)
-const _IT_TIGHT = (tol_basis = 1e-12, tol_trunc = 1e-14, tol_root = 1e-14, maxdim = 256,
+_IT_L = 10
+_IT_MPO = xxz_mpo(_IT_L; J = 1.0, delta = 1.0)
+_IT_HD = dense_heisenberg(_IT_L)
+_IT_HNORM = opnorm(_IT_HD)
+_IT_TIGHT = (tol_basis = 1e-12, tol_trunc = 1e-14, tol_root = 1e-14, maxdim = 256,
                    outside_residual = false, retries = 0)
 
 @testset "IT-U3: global order against dense exp(-beta H), compression off" begin
