@@ -35,6 +35,35 @@ CBE-DMRG ground state, solved at the evolution cap (`F_DGS = F_D`). The arms are
 The BUG tolerances are `1e-5 / 1e-4 / 1e-4` unless stated, and all arms use 2 threads with
 parallel half-sweeps. Driver: `benchmarks/spectral/fig45_2209.jl`.
 
+## Order of the schemes on 2D (U22): `benchmarks/spectral/order_ladder_2d.jl`
+
+The setup is a square cylinder started from the Neel product state, at short T = 0.8 and tight
+tolerances (`1e-10 / 1e-12 / 1e-13`), with a cap far above the reached rank. It is scored against
+the exact state from sparse Krylov in the S^z = 0 sector. The error is `max_j |<S^z_j>(T) - exact|`,
+and a t = 0 gate checks that the MPS and the sparse basis use the same site convention.
+
+**4x3 (N = 12) smoke, job 17282573:**
+
+| arm | dt = 0.2 | dt = 0.1 | slope | wall (0.2 / 0.1) |
+|---|---|---|---|---|
+| tdvp2 | 9.9e-2 | 4.7e-2 | 1.1 | 16 / 42 s |
+| bug1 | 1.6e-1 | 8.8e-2 | 0.9 | 2.3 / 5.1 s |
+| bugmid | 8.8e-2 | 4.6e-2 | 0.9 | 5.4 / 10.9 s |
+| **bug2** | **6.0e-7** | **7.4e-8** | **3.0** | 7.3 / 11.5 s |
+| **bug4** | **5.4e-10** | **1.4e-11** | **5.3** | 9.9 / 15.6 s |
+
+- **From a product state, every fixed-frame scheme is first order and badly off (5-16%).** That
+  covers TDVP2 and the ordinary and midpoint BUG steps. Their frames cannot represent the second
+  Krylov moment of a low-rank state. This is the gap the chain closure study measured on its first
+  step (rho_1 = 0.71); here it recurs while the state stays low-rank.
+- **The Krylov closure removes it.** Order 2 is ~1e5 times and order 4 ~1e8 times more accurate at
+  dt = 0.2. The slopes are p + 1, the local order O(dt^(p+1)) when the early steps dominate, as on
+  the chain. Order 4 costs 2-4x order 1 in wall time.
+- Two steps reported `:budget_unmet` (one each for bug2 and bug4); their reasons will be read
+  from the 6x4 run.
+
+*6x4 (N = 24, sector dim 2.7M), dt 0.2 to 0.025: running (same job).*
+
 ## 4x4 square Heisenberg cylinder, T = 8, dt = 0.05 (bug4: 0.2)
 
 | cap | ground state dE (variance) | tdvp2 | cbe1s | bug1 | bugmid | bug2 | bug4 |
