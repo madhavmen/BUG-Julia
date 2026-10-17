@@ -11,6 +11,7 @@
 #   UT7  undersized maxdim: finite, :budget_unmet, nothing leaks into the state
 #   UT8  one final compression; tol_trunc respected; cumulative weight != worst bond
 #   UT9  order = 1 is the ordinary step bit for bit; refusals
+#   closure_checks: off (default) = one enriching sweep per frontier; on = the validation loop
 #
 # ⛔ THE DENSE TESTS DRIVE THE PRODUCTION LOOP (`_closure_loop!`) AND FRONTIER RECURSION
 # (`_projected_frontiers`); only the space is a matrix. Everything MPS-shaped runs the production
@@ -130,25 +131,28 @@ _kc_magnon(L, k) = product_state([i == k ? :up : :down for i in 1:L])
         mpo = xxz_mpo(L; J = 1.0, delta = 0.0)
         psi = _kc_magnon(L, 1)
         tau = ComplexF64(-1im)
-        for p in 1:4
+        for p in 1:4, checks in (false, true)
             fr = RC.frames_from_state(psi, mpo, c)
             alloc = basis_allocation(AdaptiveBudget(1e-10, 0.0, 1.0), L - 1; tau = tau,
                                      nrm = 1.0, nfront = p)
             cl = RC._krylov_closure!(fr, psi, mpo, RC._project_root(psi, fr), tau, alloc,
                                      _kc_ckw(alloc, 64); order = p, workcap = 64, nrm = 1.0,
-                                     include_zero = true)
+                                     include_zero = true, checks = checks)
             @test cl.converged
             # the magnon reached sites 1 .. p+1: each lies in the Galerkin space
             held = [norm(RC._project_root(_kc_magnon(L, k), fr)) for k in 1:(p + 1)]
             @test all(h -> abs(h - 1) < 1e-8, held)
-            # every pass-1 frontier sweep found something new, the last pass nothing
+            # every pass-1 frontier sweep found something new...
             p1 = [l for l in cl.log if l.pass == 1]
             @test length(p1) == p && all(l.added > 0 for l in p1)
-            @test all(l.added == 0 for l in cl.log if l.pass == cl.passes) || p == 1
+            # ...so one pass is the whole closure without checks; with them the confirming
+            # pass finds nothing
+            checks || @test cl.passes == 1 && length(cl.log) == p
+            checks && @test all(l.added == 0 for l in cl.log if l.pass == cl.passes) || p == 1
             @test all(left_isometry_defect(fr.W[i]) < 1e-12 for i in 1:c)
             @test all(right_isometry_defect(fr.Z[j]) < 1e-12 for j in c:(L - 1))
-            @info "UT1 magnon p=$p: passes $(cl.passes), log $(cl.log), held $(held), " *
-                  "root widths $(leg_dim(fr.W[c], 3)) x $(leg_dim(fr.Z[c], 1))"
+            @info "UT1 magnon p=$p checks=$checks: passes $(cl.passes), log $(cl.log), " *
+                  "held $(held), root widths $(leg_dim(fr.W[c], 3)) x $(leg_dim(fr.Z[c], 1))"
         end
     end
 end
@@ -401,10 +405,18 @@ end
     end
     @test isapprox(mo.leak, mp.leak; rtol = 1e-10) && mo.met == mp.met
     @test all(isfinite, mf.leak) && all(>(0), mf.leak)
+    # the default single pass: serial == parallel, j = 0 not measured
+    sps = [RC._krylov_closure!(RC.frames_from_state(psi, mpo, c), psi, mpo, S0, tau, alloc, ckw;
+                               order = 3, workcap = 64, nrm = 1.0, parallel = par)
+           for par in (false, true)]
+    @test sps[1].converged == sps[2].converged && sps[1].passes == sps[2].passes == 1
+    @test isnan(sps[1].ledger.leak[1]) && isnan(sps[2].ledger.leak[1])
+    @test isapprox(sps[1].ledger.leak[2:end], sps[2].ledger.leak[2:end]; rtol = 1e-8)
+    # the validation path (checks first, final j = 0)
     cls = RC._krylov_closure!(frs, psi, mpo, S0, tau, alloc, ckw; order = 3, workcap = 64,
-                              nrm = 1.0, parallel = false)
+                              nrm = 1.0, parallel = false, checks = true)
     clp = RC._krylov_closure!(frp, psi, mpo, S0, tau, alloc, ckw; order = 3, workcap = 64,
-                              nrm = 1.0, parallel = true)
+                              nrm = 1.0, parallel = true, checks = true)
     @test cls.passes == clp.passes && cls.converged == clp.converged
     @test isapprox(cls.ledger.leak, clp.ledger.leak; rtol = 1e-8)
     @test cls.passes >= 1 && frs.gen > 0                      # non-vacuous: the frames grew
@@ -419,20 +431,26 @@ end
 @testset "UT6: eigenstates -- no growth, exact root phase" begin
     set_symmetry!(:U1)
     L, dt = 8, 0.3
-    for delta in (0.0, 1.0)                          # H psi = 0, then H psi = E psi, E != 0
+    for delta in (0.0, 1.0), checks in (false, true)  # H psi = 0, then H psi = E psi, E != 0
         mpo = xxz_mpo(L; J = 1.0, delta = delta)
         E = delta * (L - 1) / 4
         psi = product_state(fill(:up, L))
         v0 = copy(psi)
         info = cbe_bug_step!(psi, mpo, ComplexF64(-1im * dt); order = 4, tol_basis = 1e-10,
-                             tol_trunc = 1e-12, tol_expv = 1e-13)
+                             tol_trunc = 1e-12, tol_expv = 1e-13, closure_checks = checks)
         lg = info.ledger
         @test bond_dims(psi) == ones(Int, L - 1)
         @test lg.n_selected == 0 && lg.n_krylov == 0
         @test all(l.added == 0 for l in lg.closure_log)
-        # checked first and already closed: no closure sweep runs at all
-        @test lg.n_passes == 0
-        @test lg.leak_initial == lg.leak && length(lg.rho_initial) == 4
+        if checks
+            # checked first and already closed: no closure sweep runs at all
+            @test lg.n_passes == 0
+            @test lg.leak_initial == lg.leak && length(lg.rho_initial) == 4
+        else
+            # one sweep per frontier j = 1..3, each finding nothing; no measurement
+            @test lg.n_passes == 1 && length(lg.closure_log) == 3
+            @test isempty(lg.leak_initial) && isnan(lg.leak[1])
+        end
         @test budget_status(lg) === :met
         @test abs(overlap(v0, psi) - exp(-1im * dt * E)) < 1e-10
         @test lg.defect < 1e-12
@@ -521,7 +539,7 @@ end
                        rng = Random.MersenneTwister(7))
     @test all(norm(to_concrete(a[i] - pc[i])) == 0.0 for i in 1:L)
     @test ic.ledger.n_passes == 0 && isempty(ic.ledger.leak) && length(ic.ledger.rho_initial) == 3
-    id = cbe_bug_step!(copy(psi0), mpo, dt; tol_basis = 1e-6, order = 3,
+    id = cbe_bug_step!(copy(psi0), mpo, dt; tol_basis = 1e-6, order = 3, closure_checks = true,
                        rng = Random.MersenneTwister(7))
     @test isapprox(ic.ledger.leak_initial, id.ledger.leak_initial; rtol = 1e-12)
     @test isapprox(ic.ledger.rho_initial, id.ledger.rho_initial; rtol = 1e-12)
@@ -543,6 +561,43 @@ end
     @test_throws ArgumentError cbe_bug_step!(copy(psi0), mpo, dt; order = 0)
     @test_throws ArgumentError cbe_bug_step!(copy(psi0), mpo, dt; order = 2, krylov_basis = 3)
     @test_throws ArgumentError cbe_bug_midpoint_step!(copy(psi0), mpo, dt; order = 2)
+end
+
+@testset "closure_checks: off = one enriching sweep per frontier, on = the validation loop" begin
+    # USER 2026-10-17: an order-2 step is the two half-sweeps plus ONE left || right enriching
+    # sweep of j = 1 -- no check first, no re-check, no final j = 0. The checks stay as a switch.
+    # A case where the half-sweep frames do NOT already close j = 1 (the warm XX state at dt 0.1
+    # does, job 17332175: then neither path adds anything and the comparison is vacuous).
+    L = 8
+    mpo, warm = _xx_warm(L, 2)
+    stepc(psi, dt, p, checks) = cbe_bug_step!(copy(psi), mpo, ComplexF64(-1im * dt); order = p,
+                                            tol_basis = 1e-10, parallel = true,
+                                            closure_checks = checks,
+                                            rng = Random.MersenneTwister(3))
+    for p in (2, 3)
+        case = nothing
+        for psi0 in (warm, domain_wall_state(L)), dt in (0.1, 0.3, 0.6)
+            on = stepc(psi0, dt, p, true)
+            if sum(e.added for e in on.ledger.closure_log; init = 0) > 0
+                case = (psi0 = psi0, dt = dt, on = on)
+                break
+            end
+        end
+        @test case !== nothing                                   # non-vacuous: a case grows
+        case === nothing && continue
+        off = stepc(case.psi0, case.dt, p, false)
+        lo, ln = off.ledger, case.on.ledger
+        @test [(e.frontier, e.enrich) for e in lo.closure_log] == [(j, true) for j in 1:(p - 1)]
+        @test lo.n_passes == 1 && isempty(lo.leak_initial) && isnan(lo.leak[1])
+        @test sum(e.added for e in lo.closure_log) > 0          # non-vacuous: j = 1 enriched
+        @test !(:closure in lo.unmet)                         # each enriching sweep met A-D
+        # the checks measure first (enrich = false) and end on a measurement of j = 0
+        @test !ln.closure_log[1].enrich && length(ln.closure_log) > length(lo.closure_log)
+        @test ln.closure_log[end].frontier == 0 && !ln.closure_log[end].enrich
+        @info "closure_checks p=$p (dt $(case.dt)): off $(length(lo.closure_log)) sweeps adding " *
+              "$(sum(e.added for e in lo.closure_log)), on $(length(ln.closure_log)) sweeps " *
+              "(passes $(ln.n_passes)); off: $(budget_diagnostic(lo))"
+    end
 end
 
 @testset "stress: several RSVD seeds, order 2 and 3, against exp(-iHt)" begin

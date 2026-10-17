@@ -278,6 +278,20 @@ function truncate_sweep!(psi::SymMPS; maxdim::Int = 200, cutoff::Float64 = 1e-12
     return psi
 end
 
+"The BUG's root link `c` (the step's split and compression root is `c + 1`) when none is given."
+_bug_root_link(L::Int) = max(1, min(L - 1, L ÷ 2))
+
+"""
+    _cut_divisor(L, root) -> Float64
+
+`weight_tol ||psi|| / _cut_divisor(L, root)` is the absolute allowance of EVERY Schmidt cut under
+the budgeted rule: what [`truncate_recursive!`](@ref) gives each bond of the BUG's S-step result,
+and -- USER 2026-10-17, the singular values discarded must be the same for both -- what
+`tdvp2_step!(...; weight_tol)` gives each two-site update, at the BUG's default root
+`_bug_root_link(L) + 1`. One function, so the two rules cannot drift apart.
+"""
+_cut_divisor(L::Int, root::Int) = sqrt(root - 1) + sqrt(L - root)
+
 """
     _budget_svd(T, split, maxdim, share_of) -> (res, capped)
 
@@ -357,8 +371,7 @@ function truncate_recursive!(psi::SymMPS, root::Int; maxdim::Int = 200,
     cum = [0.0, 0.0]           # absolute squared weight removed, left / right subtree
     nrm2 = -1.0                # ||psi||^2, read off the first (centre) SVD
     capped = false
-    nL, nR = root - 1, L - root
-    sdiv = sqrt(nL) + sqrt(nR)
+    sdiv = _cut_divisor(L, root)
 
     # One bond's SVD under whichever rule is active. `split` is the legs `svd` keeps on `U`.
     function cut(T, split)

@@ -79,7 +79,8 @@ clock is the honest arbiter -- the count is here to say WHERE the time goes.
 
 `cumulative` is the step's relative discarded norm, accounted as `truncate_recursive!` accounts
 the BUG's final compression: quadrature within each half-sweep (every cut is a Schmidt cut at the
-orthogonality centre), the two half-sweeps added (triangle). The quantity `weight_tol` bounds.
+orthogonality centre), the two half-sweeps added (triangle). Reported for comparison with the
+BUG's; `weight_tol` fixes each cut's allowance, not this total.
 """
 struct TDVP2Info
     max_bond::Int
@@ -200,15 +201,15 @@ function tdvp2_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::ComplexF64;
                      # make the comparison meaningless.
                      conv_tol::Float64 = 0.0,
                      substeps::Int = 1,
-                     # THE BUG'S DISCARD RULE (USER 2026-10-16: "discard the singular values the
-                     # same for both"). `nothing` keeps the legacy relative `trunc_thresh`. A
-                     # Float64 is `tol_trunc`'s budget on the step's relative discarded norm,
-                     # cut by `_budget_svd` exactly as the BUG's final compression
-                     # (`truncate_recursive!`) cuts: each of the 2(L-1) cuts gets the fixed
-                     # share `weight_tol ||Theta|| / (2 sqrt(L-1))` -- quadrature over a
-                     # half-sweep's L-1 Schmidt cuts, the two half-sweeps added -- so
-                     # `info.cumulative <= weight_tol` unless `maxdim` binds. `trunc_thresh` is
-                     # then unused.
+                     # THE BUG'S DISCARD RULE, CUT FOR CUT (USER 2026-10-16/17: the singular values
+                     # discarded must be the same for both -- per bond, not a per-step budget).
+                     # `nothing` keeps the legacy relative `trunc_thresh`. A Float64 is `tol_trunc`:
+                     # every two-site update is cut by `_budget_svd` with the SAME allowance
+                     # `weight_tol ||Theta|| / _cut_divisor(L, root)` that `truncate_recursive!`
+                     # gives each bond of the BUG's S-step result (`root` = the BUG's default). The
+                     # step makes 2(L-1) such cuts against the BUG's L-1, so `info.cumulative` is
+                     # reported, not bounded by `weight_tol` (it can reach ~sqrt(2) weight_tol).
+                     # `trunc_thresh` is then unused.
                      weight_tol::Union{Nothing, Float64} = nothing)
     L = length(psi)
     L >= 2 || throw(ArgumentError("tdvp2_step! needs at least two sites"))
@@ -218,7 +219,7 @@ function tdvp2_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::ComplexF64;
         throw(ArgumentError("weight_tol must be non-negative, got $weight_tol"))
     # [applications, Theta elements, worst bond weight, peak, sum w forward, sum w backward, ||psi||^2]
     acc = Any[0, 0, 0.0, 0, 0.0, 0.0, 0.0]
-    wkw = (weight_tol = weight_tol, wdiv = 2 * sqrt(L - 1))
+    wkw = (weight_tol = weight_tol, wdiv = _cut_divisor(L, _bug_root_link(L) + 1))
     half = tau / 2
 
     # O(L) environments, as in `cbe_lubich_sweep`: each half-sweep carries its own side

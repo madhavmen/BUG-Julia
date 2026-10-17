@@ -445,9 +445,11 @@ Keywords beyond the [`cbe_expand`](@ref) ones (`dex`, `growth`, `dover`, `comp_r
   - `order` -- the temporal order `p` (default `1`, the ordinary step). For `p > 1` the frames
     the half-sweeps built are grown until the root generator `B = P(tau H)P` reproduces the
     global Krylov moments `B^j psi = (tau H)^j psi`, `j <= p`: each projected frontier
-    `F_j = (tau^j/j!) B^j S0`, `j = 1..p-1`, is embedded as an MPS and swept with the same
-    CBE / Tests C/D kernels until its outside-space action fits its share of `tol_basis`
-    (`krylov_closure.jl`). One root `expv`, one compression, as always. `ledger.leak`,
+    `F_j = (tau^j/j!) B^j S0`, `j = 1..p-1`, is embedded as an MPS and swept ONCE with the same
+    CBE / Tests C/D kernels, which enrich every bond whose outside-space action exceeds its share
+    of `tol_basis` (`krylov_closure.jl`). `closure_checks = true` adds the validation measurements
+    (check first, repeat until a pass adds nothing, final `j = 0`). One root `expv`, one
+    compression, as always. `ledger.leak`,
     `ledger.defect`, `ledger.n_passes` and `ledger.closure_log` report it; failing to close is
     `:budget_unmet` (`:closure`). An order is a CLAIM TO BE MEASURED, not a guarantee: finite
     tolerances, the rank cap and the final compression set an error floor.
@@ -548,6 +550,12 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # what CBE + local Krylov already capture of the global Krylov sequence.
                        # The evolved state is unchanged. `order > 1` always records them.
                        closure_probe::Int = 0,
+                       # ⚠ VALIDATION, NOT A METHOD CHOICE (USER 2026-10-17: off by default).
+                       # `false`: an `order = p` step is the two half-sweeps plus ONE enriching
+                       # sweep per frontier j = 1..p-1. `true`: the closure as it was validated --
+                       # measure every frontier first, loop until a pass adds nothing, measure
+                       # j = 0 on the final frames (`_krylov_closure!(...; checks)`).
+                       closure_checks::Bool = false,
                        # ── THE RETIRED TUNING PARAMETERS ─────────────────────────────────
                        #
                        # ⛔ EACH OF THESE IS A GUESS AT A RANK MADE BEFORE THE SPECTRUM THAT
@@ -690,7 +698,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     length(mpo) == L || throw(DimensionMismatch(
         "MPO has $(length(mpo)) sites, state has $L"))
     L >= 2 || throw(ArgumentError("cbe_bug_step! needs at least two sites"))
-    c = root === nothing ? max(1, min(L - 1, L ÷ 2)) : root
+    c = root === nothing ? _bug_root_link(L) : root
     1 <= c <= L - 1 || throw(ArgumentError("root must be a bond in 1:$(L - 1), got $c"))
 
     # ── WHICH API DID THE CALLER USE? ───────────────────────────────────────────────────────
@@ -1299,7 +1307,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         ckw = Base.structdiff(exkw, NamedTuple{(:share_ht, :fold_omega)})
         cl = _krylov_closure!(fr, psi, mpo, S0, tau, alloc, ckw; order = order,
                               workcap = wcap_step, nrm = _nrm, parallel = parallel, rng = rng,
-                              ledger = ledger, fold = fold_omega)
+                              ledger = ledger, fold = fold_omega, checks = closure_checks)
         lenv_root, renv_root, S0 = fr.lenv, fr.renv, cl.S0
         for i in 1:(c - 1)
             expanded[i] = leg_dim(W[i], 3)

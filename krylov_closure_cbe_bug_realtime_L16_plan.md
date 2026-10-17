@@ -135,3 +135,53 @@ For order claims, the small exact-matrix tests are the first gate. L=16 validate
 - All unit tests and the L=16 domain-wall reference tests pass; orders are **measured**, with honest reporting of truncation/basis floors.
 - One final root `expv` and one controlled `root_out` compression; rank growth stays bounded or returns a documented unmet-budget status.
 - Logs and plots show numerical errors **and** RSVD selections, per-sweep rank growth, root truncation and the actual cost of repeated K/L sweeps.
+
+## 8. Amendment 2026-10-17: one enriching sweep per frontier; the checks are a switch, off by default
+
+**Decision (user, 2026-10-17).** An order-`p` step is the two augment half-sweeps (left ‖ right)
+followed by **one** enriching sweep (left ‖ right) of each frontier `j = 1..p-1`. For `p = 2` that
+is two stages. The loop in §3 step 3 and the pseudocode (measure all frontiers → enrich → rebuild
+and measure again until a pass adds nothing) was there to validate the closure while it was being
+built. It is kept behind `cbe_bug_step!(...; closure_checks = true)`, default `false`
+(`_krylov_closure!(...; checks)`).
+
+**Why it is safe to drop.** An enriching sweep already measures every bond's outside-space action
+`(I-P)A v_j` and enriches only the bonds over their share (Tests A–D). So the "check first"
+measurement repeats work the enriching sweep does anyway. The re-check after enrichment is the
+part that is genuinely given up: closure then rests on the per-bond Tests A–D when the directions
+are added, not on re-measuring the rebuilt frontier. The final `j = 0` measurement only fed the
+ledger (`defect`, `leak`). The frames are nested, so `j = 0` stays closed; the code says so in
+`_closure_loop!`.
+
+**What the checks cost (job 17299494, 10x4 Heisenberg, D = 512, bug2, `tol_basis` 1e-2 + fold,
+dt 0.1, 4 threads).** Per step:
+
+| stage | runs Tests A/B | time |
+|---|---|---|
+| two augment half-sweeps (`cbe` 22 s of it) | yes | ~45 s |
+| closure pass 0: measure j = 0 and j = 1 (check first) | no | 12.0 s |
+| closure pass 1: enrich j = 1 (adds 97–207 directions) | yes, only on leaking bonds | 12.0–15.7 s |
+| closure pass 2: re-check j = 1 (adds 0) ‖ final j = 0 measurement | no | 16.4–18.2 s |
+| **closure total / step total** (steps 1–5) | | **46.2–52.5 s / 77.6–83.6 s** (tdvp2e: ~99 s) |
+
+- An enriching sweep costs only 0.2–3.7 s more than a measuring sweep. The closure's cost is the
+  leak measurement repeated at every bond in four sweeps, not Tests A/B.
+- The two re-measurements in pass 2 run concurrently with the re-check and share its 4 threads,
+  which is why that pass is the slowest.
+- In ref1024b (D = 1024, `tol_basis` 1e-3) the closure frames reached the 2χ work ceiling, and the
+  step grew from 490 s to 1190 s by t = 1.7.
+
+Expected without the checks: closure ≈ one enriching sweep (12–16 s), step ≈ 45–50 s. This is an
+estimate until a timing job measures it.
+
+**Ledger with `closure_checks = false`:**
+- `n_passes = 1`;
+- `leak[j]` is frontier `j`'s leak **before** its enrichment, and `leak[0]` is `NaN` (not measured);
+- `defect` sums the measured frontiers only;
+- `leak_initial`/`rho_initial` are empty (`closure_probe` still measures them on an `order = 1`
+  step);
+- `:closure` is unmet when an enriching sweep failed its Tests A–D.
+
+**Tests.** `test_krylov_closure.jl` runs UT1 and UT6 under both settings. The parallel test and UT9
+take the validation path explicitly. A new testset asserts that a default order-2/3 step logs
+exactly one enriching sweep per frontier `j = 1..p-1`.

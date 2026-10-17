@@ -231,7 +231,7 @@ mutable struct AdaptiveLedger
     # The same frontiers measured on the frames the half-sweeps built, BEFORE any closure
     # enrichment: what the ordinary CBE + local-Krylov step already captures. `leak_initial`
     # is time-weighted like `leak`; `rho_initial[j]` is scale-free, `||(I - P) A F_j|| /
-    # ||F_j||` (upper bound). Filled by `order > 1` and by `closure_probe` on `order = 1`.
+    # ||F_j||` (upper bound). Filled by `order > 1` with `closure_checks` and by `closure_probe` on `order = 1`.
     leak_initial::Vector{Float64}
     rho_initial::Vector{Float64}
 end
