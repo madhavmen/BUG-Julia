@@ -311,3 +311,30 @@ on the old rule); bug2: profile first, then (a) + (b).
   - Phase 6 reruns (`2026-10-17-p6s26/square/D*/`, they exclude hua07):
     - 17339381–83: p6r_tdvp2e 256/512/1024 (s27, 4/5/6 G);
     - 17339384: p6r_cbe1se_1024 (s23 like its siblings, 8 G).
+
+### 8.1 prof24 result (17339380, th-cl-hua07 Broadwell, MaxRSS 11.6 G)
+
+6x4, cap 4096 (non-binding), dt 0.05, 10 steps (t = 0.5), `tol_basis` 1e-5:
+
+| arm | mean s/step | chi at t=0.5 | notes |
+|---|---|---|---|
+| tdvp2e | 123.8 | 1411 | GC 55 % of samples |
+| bug2 fold 0 | 168.9 | 1572 | |
+| bug2 fold 1 | 171.1 | 1573 | infidelity vs fold 0 1.6e-11 |
+
+- bug2 runs at 0.72x tdvp2e's speed. The infidelity between the two at t = 0.5 is 5.7e-11. bug2 carries 11 % more chi (as in nb24).
+- bug2 serial-step phases (343 s total):
+
+  | phase | time | share |
+  |---|---|---|
+  | closure (frontier j=1 enriching sweep) | 149 s | 43 % |
+  | kry (Tests C/D) | 62 s | 18 % |
+  | cbe (sketch + Test B) | 56 s | 16 % |
+  | env | 19 s | |
+  | root | 12.5 s | |
+  | trunc | 12 s | |
+  | frame | 8.5 s | |
+
+- So (b), Test A's re-SVD (`_budget_svd` + `_extend_frame`:197), costs < 3 %.
+- (a), the Test B re-sketch, is bounded by the cbe share.
+- **The closure sweep is the cost.** This is PARKED: the USER moved to the imaginary-time/open-system plan on 2026-10-18 (Task 1 on `plan/imag-open-t1`).
