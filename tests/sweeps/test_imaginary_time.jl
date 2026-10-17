@@ -136,13 +136,17 @@ _IT_TIGHT = (tol_basis = 1e-12, tol_trunc = 1e-14, tol_root = 1e-14, maxdim = 25
                    outside_residual = false, retries = 0)
 
 @testset "IT-U3: global order against dense exp(-beta H), compression off" begin
-    psi0 = neel_state(_IT_L)
-    v0 = dense_state(psi0)
+    # ⛔ THE START STATE DECIDES WHETHER THE TEST CAN SEE THE ORDER. From Neel at L = 10 the
+    # half-sweeps' Krylov enrichment at tol_basis 1e-12 already holds the moments the closure would
+    # add: p = 1 and p = 2 came out BIT-IDENTICAL with slope 3, p = 3 with slope 6 (s29test
+    # 17340094) -- consistent with "order >= p" and unable to tell p apart. The domain wall (the
+    # real-time UT3 start) spreads a front the local enrichment cannot pre-empt. Neel is kept as
+    # a logged comparison.
     beta = 0.4
-    vref = exp(-beta * _IT_HD) * v0
     ns = (2, 4, 8)
-    for (p, m, want) in ((1, :exp, 1), (2, :exp, 2), (3, :exp, 3), (3, :radau2, 3),
-                         (3, :trapezoid, 2))
+    function run(psi0, p, m)
+        v0 = dense_state(psi0)
+        vref = exp(-beta * _IT_HD) * v0
         errs = Float64[]
         for n in ns
             psi = copy(psi0)
@@ -151,11 +155,22 @@ _IT_TIGHT = (tol_basis = 1e-12, tol_trunc = 1e-14, tol_root = 1e-14, maxdim = 25
             @test all(r.status === :met for r in hist)
             push!(errs, _it_dist(dense_state(psi), vref))
         end
-        slopes = log2.(errs[1:(end - 1)] ./ errs[2:end])
-        @info "IT-U3 order $p root $m: errors $(errs), slopes $(slopes) (want $want)"
-        p == 1 && @test errs[end] > 1e-10                          # non-vacuous
+        return errs, log2.(errs[1:(end - 1)] ./ errs[2:end])
+    end
+    errs1 = nothing
+    for (p, m, want) in ((1, :exp, 1), (2, :exp, 2), (3, :exp, 3), (4, :exp, 4),
+                         (3, :radau2, 3), (3, :trapezoid, 2), (4, :radau3, 4))
+        errs, slopes = run(domain_wall_state(_IT_L), p, m)
+        @info "IT-U3 domain wall order $p root $m: errors $(errs), slopes $(slopes) (want $want)"
+        p == 1 && (errs1 = errs; @test errs[end] > 1e-10)            # non-vacuous
         @test errs[end] < 1e-11 || slopes[end] >= want - 0.4
-        m === :trapezoid && @test slopes[end] <= want + 0.5        # the root caps the order
+        m === :trapezoid && @test slopes[end] <= want + 0.5          # the root caps the order
+        # the closure is what buys the accuracy: BUG2 must beat BUG1 at the same grid
+        (p, m) == (2, :exp) && @test errs[end] < errs1[end] / 3
+    end
+    for p in (1, 2, 3)
+        errs, slopes = run(neel_state(_IT_L), p, :exp)
+        @info "IT-U3 Neel (logged only) order $p: errors $(errs), slopes $(slopes)"
     end
 end
 
@@ -238,17 +253,21 @@ end
     @test_throws ArgumentError ite_step!(neel_state(_IT_L), _IT_MPO, -0.1)
 end
 
-@testset "physics: panel and uniform grids reach the exact ground energy" begin
+@testset "physics: panel and uniform grids follow dense exp(-beta H) to the ground state" begin
     E0 = minimum(eigvals(Hermitian(Matrix(_IT_HD))))
-    for (name, steps) in (("panel", log_panel_steps(16.0, 6; per_panel = 4)),
-                          ("uniform", uniform_beta_steps(16.0, 64)))
+    beta = 16.0
+    v = exp(-beta * _IT_HD) * dense_state(neel_state(_IT_L))
+    Ebeta = real(dot(v, _IT_HD * v)) / real(dot(v, v))     # the exact energy AT beta, not E0
+    for (name, steps) in (("panel", log_panel_steps(beta, 6; per_panel = 4)),
+                          ("uniform", uniform_beta_steps(beta, 64)))
         psi = neel_state(_IT_L)
-        hist = ite_evolve!(psi, _IT_MPO, steps; order = 2, tol_basis = 1e-7, tol_trunc = 1e-9,
-                           tol_root = 1e-10, maxdim = 64)
-        nfail = count(r -> r.status === :failed, hist)
-        @info "IT physics $name: $(length(steps)) steps, E = $(hist[end].e_after), exact $E0, failed $nfail, retried $(count(r -> r.status === :retried, hist))"
-        @test nfail == 0
-        @test hist[end].e_after ≈ E0 atol = 1e-6
+        hist = ite_evolve!(psi, _IT_MPO, steps; order = 2, tol_basis = 1e-6, tol_trunc = 1e-9,
+                           tol_root = 1e-10, maxdim = 64, retries = 3)
+        bad = [(beta = r.beta, dbeta = r.dbeta, unmet = r.unmet, resid = r.resid, nsub = r.nsub)
+               for r in hist if r.status === :failed]
+        @info "IT physics $name: $(length(steps)) steps, E = $(hist[end].e_after), exact at beta $Ebeta, E0 $E0, retried $(count(r -> r.status === :retried, hist)), failed $(bad)"
+        @test isempty(bad)
+        @test hist[end].e_after ≈ Ebeta atol = 1e-7
         @test hist[end].e_after >= E0 - 1e-8                         # variational
     end
 end
