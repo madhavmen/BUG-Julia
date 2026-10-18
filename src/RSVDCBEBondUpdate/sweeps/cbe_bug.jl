@@ -210,7 +210,7 @@ function _extend_frame(Q, R, v, side::Symbol, weight::Float64, allowance::Float6
     U === nothing && return (Q, 0, fits)
     fl = side === :left ? 3 : 1
     Qn = to_concrete(oplus([Q, to_concrete(setitag(U, fl, Q.inds[fl].itags))], (fl,)))
-    return (Qn, leg_dim(U, fl), fits)
+    return (_check_frame(Qn, side, "_extend_frame"), leg_dim(U, fl), fits)
 end
 
 """
@@ -1181,6 +1181,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             W[i] = _union_left(W[i], KX)
             kcarL[t] = to_concrete!(contract(W[i]', (1, 2), KX, (1, 2)))
         end
+        _check_frame(W[i], :left, "half-sweep W[$i]")
         expanded[i] = leg_dim(W[i], 3)
         _log_bond!(halfkw(accL).ledger, bondlg, i, :left, expanded[i])
         held += tensor_elements(W[i])
@@ -1270,6 +1271,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             Z[j] = _union_right(Z[j], BX)
             kcarR[t] = to_concrete!(contract(BX, (2, 3), Z[j]', (2, 3)))
         end
+        _check_frame(Z[j], :right, "half-sweep Z[$j]")
         j != c && (expanded[j] = leg_dim(Z[j], 1))
         _log_bond!(halfkw(accR).ledger, bondlg, j, :right, leg_dim(Z[j], 1))
         held += tensor_elements(Z[j])

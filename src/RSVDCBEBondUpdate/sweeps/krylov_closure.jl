@@ -464,7 +464,8 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
     nh1 = Ref(0)
     for i in 1:c
         enrich || (lch = chain[i])
-        U0 = Pm === nothing ? fr.W[i] : to_concrete!(contract(Pm, (2,), fr.W[i], (1,)))
+        U0 = _check_frame(Pm === nothing ? fr.W[i] : to_concrete!(contract(Pm, (2,), fr.W[i], (1,))),
+                          :left, "frontier U0 = Pm W[$i] (gen $(fr.gen))")
         if pre === nothing
             K = C === nothing ? Fm[i] : to_concrete!(contract(C, (2,), Fm[i], (1,)))
             f = _frame_onto_left(U0, K, Fm[i + 1])
@@ -493,6 +494,7 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
             U0
         end
         Wn[i] = enrich ? to_concrete(setitag(Wi, 3, _tagWg(i, gen))) : U0
+        _check_frame(Wn[i], :left, "frontier Wn[$i] (gen $gen)")
         nadd = leg_dim(Wn[i], 3) - leg_dim(U0, 3)
         nsec = _new_sectors(U0, Wn[i], 3)
         added += nadd
@@ -538,7 +540,8 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
     nh1 = Ref(0)
     for j in (L - 1):-1:c
         enrich || (rch = chain[j])
-        V0 = Pm === nothing ? fr.Z[j] : to_concrete!(contract(fr.Z[j], (3,), Pm, (1,)))
+        V0 = _check_frame(Pm === nothing ? fr.Z[j] : to_concrete!(contract(fr.Z[j], (3,), Pm, (1,))),
+                          :right, "frontier V0 = Z[$j] Pm (gen $(fr.gen))")
         if pre === nothing
             B = D === nothing ? Fm[j + 1] : to_concrete!(contract(Fm[j + 1], (3,), D, (1,)))
             f = _frame_onto_right(Fm[j], B, V0)
@@ -567,6 +570,7 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
             V0
         end
         Zn[j] = enrich ? to_concrete(setitag(Zj, 1, _tagZg(j, gen))) : V0
+        _check_frame(Zn[j], :right, "frontier Zn[$j] (gen $gen)")
         nadd = leg_dim(Zn[j], 1) - leg_dim(V0, 1)
         nsec = _new_sectors(V0, Zn[j], 1)
         added += nadd

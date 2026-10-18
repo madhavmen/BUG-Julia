@@ -287,6 +287,52 @@ function full_local_basis(frame, side::Symbol; tag::AbstractString = "cbeF")
 end
 
 """
+    _frame_sector_dims(frame, side, F, where) -> (dfull, dT)
+
+Per charge sector of `F`'s fused leg (`F = fusion_basis` of the frame's local legs): the local
+dimension `dfull[q]` and the frame's width `dT[q]` in it. Throws if the frame is wider than its
+local space in any sector, or holds directions in a sector the local space does not have -- an
+isometry cannot, so either the frame is not one or the two legs' labels disagree. `where` names
+the caller in the message.
+
+⛔ THE FRAME'S BOND LABEL IS READ IN THE FUSED LEG'S ARROW CONVENTION (`align_charge`). A sector's
+label depends on the leg's arrow (`q` on one, `dual(q)` on the other, sectors.jl), and a frame
+built inside the closure's frontier sweep can carry its bond leg with either arrow.
+"""
+function _frame_sector_dims(frame, side::Symbol, F, where::AbstractString)
+    fl = side === :left ? 3 : 1
+    dfull = Dict(q => d for (q, d) in F.spaces[3])
+    syms_ = symm(frame)
+    fdir, bdir = F.inds[3].dir, frame.inds[fl].dir
+    dT = Dict(q => sector_dim(frame, fl, align_charge(syms_, q, fdir, bdir)) for q in keys(dfull))
+    for (q, d) in dT
+        d <= dfull[q] || throw(ErrorException(
+            "$where: the frame holds $d directions in sector $q but the fused local space has " *
+            "only $(dfull[q]) -- a frame cannot exceed its local space (frame width " *
+            "$(leg_dim(frame, fl)), local $(sum(values(dfull))))"))
+    end
+    sum(values(dT); init = 0) == leg_dim(frame, fl) || throw(ErrorException(
+        "$where: the frame holds $(leg_dim(frame, fl)) directions but only " *
+        "$(sum(values(dT); init = 0)) lie in sectors its local space has"))
+    return dfull, dT
+end
+
+"""
+Debug switch, off by default: [`_check_frame`](@ref) asserts at every frame-growth site that the
+grown frame still fits its local space. It builds a fusion basis per call, so it is for
+localising a non-isometric frame (IT-1 L=16 tol_basis 1e-7, s37test 17341472), not production.
+"""
+const _FRAME_CHECKS = Ref(false)
+
+"`frame` unchanged; with `_FRAME_CHECKS[]`, first [`_frame_sector_dims`](@ref) at site `where`."
+function _check_frame(frame, side::Symbol, where::AbstractString)
+    (_FRAME_CHECKS[] && frame !== nothing) || return frame
+    a, b = side === :left ? (1, 2) : (2, 3)
+    _frame_sector_dims(frame, side, fusion_basis(frame, a, b; tag = "cbeChk"), where)
+    return frame
+end
+
+"""
     sector_graded_sketch(frame, side, npre; comp_ratio=0.5, rng, tag) -> TLArray or nothing
 
 The CBE sketch block for one side of a bond, in the frame's own layout:
@@ -331,23 +377,7 @@ function sector_graded_sketch(frame, side::Symbol, npre::Int;
     tolayout(t) = side === :left ? t : to_concrete(permutedims(t, (3, 1, 2)))
 
     F = fusion_basis(frame, a, b; tag = tag)
-    dfull = Dict(q => d for (q, d) in F.spaces[3])
-    # ⛔ THE FRAME'S BOND LABEL IS READ IN THE FUSED LEG'S ARROW CONVENTION (`align_charge`). A
-    # sector's label depends on the leg's arrow (`q` on one, `dual(q)` on the other, sectors.jl);
-    # a frame built inside the closure's frontier sweep can carry its bond leg with the arrow
-    # opposite to `F`'s fused leg, and the unaligned lookup then read the dimension of the
-    # CONJUGATE sector -- harmless while the state's sector dims were symmetric under q -> -q, and
-    # an out-of-bounds isometry-half slice once they were not (IT-1 L=16/20 at tol_basis 1e-7,
-    # jobs 17340512/13: "selector for sector ((1,),) ... out-of-bounds for dimension 10").
-    syms_ = symm(frame)
-    fdir, bdir = F.inds[3].dir, frame.inds[fl].dir
-    dT    = Dict(q => sector_dim(frame, fl, align_charge(syms_, q, fdir, bdir)) for q in keys(dfull))
-    for (q, d) in dT
-        d <= dfull[q] || throw(ErrorException(
-            "sector_graded_sketch: the frame holds $d directions in sector $q but the fused " *
-            "local space has only $(dfull[q]) -- a frame cannot exceed its local space, so the " *
-            "two legs' charge labels are in different conventions"))
-    end
+    dfull, dT = _frame_sector_dims(frame, side, F, "sector_graded_sketch")
     dC    = Dict(q => max(dfull[q] - dT[q], 0) for q in keys(dfull))
 
     # ── comp_ratio = nothing: NO PROJECTOR IN THE PROBE AT ALL ─────────────────────────
@@ -1379,7 +1409,8 @@ function cbe_expand(f::BondFrame, skl, skr;
             "$(leg_dim(V_ex, 1)) > 2*rmax = $lim")
     end
 
-    return CBEExpansion(U_ex, V_ex, n_l, n_r, err_pre, err_fnl)
+    return CBEExpansion(_check_frame(U_ex, :left, "cbe_expand U_ex"),
+                        _check_frame(V_ex, :right, "cbe_expand V_ex"), n_l, n_r, err_pre, err_fnl)
 end
 
 # ── orthonormality guard on the appended blocks ──────────────────────────────────────
