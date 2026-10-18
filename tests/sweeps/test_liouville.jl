@@ -1,0 +1,384 @@
+# tests/sweeps/test_liouville.jl -- OS-U1..OS-U7 of the imaginary-time / open-system plan
+# (cbe_bug_imaginary_open_benchmark_research (1).md, Task 2): symmetry-aware vectorised density
+# matrices and CBE-BUG on them.
+#
+#   OS-U1  vectorisation identities in the declared (row-major, ket-major) convention, and the
+#          product-state / one-site-application path against dense matrices
+#   OS-U2  the Lindblad MPO contracted to a dense matrix == the dense Liouvillian (spin XX +
+#          dephasing + boundary drive; Bose-Hubbard nmax = 2 with two-body loss)
+#   OS-U3  Tr L(rho) = 0, Hermiticity preservation, positivity of dense propagation; MPDO trace /
+#          Hermiticity / positivity violations measured after compressed steps
+#   OS-U4  weak / strong U(1): covariance refusals, forbidden blocks never present, empty
+#          reachable blocks discovered
+#   OS-U5  purity law for Hermitian jumps; a nonunital counterexample (purity INCREASES)
+#   OS-U6  root solves on a Liouvillian against dense exp / Pade; whole-MPDO BUG temporal order
+#   OS-U7  adaptive CBE/Krylov reuse on the Liouville space: counters, rank cap and failed solve
+#          are explicit
+
+using Test
+using LinearAlgebra
+using LurCGT, Telum
+using BUGJulia
+using BUGJulia.BondUpdateBUG
+using BUGJulia.RSVDCBEBondUpdate
+import Random
+
+const _LV = BUGJulia.RSVDCBEBondUpdate
+
+# ── dense references, written from the textbook formulas ───────────────────────────────────────
+
+_lv_emb(o, i, L, d) = kron(Matrix{ComplexF64}(I, d^(i - 1), d^(i - 1)), o,
+                           Matrix{ComplexF64}(I, d^(L - i), d^(L - i)))
+_vecr(r) = vec(permutedims(r))                       # row-major: index (ket - 1) D + bra
+_unvecr(v, D) = permutedims(reshape(v, D, D))
+
+"Dense Liouvillian in the row-major vec basis of the full space."
+function _lv_dense(L, d, pairs, hs, jumps)
+    D = d^L
+    H = zeros(ComplexF64, D, D)
+    for (A, B, Jm) in pairs, i in 1:L, j in (i + 1):L
+        iszero(Jm[i, j]) || (H += Jm[i, j] * _lv_emb(A, i, L, d) * _lv_emb(B, j, L, d))
+    end
+    for i in 1:L
+        H += _lv_emb(hs[i], i, L, d)
+    end
+    Id = Matrix{ComplexF64}(I, D, D)
+    S = -1im * (kron(H, Id) - kron(Id, transpose(H)))
+    for (J, rates) in jumps, i in 1:L
+        g = rates isa Number ? rates : rates[i]
+        iszero(g) && continue
+        X = sqrt(g) * _lv_emb(J, i, L, d)
+        XX = X' * X
+        S += kron(X, conj(X)) - kron(XX, Id) / 2 - kron(Id, transpose(XX)) / 2
+    end
+    return S
+end
+
+"Index map: interleaved Liouville configuration (site 1 most significant) -> row-major (ka, kb)."
+function _lv_perm(L, d)
+    Dl = d^2
+    p = zeros(Int, Dl^L)
+    for idx in 1:(Dl^L)
+        gs = reverse(digits(idx - 1; base = Dl, pad = L)) .+ 1
+        ka = 1; kb = 1
+        for g in gs
+            a, b = liouville_pair(d, g)
+            ka = (ka - 1) * d + a; kb = (kb - 1) * d + b
+        end
+        p[idx] = (ka - 1) * d^L + kb
+    end
+    return p
+end
+
+"The MPO as a dense matrix over interleaved Liouville configurations (rows = s_ket legs), by
+walking its abelian blocks exactly as `mpdo_dense` walks a state."
+function _lv_mpo_dense(W, ls, L)
+    Dl = ls.d^2
+    env = nothing
+    n = 1
+    for i in 1:L
+        T = to_concrete(W[i])
+        new = Dict{Any, Array{ComplexF64, 3}}()
+        for (k, ql) in pairs(T.qlabels)
+            wl, sk, sb, wr = ql
+            X = Array(T.RMTs[k])
+            R = reshape(X, size(X, 1), size(X, 2), size(X, 3), size(X, 4))
+            E = env === nothing ? ones(ComplexF64, 1, 1, size(R, 1)) :
+                (haskey(env, wl) ? env[wl] : continue)
+            acc = get!(new, wr, zeros(ComplexF64, n * Dl, n * Dl, size(R, 4)))
+            for p in 1:size(R, 2), q in 1:size(R, 3)
+                gk, gb = ls.members[sk][p], ls.members[sb][q]
+                rk = ((0:(n - 1)) .* Dl) .+ gk
+                rb = ((0:(n - 1)) .* Dl) .+ gb
+                for w in 1:size(R, 4), v in 1:size(R, 1)
+                    c = R[v, p, q, w]
+                    iszero(c) || (acc[rk, rb, w] .+= c .* E[:, :, v])
+                end
+            end
+        end
+        env = new
+        n *= Dl
+    end
+    return sum(dropdims(sum(m; dims = 3); dims = 3) for m in values(env))
+end
+
+# ── models ─────────────────────────────────────────────────────────────────────────────────────
+
+const _SPm = ComplexF64[0 1; 0 0]                      # sigma^+ (state 1 = up)
+const _SMm = ComplexF64[0 0; 1 0]
+const _NUP = ComplexF64[1 0; 0 0]
+
+"Spin-1/2 XX chain + dephasing + boundary drive (gain at 1, loss at L): weak U(1) only."
+function _xx_model(L; J = 1.0, gam = 0.3, gL = 0.5, gR = 0.7, drive = true)
+    Jm = zeros(L, L)
+    for i in 1:(L - 1); Jm[i, i + 1] = J; end
+    pairs = Any[(_SPm, _SMm, Jm), (_SMm, _SPm, Jm)]
+    hs = [0.2 * i * _NUP for i in 1:L]                    # a site-dependent field
+    jumps = Any[(_NUP, gam)]
+    if drive
+        push!(jumps, (_SPm, [i == 1 ? gL : 0.0 for i in 1:L]))
+        push!(jumps, (_SMm, [i == L ? gR : 0.0 for i in 1:L]))
+    end
+    return pairs, hs, jumps
+end
+
+"Bose-Hubbard, cutoff nmax, with on-site two-body loss b^2."
+function _bh_model(L; nmax = 2, J = 1.0, U = 2.0, gam = 0.4)
+    d = nmax + 1
+    b = zeros(ComplexF64, d, d)
+    for n in 1:nmax; b[n, n + 1] = sqrt(n); end           # state k holds k-1 bosons
+    nn = Diagonal(ComplexF64.(0:nmax))
+    Jm = zeros(L, L)
+    for i in 1:(L - 1); Jm[i, i + 1] = -J; end
+    pairs = Any[(Matrix(b'), b, Jm), (b, Matrix(b'), Jm)]
+    hs = [Matrix(U / 2 * nn * (nn - I)) for _ in 1:L]
+    return pairs, hs, Any[(b * b, gam)], collect(0:nmax), d
+end
+
+@testset "symmetry-aware MPDO (plan Task 2)" begin
+set_symmetry!(:U1)
+
+@testset "OS-U1: vectorisation convention" begin
+    rng = Random.MersenneTwister(1)
+    d = 3
+    A, B, r = (randn(rng, ComplexF64, d, d) for _ in 1:3)
+    @test kron(A, transpose(B)) * _vecr(r) ≈ _vecr(A * r * B)        # row-major (ours)
+    @test kron(transpose(B), A) * vec(r) ≈ vec(A * r * B)            # column-major identity
+    @test all(liouville_index(d, liouville_pair(d, g)...) == g for g in 1:(d^2))
+    @test ket_super(A) * _vecr(r) ≈ _vecr(A * r)
+    @test bra_super(B) * _vecr(r) ≈ _vecr(r * B)
+    J = randn(rng, ComplexF64, d, d)
+    @test dissipator_super(J) * _vecr(r) ≈ _vecr(J * r * J' - (J' * J * r + r * J' * J) / 2)
+    # the MPDO path: a product state and a one-site application, against dense matrices
+    ls = liouville_space([0, 1, 2]; sym = :none)
+    r1, r2 = (x -> x * x')(randn(rng, ComplexF64, d, d)), (x -> x * x')(randn(rng, ComplexF64, d, d))
+    rho = mpdo_product_state(ls, [r1, r2])
+    @test mpdo_dense(rho, ls) ≈ kron(r1, r2)
+    @test mpdo_trace(rho, ls) ≈ tr(r1) * tr(r2)
+    mpdo_apply!(rho, 1, ls, ket_super(A) * bra_super(B))             # stored-transpose rule
+    @test mpdo_dense(rho, ls) ≈ kron(A * r1 * B, r2)
+    @test_throws ArgumentError liouville_space([0, 1]; sym = :bogus)
+end
+
+@testset "OS-U2: Lindblad MPO == dense Liouvillian" begin
+    cases = Any[]
+    for sym in (:weak, :none)
+        L = 3
+        pairs, hs, jumps = _xx_model(L)
+        push!(cases, ("XX+dephasing+drive $sym", liouville_space([1, -1]; sym = sym), L, 2,
+                      pairs, hs, jumps))
+    end
+    L = 3
+    pairs, hs, jumps, q, d = _bh_model(L)
+    push!(cases, ("Bose-Hubbard nmax=2 loss weak", liouville_space(q; sym = :weak), L, d,
+                  pairs, hs, jumps))
+    for (name, ls, L, d, pairs, hs, jumps) in cases
+        W = lindblad_mpo(ls, L; pairs = pairs, onsite_h = hs, jumps = jumps)
+        Wd = _lv_mpo_dense(W, ls, L)
+        Ld = _lv_dense(L, d, pairs, hs, jumps)
+        P = _lv_perm(L, d)
+        # H_eff contracts the state with the MPO's s_ket leg: the stored matrix is the transpose
+        # of the applied superoperator, which must be the Liouvillian.
+        Lmpo = zeros(ComplexF64, size(Ld))
+        Lmpo[P, P] = transpose(Wd)
+        err = norm(Lmpo - Ld) / norm(Ld)
+        @info "OS-U2 $name: ||L_mpo - L_dense|| / ||L|| = $err"
+        @test err < 1e-12
+    end
+end
+
+@testset "OS-U3: trace, Hermiticity, positivity" begin
+    L, d = 3, 2
+    pairs, hs, jumps = _xx_model(L)
+    Ld = _lv_dense(L, d, pairs, hs, jumps)
+    D = d^L
+    Iv = _vecr(Matrix{ComplexF64}(I, D, D))
+    @test norm(transpose(Iv) * Ld) < 1e-12                          # Tr L(rho) = 0 for all rho
+    rng = Random.MersenneTwister(2)
+    X = randn(rng, ComplexF64, D, D); r = X * X'; r /= tr(r)
+    Lr = _unvecr(Ld * _vecr(r), D)
+    @test norm(Lr - Lr') < 1e-12                                    # Hermiticity preserved
+    rt = _unvecr(exp(0.7 * Ld) * _vecr(r), D)
+    @test minimum(eigvals(Hermitian((rt + rt') / 2))) > -1e-12      # positivity, dense
+    @test real(tr(rt)) ≈ 1 atol = 1e-12
+    # MPDO violations after COMPRESSED adaptive steps are measured, and within the budgets
+    L = 6
+    pairs, hs, jumps = _xx_model(L)
+    ls = liouville_space([1, -1]; sym = :weak)
+    W = lindblad_mpo(ls, L; pairs = pairs, onsite_h = hs, jumps = jumps)
+    rho = mpdo_product_state(ls, [isodd(i) ? _NUP : I - _NUP for i in 1:L])
+    for _ in 1:4
+        cbe_bug_step!(rho, W, ComplexF64(0.1); order = 2, hermitian = false, tol_basis = 1e-6,
+                      tol_trunc = 1e-6, tol_expv = 1e-8, maxdim = 64)
+    end
+    c = mpdo_checks(rho, ls)
+    @info "OS-U3 MPDO after 4 compressed steps: $(c)"
+    @test !c.local_only
+    @test abs(c.trace - 1) < 1e-4
+    @test c.herm < 1e-4
+    @test c.min_eig > -1e-4
+    cl = mpdo_checks(rho, ls; dense = false)                         # the local diagnostics
+    @test cl.local_only && cl.herm < 1e-4 && cl.min_eig > -1e-4
+end
+
+@testset "OS-U4: weak / strong U(1) blocks" begin
+    L = 4
+    pairs, hs, jumps = _xx_model(L)
+    # the boundary drive breaks the strong symmetry: refused at build time
+    @test_throws ArgumentError lindblad_mpo(liouville_space([1, -1]; sym = :strong), L;
+                                            pairs = pairs, onsite_h = hs, jumps = jumps)
+    pb, hb, jb, qb, db = _bh_model(L)
+    @test_throws ArgumentError lindblad_mpo(liouville_space(qb; sym = :strong), L;
+                                            pairs = pb, onsite_h = hb, jumps = jb)
+    # a symmetry-breaking local state is refused rather than silently projected
+    lsw = liouville_space([1, -1]; sym = :weak)
+    @test_throws ArgumentError mpdo_product_state(lsw, [fill(0.5 + 0im, 2, 2) for _ in 1:L])
+    # number-conserving hopping + dephasing: strong U(1), against dense, block labels fixed
+    pairs0, hs0, jumps0 = _xx_model(L; drive = false)
+    for sym in (:weak, :strong)
+        ls = liouville_space([1, 0]; sym = sym)                      # q = particle number
+        W = lindblad_mpo(ls, L; pairs = pairs0, onsite_h = hs0, jumps = jumps0)
+        r0 = [isodd(i) ? _NUP : I - _NUP for i in 1:L]
+        rho = mpdo_product_state(ls, r0)
+        nb0 = length(unique(ql[3] for ql in to_concrete(rho[2]).qlabels))
+        ts = 0.0
+        for _ in 1:6
+            cbe_bug_step!(rho, W, ComplexF64(0.1); order = 3, hermitian = false, exact = true,
+                          tol_basis = 1e-12, tol_trunc = 1e-14, tol_expv = 1e-13, maxdim = 256)
+            ts += 0.1
+        end
+        Ld = _lv_dense(L, 2, pairs0, hs0, jumps0)
+        want = _unvecr(exp(ts * Ld) * _vecr(kron(r0...)), 2^L)
+        got = mpdo_dense(rho, ls)
+        @info "OS-U4 $sym: dense error $(norm(got - want) / norm(want))"
+        @test norm(got - want) / norm(want) < 1e-5
+        allowed = Set(first.(ls.sectors))
+        @test all(ql[2] in allowed for i in 1:L for ql in to_concrete(rho[i]).qlabels)
+        fin = unique(ql[3] for ql in to_concrete(rho[L]).qlabels)
+        @test length(fin) == 1                                       # one total charge
+        @test fin[1] == (sym === :weak ? ((0,),) : ((L ÷ 2,), (L ÷ 2,)))
+        nb1 = length(unique(ql[3] for ql in to_concrete(rho[2]).qlabels))
+        @test nb1 > nb0                                              # empty blocks discovered
+    end
+end
+
+@testset "OS-U5: purity" begin
+    L = 4
+    # Hermitian jumps (dephasing): d Tr(rho^2)/dt = 2 Re <<rho|L rho>> = -sum_mu ||[L_mu, rho]||_F^2,
+    # evaluated EXACTLY with the MPO's own dense matrix (validated in OS-U2) on an evolved state
+    pairs0, hs0, jumps0 = _xx_model(L; drive = false)
+    ls = liouville_space([1, 0]; sym = :weak)
+    W = lindblad_mpo(ls, L; pairs = pairs0, onsite_h = hs0, jumps = jumps0)
+    Lm = zeros(ComplexF64, 4^L, 4^L)
+    P = _lv_perm(L, 2)
+    Lm[P, P] = transpose(_lv_mpo_dense(W, ls, L))
+    rho = mpdo_product_state(ls, [isodd(i) ? _NUP : I - _NUP for i in 1:L])
+    for _ in 1:3
+        cbe_bug_step!(rho, W, ComplexF64(0.1); order = 2, hermitian = false, tol_basis = 1e-8,
+                      tol_trunc = 1e-10, tol_expv = 1e-12, maxdim = 256)
+    end
+    R = mpdo_dense(rho, ls)
+    R = (R + R') / 2
+    pur(R) = real(tr(R * R))
+    gam = jumps0[1][2]
+    rate = 2 * real(dot(_vecr(R), Lm * _vecr(R)))
+    law = -sum(gam * norm(_lv_emb(_NUP, i, L, 2) * R - R * _lv_emb(_NUP, i, L, 2))^2 for i in 1:L)
+    @info "OS-U5 purity rate: MPO $rate, law $law"
+    @test rate ≈ law rtol = 1e-10
+    @test rate < 0
+    # nonunital: amplitude damping from the maximally mixed state PURIFIES -- purity is not monotone
+    # (a weak hopping, not zero: pair_mpo must not be handed all-zero vertices)
+    Jw = zeros(L, L); for i in 1:(L - 1); Jw[i, i + 1] = 0.2; end
+    pairs1 = Any[(_SPm, _SMm, Jw), (_SMm, _SPm, Jw)]
+    lsd = liouville_space([1, -1]; sym = :weak)
+    Wd = lindblad_mpo(lsd, L; pairs = pairs1, jumps = Any[(_SMm, 1.0)])
+    rho = mpdo_product_state(lsd, [Matrix{ComplexF64}(I, 2, 2) / 2 for _ in 1:L])
+    p0 = pur(mpdo_dense(rho, lsd))
+    cbe_bug_step!(rho, Wd, ComplexF64(0.5); hermitian = false, exact = true, tol_basis = 1e-12,
+                  tol_trunc = 1e-14, tol_expv = 1e-14, maxdim = 256)
+    p1 = pur(mpdo_dense(rho, lsd))
+    @info "OS-U5 amplitude damping purity $p0 -> $p1"
+    @test p1 > p0 + 1e-3
+end
+
+@testset "OS-U6: roots and temporal order on a Liouvillian" begin
+    # L = 2: one bond whose frames span the whole space, so a step IS its root solve
+    L = 2
+    pairs, hs, jumps = _xx_model(L)
+    ls = liouville_space([1, -1]; sym = :weak)
+    W = lindblad_mpo(ls, L; pairs = pairs, onsite_h = hs, jumps = jumps)
+    Ld = _lv_dense(L, 2, pairs, hs, jumps)
+    r0 = [_NUP, I - _NUP]
+    v0 = _vecr(kron(r0...))
+    for (m, tau) in ((:exp, 0.4), (:radau2, 0.4), (:radau3, 0.4), (:trapezoid, 0.4), (:radau2, 5.0))
+        rho = mpdo_product_state(ls, r0)
+        # tol_expv at roundoff: the Arnoldi space then closes, so its Ritz shift IS the steady
+        # state's eigenvalue 0 and the rational root equals the dense R(tau L)
+        cbe_bug_step!(rho, W, ComplexF64(tau); hermitian = false, exact = true, root_method = m,
+                      tol_basis = 1e-12, tol_trunc = 1e-14, tol_expv = 1e-15, maxdim = 64)
+        got = _vecr(mpdo_dense(rho, ls))
+        # the Ritz shift of a converged Arnoldi space is the eigenvalue maximising Re(tau lambda):
+        # the steady state's 0 for a trace-preserving generator
+        want = m === :exp ? exp(tau * Ld) * v0 :
+               BondUpdateBUG._rational_apply(m, tau * Ld, v0)
+        e = norm(got - want) / norm(want)
+        @info "OS-U6 root $m tau $tau: error vs dense $e"
+        @test e < 1e-8
+    end
+    # whole-MPDO BUG order, L = 5 (L = 4 can saturate to full rank and make every order exact),
+    # against dense exp(t L)
+    L = 5
+    pairs, hs, jumps = _xx_model(L)
+    W = lindblad_mpo(ls, L; pairs = pairs, onsite_h = hs, jumps = jumps)
+    Ld = _lv_dense(L, 2, pairs, hs, jumps)
+    r0 = [isodd(i) ? _NUP : I - _NUP for i in 1:L]
+    T = 0.4
+    want = exp(T * Ld) * _vecr(kron(r0...))
+    errs = Dict{Int, Vector{Float64}}()
+    for p in (1, 2, 3)
+        errs[p] = Float64[]
+        for n in (2, 4, 8)
+            rho = mpdo_product_state(ls, r0)
+            for _ in 1:n
+                cbe_bug_step!(rho, W, ComplexF64(T / n); order = p, hermitian = false,
+                              exact = true, tol_basis = 1e-12, tol_trunc = 1e-14,
+                              tol_expv = 1e-14, maxdim = 256)
+            end
+            push!(errs[p], norm(_vecr(mpdo_dense(rho, ls)) - want) / norm(want))
+        end
+        sl = log2.(errs[p][1:(end - 1)] ./ errs[p][2:end])
+        @info "OS-U6 MPDO order $p: errors $(errs[p]), slopes $(sl)"
+        @test errs[p][end] < 1e-11 || sl[end] >= p - 0.4
+    end
+    @test errs[1][end] > 1e-9                                        # non-vacuous: not full rank
+    @test errs[2][end] < errs[1][end] / 3                            # the closure buys accuracy
+end
+
+@testset "OS-U7: adaptive reuse on the Liouville space" begin
+    L = 6
+    pairs, hs, jumps = _xx_model(L)
+    ls = liouville_space([1, -1]; sym = :weak)
+    W = lindblad_mpo(ls, L; pairs = pairs, onsite_h = hs, jumps = jumps)
+    rho = mpdo_product_state(ls, [isodd(i) ? _NUP : I - _NUP for i in 1:L])
+    sel, cpass, kry = 0, 0, 0
+    for _ in 1:3
+        info = cbe_bug_step!(rho, W, ComplexF64(0.1); order = 2, hermitian = false,
+                             tol_basis = 1e-6, tol_trunc = 1e-8, tol_expv = 1e-10, maxdim = 128)
+        lg = info.ledger
+        @test budget_status(lg) === :met
+        @test lg.proj_err < 1e-7                         # the old state is in the root space
+        sel += lg.n_selected; cpass += lg.n_c_pass; kry += lg.n_krylov
+    end
+    @info "OS-U7 counters over 3 steps: CBE selected $sel, Test C passes $cpass, Krylov added $kry"
+    @test sel > 0                                        # CBE found directions from a product state
+    @test cpass > 0                                      # Test C skipped what CBE already held
+    # a binding rank cap and an unreachable root tolerance are REPORTED
+    info = cbe_bug_step!(copy(rho), W, ComplexF64(0.1); hermitian = false, tol_basis = 1e-8,
+                         tol_trunc = 1e-12, tol_expv = 1e-10, maxdim = 2)
+    @test :trunc in info.ledger.unmet && info.ledger.maxdim_reached
+    info = cbe_bug_step!(copy(rho), W, ComplexF64(2.0); hermitian = false, root_method = :radau2,
+                         tol_basis = 1e-6, tol_trunc = 1e-8, tol_expv = 1e-30, maxdim = 128)
+    @test :expv in info.ledger.unmet
+end
+
+end # symmetry-aware MPDO

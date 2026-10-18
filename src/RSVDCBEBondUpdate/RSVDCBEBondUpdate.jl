@@ -174,6 +174,12 @@ include("models/mbl_scars.jl")
 #                        space, so the Jordan-Wigner signs come from the library rather than from
 #                        a string identity written out by hand.
 include("models/hubbard_d4.jl")
+# models/liouville.jl  VECTORISED DENSITY MATRICES with explicit ket/bra charge rules (imaginary-
+#                      time / open-system plan, Task 2): a d^2 Liouville site graded :weak
+#                      (q_ket - q_bra), :strong (q_ket, q_bra) or :none, covariance-checked
+#                      superoperators, the exact Lindblad MPO (`pair_mpo` + on-site `field`), and
+#                      trace / expectation / RDM / dense contractions over the abelian blocks.
+include("models/liouville.jl")
 
 # The two TDVP integrators live in their own directories. They are FILES of this module, not
 # submodules: both are built on `henv.jl` (environments) and `cbe_core.jl` (the expansion)
@@ -313,6 +319,11 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        TDVPCBEInfo, tdvp_cbe1s_step!,
        CBEBugSweepInfo, cbe_bug_step!, cbe_bug_midpoint_step!,
        # sweeps/imaginary_time.jl -- normalised imaginary time (plan Task 1)
-       ite_step!, ite_evolve!, log_panel_steps, uniform_beta_steps, beta_grid, shift_h
+       ite_step!, ite_evolve!, log_panel_steps, uniform_beta_steps, beta_grid, shift_h,
+       # models/liouville.jl -- symmetry-aware MPDOs (plan Task 2)
+       LiouvilleSpace, liouville_space, liouville_index, liouville_pair, liouville_charge,
+       liouville_op, ket_super, bra_super, dissipator_super, lindblad_mpo, mpdo_apply!,
+       mpdo_product_state, mpdo_trace, mpdo_expect, mpdo_rdm, mpdo_dense,
+       mpdo_normalise_trace!, mpdo_checks
 
 end # module
