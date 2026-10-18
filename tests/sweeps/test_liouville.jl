@@ -381,4 +381,33 @@ end
     @test :expv in info.ledger.unmet
 end
 
+@testset "trace vector in the trial space (keep_states)" begin
+    L = 6
+    pairs, hs, jumps = _xx_model(L)
+    ls = liouville_space([1, -1]; sym = :weak)
+    W = lindblad_mpo(ls, L; pairs = pairs, onsite_h = hs, jumps = jumps)
+    Iket = mpdo_identity(ls, L)
+    @test mpdo_trace(Iket, ls) ≈ 2^L
+    r0 = mpdo_product_state(ls, [isodd(i) ? _NUP : I - _NUP for i in 1:L])
+    # a LOOSE basis so the trial space misses directions; no compression to speak of
+    drift = Dict{Bool, Float64}()
+    for keep in (false, true)
+        rho = copy(r0)
+        rep = Ref{Any}(nothing)
+        info = cbe_bug_step!(rho, W, ComplexF64(0.3); order = 1, hermitian = false,
+                             tol_basis = 1e-2, tol_trunc = 1e-14, tol_expv = 1e-14, maxdim = 512,
+                             keep_states = keep ? [Iket] : Any[])
+        drift[keep] = abs(mpdo_trace(rho, ls) - 1)
+        @test info.ledger.proj_err < 1e-7
+    end
+    @info "trace drift of one step at tol_basis 1e-2: without |I>> $(drift[false]), with $(drift[true])"
+    @test drift[true] < 1e-10                                        # exact before compression
+    @test drift[true] < drift[false]
+    # ... and the ordinary step is untouched by an empty keep list
+    a, b = copy(r0), copy(r0)
+    cbe_bug_step!(a, W, ComplexF64(0.1); hermitian = false, tol_basis = 1e-6, keep_states = Any[])
+    cbe_bug_step!(b, W, ComplexF64(0.1); hermitian = false, tol_basis = 1e-6)
+    @test norm(mpdo_dense(a, ls) - mpdo_dense(b, ls)) == 0
+end
+
 end # symmetry-aware MPDO

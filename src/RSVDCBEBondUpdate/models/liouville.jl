@@ -318,6 +318,21 @@ function mpdo_product_state(ls::LiouvilleSpace, rhos::AbstractVector)
     return rho
 end
 
+"""
+    mpdo_identity(ls, L) -> SymMPS
+
+The trace superket `|I>> = vec(I)^{(x)L}`, a product state (`chi = 1`) under `:weak` and `:none`,
+where `vec(I)` lies in the zero sector. Under `:strong` it spans every `(N, N)` block and is not a
+single-charge MPS, so it is refused; use the block-walk trace there (`mpdo_trace`).
+Pass it as `cbe_bug_step!(...; keep_states = [mpdo_identity(ls, L)])` to make the Galerkin step
+trace-preserving before the compression.
+"""
+function mpdo_identity(ls::LiouvilleSpace, L::Int)
+    ls.sym === :strong && throw(ArgumentError(
+        "|I>> spans every (N, N) block under :strong and is not a single-charge MPS"))
+    return mpdo_product_state(ls, [Matrix{ComplexF64}(I, ls.d, ls.d) for _ in 1:L])
+end
+
 # ── contractions by walking the abelian blocks ─────────────────────────────────────────────────
 
 """

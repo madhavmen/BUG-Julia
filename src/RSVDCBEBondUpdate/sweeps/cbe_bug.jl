@@ -582,6 +582,14 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # evolved state (`estimate_global_complement_action`, one measuring sweep).
                        root_report::Union{Nothing, Base.RefValue} = nothing,
                        outside_residual::Bool = false,
+                       # ── THE TRIAL SPACE IS CONSTRAINED TO CONTAIN THESE STATES (plan Task 2) ──
+                       # Each half-sweep carries every `keep_states` MPS through the new frames, as
+                       # it carries `psi`, and unions its local part into the frame, so the root
+                       # space contains each of them exactly. For an MPDO, keeping `|I>>` makes the
+                       # Galerkin step TRACE-PRESERVING before the compression: `<<I|P = <<I|` and
+                       # `<<I|L = 0` give `d/dt <<I|rho>> = <<I|P L P rho>> = 0`. The states must
+                       # share `psi`'s site legs; `[]` is the ordinary step, bit for bit.
+                       keep_states::AbstractVector = Any[],
                        # ── THE RETIRED TUNING PARAMETERS ─────────────────────────────────
                        #
                        # ⛔ EACH OF THESE IS A GUESS AT A RANK MADE BEFORE THE SPECTRUM THAT
@@ -1116,6 +1124,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                   accL.tenv += (time_ns() - t0) / 1e9; e)
         lch = boundary_channels(mpo)
         C = nothing
+        kcarL = Any[nothing for _ in keep_states]   # each kept state's carry, `(b_i, link)`
         held = 0                          # frames this sweep has accumulated, running total
     for i in 1:c
         K = C === nothing ? psiL[i] : to_concrete!(contract(C, (2,), psiL[i], (1,)))
@@ -1167,6 +1176,11 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         else
             W[i] = Wcbe[i]                                          # reproduces cbe_lubich
         end
+        for (t, X) in pairs(keep_states)
+            KX = kcarL[t] === nothing ? X[i] : to_concrete!(contract(kcarL[t], (2,), X[i], (1,)))
+            W[i] = _union_left(W[i], KX)
+            kcarL[t] = to_concrete!(contract(W[i]', (1, 2), KX, (1, 2)))
+        end
         expanded[i] = leg_dim(W[i], 3)
         _log_bond!(halfkw(accL).ledger, bondlg, i, :left, expanded[i])
         held += tensor_elements(W[i])
@@ -1199,6 +1213,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                   accR.tenv += (time_ns() - t0) / 1e9; e)
         rch = boundary_channels(mpo)
         D = nothing
+        kcarR = Any[nothing for _ in keep_states]   # each kept state's carry, `(link, b_j)`
         held = 0
     for j in (L - 1):-1:c
         B = D === nothing ? psiR[j + 1] :
@@ -1248,6 +1263,12 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                 accR.tsplit += (time_ns() - t0) / 1e9; r)
         else
             Z[j] = Zcbe[j]
+        end
+        for (t, X) in pairs(keep_states)
+            BX = kcarR[t] === nothing ? X[j + 1] :
+                 to_concrete!(contract(X[j + 1], (3,), kcarR[t], (1,)))
+            Z[j] = _union_right(Z[j], BX)
+            kcarR[t] = to_concrete!(contract(BX, (2, 3), Z[j]', (2, 3)))
         end
         j != c && (expanded[j] = leg_dim(Z[j], 1))
         _log_bond!(halfkw(accR).ledger, bondlg, j, :right, leg_dim(Z[j], 1))
