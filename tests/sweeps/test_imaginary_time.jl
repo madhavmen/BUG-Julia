@@ -278,4 +278,35 @@ end
     end
 end
 
+@testset "tdvp2 partner: eshift and the backward-substep amplification" begin
+    tkw = (maxdim = 64, maxiter = 30, conv_tol = 1e-14, substeps = 0, weight_tol = 1e-12)
+    en(p) = real(mpo_energy(p, _IT_MPO)) / real(overlap(p, p))
+    nrm!(p) = (p[p.center] = to_concrete((1.0 / norm(p)) * p[p.center]); p)
+    # the shift changes only the normalisation, so the renormalised states agree
+    a, b = neel_state(_IT_L), neel_state(_IT_L)
+    for _ in 1:3
+        tdvp2_step!(a, _IT_MPO, ComplexF64(-0.2); tkw...); nrm!(a)
+        tdvp2_step!(b, _IT_MPO, ComplexF64(-0.2); eshift = en(b), tkw...); nrm!(b)
+    end
+    @test _it_dist(dense_state(a), dense_state(b)) < 1e-9
+    # the backward stage amplifies more at a larger step (the plan's stability metric)
+    amps = Float64[]
+    for db in (0.05, 1.0)
+        rep = Ref{Any}(nothing)
+        tdvp2_step!(copy(b), _IT_MPO, ComplexF64(-db); eshift = en(b), backward_report = rep,
+                    tkw...)
+        push!(amps, rep[])
+    end
+    @info "tdvp2 backward log-amplification at dbeta 0.05 / 1.0: $(amps)"
+    @test all(isfinite, amps)
+    @test amps[2] > amps[1]
+    # a step of dbeta |E| ~ 400: the shifted step stays representable and variational
+    E0 = minimum(eigvals(Hermitian(Matrix(_IT_HD))))
+    tdvp2_step!(b, _IT_MPO, ComplexF64(-100.0); eshift = en(b), tkw...)
+    @test isfinite(norm(b))
+    nrm!(b)
+    @test en(b) >= E0 - 1e-8
+    @test en(b) < en(a)
+end
+
 end # imaginary-time CBE-BUG

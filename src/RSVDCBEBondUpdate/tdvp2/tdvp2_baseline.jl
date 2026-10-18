@@ -108,13 +108,15 @@ function _tdvp2_bond!(psi::SymMPS, h::Union{XXZChain, MPO}, i::Int, tau::Complex
                       maxdim, trunc_thresh, maxiter, tol, acc, hermitian = true,
                       conv_tol::Float64 = 0.0, substeps::Int = 1,
                       weight_tol::Union{Nothing, Float64} = nothing, wdiv::Float64 = 1.0,
-                      sweep::Int = 1)
+                      sweep::Int = 1, eshift::Float64 = 0.0, amp::Bool = false)
     Theta = to_concrete(psi[i] * psi[i + 1])        # rank 4 -- the object being compared
     acc[2] = max(acc[2], tensor_elements(Theta))
     acc[4] = max(acc[4], _state_stored(psi) + tensor_elements(Theta))
     # `acc[1]` is the operator-application counter -- see `TDVP2Info.krylov_dims`. It was an
-    # unused slot before, so nothing else reads it.
-    Theta = expv(x -> (acc[1] += 1; apply_h_two_site(x, h, i, lch, rch)), tau, Theta;
+    # unused slot before, so nothing else reads it. The generator is `H - eshift` (see
+    # `tdvp2_step!`); `eshift = 0` skips the subtraction, so the unshifted step is bit-identical.
+    h2(x) = (y = apply_h_two_site(x, h, i, lch, rch); iszero(eshift) ? y : to_concrete(y - eshift * x))
+    Theta = expv(x -> (acc[1] += 1; h2(x)), tau, Theta;
                  hermitian = hermitian, maxiter = maxiter, tol = tol,
                  conv_tol = conv_tol, substeps = substeps)
 
@@ -137,9 +139,8 @@ function _tdvp2_bond!(psi::SymMPS, h::Union{XXZChain, MPO}, i::Int, tau::Complex
         lnext = push_left_channels(lch, h, psi[i], i)
         M = to_concrete(setitag(to_concrete(res.S * res.Vd), 1, tag))
         if i < length(psi) - 1
-            M = expv(x -> (acc[1] += 1; apply_one_site(one_site_h(h, i + 1, lnext, rch), x)),
-                     -tau, M; hermitian = hermitian, maxiter = maxiter, tol = tol,
-                     conv_tol = conv_tol, substeps = substeps)
+            M = _tdvp2_backward(shift_h(one_site_h(h, i + 1, lnext, rch), eshift), M, tau, acc,
+                                amp; hermitian, maxiter, tol, conv_tol, substeps)
         end
         psi[i + 1] = M
         psi.center = i + 1
@@ -149,14 +150,31 @@ function _tdvp2_bond!(psi::SymMPS, h::Union{XXZChain, MPO}, i::Int, tau::Complex
         rnext = push_right_channels(rch, h, psi[i + 1], i + 1)
         M = to_concrete(setitag(to_concrete(res.U * res.S), 3, tag))
         if i > 1
-            M = expv(x -> (acc[1] += 1; apply_one_site(one_site_h(h, i, lch, rnext), x)),
-                     -tau, M; hermitian = hermitian, maxiter = maxiter, tol = tol,
-                     conv_tol = conv_tol, substeps = substeps)
+            M = _tdvp2_backward(shift_h(one_site_h(h, i, lch, rnext), eshift), M, tau, acc,
+                                amp; hermitian, maxiter, tol, conv_tol, substeps)
         end
         psi[i] = M
         psi.center = i
         return rnext
     end
+end
+
+"""
+The backward one-site half-step `exp(-tau H1) M`. With `amp`, `acc[8]` keeps the largest
+amplification `log(||M'|| / ||M||) - Re(-tau) <H1>_M` -- the norm growth beyond the mean-energy
+drift. By Jensen it is >= 0 and nondecreasing in the step, the same for any energy shift, and zero
+in real time; it costs one extra `H1` action, so it is measured only on request.
+"""
+function _tdvp2_backward(H1, M, tau::ComplexF64, acc, amp::Bool; hermitian, maxiter, tol,
+                         conv_tol, substeps)
+    if amp
+        n0 = norm(M)
+        e1 = real(tensor_inner(M, apply_one_site(H1, M))) / n0^2
+    end
+    M = expv(x -> (acc[1] += 1; apply_one_site(H1, x)), -tau, M; hermitian = hermitian,
+             maxiter = maxiter, tol = tol, conv_tol = conv_tol, substeps = substeps)
+    amp && (acc[8] = max(acc[8], log(norm(M) / n0) - real(-tau) * e1))
+    return M
 end
 
 """
@@ -210,16 +228,29 @@ function tdvp2_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::ComplexF64;
                      # step makes 2(L-1) such cuts against the BUG's L-1, so `info.cumulative` is
                      # reported, not bounded by `weight_tol` (it can reach ~sqrt(2) weight_tol).
                      # `trunc_thresh` is then unused.
-                     weight_tol::Union{Nothing, Float64} = nothing)
+                     weight_tol::Union{Nothing, Float64} = nothing,
+                     # IMAGINARY TIME: integrate `H - eshift`, as `cbe_bug_step!(...; eshift)` does,
+                     # so the order-2 partner of `ite_step!` sees the same generator. Without it the
+                     # unnormalised step grows by e^(dbeta |E|) and its squared Schmidt weights
+                     # overflow Float64 near dbeta |E| ~ 350 (L = 100 Heisenberg, panel dbeta = 8).
+                     eshift::Real = 0.0,
+                     # `Ref`: receives the plan's transient backward-substep amplification, the
+                     # largest over the BACKWARD one-site substeps `exp(-tau/2 H1) M` of their
+                     # norm growth beyond the mean-energy drift (`_tdvp2_backward`): how strongly
+                     # the backward stage amplifies components above the mean energy, the
+                     # projector-splitting instability in imaginary time. `nothing` skips it.
+                     backward_report::Union{Nothing, Base.RefValue} = nothing)
     L = length(psi)
     L >= 2 || throw(ArgumentError("tdvp2_step! needs at least two sites"))
     length(h) == L || throw(DimensionMismatch(
         "chain has $(length(h)) sites, state has $L"))
     weight_tol === nothing || weight_tol >= 0 ||
         throw(ArgumentError("weight_tol must be non-negative, got $weight_tol"))
-    # [applications, Theta elements, worst bond weight, peak, sum w forward, sum w backward, ||psi||^2]
-    acc = Any[0, 0, 0.0, 0, 0.0, 0.0, 0.0]
-    wkw = (weight_tol = weight_tol, wdiv = _cut_divisor(L, _bug_root_link(L) + 1))
+    # [applications, Theta elements, worst bond weight, peak, sum w forward, sum w backward,
+    #  ||psi||^2, worst backward log growth]
+    acc = Any[0, 0, 0.0, 0, 0.0, 0.0, 0.0, -Inf]
+    wkw = (weight_tol = weight_tol, wdiv = _cut_divisor(L, _bug_root_link(L) + 1),
+           eshift = Float64(eshift), amp = backward_report !== nothing)
     half = tau / 2
 
     # O(L) environments, as in `cbe_lubich_sweep`: each half-sweep carries its own side
@@ -247,6 +278,7 @@ function tdvp2_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::ComplexF64;
     end
 
     cum = acc[7] > 0 ? (sqrt(acc[5]) + sqrt(acc[6])) / sqrt(acc[7]) : 0.0
+    backward_report === nothing || (backward_report[] = acc[8])
     return TDVP2Info(maximum(bond_dims(psi); init = 0), acc[2], acc[3], acc[4], acc[1], cum)
 end
 
