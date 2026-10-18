@@ -277,8 +277,8 @@ end
 
 `rho = rho_1 (x) ... (x) rho_L` from local `d x d` matrices, each of whose vectorisation must lie
 in ONE sector of the grading (e.g. `|a><a|`, or `|0><0| + |1><1|`-type identities under `:weak`).
-Built as the fusion recursion of `product_state` -- one basis state of the sector, then a neutral
-one-site map onto `vec(rho_j)` -- so the bond dimension is 1.
+Built as the fusion recursion of `product_state` -- one basis state of the sector (the link cut to
+one component), then a neutral one-site map onto `vec(rho_j)` -- so the bond dimension is 1.
 """
 function mpdo_product_state(ls::LiouvilleSpace, rhos::AbstractVector)
     L = length(rhos)
@@ -302,7 +302,10 @@ function mpdo_product_state(ls::LiouvilleSpace, rhos::AbstractVector)
     for i in 1:L
         F = to_concrete(getIdentity(prev, (ls.I, 1); itag = "L,$(i + 1)"))
         F = to_concrete(setitag(F, 2, "S,$i"))
-        B = to_concrete(getsub(F, 2, s -> s == secs[i] ? (1:1) : nothing; preserve_space = true))
+        # ⚠ Telum refuses `preserve_space = true` with a slice INSIDE a sector, so the physical leg
+        # keeps the whole sector (and its full space) and the OUTGOING link is cut to one
+        # component instead -- which leaves exactly one basis state of the sector, amplitude 1.
+        B = to_concrete(getsub(F, 2, s -> s == secs[i] ? Colon() : nothing; preserve_space = true))
         present = Set(ql[3] for ql in B.qlabels)
         A = to_concrete(getsub(B, 3, s -> s in present ? (1:1) : nothing))
         push!(tensors, to_concrete(A * (1.0 + 0.0im)))
@@ -310,9 +313,12 @@ function mpdo_product_state(ls::LiouvilleSpace, rhos::AbstractVector)
     end
     rho = SymMPS(tensors, L)
     for i in 1:L
-        g0 = ls.members[secs[i]][1]
+        # which basis state of the sector survived the link cut is Telum's fusion order, so map
+        # EVERY state of the sector onto vec(rho_i): neutral, and right whichever one it was
         M = zeros(ComplexF64, D, D)
-        M[:, g0] = vecs[i]
+        for g in ls.members[secs[i]]
+            M[:, g] = vecs[i]
+        end
         mpdo_apply!(rho, i, ls, M)
     end
     return rho
