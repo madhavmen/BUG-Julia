@@ -1,16 +1,17 @@
-# Agent handoff — imaginary-time / open-system CBE-BUG plan (2026-10-18)
+# Agent handoff — imaginary-time / open-system CBE-BUG plan (2026-10-18, second session)
 
 - **Repo:** BUG-Julia.
-- **Branch:** `plan/imag-open-t3` (Task 3), forked from `feature/krylov-closure-order`, which
-  already holds the merged Tasks 1 and 2.
-- **Working tree:** clean; everything is committed.
-- **Previous handoff:** `agent_handoff_2026-10-17.md`, about CBE-BUG vs 2-site TDVP real time
-  under the fair settings. Its standing rules (§0) still apply and are summarised in §1.
-- **The plan:** `cbe_bug_imaginary_open_benchmark_research (1).md` (USER 2026-10-18: "with what
-  was understood now about the tolerances for the rsvd, augmentation and s step, we proceed with
-  plan …"). It has seven tasks, done in order:
-  1. imaginary-time infrastructure;
-  2. MPDO infrastructure;
+- **Branch:** `plan/imag-open-t3`, HEAD `033225a` (+ this handoff). Forked from
+  `feature/krylov-closure-order`, which holds the merged Tasks 1 and 2. Nothing has been merged
+  since.
+- **Working tree:** clean apart from this handoff commit.
+- **Previous handoffs:**
+  - `agent_handoff_2026-10-18a.md` — the start of this session: Tasks 1–2 merged, the Task 3
+    production runs and the first sketch fix.
+  - `agent_handoff_2026-10-17.md` — the standing rules, §0.
+- **The plan:** `cbe_bug_imaginary_open_benchmark_research (1).md`. Seven tasks, done in order:
+  1. imaginary-time infrastructure — MERGED;
+  2. MPDO infrastructure — MERGED;
   3. IT-1 Heisenberg chain;
   4. IT-2 square cylinder;
   5. OS-1 driven XX + dephasing;
@@ -19,223 +20,233 @@
 
 ---
 
-## 1. Standing rules (binding; details in `agent_handoff_2026-10-17.md` §0)
+## 0. Read first: one job is running and decides the next step
 
-- **Run nothing locally in Julia.** Python grading and plotting locally is fine; there is no
-  pandas, so use `csv` + matplotlib.
+**s40test 17342415** (`$SCRATCH/rsvd_adaptive/2026-10-18-s40/`; PKG `9207c690e1c7` = HEAD
+`033225a`, cold compile) verifies everything below. Its stages, in order:
+
+| stage | grep | what it shows |
+|---|---|---|
+| gates | `EXIT-PARSE`, `EXIT-PRINTF` | parse and printf gates |
+| reproducer | `EXIT-REPRO` | IT-1 L=16, bug3, `tol_basis` 1e-7, `panel:9:4`, seeds 1–3, `IT_FRAME_CHECKS=1`. This crashed in 17340512, s37 and s38. **This stage is the verdict on the frame fix.** |
+| smoke | `EXIT-IT1DW` | IT-1 from the domain wall |
+| smokes | `EXIT-OS1/2/3` | the first cluster runs of the OS drivers, including OS-3 under strong U(1) with \|I_N⟩⟩ |
+| tests | `EXIT-TESTS`, `FILE-` | `test_imaginary_time`, `test_liouville`, `test_pair_mpo`, `test_krylov_closure`, `test_adaptive_rsvd`, `test_adaptive_search` |
+
+- Gate 9 afterwards: `seffx -j 17342415`, the OOM grep, the `EXIT-` grep.
+- **None of the new src code below has run on the cluster yet.** Its tests run for the first time
+  in s40. If a test fails, read the code before weakening the test (the standing rule).
+- **s38test 17341708** may still be in its test stage. It ran on the OLD PKG `0da0827126fb`
+  (diagnostic build), so its `EXIT-TESTS` is informative only.
+
+## 1. Standing rules
+
+These are unchanged; `agent_handoff_2026-10-18a.md` §1 has the details.
+
+- **Run nothing locally in Julia.** Python is fine (`csv` + matplotlib, no pandas).
 - **Cluster jobs:**
-  - Read `../cluster_compliance.md` in full before every `sbatch` and walk its 9 gates.
+  - Read `../cluster_compliance.md` in full before every `sbatch`.
   - `--partition=small,cluster --nodes=1 --cpus-per-task=4`, `julia -t 4`,
     `--constraint=x86-64-v3`, `--time=7-00:00:00`.
   - Exclude the cip nodes and th-cl-dell03.
-  - `--mem` from a measured MaxRSS + 10–20 %. A cold-PKG compile peaks at about 5 G.
-  - Output under `$SCRATCH/rsvd_adaptive/<date>-<tag>/`, with a PROVENANCE file.
-  - Gate 9 afterwards: `seffx -j`, the OOM grep, and the `EXIT-…=` grep.
-- **One timing job at a time.** Accuracy-only jobs may run concurrently.
-- **Staging (CHANGED this session):**
-  - Build the tarball with `git -c core.autocrlf=false archive --format=tar -o X.tar HEAD`, then
-    `scp X.tar lmu-hpc:bugjl/` and run `~/bugjl/stage.sh ~/bugjl/X.tar <name>`. It prints `SNAP`
-    and the content-addressed `PKG`.
-  - Do NOT tar the working tree. A `git checkout` rewrites files with CRLF on this OneDrive
-    checkout, so identical code gets a new PKG hash and a pointless 10-minute cold compile.
-  - A `src` change still needs one cold compile.
-- **Test files:**
-  - Run several files in one process with
-    `$SCRATCH/rsvd_adaptive/run_tests.jl f1.jl f2.jl …` from SNAP, with `--project=$PKG`.
-  - Run only the tests relevant to the change.
-  - No `const` inside a top-level `@testset` (it is local scope).
-- **`@printf`:**
-  - The format must be ONE literal.
-  - `$SCRATCH/rsvd_adaptive/gate_printf.py` checks the specifier count statically and cannot
-    count a splat (`row...`), so spell the arguments out.
-- **Git:**
-  - Use explicit paths with `git commit`. `-am` swept two externally deleted handoff files into
-    `655b53d`; they are recoverable from `f588ef9`.
-- **Fairness (USER 2026-10-16/17):**
-  - bug2 ↔ `tdvp2_step!` at the same dt.
-  - Identical per-cut discard rule (`_cut_divisor`; tdvp2 via `weight_tol = tol_trunc`).
-  - `tol_trunc = tol_root (= tol_expv) = 1e-6`; `tol_basis` is the knob.
-  - Grade against exact / reference before claiming faster or rank-better.
-  - Report a flagged (`:failed`) step as a failure, never as a converged point.
+- **Memory:**
+  - A cold compile peaks at 5.0 G (s37: 5025740K), so cold jobs request `--mem=7G`.
+  - L=20 production: 8 G.
+- **Staging:** `git -c core.autocrlf=false archive HEAD` → `~/bugjl/stage.sh`. Never tar the
+  working tree.
+- **Git:** explicit paths with `git commit`.
+- **One timing job at a time.**
+- **Fairness:** bug2 ↔ tdvp2 at the same dt, the same per-cut discard rule, and
+  `tol_trunc = tol_root = 1e-6`.
 
-## 2. Task status
+## 2. USER decisions this session (2026-10-18)
 
-### Task 1 — imaginary-time infrastructure: MERGED `3d94792`
+1. *"Continue with the rest of the tasks while waiting."* That is why the Task 4–7 drivers exist
+   already.
+2. *"For the Néel product state, [the first-step flag] hints at a bug, fix it. Also use a domain
+   wall initial state."* Done: §3.2 and `IT_INIT=dw`.
+3. *"For the strong U(1), follow what the plan states."* The plan's table gives OS-3 strong U(1),
+   so OS-3 now defaults to `:strong` with |I_N⟩⟩.
+4. *"Finish the current task now, then create a new agent handoff file."* This file.
 
-- **Confirmed by:** s28test 17340070 (regressions) and s31test 17340175 (IT-U1..U6).
-- **Root methods:** `expv(...; root_method = :exp | :trapezoid | :radau2 | :radau3)`, in
-  `src/BondUpdateBUG/expv.jl`.
-  - Each implicit method's stability function (Padé) is applied once on the Lanczos/Arnoldi space
-    after shifting to the extreme Ritz value, so z ≤ 0 and the method is A-/L-stable.
-  - `tol_expv` is the FOM tail.
-  - Helpers: `root_order`, `root_stability`.
-- **Energy shift:** `shift_h` / `ShiftedH` (`mpo.jl`) wrap only the generators: the root, and the
-  half-sweep and closure one-site Krylov operators. `eshift = 0` is bit-identical. `KLFrames`
-  carries `eshift`.
-- **`_kry_weight` (`cbe_bug.jl`)** in imaginary time is now relative to the propagated seed, and
-  shifted. Before, it over-weighted directions by e^(dβ|E|) and overflowed. Real time is
-  unchanged.
-- **`cbe_bug_step!(...; root_method, eshift, root_report = Ref(), outside_residual)`.**
-  - The report holds `e_pre`, `e_root` and the outside-Galerkin defect
-    `|τ| ‖(I−P)Hψ₁‖ / ‖ψ₁‖`, measured with `estimate_global_complement_action`.
-- **`sweeps/imaginary_time.jl`:**
-  - `ite_step!`: renormalises; Eshift = the state's energy; logs `e_before`, `e_pre_root`,
-    `e_root`, `e_after` (`de_root` / `de_compression`); outside defect vs `tol_basis`. The retry
-    ladder is re-enrich (`closure_checks`) → split dβ → `:failed` (or `on_fail = :error`).
-  - Also `ite_evolve!`, `log_panel_steps(beta_max, P; per_panel = 4)` (arXiv:2606.02930),
-    `uniform_beta_steps`, `beta_grid`.
-- **Findings:**
-  - The order test needs the DOMAIN WALL. From Néel, p = 1 and p = 2 are bit-identical.
-  - Observed slopes are p+1 (1.95 / 2.96 / 3.97 / 5.0).
-  - Radau2 caps the order at 3, the trapezoid at 2.
-  - ITE equals dense E(β) to 5e-11.
-  - **The first step from a product state is flagged `:outside`:** χ = 1 frames cannot hold Hψ₁
-    at any dβ. That is the fail-safe working. **USER decision still pending:** accept-and-label
-    (current) or pre-grow the rank.
+## 3. Bugs found and fixed (verification pending in s40)
 
-### Task 2 — symmetry-aware MPDO: MERGED `1aba5b5`
+### 3.1 The IT-1 L=16/20 crash was a NON-ISOMETRIC frame, not a label convention
 
-- **Confirmed by:** s33test 17340370 and s34test 17340453 (OS-U1..U7 and the `keep_states` test).
-- **`src/RSVDCBEBondUpdate/models/liouville.jl`:**
-  - `liouville_space(q; sym = :weak|:strong|:none)` builds the d² site with
-    `Telum._localspace_cgt_fields`. Labels are `q_ket − q_bra` (U1), `(q_ket, q_bra)` (U1×U1), or
-    a single sector.
-  - `liouville_op` refuses a non-covariant superoperator and STORES `transpose(M)`, because the
-    MPO / `mpdo_apply!` apply the transpose — the old `jump_transpose` finding, made a rule.
-  - Superoperator builders: `ket_super`, `bra_super`, `dissipator_super`.
-  - `lindblad_mpo(ls, L; pairs, onsite_h, jumps)` is a `pair_mpo` with complex couplings, with
-    the on-site H and dissipators in `field`.
-  - States: `mpdo_product_state` (keeps the whole physical sector and cuts the LINK — Telum
-    refuses an in-sector slice with `preserve_space`), `mpdo_identity`.
-  - Contractions by walking the abelian blocks: `mpdo_trace`, `mpdo_expect`, `mpdo_rdm`,
-    `mpdo_dense`, `mpdo_checks`.
-- **`cbe_bug_step!(...; keep_states = [mpdo_identity(ls, L)])`** unions |I⟩⟩ into the frames, so
-  the Galerkin step is trace-exact: drift 1.1e-15 vs 0.37 without it, at `tol_basis` 1e-2.
-- **Findings:**
-  - The MPO equals the dense Liouvillian to 2e-16 (XX + dephasing + drive; Bose-Hubbard + loss).
-  - The roots equal dense exp/Padé to 1e-15, but only from a FULL-RANK bond: product-state frames
-    are not the whole space, even at L = 2.
-  - MPDO order slopes are 2/3/4.
-  - weak == strong to 2e-17.
-  - The purity law holds to 1e-15.
-  - The strong total charge reads (−N, −N) on the last link (arrow sign).
+- `661c3e7` (align_charge) did **not** fix it. s37 still crashed with *"frame holds 174 directions
+  in sector ((0,),) but local space has only 92"*, and sector 0 is self-conjugate.
+- `a19c027` added `_FRAME_CHECKS` (`IT_FRAME_CHECKS=1`): a frame-fits-local-space check at every
+  frame-growth site, off by default.
+- **s38 localised it:** `_extend_frame` inside the closure frontier's `_krylov_enrich` left 72
+  directions in sector 0 against 70 local (frame 253 of 256).
+- **Mechanism:**
+  - Telum's `svd` cutoff is relative to the GLOBAL σ_max across sectors (Telum-fork
+    `svd.jl:1672`).
+  - So roundoff in a saturated sector clears the cut whenever another sector carries a real
+    direction.
+  - `_reortho` then renormalises it into a fake column.
+- **Fix `033225a`:** `_cap_to_local_room` (`cbe_core.jl`) keeps at most the sector's local room of
+  new columns, the leading ones in SVD order.
+  - It returns `U` unchanged whenever it fits, so the ordinary step is bit-identical.
+  - It costs one `fusion_basis` per extension.
+  - Test: `test_krylov_closure.jl`, "_extend_frame never exceeds the local space".
+- **Same pattern still to audit:** `cbe_expand`'s `_reortho_left/right(U0, TLC/TRC)` and
+  `_union_left/right` (keep_states) use the same globally relative cutoff. They never tripped the
+  check in s38, but nothing proves they cannot.
+- **Do next if s40 passes:** decide whether to call `_cap_to_local_room` there too. Mind the cost
+  in timing jobs.
 
-### Task 3 — IT-1 Heisenberg chain: IN PROGRESS on `plan/imag-open-t3`
+### 3.2 The flagged first ITE step from Néel (USER: "a bug")
 
-- **Driver:** `benchmarks/imaginary_time/it1_heisenberg_chain.jl` (env `IT_*`, documented in its
-  header).
-  - Arms: bug2/3/4 via `ite_step!`, and tdvp2 as the fair order-2 partner.
-  - Grids: `panel:P:k` and `uniform:n`, the same grid for every arm.
-  - References: exact (L ≤ 20: E0, E(β), the correlation row) or DMRG (cached
-    `it1_dmrg_L*_D*.jls`).
-  - Output CSVs: `it1_steps_L*.csv`, `it1_final_L*.csv`, `it1_ref_L*.csv`.
-  - `6a0b595` added an untimed JIT warm-up, and the tdvp2 wall now includes its energy readout.
-    The production runs below predate this.
-- **Plots:** `benchmarks/imaginary_time/plot_it1.py DIR L --tb 1e-05` draws small multiples:
-  trajectory error, E − E0, χ(β), cost-to-accuracy; open rings mark flagged steps.
-- **Production 2026-10-18** (`$SCRATCH/rsvd_adaptive/2026-10-18-it1/L{12,16,20}/`; β = 64,
-  `panel:9:4` + `uniform:256`; bug2/3/4 × `tol_basis` {1e-3, 1e-5, 1e-7} × seeds 1–3, plus tdvp2;
-  maxdim 1024):
+The probe was `first_step_probe.jl`, run as fp1 job 17342386 (L=10, `2026-10-18-fp1/`).
 
-  | L | job | outcome | MaxRSS |
-  |---|---|---|---|
-  | 12 | 17340511 | COMPLETED | 1.35 G |
-  | 16 | 17340512 | CRASHED at bug3 `tol_basis` 1e-7 panel, seed 2 | 1.70 G |
-  | 20 | 17340513 | CRASHED at bug3 `tol_basis` 1e-7 panel (after seed 1) | 5.98 G of 6 G — use 8 G next |
+- **The old explanation was wrong.** The handoff said "χ=1 frames cannot hold Hψ₁ at any dβ". In
+  fact the first-step defect shrinks like dβ^(p+1):
+  - domain wall: p=1 slope 2, p=2 slope 3;
+  - Néel: ~3 already at p=1, because the half-sweep Krylov holds the closure's moments (p1 ≡ p2
+    bit-identical, as recorded before).
+  - The constant is 400–1000× the second step's, because the energy fluctuation is maximal at a
+    product state.
+- **The bug was the fixed halving in `ite_step!`.** `retries=2` reaches dβ/4, but the panel's
+  first step (dβ=0.0625, `tol_basis` 1e-7) needs about dβ/7.
+- **A second defect:** it also split steps that failed on a resource cap (`maxdim_reached` /
+  `workcap_reached`). That only multiplied the truncations: the IT-2 4x4 smoke at maxdim 64 had
+  bug2 E−E(β) = 6e-2 with 4 sub-steps per step.
+- **Fix `576a46b`:**
+  - `_ite_nsplit` gives n = 1.2·(resid/tol_basis)^(1/(order+1)), capped at 64.
+  - `_ite_capped` means capped steps are flagged at once, not split.
+  - `root_report` also carries the per-bond defect (`per_left/per_right`).
+- **Tests:** the physics test now asserts NO failed step. There is a new first-step test (Néel
+  and domain wall, `tol_basis` 1e-7) and a capped-no-split test.
 
-  - **Crash:** `ArgumentError: selector for sector … on leg 3 out-of-bounds`, in
-    `sector_graded_sketch` → `_trim_per_sector`, inside the order-p closure frontier sweep.
-  - **Root cause:** the frame's bond-sector dimension was read with the fusion basis's label
-    without arrow alignment, so it read the CONJUGATE sector. That fails only once the sector
-    dimensions stop being symmetric under q → −q.
-  - **Fix `661c3e7`** (`cbe_core.jl`): `align_charge(symm(frame), q, F.inds[3].dir,
-    frame.inds[fl].dir)`, plus an assertion that a frame never exceeds its local space. This is a
-    real pre-existing bug in shared CBE code, not in the new code.
-- **s37test 17341472 (RUNNING at handoff;** `$SCRATCH/rsvd_adaptive/2026-10-18-s37/`; PKG
-  `46c903a8ef8f`, cold**):**
-  1. Reproducer: L = 16, bug3, `tol_basis` 1e-7, `panel:9:4`, seeds 1–3, in `repro/`.
-  2. Regressions: `test_adaptive_rsvd`, `test_adaptive_search`, `test_krylov_closure`,
-     `test_imaginary_time`.
+### 3.3 tdvp2 in imaginary time could not handle large L (`6ceb0eb`)
 
-  Check `EXIT-REPRO`, `EXIT-TESTS` and the `FILE-` lines.
-- **L = 12 results** (local copy and figure in the session scratchpad; regenerate with
-  `plot_it1.py`):
-  - **Every arm reaches the exact E0 to about 1e-12 at β = 64.** The exception is uniform with
-    `tol_basis` 1e-3: BUG stalls at 5–9e-8, a basis floor that the panel grid does not show.
-  - **Trajectory accuracy (|E − E_exact(β)|):** on the uniform grid, tdvp2 is ~3e-4 early, bug2
-    ~1e-5, bug3/4 1e-7–1e-9. On the panel grid, **tdvp2 departs from the exact trajectory**: a
-    6e-6 spike at β ≈ 20, and it reaches E0 by β ≈ 20 while the exact relaxation needs β ≈ 50.
-    With panel steps of dβ = 4–8 the projector splitting acts like a DMRG sweep. That is fast
-    ground-state search, not accurate integration.
-  - **Cost-to-accuracy (indicative only: concurrent jobs, JIT in the first arm):** tdvp2 is
-    faster at L = 12 (χ ≤ 38). Panel: tdvp2 34 s to 1e-10, bug 44–53 s. Uniform: tdvp2 144 s,
-    bug 205–224 s. The panel grid is 3–4x cheaper than uniform for every arm.
-  - **χ(β) is about the same for all arms.**
-  - **Flagged steps:** the Néel first step for bug2. Many late steps are flagged at
-    `tol_basis` 1e-7 on the panel grid (L = 20 bug3: 14) — the outside test vs very large dβ.
-  - **Report both metrics** (ground-state error vs cost, AND trajectory error vs exact E(β)).
-    The plan's time-to-accuracy metric alone rewards tdvp2's non-integrator behaviour.
+- Unshifted, a step grows the state by e^(dβ|E|). The squared weights reach the Float64 limit near
+  dβ|E| ≈ 350 (L=100, panel dβ=8).
+- **Fix:**
+  - `tdvp2_step!(...; eshift, backward_report)`; `eshift=0` is bit-identical.
+  - The drivers pass Eshift = the state's energy, as `ite_step!` does.
+  - `backward_report` is the plan's backward-substep amplification,
+    `log(‖M'‖/‖M‖) − Re(−τ)⟨H1⟩_M`: ≥ 0 by Jensen and shift-invariant.
+  - It costs one extra H1 action per bond when requested. Use `IT_BACKAMP=0` / `OS_BACKAMP=0` in
+    timing jobs.
 
-## 3. Next steps (in order)
+## 4. Task status
 
-1. **Read s37test.**
-   - If the reproducer completes and the four regression files pass, rerun L = 16 and L = 20
-     production on the fixed PKG (`46c903a8ef8f`), with L = 20 at `--mem=8G`. The L = 12 data
-     need not be rerun: the fix only changes behaviour where labels were misaligned, but L = 12
-     can be rerun for one consistent PKG.
-   - If it fails, read the new assertion's message: it names the sector and the dimensions.
-2. **Merge `plan/imag-open-t3`** into `feature/krylov-closure-order` only after Task 3's
-   deliverables exist. Until then the fix lives on the t3 branch. Or cherry-pick `661c3e7`
-   earlier if other work needs it.
-3. **Task 3 main size L = 100** (stretch L = 200): the DMRG reference `IT_DMRG_D` (512) is cached
-   by the driver. This is a TIMING job: alone, on its own node, using the warm-up driver.
-   - Size `--mem` from L = 20 × the χ growth (measure a short test first).
-   - Do the plan's grid-refinement / stiffness sweep (backward-step limitation of TDVP) and the
-     implicit roots (`IT_ROOT=radau2` etc.).
-4. **Plots for all sizes:** `plot_it1.py`, plus a `tol_basis` comparison and the seed spread.
-5. **Tasks 4–7** in order: IT-2 square cylinder (4x4, 6x4; main 8x4, 10x4), then OS-1/2/3 with
-   `liouville.jl`.
-   - OS-3 (East) needs a 3-body term `n_{j−1}(c†_j c_{j+1} + h.c.)`, which `pair_mpo` (two-body)
-     cannot build — it needs an MPO builder extension.
-   - Strong-U(1) |I⟩⟩ is not an MPS, so `keep_states` there needs an |I_N⟩⟩ construction.
+### Task 3 — IT-1 Heisenberg chain (driver ready; production blocked on s40)
 
-## 4. Other jobs and results from the real-time track (parked by the USER on 2026-10-18)
+- **Driver:** `it1_heisenberg_chain.jl` on the shared `it_common.jl`.
+  - Output is unchanged except for two appended columns, `backamp` and `var`.
+  - New knobs: `IT_VAR_EVERY` (variance vs β, untimed), `IT_FRAME_CHECKS`, and `IT_INIT=neel|dw`
+    (tag `L<L>_dw`).
+- **Smokes passed in s38:** L=12, β=4. The trajectory error at β=4 is 1.5e-6 for bug2 and 1.75e-5
+  for tdvp2.
+- **If s40 passes,** rerun L=12/16/20 production on PKG `9207c690e1c7`, from BOTH Néel and the
+  domain wall:
+  - β=64, `panel:9:4` + `uniform:256`, bug2/3/4 × `tol_basis` {1e-3, 1e-5, 1e-7} × seeds 1–3,
+    plus tdvp2, maxdim 1024;
+  - L=20 at 8 G. The old sbatch files are in `2026-10-18-it1/L*/run.sbatch`.
+- **Then L=100** (stretch 200):
+  - This is a TIMING job: alone, with `IT_BACKAMP=0`, and the DMRG reference `IT_DMRG_D=512`
+    cached.
+  - Run the grid-refinement / stiffness sweep (several `uniform:n` and `panel:P:k`) with
+    `IT_BACKAMP=1` in a separate accuracy job.
+  - Implicit roots via `IT_ROOT=radau2`.
+- **Plots:** `plot_it1.py DIR 16 [--tb 1e-05]`; for a domain-wall run, pass `16_dw` as L. A 5th row
+  shows tdvp2's backward amplification.
 
-- **prof24 17339380** (`2026-10-17-prof24/`, 6x4, non-binding cap, `tol_basis` 1e-5):
-  - bug2 is 0.72x tdvp2e's speed and carries +11 % χ.
-  - bug2 serial step: closure sweep 43 %, Krylov 18 %, CBE 16 %.
-  - So Test B incremental re-sketch (a) and Test A's second SVD (b) are small; the closure sweep
-    is the cost. Details in `agent_handoff_2026-10-17.md` §8.1.
-- **fair10** graded against ref1024t + ref1536t (t ≤ 4.5): at a binding cap bug2 is 40–280x less
-  accurate than tdvp2e.
-- **ref1536t 17331887:** still RUNNING, step ~79/100 at ~1010 s/step (~6 h left) —
-  `2026-10-17-ref1536/`.
-- **Phase 6 reruns on the s26 rules** (`2026-10-17-p6s26/square/`):
+### Task 4 — IT-2 square cylinder (driver ready, smoke passed)
 
-  | job | arm | state | MaxRSS |
-  |---|---|---|---|
-  | 17339381 | p6r_tdvp2e_256 | COMPLETED | 2.87 G |
-  | 17339382 | p6r_tdvp2e_512 | COMPLETED | 2.99 G |
-  | 17339383 | p6r_tdvp2e_1024 | RUNNING | |
-  | 17339384 | p6r_cbe1se_1024 | OUT_OF_MEMORY again at 8 G | 8.31 G |
+- **Driver:** `it2_square_cylinder.jl` (`IT_LX`, `IT_LY` even, `IT_INIT`).
+  - Exact reference for N ≤ 24 (`pairs_sparse`, Lanczos m=60). For 6x4, C(24,12) = 2.7e6 states:
+    request about 10 G.
+  - DMRG reference for larger N, cached per geometry.
+  - Output: site/bond maps and the finite-cylinder S^zz(π,π) (`it2_maps_*.csv`, `it2_final_*`).
+- **4x4 exact:** E0 = −10.264289620979 (E0/N = −0.6415), S^zz(π,π) = 1.36977.
+- **The 4x4 smoke used maxdim 64, which binds.** Production at 4x4 needs maxdim ≥ 256.
+  - At the cap BUG is truncation-limited (known).
+  - The 6e-2 drift was also the split-on-cap defect fixed in §3.2.
+- **Next:** 4x4 and 6x4 production, both starts, then 8x4 and 10x4 (DMRG reference).
+- **Not yet done:** spatial-map plots and S(π,π) plots; `plot_it1.py --model it2` covers energies,
+  χ and cost only.
 
-  - p6r_cbe1se_1024 needs ≥ 10 G and is still pending a rerun.
-- **Hubbard-track jobs** on the account (`long_r-*`, `rs3*`, `ms*` / `gr*`) are NOT ours — leave
-  them alone.
+### Tasks 5–7 — open systems (drivers ready; first cluster run is s40)
 
-## 5. Where things are
+Shared machinery:
+
+- `benchmarks/open_system/os_common.jl` (`OS_*` knobs).
+  - Arms: bugP via `cbe_bug_step!(hermitian=false, keep_states=[trace vector])` and tdvp2.
+  - The raw trace is logged, then the state is renormalised.
+  - Unmet steps are labelled. Checks (Hermiticity, min eigenvalue) run at output times.
+- `OS_DTS` takes a list, for the stiffness sweep.
+- Plots: `plot_os.py DIR os1|os2|os3 TAG`, tested on synthetic data only.
+
+**OS-1 (`os1_driven_xx.jl`).** XX + boundary drive + dephasing, weak U(1).
+
+- The EXACT reference at every L ≤ 64 is `xx_open_covariance`, added to
+  `tests/common/free_fermion.jl`: dephasing keeps the two-point ODE closed.
+- It is pinned against the dense Liouvillian at L=4 in `test_liouville.jl`. At γ=0 the NESS
+  current has a closed form.
+- Conventions are stated in the header. Rate g means D[√g J].
+
+**OS-2 (`os2_bose_hubbard_loss.jl`).** Bose-Hubbard + loss.
+
+- Exact sparse-Lindblad reference (`sparse_lindblad.jl`: substepped Arnoldi plus Saad's estimate)
+  for d^L ≤ `OS_REF_MAXD`.
+- Logs N and `loss_rate` for the exact identity dN/dt = −2γ Σ⟨n(n−1)⟩.
+
+**OS-3 (`os3_east_dephasing.jl`).** East + dephasing.
+
+- The three-site term is built with the new `TripleTerm` in `pair_mpo` / `lindblad_mpo(...;
+  triples)` (`4288d32`). Test: dense-Liouvillian equality under weak and strong grading, [H,N]=0,
+  frozen states, facilitated hops only.
+- Default `OS_SYM=strong`, with `mpdo_identity_sector` (|I_N⟩⟩, `d08731f`) in the trial space.
+  Test: trace = C(L,N), ⟨⟨I_N|ρ⟩⟩ = Tr ρ, a trace-exact loose step.
+
+**Next:**
+
+- OS-1 production: L=32, 64 (exact), stretch 100, γ ∈ {0, γ>0}, and the stiffness sweep in
+  `OS_DTS`.
+- OS-2: L=3–6, nmax 2/3 against the exact reference, then L=16/24 plus the γ sweep (Zeno).
+- OS-3: L=4/6/8 exact, then L=24/40.
+- Use 3 `tol_basis` values and several seeds (plan "Shared analysis").
+
+## 5. Open items / caveats
+
+- **The audit of §3.1** (cbe_expand / `_union_*` reortho) is open.
+- **The IT drivers' DMRG reference** has not run at L=100.
+- **The OS drivers have not run on the cluster** before s40. Expect small fixes. Things to watch:
+  - `mpdo_checks` cost at large L with small `OS_OBS_EVERY` (local RDMs: 16 walks per bond);
+  - `xx_open_covariance` building a 4096² `exp` at L=64 (≈ 1 GB).
+- **`plan/imag-open-t3`** should be merged into `feature/krylov-closure-order` once s40 passes and
+  the Task 3 deliverables exist. Until then everything lives only on the t3 branch.
+- **Parked real-time-track jobs** (USER 10-18): `agent_handoff_2026-10-18a.md` §4 lists them. The
+  ref1536t and p6r jobs should be finished by now; `p6r_cbe1se_1024` still needs a rerun at
+  ≥ 10 G.
+
+## 6. Jobs this session
+
+| job | dir | result |
+|---|---|---|
+| s37test 17341472 | `2026-10-18-s37` | reproducer FAILED (174 > 92, the 661c3e7 fix is insufficient); 4 regression test files OK; MaxRSS 5.0 G (cold) |
+| s38test 17341708 | `2026-10-18-s38` | gates OK; IT-1 smoke OK; IT-2 4x4 smoke OK (maxdim 64 binds); frame-check reproducer localised `_extend_frame` 72 > 70; tests: check `EXIT-TESTS` (old PKG) |
+| fp1 17342386 | `2026-10-18-fp1` | first-step probe, CSV `first_step_probe.csv` (§3.2) |
+| s39test 17342409 | `2026-10-18-s39` | CANCELLED (superseded by s40) |
+| **s40test 17342415** | `2026-10-18-s40` | **RUNNING — §0** |
+
+## 7. Where things are
 
 | what | where |
 |---|---|
-| plan | `cbe_bug_imaginary_open_benchmark_research (1).md` |
-| imaginary-time step / grids | `src/RSVDCBEBondUpdate/sweeps/imaginary_time.jl` |
-| root integrators | `src/BondUpdateBUG/expv.jl` (block above `_tail`) |
-| eshift wrapper | `src/RSVDCBEBondUpdate/mpo.jl` (`shift_h`) |
-| MPDO | `src/RSVDCBEBondUpdate/models/liouville.jl` |
-| keep_states / root_report | `src/RSVDCBEBondUpdate/sweeps/cbe_bug.jl` (kwargs block, half-sweeps, after root `expv`) |
-| sketch label fix | `src/RSVDCBEBondUpdate/cbe_core.jl` (`sector_graded_sketch`) |
-| tests | `tests/sweeps/test_imaginary_time.jl` (IT-U1..U6), `tests/sweeps/test_liouville.jl` (OS-U1..U7, keep_states) |
-| IT-1 driver / plots | `benchmarks/imaginary_time/it1_heisenberg_chain.jl`, `plot_it1.py` |
-| exact sparse helpers | `benchmarks/exact_sparse.jl`, `benchmarks/sparse_krylov.jl` |
-| cluster dirs | `$SCRATCH/rsvd_adaptive/2026-10-18-{s28..s37,it1}` |
-| memory notes | `imag-open-plan-task1-design`, `imag-open-plan-task2-mpdo`, `bugjulia-cold-compile-fix-staging-and-workload` |
+| shared IT driver core / IT-1 / IT-2 | `benchmarks/imaginary_time/{it_common,it1_heisenberg_chain,it2_square_cylinder}.jl` |
+| first-step probe | `benchmarks/imaginary_time/first_step_probe.jl` |
+| OS drivers, shared core, sparse reference, plots | `benchmarks/open_system/{os_common,os1_driven_xx,os2_bose_hubbard_loss,os3_east_dephasing,sparse_lindblad}.jl`, `plot_os.py` |
+| plots IT | `benchmarks/imaginary_time/plot_it1.py` (`--model it2`) |
+| frame cap / frame checks | `cbe_core.jl` (`_cap_to_local_room`, `_frame_sector_dims`, `_check_frame`, `_FRAME_CHECKS`) |
+| ITE retry ladder | `sweeps/imaginary_time.jl` (`_ite_nsplit`, `_ite_capped`) |
+| tdvp2 eshift / backward amplification | `tdvp2/tdvp2_baseline.jl` (`_tdvp2_backward`) |
+| three-site MPO terms | `models/pair_mpo.jl` (`TripleTerm`), `models/liouville.jl` (`triples`) |
+| \|I_N⟩⟩ | `models/liouville.jl` (`mpdo_identity_sector`) |
+| exact OS-1 reference | `tests/common/free_fermion.jl` (`xx_open_generator/ness/covariance`) |
+| new tests | `test_imaginary_time.jl` (tdvp2 partner, first-step split), `test_liouville.jl` (OS-3 model, \|I_N⟩⟩, OS-1 reference), `test_krylov_closure.jl` (saturated frame) |
+| memory notes | `imag-open-plan-tasks3-7-progress`, `user-10-18-neel-first-step-flag-is-a-bug-dw-start-strong-u1-per-plan` |
