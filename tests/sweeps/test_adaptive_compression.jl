@@ -117,7 +117,7 @@ end
 
     @testset "predictor (truncate = false): the K/L frames ARE the state's bonds" begin
         lg = info1.ledger
-        @test lg.proj_err < 1e-7                        # the frames hold all of psi
+        @test lg.proj_err < 1e-12                       # the frames hold all of psi (no sqrt(eps) floor)
         @test lg.discarded == 0.0 && info1.discarded == 0.0
         c, bd = info1.root, bond_dims(half)
         @test all(bd[i] == info1.expanded[i] for i in 1:(c - 1))
@@ -130,7 +130,7 @@ end
         info2 = cbe_bug_step!(p, mpo, tau; frame_state = half, parallel = true)
         lg = info2.ledger
         @test isfinite(lg.proj_err)
-        @test (:projection in lg.unmet) == (lg.proj_err > max(1e-5, RC._PROJ_FLOOR))
+        @test (:projection in lg.unmet) == (lg.proj_err > 1e-5)
         @info "UT12 midpoint projection error $(lg.proj_err) (tol_basis 1e-5)"
         # The midpoint step is exactly these two stages, and keeps the FINAL stage's rank.
         q = copy(psi0)

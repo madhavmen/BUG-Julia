@@ -54,7 +54,8 @@ renorm!(p) = (p[p.center] = to_concrete((1.0 / norm(p)) * p[p.center]); p)
 
 "The per-step CSV header; `key` names the first column (the model size)."
 it_step_header(key) = "$key,arm,grid,tol_basis,seed,step,beta,dbeta,E,dE0,dEbeta,chi,wall,status,unmet," *
-                      "e_pre_root,e_root,de_root,de_compression,resid,discarded,root_err,nsub,backamp,var"
+                      "e_pre_root,e_root,de_root,de_compression,resid,discarded,root_err,nsub,backamp,var," *
+                      "proj_err"
 
 """
 One arm on one grid from `psi0`, one CSV row per step into `io`; `ref.E0` and, when not `nothing`,
@@ -68,7 +69,7 @@ function it_run_arm(io, key, W, psi0, ref, arm, g, tb, seed)
     nfail = nretry = 0
     Ecur = NaN
     for (k, db) in enumerate(steps)
-        amp = NaN
+        amp = pe = NaN
         if startswith(arm, "bug")
             p = parse(Int, arm[4:end])
             r = ite_step!(psi, W, db; order = p, root_method = IT.root, tol_basis = tb,
@@ -80,6 +81,8 @@ function it_run_arm(io, key, W, psi0, ref, arm, g, tb, seed)
             st, um = r.status, join(string.(r.unmet), "+")
             row = (r.e_pre_root, r.e_root, r.de_root, r.de_compression, r.resid, r.discarded,
                    r.root_err, r.nsub)
+            # worst over every attempt, rejected ones included: the value that triggered a retry
+            pe = maximum(a.info.ledger.proj_err for a in r.attempts)
             nfail += r.status === :failed; nretry += r.status === :retried
         else                                      # tdvp2: the fair order-2 partner
             t0 = time_ns()
@@ -103,10 +106,10 @@ function it_run_arm(io, key, W, psi0, ref, arm, g, tb, seed)
         Ex = ref.traj === nothing ? NaN : ref.traj[g][k]
         var = (IT.var_every > 0 && (k % IT.var_every == 0 || k == length(steps))) ?
               mpo_variance(psi, W) : NaN
-        @printf(io, "%s,%s,%s,%.0e,%d,%d,%.10g,%.10g,%.14f,%.6e,%.6e,%d,%.3f,%s,%s,%.14f,%.14f,%.6e,%.6e,%.6e,%.6e,%.6e,%d,%.6e,%.6e\n",
+        @printf(io, "%s,%s,%s,%.0e,%d,%d,%.10g,%.10g,%.14f,%.6e,%.6e,%d,%.3f,%s,%s,%.14f,%.14f,%.6e,%.6e,%.6e,%.6e,%.6e,%d,%.6e,%.6e,%.6e\n",
                 key, arm, g, tb, seed, k, beta, db, E, E - ref.E0, E - Ex,
                 maximum(bond_dims(psi)), wall, st, um, row[1], row[2], row[3], row[4],
-                row[5], row[6], row[7], row[8], amp, var)
+                row[5], row[6], row[7], row[8], amp, var, pe)
         flush(io)
     end
     var = mpo_variance(psi, W)

@@ -233,6 +233,47 @@ function _overlap_right(psi::SymMPS, Z, c::Int)
     return AR
 end
 
+"""
+    _projection_miss(psi, W, Z, c) -> Float64
+
+`||(I - P) psi||` for `P` the projector onto the root space of `W[1..c]`, `Z[c..L-1]`, measured
+DIRECTLY. `I - P = (I - P_L) ⊗ 1 + P_L ⊗ (I - P_R)`, and each side telescopes into orthogonal
+one-site pieces `(1 - W_i W_i') T_i` / `B_j (1 - Z_j' Z_j)` that are formed explicitly, so the
+roundoff floor is ~eps. The difference of squares `||psi||^2 - ||P psi||^2` cancels to
+~sqrt(eps), the size of a tight `tol_basis`. The rest of `psi` beyond each piece enters through
+a square-root factor of its Gram matrix (an SVD's `U S` / `S V'`), so any gauge works.
+"""
+function _projection_miss(psi::SymMPS, W, Z, c::Int)
+    L = length(psi)
+    R = Vector{Any}(undef, L)                    # R[k] R[k]' = Gram of psi[k..L] on link_k
+    for k in L:-1:2
+        T = k == L ? psi[L] : to_concrete!(contract(psi[k], (3,), R[k + 1], (1,)))
+        res = svd(T, (1,); cutoff = 0.0)
+        R[k] = to_concrete(res.U * res.S)
+    end
+    miss2 = 0.0
+    AL = nothing
+    for i in 1:c
+        T = AL === nothing ? psi[i] : to_concrete!(contract(AL, (2,), psi[i], (1,)))
+        miss2 += norm(to_concrete!(contract(perp_component(W[i], T), (3,), R[i + 1], (1,))))^2
+        AL = to_concrete!(contract(W[i]', (1, 2), T, (1, 2)))         # (b_i, link_{i+1})
+    end
+    G = Vector{Any}(undef, L - 1)                # G[j]' G[j] = Gram of P_L psi on link_{j+1}
+    res = svd(AL, (1,); cutoff = 0.0)
+    G[c] = to_concrete(res.S * res.Vd)
+    for j in (c + 1):(L - 1)
+        res = svd(to_concrete!(contract(G[j - 1], (2,), psi[j], (1,))), (1, 2); cutoff = 0.0)
+        G[j] = to_concrete(res.S * res.Vd)
+    end
+    AR = nothing
+    for j in (L - 1):-1:c
+        B = AR === nothing ? psi[j + 1] : to_concrete!(contract(psi[j + 1], (3,), AR, (1,)))
+        miss2 += norm(to_concrete!(contract(G[j], (2,), perp_component_right(Z[j], B), (1,))))^2
+        AR = to_concrete!(contract(B, (2, 3), Z[j]', (2, 3)))         # (link_{j+1}, b_j)
+    end
+    return sqrt(miss2)
+end
+
 "`S = (W ⊗ Z)' psi`, the root coefficients of `P psi` (plan: `project_root`)."
 _project_root(psi::SymMPS, fr::KLFrames) =
     to_concrete!(contract(_overlap_left(psi, fr.W, fr.c), (2,),

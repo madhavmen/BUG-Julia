@@ -53,6 +53,13 @@ using Preferences: @load_preference
 # The `using` cost IS the cached specialisations (dependencies load in ~2 s), so it cannot be
 # had without them. Break-even is ~2 processes per edit: keep "adaptive" for jobs, and run many
 # test files in ONE process; "none" only for a single quick process.
+#
+# ⛔ A WORKLOAD FOR THE IMAGINARY-TIME / OPEN-SYSTEM PATHS DOES NOT HELP. MEASURED 2026-10-18 on the
+# same stages in ONE process (`run_stages.jl`, Intel E5-2680 v4): an "imagopen" workload
+# (`ite_step!`, MPDO Lindblad step, tdvp2 at -dbeta) cost 627 s of precompilation plus 126 s of
+# `using` (s43comp 17343333), while "none" cost 23 s plus 2.6 s and ran all four test files and
+# the IT-1/OS-1/2/3 smokes in 25.6 min total (s43none 17343409). Any workload over
+# `cbe_bug_step!`'s call graph is ~10 min, so for one-process jobs stage with "none".
 const _WORKLOAD = @load_preference("workload", "adaptive")
 
 @setup_workload begin

@@ -84,6 +84,7 @@ function references()
 end
 
 function main()
+    mkpath(OS.out)                     # the NESS file below is written before os_open
     set_symmetry!(:U1)
     ls, W = model(L)
     Iket = mpdo_identity(ls, L)

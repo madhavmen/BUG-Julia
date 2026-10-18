@@ -374,6 +374,24 @@ end
     @test grew > 0                                       # non-vacuous: frames did grow
 end
 
+@testset "projection miss: direct, no sqrt(eps) floor, any gauge" begin
+    L, c = 8, 4
+    mpo, psi = _xx_warm(L, 2)
+    fr = RC.frames_from_state(psi, mpo, c)
+    normdiff(p) = sqrt(max(norm(p[p.center])^2 - norm(RC._project_root(p, fr))^2, 0.0))
+    m0 = RC._projection_miss(psi, fr.W, fr.Z, c)
+    @info "frames holding psi: direct miss $m0, norm difference $(normdiff(psi))"
+    @test m0 < 1e-13 * norm(psi[psi.center])
+    # a state the frames do not hold: an O(1) miss, where the norm difference is accurate
+    _, phi = _xx_warm(L, 4)
+    m = RC._projection_miss(phi, fr.W, fr.Z, c)
+    @test m > 1e-4 * norm(phi[phi.center])
+    @test isapprox(m, normdiff(phi); rtol = 1e-8)
+    phi2 = copy(phi)
+    canonical!(phi2, 2)
+    @test isapprox(RC._projection_miss(phi2, fr.W, fr.Z, c), m; rtol = 1e-10)
+end
+
 @testset "parallel closure: concurrent frontiers, final j = 0 measurement" begin
     # With >= RC._FRONTIER_THREADS threads `parallel = true` measures the frontiers concurrently
     # and takes the final j = 0 measurement speculatively; below it, the same calls run in order.

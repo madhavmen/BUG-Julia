@@ -146,11 +146,6 @@ const _TAG_K, _TAG_KR = "cbeK,L", "cbeK,R"
 "Safety bound on the adaptive Krylov depth. Reaching it with weight left is REPORTED, not hidden."
 const _KRY_MAXDEPTH = 64
 
-# The norm-difference `sqrt(||psi||^2 - ||S0||^2)` cannot resolve a projection error below
-# ~sqrt(eps): cancellation. A frame that contains `psi` exactly reads ~1e-8 here, so a
-# `tol_basis` tighter than this floor is compared against the floor, not against roundoff.
-const _PROJ_FLOOR = 1e-7
-
 # The root solve's Krylov basis per substep on the adaptive path. A NUMERICAL cap, not an
 # accuracy one: `substeps = 0` splits `tau` whenever this basis cannot reach `tol_expv`.
 const _ROOT_MAXITER = 30
@@ -1375,17 +1370,18 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                                 parallel = parallel, rng = copy(rng), fold = fold_omega)
         merge_ledger!(ledger, pr.ledger)
     end
-    # PLAN §5 `state_projection_error`: how much of `psi` the frames miss. `W`/`Z` are
-    # isometries, so `||S0|| = ||P psi||` and the miss is `sqrt(||psi||^2 - ||S0||^2)`. `psi` is
-    # canonical at `L` here on both paths (`half_right!` or the `frame_state` re-gauge above).
-    # On the ordinary step the frames CONTAIN `psi` and this is roundoff -- a K/L cut of a
-    # physical direction would show up here; on the midpoint's second stage it is the genuine
-    # error of projecting `Y_0` onto frames built from `Y_{1/2}`, charged against `tol_basis`.
+    # PLAN §5 `state_projection_error`: how much of `psi` the frames miss. `psi` is canonical at
+    # `L` here on both paths (`half_right!` or the `frame_state` re-gauge above). On the ordinary
+    # step the frames CONTAIN `psi` and this is roundoff -- a K/L cut of a physical direction
+    # would show up here; on the midpoint's second stage it is the genuine error of projecting
+    # `Y_0` onto frames built from `Y_{1/2}`, charged against `tol_basis`. Measured directly:
+    # `sqrt(||psi||^2 - ||S0||^2)` read ~1e-8 of pure cancellation and flagged steps at
+    # `tol_basis` 1e-7 (s40, IT-1 L=16).
     if adaptive
         npsi = norm(psi[psi.center])
         ledger.r_aug = max(maximum(expanded; init = 0), leg_dim(Z[c], 1))
-        ledger.proj_err = npsi > 0 ? sqrt(max(npsi^2 - norm(S0)^2, 0.0)) / npsi : 0.0
-        ledger.proj_err > max(budget.basis, _PROJ_FLOOR) && _unmet!(ledger, :projection)
+        ledger.proj_err = npsi > 0 ? _projection_miss(psi, W, Z, c) / npsi : 0.0
+        ledger.proj_err > budget.basis && _unmet!(ledger, :projection)
     end
     peak = accL.peak + accR.peak +
            sum(tensor_elements(t) for t in (W[c], Z[c], S0); init = 0)
