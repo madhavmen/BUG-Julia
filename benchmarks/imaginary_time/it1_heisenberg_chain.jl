@@ -12,8 +12,11 @@
 # after the compression, outside defect, status, chi, walls, tdvp2's backward amplification),
 # it1_final_L<L>.csv variance and correlations at beta_max, it1_ref_L<L>.csv the reference rows.
 #
+# Initial state (IT_INIT): `neel` (the plan's) or `dw`, the domain wall |up...up down...down>, also in
+# S^z = 0 (USER 2026-10-18). Output files of a `dw` run carry the tag `L<L>_dw`.
+#
 # Run: julia -t 4 --project=PKG benchmarks/imaginary_time/it1_heisenberg_chain.jl
-# Env: IT_L (12) IT_EXACT_N (20) IT_DMRG_D (512), plus the shared knobs of it_common.jl
+# Env: IT_L (12) IT_EXACT_N (20) IT_DMRG_D (512) IT_INIT (neel), plus it_common.jl's knobs
 
 using Serialization, SparseArrays
 
@@ -24,6 +27,10 @@ include(joinpath(@__DIR__, "..", "sparse_krylov.jl"))
 const L       = parse(Int, get(ENV, "IT_L", "12"))
 const EXACT_N = parse(Int, get(ENV, "IT_EXACT_N", "20"))
 const DMRG_D  = parse(Int, get(ENV, "IT_DMRG_D", "512"))
+const INIT    = get(ENV, "IT_INIT", "neel")
+INIT in ("neel", "dw") || error("IT_INIT must be neel or dw, got $INIT")
+const TAG     = INIT == "neel" ? "L$L" : "L$(L)_$INIT"
+init_state() = INIT == "dw" ? domain_wall_state(L) : neel_state(L)
 
 "`<S^z_c S^z_{c+r}>` for r = 0..L-c and the staggered `S^zz(pi)` from that row."
 function corr_row(psi)
@@ -36,12 +43,12 @@ end
 # ── references ─────────────────────────────────────────────────────────────────────────────────
 
 """Exact (L <= IT_EXACT_N): E0, and per grid the exact E(beta) at every grid point and the exact
-central correlation row at beta_max, from exp(-beta H)|Neel> by chunked sparse Krylov."""
+central correlation row at beta_max, from exp(-beta H)|start> by chunked sparse Krylov."""
 function exact_refs()
     H, states, idx = heisenberg_sparse(L)
     E0, _, res, _, _ = sparse_ground(H, length(states))
     res < 1e-8 || error("exact ground state unconverged (resid $res)")
-    v0 = neel_vector(L, idx)
+    v0 = INIT == "dw" ? domain_wall_vector(L, states, idx) : neel_vector(L, idx)
     traj = Dict{String, Vector{Float64}}()
     corr = Float64[]
     for g in IT.grids
@@ -90,10 +97,10 @@ function main()
     W = xxz_mpo(L; J = 1.0, delta = 1.0)
     t = @elapsed it_warmup(xxz_mpo(6; J = 1.0, delta = 1.0), neel_state(6))
     say(@sprintf("JIT warm-up (untimed, excluded from every wall): %.1f s", t))
-    say("== IT-1 Heisenberg chain L=$L  beta_max=$(IT.bmax)  grids $(IT.grids)  arms $(IT.arms)  tol_basis $(IT.tbs)  tol_trunc $(IT.tt)  tol_root $(IT.tr)  maxdim $(IT.maxdim)  root $(IT.root)  backamp $(IT.backamp)  var_every $(IT.var_every)  threads $(Threads.nthreads())")
+    say("== IT-1 Heisenberg chain L=$L  start $INIT  beta_max=$(IT.bmax)  grids $(IT.grids)  arms $(IT.arms)  tol_basis $(IT.tbs)  tol_trunc $(IT.tt)  tol_root $(IT.tr)  maxdim $(IT.maxdim)  root $(IT.root)  backamp $(IT.backamp)  var_every $(IT.var_every)  threads $(Threads.nthreads())")
     ref = L <= EXACT_N ? exact_refs() : dmrg_ref(W)
     say(@sprintf("reference %s: E0 = %.12f  (E0/L = %.12f)", ref.kind, ref.E0, ref.E0 / L))
-    open(joinpath(IT.out, "it1_ref_L$L.csv"), "w") do io
+    open(joinpath(IT.out, "it1_ref_$TAG.csv"), "w") do io
         println(io, "kind,grid,step,E")
         println(io, "$(ref.kind),E0,0,$(ref.E0)")
         ref.traj === nothing || for (g, Es) in ref.traj, (k, E) in pairs(Es)
@@ -103,12 +110,12 @@ function main()
             println(io, "$(ref.kind),corr,$(r - 1),$c")
         end
     end
-    io = open(joinpath(IT.out, "it1_steps_L$L.csv"), "w")
+    io = open(joinpath(IT.out, "it1_steps_$TAG.csv"), "w")
     println(io, it_step_header("L"))
-    fio = open(joinpath(IT.out, "it1_final_L$L.csv"), "w")
+    fio = open(joinpath(IT.out, "it1_final_$TAG.csv"), "w")
     println(fio, "L,arm,grid,tol_basis,seed,variance,wall,nfail,corr_err_max")
     for g in IT.grids, arm in IT.arms, (tb, seed) in it_runs(arm)
-        f = it_run_arm(io, string(L), W, neel_state(L), ref, arm, g, tb, seed)
+        f = it_run_arm(io, string(L), W, init_state(), ref, arm, g, tb, seed)
         cerr = maximum(abs.(corr_row(f.psi) .- ref.corr); init = 0.0)
         @printf(fio, "%d,%s,%s,%.0e,%d,%.6e,%.3f,%d,%.6e\n", L, arm, g, tb, seed, f.var,
                 f.wall, f.nfail, cerr)

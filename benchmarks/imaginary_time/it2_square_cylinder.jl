@@ -21,7 +21,11 @@
 # (arm `ref` = the reference), it2_ref_<tag>.csv the reference energies.
 #
 # Run: julia -t 4 --project=PKG benchmarks/imaginary_time/it2_square_cylinder.jl
-# Env: IT_LX (4) IT_LY (4) IT_EXACT_N (24) IT_DMRG_D (1024) IT_MAPS (1), plus it_common.jl's knobs
+# Initial state (IT_INIT): `neel` (checkerboard, the plan's) or `dw`, the domain wall with the left
+# half of the cylinder (snake sites 1..N/2, i.e. x <= Lx/2) up (USER 2026-10-18); tag suffix `_dw`.
+#
+# Env: IT_LX (4) IT_LY (4) IT_EXACT_N (24) IT_DMRG_D (1024) IT_MAPS (1) IT_INIT (neel), plus
+#      it_common.jl's knobs
 
 using Serialization, SparseArrays
 
@@ -35,7 +39,9 @@ const N       = LX * LY
 const EXACT_N = parse(Int, get(ENV, "IT_EXACT_N", "24"))
 const DMRG_D  = parse(Int, get(ENV, "IT_DMRG_D", "1024"))
 const MAPS    = get(ENV, "IT_MAPS", "1") == "1"
-const TAG     = "$(LX)x$(LY)"
+const INIT    = get(ENV, "IT_INIT", "neel")
+INIT in ("neel", "dw") || error("IT_INIT must be neel or dw, got $INIT")
+const TAG     = INIT == "neel" ? "$(LX)x$(LY)" : "$(LX)x$(LY)_$INIT"
 
 iseven(LY) || error("IT-2 needs an even circumference: odd Ly frustrates the Neel pattern on the wrap")
 const JM    = square_cylinder_couplings(LX, LY)
@@ -44,6 +50,9 @@ const BONDS = square_cylinder_bonds(LX, LY)
 const EPS   = [(-1)^(((i - 1) ÷ LY + 1) + ((i - 1) % LY + 1)) for i in 1:N]
 
 neel_cyl() = product_state([e > 0 ? :up : :down for e in EPS])
+"The start: the checkerboard Neel or the domain wall (sites 1..N/2 up); both S^z = 0."
+start_up() = INIT == "dw" ? [i <= N ÷ 2 for i in 1:N] : [e > 0 for e in EPS]
+init_cyl() = product_state([u ? :up : :down for u in start_up()])
 staggered(C) = sum(EPS[i] * EPS[j] * C[i, j] for i in 1:N, j in 1:N) / N
 
 # ── MPS observables ────────────────────────────────────────────────────────────────────────────
@@ -95,7 +104,7 @@ function exact_refs()
     E0, _, res, _, _ = sparse_ground(H, length(states); m = 60, restarts = 80)
     res < 1e-8 || error("exact ground state unconverged (resid $res)")
     v0 = zeros(ComplexF64, length(states))
-    v0[idx[sum(1 << (i - 1) for i in 1:N if EPS[i] > 0)]] = 1.0
+    v0[idx[sum(1 << (i - 1) for i in 1:N if start_up()[i])]] = 1.0
     traj = Dict{String, Vector{Float64}}()
     maps = nothing
     for g in IT.grids
@@ -117,7 +126,7 @@ end
 
 "DMRG reference (N > IT_EXACT_N), cached; its energy is an upper bound, labelled as such."
 function dmrg_ref(W, Wb)
-    file = joinpath(IT.out, "it2_dmrg_$(TAG)_D$(DMRG_D).jls")
+    file = joinpath(IT.out, "it2_dmrg_$(LX)x$(LY)_D$(DMRG_D).jls")      # the ground state: any start
     if isfile(file)
         b = deserialize(file)
         b.key == (LX, LY, DMRG_D) && return (E0 = b.E0, kind = "dmrg_D$(DMRG_D)", traj = nothing,
@@ -153,7 +162,7 @@ function main()
     t = @elapsed it_warmup(square_cylinder_mpo(2, 4), product_state([:up, :down, :up, :down,
                                                                     :down, :up, :down, :up]))
     say(@sprintf("JIT warm-up (untimed, excluded from every wall): %.1f s", t))
-    say("== IT-2 square cylinder $TAG (N=$N, $(length(BONDS)) bonds, MPO dims $(maximum(mpo_virtual_dims(W))))  beta_max=$(IT.bmax)  grids $(IT.grids)  arms $(IT.arms)  tol_basis $(IT.tbs)  tol_trunc $(IT.tt)  tol_root $(IT.tr)  maxdim $(IT.maxdim)  root $(IT.root)  backamp $(IT.backamp)  var_every $(IT.var_every)  threads $(Threads.nthreads())")
+    say("== IT-2 square cylinder $TAG start $INIT (N=$N, $(length(BONDS)) bonds, MPO dims $(maximum(mpo_virtual_dims(W))))  beta_max=$(IT.bmax)  grids $(IT.grids)  arms $(IT.arms)  tol_basis $(IT.tbs)  tol_trunc $(IT.tt)  tol_root $(IT.tr)  maxdim $(IT.maxdim)  root $(IT.root)  backamp $(IT.backamp)  var_every $(IT.var_every)  threads $(Threads.nthreads())")
     ref = N <= EXACT_N ? exact_refs() : dmrg_ref(W, Wb)
     rs = staggered(ref.maps[2])
     say(@sprintf("reference %s: E0 = %.12f  (E0/N = %.12f)  Szz(pi,pi) = %.10f", ref.kind,
@@ -173,7 +182,7 @@ function main()
     fio = open(joinpath(IT.out, "it2_final_$TAG.csv"), "w")
     println(fio, "geom,arm,grid,tol_basis,seed,E_per_site,variance,wall,nfail,szz_pipi,szz_pipi_err,bond_err_max,corr_err_max")
     for g in IT.grids, arm in IT.arms, (tb, seed) in it_runs(arm)
-        f = it_run_arm(io, TAG, W, neel_cyl(), ref, arm, g, tb, seed)
+        f = it_run_arm(io, TAG, W, init_cyl(), ref, arm, g, tb, seed)
         Ef = energy(f.psi, W) / N
         if MAPS
             m = mps_maps(f.psi, Wb)
