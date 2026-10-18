@@ -182,6 +182,75 @@ function _coeffs_from_eigen(vals, vecs, tau::ComplexF64)
     return ComplexF64.(vecs) * w, tau * sigma
 end
 
+# ── ROOT INTEGRATORS OTHER THAN THE EXPONENTIAL (imaginary-time plan, Task 1) ──────────────────
+#
+# The root problem is LINEAR, `y' = tau*A*y` on the Galerkin core, so a one-step implicit
+# Runge-Kutta method applied to it over the whole step IS its stability function: `y1 = R(tau*A)
+# y0` with `R` a rational (Pade) approximant of `exp`. The implicit stage equations are the shifted
+# linear solves `R`'s denominator factorises into, and on the Krylov basis of `(A, y0)` they are
+# solved by FOM -- for Hermitian `A` that is CG, i.e. Lanczos -- so the same recursion that builds
+# the exponential builds these, and the Saad-type tail `beta_k*|c_k|` (the FOM residual for one
+# shifted solve) is their convergence test at `tol_expv`.
+#
+#   :trapezoid   (1 + z/2) / (1 - z/2)                              order 2, A-stable
+#   :radau2      (1 + z/3) / (1 - 2z/3 + z^2/6)                     order 3, L-stable (2-stage Radau IIA)
+#   :radau3      (1 + 2z/5 + z^2/20) / (1 - 3z/5 + 3z^2/20 - z^3/60)  order 5, L-stable (3-stage Radau IIA)
+#
+# ⛔ THE SPECTRUM IS SHIFTED TO ITS EXTREME RITZ VALUE, ALWAYS. A rational `R` is not
+# shift-covariant (`R(z - s) != R(z)R(-s)`), so the shift is part of the method: the operator
+# integrated is `tau*(A - sigma)` with `sigma` the Ritz value maximising `Re(tau*lambda)`, which puts
+# every `z = tau*(lambda - sigma)` in the closed left half-plane -- the region the A-/L-stability
+# statements are about. Unshifted, an imaginary-time step `tau = -dbeta` meets `R`'s pole at
+# `z = 2` (trapezoid) as soon as `dbeta*(E - lambda_min) = 2`. The factored scale is not
+# returned: in imaginary time the norm is not physical and the caller renormalises. In REAL time
+# (`tau` imaginary) no shift is applied and `:trapezoid` is Crank-Nicolson.
+#
+# ⚠ ROOT ORDER IS NOT THE STEP'S ORDER. The global order of a BUG step is the smaller of the
+# root's and the basis closure's (`order`); `:exp` (Saad-converged) is the reference.
+
+"Root integrators [`expv`](@ref) accepts, see the block above."
+const ROOT_METHODS = (:exp, :trapezoid, :radau2, :radau3)
+
+# Numerator / denominator coefficients of each stability function, constant term first.
+const _ROOT_PADE = Dict(
+    :trapezoid => ([1.0, 1 / 2], [1.0, -1 / 2]),
+    :radau2    => ([1.0, 1 / 3], [1.0, -2 / 3, 1 / 6]),
+    :radau3    => ([1.0, 2 / 5, 1 / 20], [1.0, -3 / 5, 3 / 20, -1 / 60]))
+
+"Classical order of a root integrator (`typemax(Int)` for the exponential)."
+root_order(m::Symbol) = m === :exp ? typemax(Int) : m === :trapezoid ? 2 :
+                        m === :radau2 ? 3 : m === :radau3 ? 5 : _bad_root(m)
+
+_bad_root(m) = throw(ArgumentError("root_method must be one of $(ROOT_METHODS), got :$m"))
+
+"The stability function `R(z)` of root integrator `m` (`exp(z)` for `:exp`)."
+function root_stability(m::Symbol, z::Number)
+    m === :exp && return exp(ComplexF64(z))
+    haskey(_ROOT_PADE, m) || _bad_root(m)
+    p, q = _ROOT_PADE[m]
+    return evalpoly(ComplexF64(z), p) / evalpoly(ComplexF64(z), q)
+end
+
+"`R(Z) b` for a small dense `Z`: one solve with the denominator polynomial."
+function _rational_apply(m::Symbol, Z::AbstractMatrix, b::AbstractVector)
+    p, q = _ROOT_PADE[m]
+    poly(c) = (P = c[end] * Matrix{ComplexF64}(I, size(Z)...);
+               for k in (length(c) - 1):-1:1; P = P * Z + c[k] * I; end; P)
+    return poly(q) \ (poly(p) * b)
+end
+
+"The shift of a rational root: the Ritz value maximising `Re(tau*lambda)` (none in real time)."
+_rational_shift(vals, tau::ComplexF64) =
+    (isempty(vals) || real(tau) == 0) ? zero(ComplexF64) :
+    ComplexF64(vals[argmax([real(tau * ComplexF64(v)) for v in vals])])
+
+"`R(tau*(T - sigma))e_1` for the Hermitian tridiagonal's eigendecomposition; scale not returned."
+function _rational_coeffs(vals, vecs, tau::ComplexF64, m::Symbol)
+    sigma = _rational_shift(vals, tau)
+    w = root_stability.(m, tau .* (ComplexF64.(vals) .- sigma)) .* ComplexF64.(vecs[1, :])
+    return ComplexF64.(vecs) * w, zero(ComplexF64)
+end
+
 "Saad's a-posteriori estimate of the next basis vector's contribution: `beta_k*|[exp(tau*T_k)]_k1|`.
 This is the CONVERGENCE measure. `beta` alone is a BREAKDOWN detector and does not fire on a
 generic operator -- measured: identical results for thresholds from 1e-6 to 1e-13."
@@ -232,7 +301,14 @@ basis; that is more stable but is *not* what the reference kernel does.
 function lanczos_expv(apply, tau::ComplexF64, x;
                       tol::Float64 = 1e-13, maxiter::Int = 60, reorth::Bool = false,
                       conv_tol::Float64 = 0.0, substeps::Int = 1,
-                      report::Union{Nothing, Base.RefValue} = nothing)
+                      report::Union{Nothing, Base.RefValue} = nothing,
+                      root_method::Symbol = :exp)
+    root_method in ROOT_METHODS || _bad_root(root_method)
+    # An implicit root takes the WHOLE step in one stage -- that is what it is for -- so the
+    # exponential's substep split does not apply to it.
+    root_method === :exp || (substeps = 1)
+    coeffs(vals, vecs, t) = root_method === :exp ? _coeffs_from_eigen(vals, vecs, t) :
+                                                   _rational_coeffs(vals, vecs, t, root_method)
     xc = _as_complex(x)
     beta0 = norm(xc)
     if beta0 == 0
@@ -268,7 +344,7 @@ function lanczos_expv(apply, tau::ComplexF64, x;
             b < tol && break                       # genuine breakdown: the space is exhausted
             if conv_tol > 0                        # genuine convergence: the answer stopped moving
                 vals, vecs = _tridiag_eigen(alpha, betas)
-                c, _ = _coeffs_from_eigen(vals, vecs, tau_rem)
+                c, _ = coeffs(vals, vecs, tau_rem)
                 _tail(c, b) < conv_tol && break
             end
             push!(betas, b)
@@ -326,7 +402,7 @@ function lanczos_expv(apply, tau::ComplexF64, x;
         end
 
         vals, vecs = _tridiag_eigen(alpha, betas)
-        evalcoeff(t) = _coeffs_from_eigen(vals, vecs, ComplexF64(t))
+        evalcoeff(t) = coeffs(vals, vecs, ComplexF64(t))
         betak = norm(w)
 
         tau_s = if substeps == 1
@@ -438,7 +514,12 @@ start to align.
 function arnoldi_expv(apply, tau::ComplexF64, x;
                       tol::Float64 = 1e-13, maxiter::Int = 60,
                       conv_tol::Float64 = 0.0, substeps::Int = 1,
-                      report::Union{Nothing, Base.RefValue} = nothing)
+                      report::Union{Nothing, Base.RefValue} = nothing,
+                      root_method::Symbol = :exp)
+    root_method in ROOT_METHODS || _bad_root(root_method)
+    root_method === :exp || (substeps = 1)     # an implicit root takes the whole step at once
+    hcoeffs(Hm, t) = root_method === :exp ? _hess_coeffs(Hm, t) :
+                                            _hess_rational(Hm, t, root_method)
     xc = _as_complex(x)
     beta0 = norm(xc)
     if beta0 == 0
@@ -492,7 +573,7 @@ function arnoldi_expv(apply, tau::ComplexF64, x;
             betak = b
             b < tol && break
             if conv_tol > 0
-                c = _hess_coeffs(H[1:m, 1:m], tau_rem)[1]
+                c = hcoeffs(H[1:m, 1:m], tau_rem)[1]
                 _tail(c, b) < conv_tol && break
             end
             H[j + 1, j] = b
@@ -501,7 +582,7 @@ function arnoldi_expv(apply, tau::ComplexF64, x;
         end
 
         Hm = H[1:m, 1:m]
-        evalcoeff(t) = _hess_coeffs(Hm, ComplexF64(t))
+        evalcoeff(t) = hcoeffs(Hm, ComplexF64(t))
 
         tau_s = if substeps == 1
             tau_rem
@@ -534,6 +615,15 @@ function _hess_coeffs(Hm::Matrix{ComplexF64}, tau::ComplexF64)
     return E[:, 1], tau * sigma
 end
 
+"`R(tau*(Hm - sigma))e_1` on the Arnoldi Hessenberg, `sigma` the eigenvalue maximising
+`Re(tau*lambda)` (see the root-integrator block); scale not returned."
+function _hess_rational(Hm::Matrix{ComplexF64}, tau::ComplexF64, m::Symbol)
+    isempty(Hm) && return (ComplexF64[], zero(ComplexF64))
+    sigma = _rational_shift(eigvals(Hm), tau)
+    e1 = zeros(ComplexF64, size(Hm, 1)); e1[1] = 1
+    return _rational_apply(m, tau * (Hm - sigma * I), e1), zero(ComplexF64)
+end
+
 """
     expv(apply, tau, x; hermitian=true, maxiter=60, tol=1e-13, reorth=false,
          conv_tol=0.0, substeps=1)
@@ -548,16 +638,22 @@ Hermitian.
 splits `tau` adaptively so a large step needs no larger `maxiter`. Both default to the historical
 behaviour -- see the file header. `report = Ref{Any}()` receives `(iterations, substeps, err)`,
 see [`_report!`](@ref).
+`root_method` (`:exp` default) selects the root integrator: `:trapezoid`, `:radau2`, `:radau3`
+apply that implicit method's stability function to the shifted generator in one stage (see the
+root-integrator block above `_tail`); `substeps` is then ignored.
 """
 function expv(apply, tau::ComplexF64, x;
               hermitian::Bool = true, maxiter::Int = 60, tol::Float64 = 1e-13,
               reorth::Bool = false, conv_tol::Float64 = 0.0, substeps::Int = 1,
-              report::Union{Nothing, Base.RefValue} = nothing)
+              report::Union{Nothing, Base.RefValue} = nothing,
+              root_method::Symbol = :exp)
     return hermitian ?
         lanczos_expv(apply, tau, x; tol = tol, maxiter = maxiter, reorth = reorth,
-                     conv_tol = conv_tol, substeps = substeps, report = report) :
+                     conv_tol = conv_tol, substeps = substeps, report = report,
+                     root_method = root_method) :
         arnoldi_expv(apply, tau, x; tol = tol, maxiter = maxiter,
-                     conv_tol = conv_tol, substeps = substeps, report = report)
+                     conv_tol = conv_tol, substeps = substeps, report = report,
+                     root_method = root_method)
 end
 
 expv(apply, tau::Number, x; kwargs...) = expv(apply, ComplexF64(tau), x; kwargs...)

@@ -169,7 +169,17 @@ function _kry_weight(Hm::Matrix{ComplexF64}, k::Int, tau::ComplexF64)
     A = zeros(ComplexF64, k + 1, k + 1)
     A[1:k, 1:k] .= tau .* @view Hm[1:k, 1:k]
     A[k + 1, k] = tau * Hm[k + 1, k]
-    return abs(exp(A)[k + 1, 1])
+    real(tau) == 0 && return abs(exp(A)[k + 1, 1])
+    # ⛔ IMAGINARY TIME: RELATIVE TO THE PROPAGATED SEED, AND SHIFTED TO STAY REPRESENTABLE. The
+    # propagator is not unitary, so `|[exp(A)]_{k+1,1}|` carries the seed's own growth
+    # `||exp(tau*H_k) e_1||` -- `exp(dbeta*|E|)` for an unshifted generator, i.e. `e^44` at L=100,
+    # dbeta=1 -- and every direction would look that much more important than it is to the
+    # NORMALISED state the caller keeps (and overflow past dbeta*|E| ~ 700). The ratio is the
+    # weight the direction carries in the normalised propagated seed; the scalar shift cancels in
+    # it exactly. In real time the propagator is unitary and the old expression is kept bit for bit.
+    s = maximum(real, eigvals(A[1:k, 1:k]))
+    E = exp(A - s * I)
+    return abs(E[k + 1, 1]) / max(norm(@view E[1:k, 1]), floatmin(Float64))
 end
 
 """
@@ -556,6 +566,22 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # measure every frontier first, loop until a pass adds nothing, measure
                        # j = 0 on the final frames (`_krylov_closure!(...; checks)`).
                        closure_checks::Bool = false,
+                       # ── IMAGINARY TIME (plan: cbe_bug_imaginary_open_benchmark, Task 1) ──
+                       # The root integrator (`ROOT_METHODS`): `:exp` is the Saad-converged
+                       # exponential (the reference); `:trapezoid`/`:radau2`/`:radau3` apply that
+                       # implicit method's stability function in one stage. A METHOD choice.
+                       root_method::Symbol = :exp,
+                       # The step integrates `H - eshift` (`shift_h`): the root and every Krylov
+                       # generator, so the basis weights measure the change of the NORMALISED
+                       # state rather than its `exp(-dbeta*E)` growth. `0.0` is bit-identical.
+                       eshift::Real = 0.0,
+                       # ⚠ INSTRUMENTATION. A `Ref` receives the root's account: energies of the
+                       # state before and after the root solve (`<S|H|S>/<S|S>`, exact in the
+                       # Galerkin space), the solve's report, and with `outside_residual = true`
+                       # the outside-Galerkin action `||(I - P) H psi_1|| / ||psi_1||` of the
+                       # evolved state (`estimate_global_complement_action`, one measuring sweep).
+                       root_report::Union{Nothing, Base.RefValue} = nothing,
+                       outside_residual::Bool = false,
                        # ── THE RETIRED TUNING PARAMETERS ─────────────────────────────────
                        #
                        # ⛔ EACH OF THESE IS A GUESS AT A RANK MADE BEFORE THE SPECTRUM THAT
@@ -913,9 +939,9 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         # nothing in the suite exercised.
         Hm = zeros(ComplexF64, krylov_basis + 1, krylov_basis + 1)
         for k in 1:krylov_basis
-            H1 = side === :left ?
-                 one_site_h(mpo, i, lch, push_right_channels(rch, mpo, V, i + 1)) :
-                 one_site_h(mpo, i + 1, push_left_channels(lch, mpo, V, i), rch)
+            H1 = shift_h(side === :left ?
+                         one_site_h(mpo, i, lch, push_right_channels(rch, mpo, V, i + 1)) :
+                         one_site_h(mpo, i + 1, push_left_channels(lch, mpo, V, i), rch), eshift)
             acc.nmv += 1
             w = apply_one_site(H1, vs[end])
             # ⛔ EVERY NAME ASSIGNED HERE MUST BE ONE `cbe_bug_step!`'s BODY DOES NOT USE. This is a
@@ -1110,7 +1136,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             M    = to_concrete!(contract(psiL[i + 1], (2, 3), ex.V_ex', (2, 3)))
             Kex  = to_concrete!(contract(K, (3,), M, (1,)))
             rch1 = push_right_channels(right_channels(rstack, i + 2), mpo, ex.V_ex, i + 1)
-            H1   = one_site_h(mpo, i, lch, rch1)
+            H1   = shift_h(one_site_h(mpo, i, lch, rch1), eshift)
             tkL0 = time_ns()
             Wkry, kstL = _krylov_enrich(Kex, x -> (accL.nmv += 1; apply_one_site(H1, x)),
                                         ex.U_ex, :left, tau, alloc; workcap = wcap_step)
@@ -1128,7 +1154,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                 bl
             else
                 rch1 = push_right_channels(right_channels(rstack, i + 2), mpo, ex.V_ex, i + 1)
-                H1 = one_site_h(mpo, i, lch, rch1)
+                H1 = shift_h(one_site_h(mpo, i, lch, rch1), eshift)
                 (t0 = time_ns();
                  bl = _krylov_frame(Kex, x -> (accL.nmv += 1; apply_one_site(H1, x)),
                                     krylov_basis, ktol, tau);
@@ -1191,7 +1217,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             M    = to_concrete!(contract(ex.U_ex', (1, 2), psiR[j], (1, 2)))  # (b_L, link_j)
             Bex  = to_concrete!(contract(M, (2,), B, (1,)))
             lch1 = push_left_channels(left_channels(lstack, j), mpo, ex.U_ex, j)
-            H1   = one_site_h(mpo, j + 1, lch1, rch)
+            H1   = shift_h(one_site_h(mpo, j + 1, lch1, rch), eshift)
             tkR0 = time_ns()
             Zkry, kstR = _krylov_enrich(Bex, x -> (accR.nmv += 1; apply_one_site(H1, x)),
                                         ex.V_ex, :right, tau, alloc; workcap = wcap_step)
@@ -1210,7 +1236,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                 bl
             else
                 lch1 = push_left_channels(left_channels(lstack, j), mpo, ex.U_ex, j)
-                H1 = one_site_h(mpo, j + 1, lch1, rch)
+                H1 = shift_h(one_site_h(mpo, j + 1, lch1, rch), eshift)
                 (t0 = time_ns();
                  bl = _krylov_frame(Bex, x -> (accR.nmv += 1; apply_one_site(H1, x)),
                                     krylov_basis, ktol, tau);
@@ -1303,7 +1329,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     # and the single root solve below runs in them.
     nclose = 0
     if adaptive && order > 1
-        fr = KLFrames(W, Z, c, lenv_root, renv_root, 0)
+        fr = KLFrames(W, Z, c, lenv_root, renv_root, 0, nothing, nothing, Float64(eshift))
         ckw = Base.structdiff(exkw, NamedTuple{(:share_ht, :fold_omega)})
         cl = _krylov_closure!(fr, psi, mpo, S0, tau, alloc, ckw; order = order,
                               workcap = wcap_step, nrm = _nrm, parallel = parallel, rng = rng,
@@ -1318,7 +1344,8 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         nclose = cl.n_h1 + cl.n_root
     elseif adaptive && closure_probe > 0
         # A copied `rng` and untouched frames: the step itself stays bit-identical.
-        pr = _measure_frontiers(KLFrames(W, Z, c, lenv_root, renv_root, 0), psi, mpo, S0, tau,
+        pr = _measure_frontiers(KLFrames(W, Z, c, lenv_root, renv_root, 0, nothing, nothing,
+                                         Float64(eshift)), psi, mpo, S0, tau,
                                 alloc, NamedTuple(), closure_probe; nrm = _nrm,
                                 parallel = parallel, rng = copy(rng), fold = fold_omega)
         merge_ledger!(ledger, pr.ledger)
@@ -1338,14 +1365,35 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     peak = accL.peak + accR.peak +
            sum(tensor_elements(t) for t in (W[c], Z[c], S0); init = 0)
 
-    H0 = zero_site_h(mpo, c, lenv_root, renv_root, W[c], Z[c])
+    H0 = shift_h(zero_site_h(mpo, c, lenv_root, renv_root, W[c], Z[c]), eshift)
     nroot = Ref(0)
     rootrep = Ref{Any}(nothing)
     _t0root = time_ns()
     S1 = expv(x -> (nroot[] += 1; apply_zero_site(H0, x)), tau, S0;
               hermitian = hermitian, maxiter = maxiter, tol = tol, reorth = reorth,
-              conv_tol = root_conv_tol, substeps = root_substeps, report = rootrep)
+              conv_tol = root_conv_tol, substeps = root_substeps, report = rootrep,
+              root_method = root_method)
     troot[] = (time_ns() - _t0root) / 1e9
+    if root_report !== nothing
+        # Rayleigh quotients in the Galerkin space: `S0` and `S1` ARE the state before the root
+        # and after it (before the compression), and `<S|H_0|S> = <psi|P H P|psi> = <psi|H|psi>`
+        # for `psi` in the frames' span, so these are exact energies, not projections of them.
+        rq(S) = (n2 = norm(S)^2; n2 > 0 ? real(tensor_inner(S, apply_zero_site(H0, S))) / n2 +
+                                          Float64(eshift) : NaN)
+        e_pre, e_root = rq(S0), rq(S1)
+        out = outside_residual ?
+            estimate_global_complement_action(psi, mpo,
+                KLFrames(W, Z, c, lenv_root, renv_root, 0, nothing, nothing, Float64(eshift)),
+                S1; rng = copy(rng)) : nothing
+        n1 = max(norm(S1), eps())
+        root_report[] = (root_method = root_method, eshift = Float64(eshift), e_pre = e_pre,
+                         e_root = e_root, solve = rootrep[], n_root = nroot[],
+                         outside = out === nothing ? NaN : out.bound / n1,
+                         outside_left = out === nothing ? NaN : out.left / n1,
+                         outside_right = out === nothing ? NaN : out.right / n1,
+                         # the step's outside-Galerkin defect, `|tau| ||(I-P) H psi_1|| / ||psi_1||`
+                         resid = out === nothing ? NaN : abs(tau) * out.bound / n1)
+    end
     if adaptive && rootrep[] !== nothing
         ledger.expv_err   = rootrep[].err
         ledger.expv_iters = rootrep[].iterations
