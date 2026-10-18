@@ -25,6 +25,8 @@ import Random
 
 const _LV = BUGJulia.RSVDCBEBondUpdate
 
+include(joinpath(@__DIR__, "..", "common", "free_fermion.jl"))
+
 # ── dense references, written from the textbook formulas ───────────────────────────────────────
 
 _lv_emb(o, i, L, d) = kron(Matrix{ComplexF64}(I, d^(i - 1), d^(i - 1)), o,
@@ -424,6 +426,81 @@ end
     cbe_bug_step!(a, W, ComplexF64(0.1); hermitian = false, tol_basis = 1e-6, keep_states = Any[])
     cbe_bug_step!(b, W, ComplexF64(0.1); hermitian = false, tol_basis = 1e-6)
     @test norm(mpdo_dense(a, ls) - mpdo_dense(b, ls)) == 0
+end
+
+@testset "OS-3 model: three-site East term == dense Liouvillian, strong U(1), frozen states" begin
+    # H_E = J sum_{j=2}^{L-1} n_{j-1} (s+_j s-_{j+1} + h.c.) + dephasing sqrt(gamma) n_j: the
+    # facilitated hop as a TripleTerm (A = n neutral), no two-body term at all
+    L, J, gam = 5, 0.9, 0.3
+    w = fill(J, L - 2)
+    triples = Any[(_NUP, _SPm, _SMm, w), (_NUP, _SMm, _SPm, w)]
+    jumps = Any[(_NUP, gam)]
+    H = zeros(ComplexF64, 2^L, 2^L)
+    for (A, B, C, ww) in triples, j in 1:(L - 2)
+        H += ww[j] * _lv_emb(A, j, L, 2) * _lv_emb(B, j + 1, L, 2) * _lv_emb(C, j + 2, L, 2)
+    end
+    Nop = sum(_lv_emb(_NUP, j, L, 2) for j in 1:L)
+    @test norm(H * Nop - Nop * H) < 1e-14                            # [H, N] = 0
+    @test norm(H) > 0
+    Ld = _lv_dense(L, 2, Any[], [zeros(ComplexF64, 2, 2) for _ in 1:L], jumps)
+    Ld += -1im * (kron(H, I(2^L)) - kron(I(2^L), transpose(H)))
+    P = _lv_perm(L, 2)
+    for sym in (:weak, :strong)
+        ls = liouville_space([1, 0]; sym = sym)
+        W = lindblad_mpo(ls, L; triples = triples, jumps = jumps)  # strong is accepted: [L_j, N] = 0
+        Lmpo = zeros(ComplexF64, size(Ld))
+        Lmpo[P, P] = transpose(_lv_mpo_dense(W, ls, L))
+        err = norm(Lmpo - Ld) / norm(Ld)
+        @info "OS-3 $sym: ||L_mpo - L_dense|| / ||L|| = $err, MPO dims $(mpo_virtual_dims(W))"
+        @test err < 1e-12
+    end
+    # frozen: nothing occupied left of a particle, or a lone particle at site 1, never moves
+    for occ in ([1], [L], [1, L])
+        r = kron([j in occ ? _NUP : I - _NUP for j in 1:L]...)
+        @test norm(Ld * _vecr(r)) < 1e-14
+    end
+    r = kron([j in (1, 2) ? _NUP : I - _NUP for j in 1:L]...)       # mobile: 1 facilitates 2 -> 3
+    @test norm(Ld * _vecr(r)) > 0.1
+    # and only facilitated hops: from |1,1,0,0,0> the only state H reaches is |1,0,1,0,0>
+    v = zeros(ComplexF64, 2^L); v[1 + sum(1 << (L - j) for j in 1:L if !(j in (1, 2)))] = 1
+    reach = findall(x -> abs(x) > 1e-14, H * v)
+    @test length(reach) == 1
+end
+
+@testset "OS-1 reference: dephased boundary-driven XX covariance == dense Liouvillian" begin
+    # H = J sum (s+_j s-_{j+1} + h.c.) = J sum (c'_j c_{j+1} + h.c.) (Jordan-Wigner, up = occupied),
+    # gain/loss sqrt(eps (1 +- mu)/2) s+- at each end, dephasing sqrt(gamma) n_j: the plan's OS-1
+    # model in the jump convention `lindblad_mpo` uses (rate g multiplies D[J]); the closed
+    # covariance ODE must reproduce the dense Liouvillian's <n_j> and <c'_k c_{k+1}>.
+    L, J, gam, eL, eR, muL, muR = 4, 0.8, 0.35, 0.5, 0.7, 0.6, -0.4
+    Jm = zeros(L, L); for i in 1:(L - 1); Jm[i, i + 1] = J; end
+    pairs = Any[(_SPm, _SMm, Jm), (_SMm, _SPm, Jm)]
+    at(i, g) = [k == i ? g : 0.0 for k in 1:L]
+    jumps = Any[(_NUP, gam), (_SPm, at(1, eL * (1 + muL) / 2)), (_SMm, at(1, eL * (1 - muL) / 2)),
+                (_SPm, at(L, eR * (1 + muR) / 2)), (_SMm, at(L, eR * (1 - muR) / 2))]
+    Ld = _lv_dense(L, 2, pairs, [zeros(ComplexF64, 2, 2) for _ in 1:L], jumps)
+    occ = [1, 3]
+    r0 = [i in occ ? _NUP : I - _NUP for i in 1:L]
+    C0 = Diagonal([i in occ ? 1.0 : 0.0 for i in 1:L])
+    ts = [0.3, 0.6, 2.0]
+    Cs = xx_open_covariance(L, ts; C0 = C0, J = J, gamma = gam, eps_L = eL, eps_R = eR,
+                            mu_L = muL, mu_R = muR)
+    for (t, C) in zip(ts, Cs)
+        R = _unvecr(exp(t * Ld) * _vecr(kron(r0...)), 2^L)
+        n = [real(tr(_lv_emb(_NUP, j, L, 2) * R)) for j in 1:L]
+        hop = [tr(_lv_emb(_SPm, k, L, 2) * _lv_emb(_SMm, k + 1, L, 2) * R) for k in 1:(L - 1)]
+        @test maximum(abs.(n .- real.(diag(C)))) < 1e-12
+        @test maximum(abs.(hop .- [C[k, k + 1] for k in 1:(L - 1)])) < 1e-12
+        @test norm(hop) > 1e-3                                       # non-vacuous: a current flows
+    end
+    # gamma = 0 is the published boundary-driven reference; the NESS is the long-time limit
+    C1 = xx_open_covariance(L, [1.5]; J = J, eps_L = eL, eps_R = eR, mu_L = muL, mu_R = muR)[1]
+    @test norm(C1 - xx_boundary_covariance(L, 1.5; J = J, eps_L = eL, eps_R = eR, mu_L = muL,
+                                           mu_R = muR)) < 1e-12
+    Cinf = xx_open_covariance(L, [400.0]; J = J, gamma = gam, eps_L = eL, eps_R = eR,
+                              mu_L = muL, mu_R = muR)[1]
+    @test norm(Cinf - xx_open_ness(L; J = J, gamma = gam, eps_L = eL, eps_R = eR, mu_L = muL,
+                                   mu_R = muR)) < 1e-10
 end
 
 end # symmetry-aware MPDO

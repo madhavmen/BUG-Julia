@@ -534,6 +534,55 @@ function xx_boundary_current_check(N::Int; J::Real = 1.0, kwargs...)
 end
 
 """
+    xx_open_generator(N; gamma = 0.0, kwargs...) -> (M, g)
+
+The boundary-driven XX chain WITH BULK DEPHASING `L_j = sqrt(gamma) n_j` on every site (plan OS-1),
+as the vectorised affine ODE `d vec(C)/dt = M vec(C) + g`. The two-point function still closes:
+dephasing damps every OFF-diagonal `C_jk` at rate `gamma` and leaves the diagonal alone
+(`xx_dephasing_correlation`), so `dC/dt = X C + C X' + G - gamma (C - Diagonal(C))` with `X, G` of
+[`xx_boundary_lyapunov`](@ref) (`kwargs`: `J, B, eps_L, eps_R, mu_L, mu_R`). Column-major `vec`:
+`vec(X C) = kron(I, X) vec(C)`, `vec(C X') = kron(conj(X), I) vec(C)`. `gamma = 0` is
+[`xx_boundary_covariance`](@ref) exactly. `N^2 x N^2` dense: N = 64 is 4096^2, fine for a reference.
+"""
+function xx_open_generator(N::Int; gamma::Real = 0.0, kwargs...)
+    X, G = xx_boundary_lyapunov(N; kwargs...)
+    Id = Matrix{ComplexF64}(I, N, N)
+    M = kron(Id, X) + kron(conj(X), Id)
+    for i in 1:N, j in 1:N
+        i == j || (M[(j - 1) * N + i, (j - 1) * N + i] -= gamma)
+    end
+    return M, vec(G)
+end
+
+"The exact NESS covariance of [`xx_open_generator`](@ref): `M vec(C) + g = 0`."
+xx_open_ness(N::Int; kwargs...) = (Mg = xx_open_generator(N; kwargs...);
+                                   reshape(-(Mg[1] \ Mg[2]), N, N))
+
+"""
+    xx_open_covariance(N, ts; C0 = nothing, kwargs...) -> Vector{Matrix{ComplexF64}}
+
+EXACT `C(t)` of [`xx_open_generator`](@ref) at every time in `ts` (ascending, from `t = 0`), for the
+initial covariance `C0` (default `I/2`, maximally mixed). Solved around the NESS, so the ODE is
+homogeneous; one `exp(M dt)` per distinct spacing, cached, so a uniform output grid costs one.
+"""
+function xx_open_covariance(N::Int, ts::AbstractVector{<:Real}; C0 = nothing, kwargs...)
+    M, g = xx_open_generator(N; kwargs...)
+    css = -(M \ g)
+    c = vec(C0 === nothing ? Matrix{ComplexF64}(I, N, N) ./ 2 : ComplexF64.(C0)) .- css
+    props = Dict{Float64, Matrix{ComplexF64}}()
+    out = Matrix{ComplexF64}[]
+    tprev = 0.0
+    for t in ts
+        dt = round(float(t) - tprev; sigdigits = 12)
+        dt < 0 && throw(ArgumentError("ts must be ascending from 0"))
+        dt > 0 && (c = get!(() -> exp(M .* dt), props, dt) * c)
+        push!(out, reshape(c .+ css, N, N))
+        tprev = float(t)
+    end
+    return out
+end
+
+"""
     xx_boundary_current_published(; J = 1.0, eps = 1.0, mu_L = 1.0, mu_R = -1.0) -> Float64
 
 The CLOSED-FORM non-equilibrium steady-state current of the boundary-driven XX chain:
