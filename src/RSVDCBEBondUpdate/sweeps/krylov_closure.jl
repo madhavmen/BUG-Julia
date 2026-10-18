@@ -527,7 +527,8 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
             H1 = shift_h(one_site_h(mpo, i, lch, push_right_channels(rch, mpo, ex.V_ex, i + 1)),
                          fr.eshift)
             Q, st = _krylov_enrich(Kex, x -> (nh1[] += 1; apply_one_site(H1, x)), ex.U_ex,
-                                   :left, tau, alloc; workcap = workcap, amp = amp)
+                                   :left, tau, alloc; workcap = workcap, amp = amp,
+                                   state_seed = false)
             _record_krylov!(bl, st, alloc)
             Q
         else
@@ -603,7 +604,8 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
             H1 = shift_h(one_site_h(mpo, j + 1, push_left_channels(lch, mpo, ex.U_ex, j), rch),
                          fr.eshift)
             Q, st = _krylov_enrich(Bex, x -> (nh1[] += 1; apply_one_site(H1, x)), ex.V_ex,
-                                   :right, tau, alloc; workcap = workcap, amp = amp)
+                                   :right, tau, alloc; workcap = workcap, amp = amp,
+                                   state_seed = false)
             _record_krylov!(bl, st, alloc)
             Q
         else

@@ -299,6 +299,36 @@ end
     @test q.status === :failed && q.nsub == 1 && length(q.attempts) == 1
 end
 
+@testset "Krylov weight in imaginary time: relative to the kept state, not a decaying frontier" begin
+    # one Krylov step, [tau*h 0; tau*b 0]: the direction's weight in exp(tau*H) e1 is
+    # |tau b phi_1(tau h)| = b |1 - e^{tau h}| / |h| in the Eshift frame
+    Hm = zeros(ComplexF64, 3, 3)
+    Hm[2, 1] = 0.5
+    Hm[1, 1] = 3.0                       # h = 3 above Eshift: the seed DECAYS by e^{-24}
+    Ex = exp(ComplexF64[-24 0; -4 0])
+    # a closure FRONTIER: the absolute weight, not that inflated by its own decay (the d49 flags
+    # at dbeta 8: 1e8 to 3e15)
+    wf = RC._kry_weight(Hm, 1, ComplexF64(-8); state_seed = false)
+    @test wf ≈ 0.5 * (1 - exp(-24)) / 3 rtol = 1e-10
+    @test wf ≈ abs(Ex[2, 1]) rtol = 1e-10
+    # the state's own tensor (half-sweeps): relative to its growth, unchanged
+    @test RC._kry_weight(Hm, 1, ComplexF64(-8)) ≈ abs(Ex[2, 1]) / abs(Ex[1, 1]) rtol = 1e-10
+    @test RC._kry_weight(Hm, 1, ComplexF64(-8)) > 1e9 * wf          # what the frontier used to get
+    # real time: one expression for both, unchanged
+    @test RC._kry_weight(Hm, 1, ComplexF64(-0.1im); state_seed = false) ==
+          RC._kry_weight(Hm, 1, ComplexF64(-0.1im)) ==
+          abs(exp(ComplexF64[-0.3im 0; -0.05im 0])[2, 1])
+    # end to end: the last panel (dbeta = 8) of a converged order-3 run is accepted, not flagged
+    # `krylov+closure` as a capped step (IT-1 L=16, s42 repro steps 34-36)
+    psi = neel_state(_IT_L)
+    hist = ite_evolve!(psi, _IT_MPO, log_panel_steps(64.0, 9; per_panel = 4); order = 3,
+                       tol_basis = 1e-7, tol_trunc = 1e-6, tol_root = 1e-6, maxdim = 256)
+    late = [(beta = r.beta, unmet = r.unmet, nsub = r.nsub) for r in hist[(end - 3):end]
+            if r.status === :failed]
+    @info "IT dbeta-8 panel, order 3: failed among the last 4 steps $(late)"
+    @test isempty(late)
+end
+
 @testset "tdvp2 partner: eshift and the backward-substep amplification" begin
     tkw = (maxdim = 64, maxiter = 30, conv_tol = 1e-14, substeps = 0, weight_tol = 1e-12)
     en(p) = real(mpo_energy(p, _IT_MPO)) / real(overlap(p, p))
