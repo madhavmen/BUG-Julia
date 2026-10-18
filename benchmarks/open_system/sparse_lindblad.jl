@@ -82,7 +82,8 @@ function arnoldi_expv_sparse(A, v::Vector{ComplexF64}, t::Real; m::Int = 40, tol
                 x .-= c .* V[i]
             end
             Hm[j + 1, j] = norm(x)
-            if Hm[j + 1, j] < 1e-14 * b0
+            # the basis vectors are unit, so the breakdown test is absolute (Hm is complex: abs)
+            if abs(Hm[j + 1, j]) < 1e-14
                 k = j; break
             end
             V[j + 1] = x / Hm[j + 1, j]
