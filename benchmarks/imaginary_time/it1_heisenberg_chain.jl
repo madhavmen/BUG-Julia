@@ -146,8 +146,9 @@ function run_arm(io, W, ref, arm, g, tb, seed)
             info = tdvp2_step!(psi, W, ComplexF64(-db); maxdim = MAXDIM, maxiter = 30,
                                conv_tol = TR, substeps = 0, weight_tol = TT)
             renorm!(psi)
-            wall += (time_ns() - t0) / 1e9
+            # the energy readout counts in the wall, as ite_step!'s own energy logging does
             E = energy(psi, W)
+            wall += (time_ns() - t0) / 1e9
             st, um = :tdvp2, ""
             row = (NaN, NaN, NaN, NaN, NaN, info.cumulative, NaN, 1)
         end
@@ -168,10 +169,29 @@ function run_arm(io, W, ref, arm, g, tb, seed)
     return (var = var, corr = corr, wall = wall, nfail = nfail)
 end
 
+"""JIT warm-up, untimed and discarded: two steps of every arm on a 6-site chain, so no arm's
+first measured step carries compilation (the smoke run's first BUG step showed ~17 s of it)."""
+function warmup()
+    W6 = xxz_mpo(6; J = 1.0, delta = 1.0)
+    for arm in ARMS, _ in 1:2
+        p = neel_state(6)
+        if startswith(arm, "bug")
+            ite_step!(p, W6, 0.1; order = parse(Int, arm[4:end]), root_method = ROOT,
+                      tol_basis = TBS[1], tol_trunc = TT, tol_root = TR, maxdim = 16,
+                      retries = 0, outside_residual = OUTSIDE, parallel = PARALLEL)
+        else
+            tdvp2_step!(p, W6, ComplexF64(-0.1); maxdim = 16, maxiter = 30, conv_tol = TR,
+                        substeps = 0, weight_tol = TT)
+        end
+    end
+end
+
 function main()
     mkpath(OUT)
     set_symmetry!(:U1)
     W = xxz_mpo(L; J = 1.0, delta = 1.0)
+    t = @elapsed warmup()
+    say(@sprintf("JIT warm-up (untimed, excluded from every wall): %.1f s", t))
     say("== IT-1 Heisenberg chain L=$L  beta_max=$BMAX  grids $(GRIDS)  arms $(ARMS)  tol_basis $(TBS)  tol_trunc $TT  tol_root $TR  maxdim $MAXDIM  root $ROOT  threads $(Threads.nthreads())")
     ref = L <= EXACT_N ? exact_refs() : dmrg_ref(W)
     say(@sprintf("reference %s: E0 = %.12f  (E0/L = %.12f)", ref.kind, ref.E0, ref.E0 / L))

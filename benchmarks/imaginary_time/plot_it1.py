@@ -87,7 +87,7 @@ def main():
                     ax.plot(fx, fy, linestyle="none", marker="o", markersize=8,
                             markerfacecolor="white", markeredgecolor=c, markeredgewidth=2)
         ttl = [f"|E - E_exact(beta)|   {g}", f"E - E0   {g}", f"chi(beta)   {g}",
-               f"E - E0 vs cumulative wall [s] (incl. first-call JIT)   {g}"]
+               f"E - E0 vs cumulative wall [s]   {g}"]
         for row in range(4):
             ax = axes[row][j]
             style(ax, ttl[row])
