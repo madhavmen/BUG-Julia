@@ -266,16 +266,37 @@ end
         bad = [(beta = r.beta, dbeta = r.dbeta, unmet = r.unmet, resid = r.resid, nsub = r.nsub)
                for r in hist if r.status === :failed]
         @info "IT physics $name: $(length(steps)) steps, E = $(hist[end].e_after), exact at beta $Ebeta, E0 $E0, retried $(count(r -> r.status === :retried, hist)), failed $(bad)"
-        # ⛔ THE FIRST STEP FROM A PRODUCT STATE IS FLAGGED, AND THAT IS THE FAIL-SAFE WORKING.
-        # At chi = 1 the frames can admit ~one direction per side per bond, so the first sub-step's
-        # basis cannot hold H psi_1 at any dbeta: its outside defect (2.1e-6 panel, 1.6e-5 uniform
-        # after 4-5 sub-steps, s30test 17340117) stays above tol_basis while every later step,
-        # at grown rank, passes. Anything failing past the first step is a real failure.
-        @test all(b -> b.beta == steps[1] && b.unmet == [:outside], bad)
-        @test all(r -> r.status !== :failed, hist[2:end])
+        # ⛔ NO STEP MAY FAIL, THE FIRST ONE INCLUDED. The first step from a product state used to be
+        # flagged and called "the fail-safe working" (s30test 17340117: 2.1e-6 panel, 1.6e-5
+        # uniform after 4-5 sub-steps). It was the fixed halving: the defect does shrink like
+        # dbeta^(p+1), only from a large constant (fp1, job 17342386), and the split is now
+        # sized from it (`_ite_nsplit`). USER 2026-10-18: "this hints at a bug, fix it".
+        @test isempty(bad)
         @test hist[end].e_after ≈ Ebeta atol = 1e-7
         @test hist[end].e_after >= E0 - 1e-8                         # variational
     end
+end
+
+@testset "first step from a product state: the split is sized from the defect" begin
+    # Neel and the domain wall, order 2, a tight tol_basis: two halvings cannot reach it (the old
+    # ladder flagged this step), a defect-sized split does, in ONE rejection
+    for (name, st) in (("neel", neel_state(_IT_L)), ("dw", domain_wall_state(_IT_L)))
+        psi = st
+        q = ite_step!(psi, _IT_MPO, 0.125; order = 2, tol_basis = 1e-7, tol_trunc = 1e-10,
+                      tol_root = 1e-12, maxdim = 256, retries = 2)
+        a1 = q.attempts[1]
+        @info "first step $name: status $(q.status), first resid $(a1.resid), nsub $(q.nsub), final resid $(q.resid)"
+        @test !a1.ok && :outside in a1.unmet                       # non-vacuous: it IS rejected
+        @test RC._ite_nsplit(a1, 1e-7, 2) > 4                      # more than two halvings give
+        @test q.status === :retried
+        @test q.resid <= 1e-7 * (1 + 1e-8)
+    end
+    # a RESOURCE cap is not split: the binding maxdim stays binding at any dbeta
+    psi = neel_state(_IT_L)
+    ite_step!(psi, _IT_MPO, 0.1; order = 1, maxdim = 32, outside_residual = false)
+    q = ite_step!(psi, _IT_MPO, 0.3; order = 1, tol_trunc = 1e-10, maxdim = 2,
+                  outside_residual = false, retries = 3)
+    @test q.status === :failed && q.nsub == 1 && length(q.attempts) == 1
 end
 
 @testset "tdvp2 partner: eshift and the backward-substep amplification" begin

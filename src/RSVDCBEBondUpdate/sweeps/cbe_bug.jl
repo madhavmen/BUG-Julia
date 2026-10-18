@@ -1414,6 +1414,9 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                          outside = out === nothing ? NaN : out.bound / n1,
                          outside_left = out === nothing ? NaN : out.left / n1,
                          outside_right = out === nothing ? NaN : out.right / n1,
+                         # per bond (left frames 1..c, right frames c..L-1), scale-free like the above
+                         per_left = out === nothing ? Float64[] : out.per_left ./ n1,
+                         per_right = out === nothing ? Float64[] : out.per_right ./ n1,
                          # the step's outside-Galerkin defect, `|tau| ||(I-P) H psi_1|| / ||psi_1||`
                          resid = out === nothing ? NaN : abs(tau) * out.bound / n1)
     end

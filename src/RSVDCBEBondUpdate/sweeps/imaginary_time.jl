@@ -73,6 +73,35 @@ end
 # defect). `:projection` belongs to the midpoint step, which this driver does not use.
 const _ITE_REASONS = (:sample, :tail, :krylov, :closure, :expv, :trunc, :outside)
 
+# Largest number of sub-steps one rejection may split a step into.
+const _ITE_MAXSPLIT = 64
+
+"""
+How many sub-steps a rejected attempt is split into. The outside defect of an order-`p` step is
+`|tau| ||(I-P) H psi_1||` with `(I-P) H psi_1 = O(tau^p)` (the closure holds the frontiers below
+`p`), i.e. `O(dbeta^(p+1))` -- MEASURED from Neel and the domain wall at L = 10 (fp1, job 17342386:
+slopes ~3 for p = 2, ~2 for p = 1 from the domain wall). So the split that brings it within
+`tol_basis` is `(resid / tol_basis)^(1/(p+1))`, with a 20% margin. Other reasons halve.
+
+⛔ A FIXED HALVING WAS THE FIRST-STEP "FAILURE". From a product state the energy fluctuation is
+maximal, so the defect's constant is 400-1000x the second step's (fp1): the panel's first step from
+Neel (dbeta 0.0625, tol_basis 1e-7) needed ~dbeta/7, and two halvings (`retries = 2`) reach only
+dbeta/4 -- the step was flagged although the method meets the tolerance at a smaller step.
+"""
+function _ite_nsplit(a, tol_basis::Float64, order::Int)
+    (:outside in a.unmet && isfinite(a.resid) && a.resid > tol_basis) || return 2
+    return clamp(ceil(Int, 1.2 * (a.resid / tol_basis)^(1 / (order + 1))), 2, _ITE_MAXSPLIT)
+end
+
+"""
+Whether a rejected attempt failed for a RESOURCE cap -- the rank cap `maxdim` cut a bond past its
+`tol_trunc` share, or the work ceiling stopped an enrichment with weight left. A smaller step
+cannot widen either, and splitting multiplies the binding truncations (IT-2 4x4 at maxdim 64, s38:
+4 sub-steps per step, each cut at the cap, drove E - E(beta) to 6e-2), so such a step is flagged
+at once.
+"""
+_ite_capped(a) = a.info.ledger.maxdim_reached || a.info.ledger.workcap_reached
+
 """
 One attempt at one step: the state's energy, the step at `tau = -dbeta` with the shifted
 generators and the root report, renormalisation, the energy after, and the verdicts.
@@ -122,10 +151,13 @@ redone from the saved state:
 
   1. `order > 1` and the closure or the outside test failed: once more with the closure run to
      closure (`closure_checks = true`) -- RE-ENRICH, same `dbeta`;
-  2. then, while `retries > 0`, as two half steps of `dbeta/2` (each with `retries - 1`) -- REJECT.
+  2. then, while `retries > 0`, as `n` sub-steps of `dbeta/n` (each with `retries - 1`) -- REJECT.
+     `n` comes from the measured outside defect and the order (`_ite_nsplit`: the defect is
+     `O(dbeta^(order+1))`), else 2.
 
-A step that still fails is `status = :failed` with its reasons in `unmet`, and `on_fail = :error`
-throws instead. Never a silent success.
+A failure caused by a RESOURCE cap (`maxdim` binding, or the work ceiling) is not split: a smaller
+step cannot widen either (`_ite_capped`). A step that still fails is `status = :failed` with its
+reasons in `unmet`, and `on_fail = :error` throws instead. Never a silent success.
 
 Returns `status` (`:met`, `:retried`, `:failed`), `unmet`, the energies `e_before`, `e_pre_root`,
 `e_root`, `e_after` and the split `de_root` (root solve) / `de_compression` (truncation), the
@@ -162,11 +194,12 @@ function ite_step!(psi::SymMPS, mpo::MPO, dbeta::Real; order::Int = 2,
     end
     a.ok && return _ite_result(length(attempts) == 1 ? :met : :retried, [a], attempts, t0)
 
-    if retries > 0
+    if retries > 0 && !_ite_capped(a)
         restore!()
+        n = _ite_nsplit(a, tol_basis, order)
         halves = Any[]
-        for _ in 1:2
-            h = ite_step!(psi, mpo, dbeta / 2; akw..., retries = retries - 1, on_fail = :flag,
+        for _ in 1:n
+            h = ite_step!(psi, mpo, dbeta / n; akw..., retries = retries - 1, on_fail = :flag,
                           kwargs...)
             append!(attempts, h.attempts)
             push!(halves, h)
