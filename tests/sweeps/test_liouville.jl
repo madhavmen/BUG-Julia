@@ -235,31 +235,39 @@ end
     @test_throws ArgumentError mpdo_product_state(lsw, [fill(0.5 + 0im, 2, 2) for _ in 1:L])
     # number-conserving hopping + dephasing: strong U(1), against dense, block labels fixed
     pairs0, hs0, jumps0 = _xx_model(L; drive = false)
+    dense_by_sym = Dict{Symbol, Matrix{ComplexF64}}()
     for sym in (:weak, :strong)
         ls = liouville_space([1, 0]; sym = sym)                      # q = particle number
         W = lindblad_mpo(ls, L; pairs = pairs0, onsite_h = hs0, jumps = jumps0)
         r0 = [isodd(i) ? _NUP : I - _NUP for i in 1:L]
         rho = mpdo_product_state(ls, r0)
         nb0 = length(unique(ql[3] for ql in to_concrete(rho[2]).qlabels))
+        # dt = 0.025: BUG3's own temporal error at dt = 0.1 is ~4e-5 here (OS-U6 measures the
+        # order separately, s33test 17340370), which would hide a symmetry error of that size
         ts = 0.0
-        for _ in 1:6
-            cbe_bug_step!(rho, W, ComplexF64(0.1); order = 3, hermitian = false, exact = true,
+        for _ in 1:24
+            cbe_bug_step!(rho, W, ComplexF64(0.025); order = 3, hermitian = false, exact = true,
                           tol_basis = 1e-12, tol_trunc = 1e-14, tol_expv = 1e-13, maxdim = 256)
-            ts += 0.1
+            ts += 0.025
         end
         Ld = _lv_dense(L, 2, pairs0, hs0, jumps0)
         want = _unvecr(exp(ts * Ld) * _vecr(kron(r0...)), 2^L)
         got = mpdo_dense(rho, ls)
         @info "OS-U4 $sym: dense error $(norm(got - want) / norm(want))"
-        @test norm(got - want) / norm(want) < 1e-5
+        @test norm(got - want) / norm(want) < 1e-6
+        dense_by_sym[sym] = got
         allowed = Set(first.(ls.sectors))
         @test all(ql[2] in allowed for i in 1:L for ql in to_concrete(rho[i]).qlabels)
         fin = unique(ql[3] for ql in to_concrete(rho[L]).qlabels)
         @test length(fin) == 1                                       # one total charge
-        @test fin[1] == (sym === :weak ? ((0,),) : ((L ÷ 2,), (L ÷ 2,)))
+        # the total charge, up to Telum's arrow sign on the last link (measured: (-N, -N))
+        N = L ÷ 2
+        @test fin[1] in (sym === :weak ? (((0,),),) : (((N,), (N,)), ((-N,), (-N,))))
         nb1 = length(unique(ql[3] for ql in to_concrete(rho[2]).qlabels))
         @test nb1 > nb0                                              # empty blocks discovered
     end
+    # the grading is storage, not physics: weak and strong give the same state
+    @test norm(dense_by_sym[:weak] - dense_by_sym[:strong]) < 1e-10
 end
 
 @testset "OS-U5: purity" begin
@@ -308,10 +316,18 @@ end
     ls = liouville_space([1, -1]; sym = :weak)
     W = lindblad_mpo(ls, L; pairs = pairs, onsite_h = hs, jumps = jumps)
     Ld = _lv_dense(L, 2, pairs, hs, jumps)
-    r0 = [_NUP, I - _NUP]
-    v0 = _vecr(kron(r0...))
+    # ⛔ FROM A PRODUCT STATE THE FRAMES ARE NOT THE WHOLE SPACE (s33test: even :exp was 0.12
+    # off), so first grow the bond to its full rank d^2 = 4: then both frames are the complete local
+    # spaces and the step IS its root solve.
+    warm = mpdo_product_state(ls, [_NUP, I - _NUP])
+    for _ in 1:10
+        cbe_bug_step!(warm, W, ComplexF64(0.05); order = 2, hermitian = false, exact = true,
+                      tol_basis = 1e-12, tol_trunc = 1e-14, tol_expv = 1e-14, maxdim = 64)
+    end
+    @test maximum(bond_dims(warm)) == 4                              # full rank, non-vacuous
+    v0 = _vecr(mpdo_dense(warm, ls))
     for (m, tau) in ((:exp, 0.4), (:radau2, 0.4), (:radau3, 0.4), (:trapezoid, 0.4), (:radau2, 5.0))
-        rho = mpdo_product_state(ls, r0)
+        rho = copy(warm)
         # tol_expv at roundoff: the Arnoldi space then closes, so its Ritz shift IS the steady
         # state's eigenvalue 0 and the rational root equals the dense R(tau L)
         cbe_bug_step!(rho, W, ComplexF64(tau); hermitian = false, exact = true, root_method = m,
