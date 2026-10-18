@@ -194,16 +194,32 @@ The Lindbladian `L rho = -i [H, rho] + sum_mu D[J_mu] rho` on `L` Liouville site
     `(c', c, J)` and `(c, c', J)`; a charged pair must carry opposite shifts.
   - `onsite_h`: one `d x d` Hermitian matrix for every site, or a vector of `L` of them.
   - `jumps`: `[(Jop, rates), ...]`, `rates` a scalar (every site) or a length-`L` vector.
+  - `triples`: `[(A, B, C, w), ...]` with `H ⊃ sum_j w[j] A_j B_{j+1} C_{j+2}` (`w` length `L-2`,
+    `A` charge-neutral; [`TripleTerm`](@ref)) -- the facilitated hop `n_{j-1} c'_j c_{j+1}` of the
+    U(1) East model (plan OS-3) is `(n, c', c, J)` plus its conjugate `(n, c, c', J)`.
 
 Every superoperator passes `liouville_charge` under `ls`'s grading, so a model that breaks it is
 refused at build time with the offending entries named.
 """
 function lindblad_mpo(ls::LiouvilleSpace, L::Int; pairs = Any[], onsite_h = nothing,
-                      jumps = Any[])
+                      jumps = Any[], triples = Any[])
     L >= 2 || throw(ArgumentError("lindblad_mpo needs at least two sites"))
-    isempty(pairs) && throw(ArgumentError(
-        "lindblad_mpo needs at least one two-body term (pair_mpo is a two-body builder)"))
+    isempty(pairs) && isempty(triples) && throw(ArgumentError(
+        "lindblad_mpo needs at least one two- or three-body term"))
     d = ls.d
+    tts = TripleTerm[]
+    for (A, B, C, w) in triples
+        all(size(X) == (d, d) for X in (A, B, C)) || throw(DimensionMismatch(
+            "triple operators must be $d x $d"))
+        length(w) == L - 2 || throw(DimensionMismatch("triple weights must have length $(L - 2)"))
+        for (sup, c) in ((ket_super, -1im), (bra_super, 1im))
+            TA = liouville_op(ls, sup(A))
+            length(TA.inds) == 2 || throw(ArgumentError(
+                "a triple's first operator must be charge-neutral under :$(ls.sym)"))
+            push!(tts, TripleTerm(TA, _liouville_vertex(ls, sup(B), sup(C)),
+                                  c .* ComplexF64.(w)))
+        end
+    end
     verts = PairVertex[]
     Js = AbstractMatrix[]
     for (A, B, Jm) in pairs
@@ -232,7 +248,8 @@ function lindblad_mpo(ls::LiouvilleSpace, L::Int; pairs = Any[], onsite_h = noth
             "covariant with a ZERO net shift under :$(ls.sym)"))
         push!(field, _mpo_block(T, i, "W,$(i - 1)", "W,$i", :none))
     end
-    return pair_mpo(L, Vector{AbstractMatrix}(Js), verts; Iloc = ls.I, field = field)
+    return pair_mpo(L, Vector{AbstractMatrix}(Js), verts; Iloc = ls.I, field = field,
+                    triples = tts)
 end
 
 """

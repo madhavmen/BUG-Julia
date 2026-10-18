@@ -238,7 +238,7 @@ Hamiltonian -- still Hermitian, still conserving the same charges, so nothing do
 complains.
 """
 function pair_mpo(L::Int, Js::Vector{<:AbstractMatrix}, vertices::Vector{PairVertex};
-                  Iloc = nothing, Itrans = nothing, field = nothing)
+                  Iloc = nothing, Itrans = nothing, field = nothing, triples = TripleTerm[])
 
     length(Js) == length(vertices) || throw(DimensionMismatch(
         "pair_mpo got $(length(Js)) coupling matrices for $(length(vertices)) vertices; " *
@@ -247,23 +247,52 @@ function pair_mpo(L::Int, Js::Vector{<:AbstractMatrix}, vertices::Vector{PairVer
         size(J) == (L, L) || throw(DimensionMismatch(
             "coupling matrix $t is $(size(J)), expected ($L, $L)"))
     end
-    return _pair_mpo(L, collect(Js), vertices; Iloc = Iloc, Itrans = Itrans, field = field)
+    return _pair_mpo(L, collect(Js), vertices; Iloc = Iloc, Itrans = Itrans, field = field,
+                     triples = triples)
+end
+
+"""
+    TripleTerm(A, pair, w)
+
+A nearest-neighbour THREE-site term `sum_j w[j] A_j B_{j+1} C_{j+2}` (`j = 1..L-2`), with
+`pair = PairVertex(B, C, coeff)` an ordinary (charged or neutral) two-body vertex and `A` a
+charge-NEUTRAL rank-2 operator: the facilitation factor `n_{j-1}` of the U(1) East model (plan
+OS-3), `n_{j-1} (c'_j c_{j+1} + h.c.)`, which `pair_mpo`'s two-body automaton cannot express.
+
+Because `A` is neutral the term needs no new tensor: in the automaton it is `id -(A)-> pre ->(B
+opens, as a pair's left half)-> mid -(C closes)-> done`, and `pre` carries the vacuum virtual space.
+Two virtual dimensions per term on the links it crosses. `w` may be complex (a Lindbladian's +-i).
+"""
+struct TripleTerm
+    A::Any
+    pair::PairVertex
+    w::Vector{ComplexF64}
 end
 
 function pair_mpo(L::Int, J::AbstractMatrix, vertices::Vector{PairVertex}; Iloc = nothing,
-                  Itrans = nothing, field = nothing)
+                  Itrans = nothing, field = nothing, triples = TripleTerm[])
     L >= 2 || throw(ArgumentError("pair_mpo needs at least two sites, got $L"))
     size(J) == (L, L) || throw(DimensionMismatch(
         "coupling matrix is $(size(J)), expected ($L, $L)"))
     return _pair_mpo(L, [J for _ in vertices], vertices; Iloc = Iloc, Itrans = Itrans,
-                     field = field)
+                     field = field, triples = triples)
 end
 
 function _pair_mpo(L::Int, Js::Vector, vertices::Vector{PairVertex}; Iloc = nothing,
-                   Itrans = nothing, field = nothing)
+                   Itrans = nothing, field = nothing, triples = TripleTerm[])
     L >= 2 || throw(ArgumentError("pair_mpo needs at least two sites, got $L"))
     n = length(vertices)
-    n >= 1 || throw(ArgumentError("pair_mpo needs at least one vertex"))
+    m = length(triples)
+    n + m >= 1 || throw(ArgumentError("pair_mpo needs at least one vertex or triple"))
+    for (k, tt) in pairs(triples)
+        length(tt.A.inds) == 2 || throw(ArgumentError(
+            "pair_mpo: triple $k's first operator must be charge-neutral (rank 2)"))
+        length(tt.w) == L - 2 || throw(DimensionMismatch(
+            "pair_mpo: triple $k needs $(L - 2) weights (one per j = 1..L-2), got $(length(tt.w))"))
+        nl, nr = length(tt.pair.left.inds), length(tt.pair.right.inds)
+        (nl in (2, 3) && nl == nr) || throw(ArgumentError(
+            "pair_mpo: triple $k's pair joins a rank-$nl to a rank-$nr operator"))
+    end
     for (k, v) in pairs(vertices)
         nl, nr = length(v.left.inds), length(v.right.inds)
         (nl in (2, 3) && nr in (2, 3)) || throw(ArgumentError(
@@ -303,11 +332,15 @@ function _pair_mpo(L::Int, Js::Vector, vertices::Vector{PairVertex}; Iloc = noth
     # ...and `coupling(o, j)` is the weight over ANY vertex, which is what decides whether a
     # channel is worth carrying. A channel must stay alive if EITHER operator type still has a
     # partner ahead of it; testing only one would silently drop the longer-ranged term.
-    coupling(o, j) = o < j ? maximum(abs(Js[t][o, j]) for t in eachindex(Js)) : 0.0
+    coupling(o, j) = o < j && !isempty(Js) ? maximum(abs(Js[t][o, j]) for t in eachindex(Js)) : 0.0
     # A channel opened at `o` is still useful at link `i` iff some later site can close it.
     closable(o, i) = any(coupling(o, j) != 0.0 for j in (i + 1):L)
     # Openings alive on link `i` (i.e. between sites `i` and `i+1`): opened at `o <= i`.
     alive(i) = [o for o in 1:min(i, L - 1) if closable(o, i)]
+    # Triple states on link `i`: `pre` after `A` placed at `i` (a term starting at `j = i`), `mid`
+    # after `B` placed at `i` (a term that started at `j = i - 1`). Only where the weight is nonzero.
+    tstates(i) = vcat([(t, :pre) for t in 1:m if 1 <= i <= L - 2 && triples[t].w[i] != 0],
+                      [(t, :mid) for t in 1:m if 2 <= i <= L - 1 && triples[t].w[i - 1] != 0])
 
     Ws = Any[]
     for i in 1:L
@@ -328,7 +361,10 @@ function _pair_mpo(L::Int, Js::Vector, vertices::Vector{PairVertex}; Iloc = noth
                      for (k, o) in enumerate(prev) for t in 1:n)
         colof = Dict((o, t) => 1 + (k - 1) * n + t
                      for (k, o) in enumerate(cur) for t in 1:n)
-        nrow, ncol = 2 + n * length(prev), 2 + n * length(cur)
+        tprev, tcur = tstates(i - 1), tstates(i)
+        trow = Dict(s => 1 + n * length(prev) + k for (k, s) in enumerate(tprev))
+        tcol = Dict(s => 1 + n * length(cur) + k for (k, s) in enumerate(tcur))
+        nrow, ncol = 2 + n * length(prev) + length(tprev), 2 + n * length(cur) + length(tcur)
         mat = Matrix{Any}(nothing, nrow, ncol)
 
         # `id -> id`: nothing has opened yet. The guard is `i < L` -- exactly `mpo_from_terms`'s
@@ -368,6 +404,19 @@ function _pair_mpo(L::Int, Js::Vector, vertices::Vector{PairVertex}; Iloc = noth
             # Under a SHARED matrix the situation never arose: `J[o,i] == 0` killed every vertex
             # at once, so whole rows were skipped consistently.
             mat[rowof[(o, t)], ncol] = to_concrete((c == 0.0 ? zero(c) : c) * closes[t])
+        end
+        # Triples: `id -(A)-> pre`, `pre -(B)-> mid`, `mid -(w C)-> done` -- the same opening and
+        # closing block forms as a pair, with a neutral (vacuum) `pre` state in front.
+        for (t, tt) in pairs(triples)
+            haskey(tcol, (t, :pre)) && (mat[1, tcol[(t, :pre)]] = _mpo_block(tt.A, i, tl, tr, :none))
+            haskey(trow, (t, :pre)) && haskey(tcol, (t, :mid)) &&
+                (mat[trow[(t, :pre)], tcol[(t, :mid)]] =
+                     _mpo_block(tt.pair.left, i, tl, tr, _side(tt.pair.left, :left)))
+            if haskey(trow, (t, :mid))
+                c = tt.w[i - 2] * tt.pair.coeff
+                mat[trow[(t, :mid)], ncol] = to_concrete((isreal(c) ? real(c) : c) *
+                    _mpo_block(tt.pair.right, i, tl, tr, _side(tt.pair.right, :right)))
+            end
         end
 
         # `id -> done`: an ON-SITE term. No channel opens, so it costs no virtual dimension.
