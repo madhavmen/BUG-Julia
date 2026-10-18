@@ -356,6 +356,61 @@ function mpdo_identity(ls::LiouvilleSpace, L::Int)
     return mpdo_product_state(ls, [Matrix{ComplexF64}(I, ls.d, ls.d) for _ in 1:L])
 end
 
+"""
+    mpdo_identity_sector(ls, L, like) -> SymMPS
+
+The trace superket of ONE `(N, N)` block under `:strong`: `|I_N>> = sum over configurations of total
+charge N of (x)_j |a_j><a_j|`. Unlike `|I>>` it IS a single-charge MPS, and an exact one at ONE
+dimension per link sector `(n, n)` (n = the charge to the left of the link), so it can be handed to
+`cbe_bug_step!(...; keep_states = [I_N])` and makes the Galerkin step trace-exact on a strong-U(1)
+MPDO (plan Task 2: keep the trace vector in the final trial space; plan OS-3: strong U(1)).
+`<<I_N|rho>> = Tr rho` for every `rho` in the block.
+
+Built by the fusion recursion of [`mpdo_product_state`](@ref), so every label and arrow is Telum's
+own: at each site the physical leg is restricted to the DIAGONAL states `|a><a|` (one per diagonal
+sector), and the fusion paths into each outgoing sector are MERGED into its single component --
+the sum over configurations -- keeping only charges from which `N` is still reachable. `like` is
+any MPDO in the target block: its last link names the block in Telum's sign convention. Needs
+non-negative local charges (a particle number).
+"""
+function mpdo_identity_sector(ls::LiouvilleSpace, L::Int, like::SymMPS)
+    ls.sym === :strong || throw(ArgumentError(
+        "mpdo_identity_sector is for :strong; under :$(ls.sym) use mpdo_identity"))
+    all(>=(0), ls.q) || throw(ArgumentError("mpdo_identity_sector needs non-negative charges"))
+    length(like) == L || throw(DimensionMismatch("`like` has $(length(like)) sites, not $L"))
+    targets = unique(ql[3] for ql in to_concrete(like[L]).qlabels)
+    length(targets) == 1 || throw(ArgumentError("`like` is not in one (N, N) block"))
+    target = targets[1]
+    nof(lab) = abs(lab[1][1])                     # the charge of a diagonal label, any sign convention
+    N, qmax = nof(target), maximum(ls.q)
+    diag = Set(ls.labels[liouville_index(ls.d, a, a)] for a in 1:ls.d)
+    NS = length(ls.symm)
+    QT = Tuple{Vararg{Int}}
+    tensors = Any[]
+    prev = (getvac(ls.I, ("L,0", "L,1")), 2)
+    for i in 1:L
+        F = to_concrete(getIdentity(prev, (ls.I, 1); itag = "L,$(i + 1)"))
+        F = to_concrete(setitag(F, 2, "S,$i"))
+        B = to_concrete(getsub(F, 2, s -> s in diag ? Colon() : nothing; preserve_space = true))
+        reach(lab) = i == L ? lab == target : (nof(lab) <= N && N - nof(lab) <= qmax * (L - i))
+        data = Vector{Tuple{NTuple{3, NTuple{NS, QT}}, Array{Float64, 3 + NS}}}()
+        for (k, ql) in pairs(B.qlabels)
+            reach(ql[3]) || continue
+            v = sum(real, Array(B.RMTs[k]))         # the fusion isometry's one entry on this path
+            iszero(v) && continue
+            push!(data, ((ql[1], ql[2], ql[3]), reshape([v], ntuple(_ -> 1, 3 + NS))))
+        end
+        isempty(data) && throw(ErrorException("mpdo_identity_sector: no reachable sector at site $i"))
+        kept = Set(d[1][3] for d in data)
+        spaces = (B.spaces[1], B.spaces[2], [(l, 1) for (l, _) in B.spaces[3] if l in kept])
+        f = _localspace_cgt_fields(data, symm(B), spaces)
+        A = TLArray(symm(B), f.qlabels, f.wmatdata, f.wmatinfo, f.RMTs, B.inds, spaces)
+        push!(tensors, to_concrete(A * (1.0 + 0.0im)))
+        prev = (tensors[end], 3)
+    end
+    return SymMPS(tensors, L)
+end
+
 # ── contractions by walking the abelian blocks ─────────────────────────────────────────────────
 
 """

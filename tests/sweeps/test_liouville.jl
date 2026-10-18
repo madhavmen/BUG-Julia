@@ -467,6 +467,40 @@ end
     @test length(reach) == 1
 end
 
+@testset "strong U(1): the block trace vector |I_N>> in the trial space" begin
+    L = 6
+    triples = Any[(_NUP, _SPm, _SMm, fill(1.0, L - 2)), (_NUP, _SMm, _SPm, fill(1.0, L - 2))]
+    jumps = Any[(_NUP, 0.3)]
+    ls = liouville_space([1, 0]; sym = :strong)
+    W = lindblad_mpo(ls, L; triples = triples, jumps = jumps)
+    occ = [1, 2, 4]
+    r0 = mpdo_product_state(ls, [j in occ ? _NUP : I - _NUP for j in 1:L])
+    IN = mpdo_identity_sector(ls, L, r0)
+    @test maximum(bond_dims(IN)) <= L                                # one dimension per sector
+    @test real(mpdo_trace(IN, ls)) ≈ binomial(L, length(occ)) atol = 1e-10
+    @test_throws ArgumentError mpdo_identity_sector(liouville_space([1, 0]; sym = :weak), L, r0)
+    # <<I_N|rho>> = Tr rho on an evolved (entangled, non-product) MPDO of the block
+    rho = copy(r0)
+    for _ in 1:3
+        cbe_bug_step!(rho, W, ComplexF64(0.2); order = 2, hermitian = false, exact = true,
+                      tol_basis = 1e-10, tol_trunc = 1e-12, tol_expv = 1e-12, maxdim = 128)
+    end
+    @test maximum(bond_dims(rho)) > 1                                # non-vacuous
+    @test abs(overlap(IN, rho) - mpdo_trace(rho, ls)) < 1e-10 * abs(mpdo_trace(rho, ls))
+    # and as keep_states it makes a LOOSE step trace-exact before the compression (cf. |I>>, weak)
+    drift = Dict{Bool, Float64}()
+    for keep in (false, true)
+        r = copy(rho)
+        t0 = mpdo_trace(r, ls)
+        cbe_bug_step!(r, W, ComplexF64(0.3); order = 1, hermitian = false, tol_basis = 1e-2,
+                      tol_trunc = 1e-14, tol_expv = 1e-14, maxdim = 512,
+                      keep_states = keep ? [IN] : Any[])
+        drift[keep] = abs(mpdo_trace(r, ls) / t0 - 1)
+    end
+    @info "strong |I_N>>: one-step trace drift at tol_basis 1e-2 without $(drift[false]), with $(drift[true])"
+    @test drift[true] < 1e-10
+end
+
 @testset "OS-1 reference: dephased boundary-driven XX covariance == dense Liouvillian" begin
     # H = J sum (s+_j s-_{j+1} + h.c.) = J sum (c'_j c_{j+1} + h.c.) (Jordan-Wigner, up = occupied),
     # gain/loss sqrt(eps (1 +- mu)/2) s+- at each end, dephasing sqrt(gamma) n_j: the plan's OS-1

@@ -324,6 +324,6 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        LiouvilleSpace, liouville_space, liouville_index, liouville_pair, liouville_charge,
        liouville_op, ket_super, bra_super, dissipator_super, lindblad_mpo, mpdo_apply!,
        mpdo_product_state, mpdo_trace, mpdo_expect, mpdo_rdm, mpdo_dense,
-       mpdo_normalise_trace!, mpdo_checks, mpdo_identity
+       mpdo_normalise_trace!, mpdo_checks, mpdo_identity, mpdo_identity_sector
 
 end # module

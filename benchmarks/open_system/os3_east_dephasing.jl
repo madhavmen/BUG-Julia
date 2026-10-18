@@ -6,11 +6,12 @@
 #                                                            a nearest-neighbour hop has no string)
 #   L_j = sqrt(gamma) n_j
 #
-# H_E and every L_j commute with N, so the Lindbladian has the STRONG U(1) (rho stays in one (N, N)
-# block); OS_SYM = weak (default) uses the Liouville label n_ket - n_bra instead, where |I>> is a
-# product state and `keep_states` makes the Galerkin step trace-exact. Under :strong the trace
-# functional is not a single-charge MPS, so the arms run WITHOUT |I>> there (trace drift logged)
-# until an |I_N>> construction exists. The facilitated hop is a THREE-site term, built by
+# H_E and every L_j commute with N, so the Lindbladian has the STRONG U(1): rho stays in one (N, N)
+# block, and the plan's table assigns OS-3 exactly that grading -- the default here (OS_SYM = strong).
+# The trial space keeps the block's trace vector |I_N>> (`mpdo_identity_sector`, exact, one dimension
+# per link sector), so the Galerkin step is trace-exact as |I>> makes it under :weak. OS_SYM = weak
+# (label n_ket - n_bra, |I>> a product state) is kept as the A/B. The facilitated hop is a THREE-site
+# term, built by
 # `lindblad_mpo(...; triples)` (`TripleTerm`), pinned against the dense Liouvillian in
 # test_liouville.jl together with the model checks ([H, N] = 0, frozen configurations stay frozen,
 # only facilitated hops).
@@ -25,7 +26,7 @@
 # variant, not data).
 #
 # Run: julia -t 4 --project=PKG benchmarks/open_system/os3_east_dephasing.jl
-# Env: OS_L (8) OS_J (1.0) OS_GAMMA (0.1) OS_INIT (dw | quarter | pair) OS_SYM (weak | strong)
+# Env: OS_L (8) OS_J (1.0) OS_GAMMA (0.1) OS_INIT (dw | quarter | pair) OS_SYM (strong | weak)
 #      OS_REF_MAXD (256), plus os_common.jl's knobs
 
 include(joinpath(@__DIR__, "os_common.jl"))
@@ -35,7 +36,7 @@ const L        = parse(Int, get(ENV, "OS_L", "8"))
 const J        = parse(Float64, get(ENV, "OS_J", "1.0"))
 const GAMMA    = parse(Float64, get(ENV, "OS_GAMMA", "0.1"))
 const INIT     = get(ENV, "OS_INIT", "dw")
-const SYM      = Symbol(get(ENV, "OS_SYM", "weak"))
+const SYM      = Symbol(get(ENV, "OS_SYM", "strong"))
 const REF_MAXD = parse(Int, get(ENV, "OS_REF_MAXD", "256"))
 const TAG      = @sprintf("L%d_g%g_%s_%s", L, GAMMA, INIT, SYM)
 
@@ -65,6 +66,9 @@ const S0 = [j in occupied(L) ? 1.0 : -1.0 for j in 1:L]          # 2 n_j(0) - 1
 
 east_obs(nj) = Dict("n" => nj, "autocorr" => [sum((2 .* nj .- 1) .* S0) / L],
                     "xcm" => [sum((1:L) .* nj) / sum(nj)])
+
+"The trace vector kept in the trial space: |I_N>> of rho0's block (strong) or |I>> (weak)."
+trace_vector(ls, n, rho0) = SYM === :strong ? mpdo_identity_sector(ls, n, rho0) : mpdo_identity(ls, n)
 
 observe(ls) = rho -> east_obs([real(mpdo_expect(rho, ls, Dict(j => NU))) for j in 1:L])
 
@@ -99,13 +103,13 @@ end
 function main()
     set_symmetry!(:U1)
     ls, W = model(L)
-    Iket = SYM === :strong ? nothing : mpdo_identity(ls, L)
     rho0 = mpdo_product_state(ls, local_rhos(L))
+    Iket = trace_vector(ls, L, rho0)
     ls6, W6 = model(6)
-    t = @elapsed os_warmup(ls6, W6, mpdo_product_state(ls6, local_rhos(6)),
-                           SYM === :strong ? nothing : mpdo_identity(ls6, 6))
+    r6 = mpdo_product_state(ls6, local_rhos(6))
+    t = @elapsed os_warmup(ls6, W6, r6, trace_vector(ls6, 6, r6))
     say(@sprintf("JIT warm-up (untimed, excluded from every wall): %.1f s", t))
-    say("== OS-3 U(1) East + dephasing L=$L J=$J gamma=$GAMMA init=$INIT occupied $(occupied(L)) sym=$SYM (|I>> in trial space: $(Iket !== nothing))  MPO dims $(maximum(mpo_virtual_dims(W)))  tmax=$(OS.tmax)  dts $(OS.dts)  arms $(OS.arms)  tol_basis $(OS.tbs)  tol_trunc $(OS.tt)  tol_root $(OS.tr)  maxdim $(OS.maxdim)  root $(OS.root)  threads $(Threads.nthreads())")
+    say("== OS-3 U(1) East + dephasing L=$L J=$J gamma=$GAMMA init=$INIT occupied $(occupied(L)) sym=$SYM (trace vector in the trial space: $(SYM === :strong ? "|I_N>>" : "|I>>"))  MPO dims $(maximum(mpo_virtual_dims(W)))  tmax=$(OS.tmax)  dts $(OS.dts)  arms $(OS.arms)  tol_basis $(OS.tbs)  tol_trunc $(OS.tt)  tol_root $(OS.tr)  maxdim $(OS.maxdim)  root $(OS.root)  threads $(Threads.nthreads())")
     t = @elapsed refs = references()
     say(@sprintf("exact sparse reference: %.1f s", t))
     sio, oio, fio = os_open("os3", TAG)
