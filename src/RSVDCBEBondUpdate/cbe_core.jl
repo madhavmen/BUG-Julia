@@ -332,7 +332,22 @@ function sector_graded_sketch(frame, side::Symbol, npre::Int;
 
     F = fusion_basis(frame, a, b; tag = tag)
     dfull = Dict(q => d for (q, d) in F.spaces[3])
-    dT    = Dict(q => sector_dim(frame, fl, q) for q in keys(dfull))
+    # ⛔ THE FRAME'S BOND LABEL IS READ IN THE FUSED LEG'S ARROW CONVENTION (`align_charge`). A
+    # sector's label depends on the leg's arrow (`q` on one, `dual(q)` on the other, sectors.jl);
+    # a frame built inside the closure's frontier sweep can carry its bond leg with the arrow
+    # opposite to `F`'s fused leg, and the unaligned lookup then read the dimension of the
+    # CONJUGATE sector -- harmless while the state's sector dims were symmetric under q -> -q, and
+    # an out-of-bounds isometry-half slice once they were not (IT-1 L=16/20 at tol_basis 1e-7,
+    # jobs 17340512/13: "selector for sector ((1,),) ... out-of-bounds for dimension 10").
+    syms_ = symm(frame)
+    fdir, bdir = F.inds[3].dir, frame.inds[fl].dir
+    dT    = Dict(q => sector_dim(frame, fl, align_charge(syms_, q, fdir, bdir)) for q in keys(dfull))
+    for (q, d) in dT
+        d <= dfull[q] || throw(ErrorException(
+            "sector_graded_sketch: the frame holds $d directions in sector $q but the fused " *
+            "local space has only $(dfull[q]) -- a frame cannot exceed its local space, so the " *
+            "two legs' charge labels are in different conventions"))
+    end
     dC    = Dict(q => max(dfull[q] - dT[q], 0) for q in keys(dfull))
 
     # ── comp_ratio = nothing: NO PROJECTOR IN THE PROBE AT ALL ─────────────────────────
