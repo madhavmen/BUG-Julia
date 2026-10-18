@@ -338,3 +338,44 @@ on the old rule); bug2: profile first, then (a) + (b).
 - So (b), Test A's re-SVD (`_budget_svd` + `_extend_frame`:197), costs < 3 %.
 - (a), the Test B re-sketch, is bounded by the cbe share.
 - **The closure sweep is the cost.** This is PARKED: the USER moved to the imaginary-time/open-system plan on 2026-10-18 (Task 1 on `plan/imag-open-t1`).
+
+## 9. Imaginary-time / open-system plan (USER 2026-10-18)
+
+The plan is `cbe_bug_imaginary_open_benchmark_research (1).md`: seven tasks, done in order, one
+branch per task, each merged into `feature/krylov-closure-order` once confirmed. Tolerances:
+`tol_trunc` = `tol_root` (= `tol_expv`) = 1e-6, with `tol_basis` as the knob.
+
+- **Task 1** — normalised imaginary time. Merged `3d94792`; s28test 17340070 + s31test 17340175.
+  - `expv(...; root_method = :exp|:trapezoid|:radau2|:radau3)`: the Padé roots run on the
+    Ritz-shifted Krylov space.
+  - `shift_h` / `eshift` on the generators.
+  - `_kry_weight` in imaginary time is now relative to the propagated seed and shifted (before:
+    an e^(dβ|E|) over-weight).
+  - `cbe_bug_step!(...; root_report, outside_residual)`.
+  - `sweeps/imaginary_time.jl`: `ite_step!` / `ite_evolve!` (Eshift = E, energy split
+    root/compression, outside defect vs `tol_basis`, re-enrich → split → flag), panel/uniform
+    grids.
+  - IT-U1..U6 pass. The order test needs the domain wall: from Néel, p = 1 and p = 2 are
+    identical. Slopes are p+1.
+  - The first step from a product state is flagged `:outside`.
+- **Task 2** — symmetry-aware MPDO. Merged `1aba5b5`; s33test 17340370 + s34test 17340453.
+  - `models/liouville.jl`: weak / strong / none Liouville sites built below the IROP layer; the
+    covariance check; the stored-transpose rule; `lindblad_mpo` = `pair_mpo` + `field`; block-walk
+    trace / expectation / RDM / dense.
+  - `cbe_bug_step!(...; keep_states)` with `mpdo_identity` makes the step trace-exact (1e-15 vs
+    0.37 drift without it).
+  - OS-U1..U7 pass. The MPO equals the dense Liouvillian to 2e-16.
+- **Task 3** — IT-1 Heisenberg chain, branch `plan/imag-open-t3`.
+  - Driver: `benchmarks/imaginary_time/it1_heisenberg_chain.jl`.
+  - Smoke 17340494, L = 12, β = 8: bug2 vs exact E(β) 1e-7 (panel) / 2e-7 (uniform), against
+    tdvp2 3e-7 / 2.4e-6 on the same grids.
+  - Production 17340511–13 (L = 12/16/20, β = 64, `panel:9:4` + `uniform:256`; bug2/3/4 ×
+    `tol_basis` × 3 seeds; tdvp2), in `2026-10-18-it1/L*/`.
+  - Next:
+    - plots;
+    - L = 100 (DMRG reference; a TIMING job, so it runs alone). The BUG wall includes the
+      `ite_step!` energy and outside measurements; separate them before quoting a timing.
+    - USER decision pending: the flagged Néel first step — accept-and-label (current) or
+      pre-grow the rank.
+- **Staging:** use `git -c core.autocrlf=false archive HEAD`. A branch switch rewrites files with
+  CRLF and changes the PKG hash for identical code.
