@@ -155,7 +155,8 @@ function run_arm(io, W, ref, arm, g, tb, seed)
         Ex = ref.traj === nothing ? NaN : ref.traj[g][k]
         @printf(io, "%d,%s,%s,%.0e,%d,%d,%.10g,%.10g,%.14f,%.6e,%.6e,%d,%.3f,%s,%s,%.14f,%.14f,%.6e,%.6e,%.6e,%.6e,%.6e,%d\n",
                 L, arm, g, tb, seed, k, beta, db, E, E - ref.E0, E - Ex,
-                maximum(bond_dims(psi)), wall, st, um, row...)
+                maximum(bond_dims(psi)), wall, st, um, row[1], row[2], row[3], row[4],
+                row[5], row[6], row[7], row[8])
         flush(io)
     end
     var = mpo_variance(psi, W)
