@@ -626,4 +626,37 @@ end
     end
 end
 
+@testset "_extend_frame never exceeds the local space (saturated sector + roundoff)" begin
+    # s38test 17341708: a nearly saturated frame (253 of 256) gained 72 > 70 directions in one
+    # sector -- roundoff cleared Telum's GLOBALLY relative cutoff because another sector carried a
+    # real direction. Reproduced: the complete local basis minus ONE column of one sector, with
+    # 1e-11 orthogonality loss (an accumulated-frame level), and a residual with one genuine
+    # direction (that sector) and roundoff everywhere else.
+    set_symmetry!(:U1)
+    L = 8
+    psi = neel_state(L)
+    mpo = xxz_mpo(L; J = 1.0, delta = 1.0)
+    for _ in 1:3
+        cbe_bug_step!(psi, mpo, ComplexF64(-0.3); exact = true, tol_basis = 1e-10,
+                      tol_trunc = 1e-12, tol_expv = 1e-12, maxdim = 64)
+    end
+    canonical!(psi, L)
+    A = psi[L ÷ 2]                                                      # (link, site, bond)
+    F = RC.full_local_basis(A, :left)
+    dims = Dict(q => d for (q, d) in F.spaces[3])
+    qbig = argmax(q -> dims[q], collect(keys(dims)))
+    Q = RC._trim_per_sector(F, 3, Dict(q => d - (q == qbig ? 1 : 0) for (q, d) in dims))
+    rng = Random.MersenneTwister(11)
+    Q = to_concrete(Q + 1e-11 * RC._randomize_like(Q, rng))
+    v = RC._randomize_like(A, rng)
+    v = to_concrete((1.0 / norm(v)) * v)
+    R = to_concrete(RC.perp_component(Q, v))
+    Qn, nadd, _ = RC._extend_frame(Q, R, v, :left, 1.0, 0.0)
+    nloc = sum(values(dims))
+    @info "saturated-frame extension: local $nloc, frame $(RC.leg_dim(Q, 3)) -> $(RC.leg_dim(Qn, 3)) (+$nadd)"
+    @test nadd >= 1                                                     # the genuine one is kept
+    @test RC.leg_dim(Qn, 3) <= nloc
+    RC._frame_sector_dims(Qn, :left, RC.fusion_basis(Qn, 1, 2; tag = "chk"), "test")  # no throw
+end
+
 end # Krylov closure

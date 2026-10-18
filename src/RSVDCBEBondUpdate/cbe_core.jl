@@ -318,6 +318,41 @@ function _frame_sector_dims(frame, side::Symbol, F, where::AbstractString)
 end
 
 """
+    _cap_to_local_room(Q, U, side) -> U, a trimmed U, or nothing
+
+At most `dim_local(q) - width_Q(q)` of the new columns `U` in every charge sector -- the leading
+ones, in SVD order -- so `[Q | U]` cannot exceed its local space. `U` unchanged (the same object)
+whenever it fits, which is every ordinary step.
+
+⛔ WHY A FRAME COULD OVERFLOW AT ALL. Telum's `svd` cutoff is relative to the GLOBAL sigma_max
+across sectors (Telum-fork svd.jl:1672), so once ONE sector of the residual carries a genuine
+direction (sigma ~ 1), roundoff in a SATURATED sector (sigma ~ the frame's orthogonality loss)
+clears the cut and is renormalised into a fake unit column. MEASURED (s38test 17341708,
+IT_FRAME_CHECKS): `_extend_frame` in the closure frontier's Krylov enrichment left 72 directions
+in sector 0 against a local space of 70, frame width 253 of 256 -- IT-1 L=16 bug3 tol_basis 1e-7
+seed 2, the crash 661c3e7's label alignment did not fix (s37test 17341472: 174 > 92 downstream).
+"""
+function _cap_to_local_room(Q, U, side::Symbol)
+    U === nothing && return nothing
+    fl = side === :left ? 3 : 1
+    a, b = side === :left ? (1, 2) : (2, 3)
+    F = fusion_basis(Q, a, b; tag = "cbeRoom")
+    dfull, dT = _frame_sector_dims(Q, side, F, "_cap_to_local_room")
+    syms_ = symm(Q)
+    counts = Dict{Any, Int}()
+    over = false
+    for (q, d) in dfull
+        uq = align_charge(syms_, q, F.inds[3].dir, U.inds[fl].dir)
+        du = sector_dim(U, fl, uq)
+        du == 0 && continue
+        counts[uq] = min(du, d - dT[q])
+        over |= counts[uq] < du
+    end
+    over || return U
+    return _trim_per_sector(U, fl, counts)
+end
+
+"""
 Debug switch, off by default: [`_check_frame`](@ref) asserts at every frame-growth site that the
 grown frame still fits its local space. It builds a fusion basis per call, so it is for
 localising a non-isometric frame (IT-1 L=16 tol_basis 1e-7, s37test 17341472), not production.

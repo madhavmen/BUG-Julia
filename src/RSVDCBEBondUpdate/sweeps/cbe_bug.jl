@@ -207,6 +207,8 @@ function _extend_frame(Q, R, v, side::Symbol, weight::Float64, allowance::Float6
     k < nk && (res = svd(R, legs, _TAG_K, _TAG_KR; Nkeep = k, cutoff = cut))
     U = side === :left ? _reortho_left(Q, to_concrete(res.U)) :
                          _reortho_right(Q, to_concrete(permutedims(res.U, (3, 1, 2))))
+    # roundoff in a saturated sector must not become a column (`_cap_to_local_room`)
+    U = _cap_to_local_room(Q, U, side)
     U === nothing && return (Q, 0, fits)
     fl = side === :left ? 3 : 1
     Qn = to_concrete(oplus([Q, to_concrete(setitag(U, fl, Q.inds[fl].itags))], (fl,)))
