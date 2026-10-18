@@ -318,15 +318,8 @@ end
     @test RC._kry_weight(Hm, 1, ComplexF64(-0.1im); state_seed = false) ==
           RC._kry_weight(Hm, 1, ComplexF64(-0.1im)) ==
           abs(exp(ComplexF64[-0.3im 0; -0.05im 0])[2, 1])
-    # end to end: the last panel (dbeta = 8) of a converged order-3 run is accepted, not flagged
-    # `krylov+closure` as a capped step (IT-1 L=16, s42 repro steps 34-36)
-    psi = neel_state(_IT_L)
-    hist = ite_evolve!(psi, _IT_MPO, log_panel_steps(64.0, 9; per_panel = 4); order = 3,
-                       tol_basis = 1e-7, tol_trunc = 1e-6, tol_root = 1e-6, maxdim = 256)
-    late = [(beta = r.beta, unmet = r.unmet, nsub = r.nsub) for r in hist[(end - 3):end]
-            if r.status === :failed]
-    @info "IT dbeta-8 panel, order 3: failed among the last 4 steps $(late)"
-    @test isempty(late)
+    # No end-to-end case here: at L = 10 the old weight flags nothing (s45 control, order 3,
+    # panel:9:4 to beta 64), so it could not discriminate. The L = 16 reproducer is that check.
 end
 
 @testset "tdvp2 partner: eshift and the backward-substep amplification" begin
