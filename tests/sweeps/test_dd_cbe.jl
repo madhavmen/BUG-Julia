@@ -488,7 +488,10 @@ end
         end
         push!(rows, (tol = tol, dim = size(U, 2), leak = leak))
         @test leak[1] <= 10 * tol + 1e-12
-        tol == 1e-8 && @test leak[2] > leak[1]
+        # The dominant leak is a higher-order term, well above the first-order one. Not
+        # `leak[2] > leak[1]`: the frames can hold H^2 psi too, and then both sit at the rounding
+        # floor (hq13 17418199 at tol 1e-8: 3.4e-16, 5.1e-17, 1.9e-11).
+        @test argmax(leak) > 1 && maximum(leak) > 100 * leak[1]
     end
     @info "T3.5 Taylor leak h^m/m! ||(I-P) H^m v||, m = 1..3" h rows
 end

@@ -80,7 +80,10 @@ end
     L = 10
     mpo = xxz_mpo(L; J = 1.0, delta = 1.0)
     tau = ComplexF64(-0.05im)
-    akw = (tol_basis = 1e-7, tol_trunc = 1e-9, tol_expv = 1e-10, maxdim = 64)
+    # `thin_search` is `_certified_range`'s A/B, so it runs on the policy that calls it: the DD
+    # policies' controller is always thin (`dd_cbe_expand`, plan T3.1) and ignores the knob.
+    akw = (tol_basis = 1e-7, tol_trunc = 1e-9, tol_expv = 1e-10, maxdim = 64,
+           cbe_policy = :svd_select)
     fid(a, b) = abs(overlap(a, b)) / (norm(a) * norm(b))
     for (name, kw) in (("ordinary", NamedTuple()), ("order 2", (order = 2,)))
         @testset "$name" begin
