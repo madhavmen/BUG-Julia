@@ -148,3 +148,58 @@ frames of `order = 1`; `order > 1` uses the same `_project_root` path (not re-te
   and marks the 10×-svd parity `@test_broken` (T3.5/T4).
 * hq12c 17410287 (`c05c87c`): **test_dd_cbe.jl 113 pass / 1 broken / 0 fail**, MaxRSS 1.6 G.
   Tasks 1–2 CONFIRMED.
+
+## Task 3
+
+Branch `plan/hq-task-3` (stacked on `plan/hq-tasks-1-2`), commits `22aca99`, `c043e90`, `c570c3c`,
+`092684e`.
+Tests: `tests/sweeps/test_dd_cbe.jl` "T3.*" on `_hb_wide()` (L = 12, cap 16, bond 6: at L = 8 cap 4
+the discarded probe space is 4-dim and a width-4 holdout spans it).
+
+| item | status | evidence |
+|---|---|---|
+| T3.1 small Gaussian block, `P_R^D` on the probe, `P_L^D` on the thin output | DONE | `_dd_controller` (dd_cbe.jl) through `_dd_probe` / `_stream_*` / `_dd_select` |
+| T3.1 append only when the DD holdout fails | DONE | controller loop; test "T3.1" (`length(trace) ≥ 2`, `:met`) |
+| T3.1 promote holdouts only after fresh validation columns | DONE | holdout → candidate on a failed check, a new holdout drawn first; test "T3.1" |
+| T3.1 never re-stream a cached column | DONE | test "T3.1": `n_stream_cols == n_probes + n_holdout` |
+| T3.1 QR-only, rank from the stopping rule | DONE | `_thin_qr` numerical rank only; test U02 (no SVD) |
+| T3.2 one `tol_basis`, linear shares over bonds × rounds | DONE | `basis_allocation(...; rule = :linear)` for the DD policies; test "T3.2" (shares sum to `tol_basis`) |
+| T3.2 RSS only where its assumptions hold | DONE | `:rss` kept for `svd_select`; `StepRecord.budget_rule` logs it; no new public knob |
+| T3.3 holdout width s small (2, 4, 8), projections on thin objects only | DONE | `RC._DD_HOLDOUT`; test "T3.3" |
+| T3.3 escalation on failed/borderline check, new sector | DONE | sector targeting by holdout residual (`_target_sectors!`) inside the controller |
+| T3.3 false acceptance on missed-sector fixtures | DONE | test "T3.3": blind-holdout control fails, honest holdout s = 8 has 0/10 false acceptances |
+| T3.3 no full `‖G_DD‖` at production D | DONE | `G` formed only in the test closures (`_dd_closures`), never in `dd_cbe_expand` |
+| T3.4 explicit `:met` / `:work_limited` / `:basis_limited` / `:empty`, bounded loop | DONE | test "T3.4" (unreachable share, work ceiling, empty discarded space; streamed columns bounded) |
+| T3.4 timestep rejection/retry on a limit | PARTIAL | limits reach `StepRecord.limits`; no retry driver (none in the plan's call path yet) |
+| T3.5 Taylor leak in small tests | DONE | test "T3.5": dense L = 8, `η_m = h^m/m! ‖(I−P)H^m ψ‖` for m ≤ 3 on the step's root space |
+| T3.5 tighter `tol_basis` exposes the temporal limit | DONE | first-order leak at the rounding floor at tol 1e-4 and 1e-8; the dominant leak is m = 3 (1.9e-11 at 1e-8) |
+| Acceptance: holdout residual nonincreasing as Q grows | DONE | test "T3.1" |
+| Acceptance: range error converges with the share | DONE | test "T3 acceptance" (share 1e-1 … 1e-5, both sides) |
+| Acceptance: deterministic seed | DONE | test "T1.4" (same `rng` ⇒ same record and state) |
+
+`thin_search` is the A/B knob of `_certified_range`, so it now only acts on `svd_select` (and the
+`no_alloc`/exact path): the DD controller is always thin.
+
+### Confirmation results
+
+* hq13 17418199 (`22aca99`): test_dd_cbe.jl failed only on T3.5 `leak[2] > leak[1]`. At tol 1e-8
+  the frames hold H² ψ as well, so both terms sat at the rounding floor (3.4e-16, 5.1e-17, then
+  m = 3 at 1.9e-11). Fixed in `c570c3c`: the dominant leak is a higher-order term and exceeds 100× the
+  first-order one.
+* hq13a 17418200 (`22aca99`), the five adaptive files:
+  * test_adaptive_search.jl "thin < wide probes" failed because `thin_search` no longer reaches the
+    DD controller. Fixed in `c570c3c`: the A/B now runs on `cbe_policy = :svd_select`.
+  * test_adaptive_rsvd.jl "a tighter basis tolerance never buys less rank" failed on the final max
+    bond, 14 at tol 1e-8 against 15 at 1e-3.
+* hqrank2 17419263 (`benchmarks/hq_rank_monotone_l12.jl`, XX L = 12, 4 × dt 0.05, exact-CBE
+  reference with bonds up to 13): the frames are monotone in `tol_basis`, with DD D_stage 18 at
+  1e-3 and 37 at 1e-8. The extra final rank at 1e-3 is the looser step's error kept above
+  `tol_trunc` (reading (a)), not a controller defect. `092684e` grades the step's frame
+  (`record.D_stage`) per step. MaxRSS 2.0 G.
+* hq13b 17419262 (`c570c3c`): **test_dd_cbe.jl 202 pass / 1 broken** (the svd parity, as in
+  Tasks 1–2), test_adaptive_search.jl 38 / 38, MaxRSS 1.7 G. T3.5 rows:
+  * tol 1e-4: dim 57, leak 2.8e-16, 3.5e-7, 1.6e-6;
+  * tol 1e-8: dim 69, leak 3.4e-16, 5.1e-17, 1.9e-11.
+* hq13c 17419418 (`092684e`): **test_adaptive_rsvd.jl 177 / 177**, MaxRSS 1.7 G.
+
+**Task 3 CONFIRMED.**
