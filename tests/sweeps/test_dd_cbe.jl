@@ -1,5 +1,11 @@
-# tests/sweeps/test_dd_cbe.jl -- cbe_bug_high_order_rsvd_parallel_tasks.md, Tasks 1 and 2.
+# tests/sweeps/test_dd_cbe.jl -- updated_cbe_high_order_parallel.md, Tasks 1 to 3.
 #
+#   Task 3  the incremental DD controller (`_dd_controller`): every streamed column cached and
+#           counted once, a nonincreasing cached holdout residual, the range error against the
+#           exact DD range following the share, a candidate block blind to the dominant sector
+#           caught by holdouts of width 2/4/8, explicit `:work_limited`/`:basis_limited`/`:empty`
+#           endings, the linear budget rule and its record, and the Taylor leak of the step's
+#           frames against dense `H` (L = 8).
 #   Task 2  the implicit DD-projected, MPO-streamed, QR-only CBE (`dd_cbe.jl`): the streamed
 #           sketch against the explicit tiny P_L^D X P_R^D Om (both directions, bulk and
 #           boundary bonds, complex tensors, a w = 5 MPO), the thin projections, the two-pass
@@ -46,7 +52,75 @@ _unsaturated(f) = leg_dim(f.U0, 1) * leg_dim(f.U0, 2) > f.old_rank &&
                   leg_dim(f.V0, 2) * leg_dim(f.V0, 3) > f.old_rank
 _fid(a, b) = abs(overlap(a, b)) / (norm(a) * norm(b))
 
-@testset "DD-QR CBE (plan Tasks 1-2)" begin
+"""
+The controller fixture: L = 12 warmed at cap 16, bond 6. At L = 8 / cap 4 each side's discarded
+probe space is 4-dimensional, so one width-4 holdout spans it and the controller is trivial.
+"""
+_hb_wide() = _hb_bond(; L = 12, i = 6, steps = 4, maxdim = 16)
+
+"""
+`_dd_controller`'s closures for one side of bond `i`, built as `dd_cbe_expand` builds them, and
+the exact DD range `G` (the complete discarded probe) its `Q` is graded against.
+"""
+function _dd_closures(f, mpo, lenv, renv, side; i = 6, rng)
+    left = side === :left
+    frame, opp = left ? (f.U0, f.V0) : (f.V0, f.U0)
+    oside = left ? :right : :left
+    kc = KernelCounters()
+    op = TwoSiteSketchOp(f, mpo, i, lenv, renv; adjoint = !left, counters = kc)
+    out = Ref{Any}(nothing)
+    draw(w, b) = RC._dd_probe(opp, oside, w; rng = rng, boost = b, kc = kc)
+    sketch(Om) = (apply_two_site_sketch!(out, Om, op); out[])
+    project = left ? (X -> perp_component(f.U0, X)) : (X -> perp_component_right(f.V0, X))
+    G = dd_reference_sketch(f, mpo, i, lenv, renv, full_local_basis(opp, oside), side)
+    fused(t) = left ? leg_dim(t, 1) * leg_dim(t, 2) : leg_dim(t, 2) * leg_dim(t, 3)
+    wcap = left ? leg_dim(opp, 2) * leg_dim(opp, 3) : leg_dim(opp, 1) * leg_dim(opp, 2)
+    perpQ(Q, X) = Q === nothing ? X : left ? perp_component(Q, X) : perp_component_right(Q, X)
+    return (; side, frame, kc, draw, sketch, project, G, perpQ, wcap,
+            ncap = fused(frame) - f.old_rank, fl = left ? 3 : 1, wleg = left ? 1 : 3)
+end
+
+"Run the controller at `share` (scale 1: the indicator is the raw residual)."
+function _ctrl(c, share; w0 = 2, s = RC._DD_HOLDOUT, wcap = c.wcap, draw = c.draw,
+               holdout = w -> c.draw(w, nothing))
+    lg, tr = RC.AdaptiveLedger(), Any[]
+    Q, st = RC._dd_controller(c.frame, c.side, draw, c.sketch, c.project, w0, wcap, c.ncap,
+                              RC.BasisAllocation(1.0, share, 1.0, 1.0, 1.0), lg;
+                              kc = c.kc, s = s, holdout = holdout, trace = tr)
+    return Q, st, lg, tr
+end
+
+_rank(Q, fl) = Q === nothing ? 0 : leg_dim(Q, fl)
+_sector_norm(T, leg, q, d) = norm(to_concrete(getsub(T, leg, s -> s == q ? (1:d) : nothing)))
+
+"`Om` without its sector `q` on `leg`; `nothing` when nothing else is left."
+function _drop(Om, leg, q)
+    Om === nothing && return nothing
+    dims = Dict(Om.spaces[leg])
+    any(k -> k != q, keys(dims)) || return nothing
+    return to_concrete(getsub(Om, leg, s -> s == q ? nothing : (1:dims[s])))
+end
+
+"""
+Orthonormal dense basis of the root space `(W ⊗ Z) core` of the frames `fr` (T3.5), from random
+cores on the blocks of `S0 = P psi0` and of `B^m S0`, m <= 3: every root block `H^m psi0` can
+reach for m <= 3, which is all the Taylor leak below measures.
+"""
+function _root_basis(psi0, mpo, fr; rng = Random.MersenneTwister(5))
+    B = RC._root_generator(mpo, fr)
+    T = RC._project_root(psi0, fr)
+    cols = Vector{ComplexF64}[]
+    for m in 0:3
+        m > 0 && (T = to_concrete(RC.apply_zero_site(B, T)))
+        for _ in 1:sum(length, T.RMTs)
+            push!(cols, dense_state(RC._frontier_mps(psi0, fr, RC._randomize_like(T, rng))))
+        end
+    end
+    F = svd(reduce(hcat, cols))
+    return F.U[:, 1:count(>(1e-10 * F.S[1]), F.S)]
+end
+
+@testset "DD-QR CBE (plan Tasks 1-3)" begin
 
 @testset "U01: streamed DD sketch == explicit P^D X P^D Om, bond $i" for i in (1, 4, 7)
     mpo, psi, f, lenv, renv = _hb_bond(; i = i)
@@ -148,13 +222,16 @@ end
     @info "DK/DD fixture" dk dd = norm(Gdd) n_dd = exd.n_new_l n_one_sided = ex1.n_new_l
 end
 
-@testset "U02: no SVD inside the DD expansion" begin
+@testset "U02: no SVD inside the DD expansion (rank stop and T3 controller)" begin
     mpo, psi, f, lenv, renv = _hb_bond()
-    for side in (:left, :right)
+    ctrl = RC.BasisAllocation(1.0, 1e-6, 1.0, 1.0, 1.0)
+    for side in (:left, :right), alloc in (nothing, ctrl)
+        lg = alloc === nothing ? nothing : RC.AdaptiveLedger()
         dd_cbe_expand(f, mpo, 4, lenv, renv, side)                # warms the fusion cache
         set_accumul_costs!(true)
         read_reset_costs!()
-        dd_cbe_expand(f, mpo, 4, lenv, renv, side; rng = Random.MersenneTwister(2))
+        dd_cbe_expand(f, mpo, 4, lenv, renv, side; alloc = alloc, ledger = lg,
+                      rng = Random.MersenneTwister(2))
         _, svdc = read_reset_costs!()
         set_accumul_costs!(false)
         @test svdc == 0
@@ -265,6 +342,155 @@ end
     @test ih.record.parallel === :half_sweeps
     io = cbe_bug_step!(copy(psi0), mpo, -0.05im; order = 2, kw...)
     @test io.record.closure_policy === :svd_select     # frontier sweeps: Task 4/5, reported
+end
+
+# ── Task 3: the incremental DD controller ─────────────────────────────────────────────────
+
+@testset "T3.1: incremental controller, every streamed column cached once, $side" for side in
+        (:left, :right)
+    mpo, psi, f, lenv, renv = _hb_wide()
+    @test _unsaturated(f)
+    c = _dd_closures(f, mpo, lenv, renv, side; rng = Random.MersenneTwister(21))
+    share = 1e-3 * norm(c.G)
+    Q, st, lg, tr = _ctrl(c, share)
+    @info("T3.1 controller", side, wcap = c.wcap, ncap = c.ncap, rank = _rank(Q, c.fl),
+          checks = length(tr), probes = lg.n_probes, holdout = lg.n_holdout)
+    @test st === :met
+    @test length(tr) >= 2                                        # it had to grow
+    # no repeated MPO action: each streamed column is a candidate or a holdout, never both
+    @test c.kc.n_stream_cols == lg.n_probes + lg.n_holdout
+    first_ind = [t[3] for t in tr]                               # first holdout vs each Q
+    @test all(first_ind[k + 1] <= first_ind[k] * (1 + 1e-10) + 1e-14
+              for k in 1:(length(first_ind) - 1))
+    @test norm(c.perpQ(Q, c.G)) <= 10 * share                    # the exact DD range
+    k = _rank(Q, c.fl)
+    QQ = side === :left ? to_concrete(contract(Q', (1, 2), Q, (1, 2))) :
+                          to_concrete(contract(Q, (2, 3), Q', (2, 3)))
+    @test abs(norm(QQ)^2 - k) < 1e-10                            # Q'Q = I
+    ov = side === :left ? contract(c.frame', (1, 2), Q, (1, 2)) :
+                          contract(Q, (2, 3), c.frame', (2, 3))
+    @test norm(to_concrete(ov)) < 1e-12                          # Q is outside the frame
+    @test lg.max_sample <= share && isempty(lg.unmet)
+end
+
+@testset "T3 acceptance: the range error follows the share, $side" for side in (:left, :right)
+    mpo, psi, f, lenv, renv = _hb_wide()
+    errs, ranks = Float64[], Int[]
+    for frac in (1e-1, 1e-2, 1e-3, 1e-5)
+        c = _dd_closures(f, mpo, lenv, renv, side; rng = Random.MersenneTwister(31))
+        share = frac * norm(c.G)
+        Q, st, _, _ = _ctrl(c, share)
+        push!(errs, norm(c.perpQ(Q, c.G)) / norm(c.G))
+        push!(ranks, _rank(Q, c.fl))
+        @test st === :met
+        @test errs[end] <= 10 * frac
+    end
+    @info "T3 acceptance" side errs ranks
+    @test ranks[end] >= ranks[1] && errs[end] < errs[1]
+end
+
+@testset "T3.3: candidates blind to the dominant sector, holdout s = 2, 4, 8" begin
+    mpo, psi, f, lenv, renv = _hb_wide()
+    c0 = _dd_closures(f, mpo, lenv, renv, :left; rng = Random.MersenneTwister(1))
+    secs = [(q, _sector_norm(c0.G, c0.fl, q, d)) for (q, d) in c0.G.spaces[c0.fl]]
+    @test length(secs) >= 2
+    qstar = secs[argmax(last.(secs))][1]
+    share = 1e-3 * norm(c0.G)
+    # Control: holdout blind too -- the controller cannot see q* and accepts without it, so the
+    # dropped sector carries real weight and the runs below test the holdout, not the fixture.
+    c = _dd_closures(f, mpo, lenv, renv, :left; rng = Random.MersenneTwister(2))
+    blind(w, b) = _drop(c.draw(w, b), c.wleg, qstar)
+    Q, _, _, _ = _ctrl(c, share; draw = blind, holdout = w -> blind(w, nothing))
+    @test norm(c.perpQ(Q, c.G)) > 10 * share
+    false_acc = Dict{Int, Int}()
+    status = Dict{Int, Vector{Symbol}}()
+    for s in (2, 4, 8)
+        false_acc[s] = 0
+        status[s] = Symbol[]
+        for seed in 1:10
+            cs = _dd_closures(f, mpo, lenv, renv, :left; rng = Random.MersenneTwister(100 + seed))
+            Qs, st, _, _ = _ctrl(cs, share; s = s,
+                                 draw = (w, b) -> _drop(cs.draw(w, b), cs.wleg, qstar))
+            push!(status[s], st)
+            st === :met && norm(cs.perpQ(Qs, cs.G)) > 10 * share && (false_acc[s] += 1)
+        end
+    end
+    @info "T3.3 false acceptances of 10 (missed dominant sector)" qstar false_acc status
+    @test false_acc[8] == 0
+end
+
+@testset "T3.4: an unreachable share ends with an explicit limit, $side" for side in
+        (:left, :right)
+    mpo, psi, f, lenv, renv = _hb_wide()
+    s = RC._DD_HOLDOUT
+    c = _dd_closures(f, mpo, lenv, renv, side; rng = Random.MersenneTwister(41))
+    Q, st, lg, _ = _ctrl(c, 1e-300)
+    err = norm(c.perpQ(Q, c.G)) / norm(c.G)
+    @info("T3.4", side, st, err, rank = _rank(Q, c.fl), streamed = c.kc.n_stream_cols,
+          wcap = c.wcap)
+    # `:met` only if Q holds the range to an exactly zero holdout residual
+    @test st in (:work_limited, :basis_limited) || (st === :met && err <= 1e-12)
+    st === :met || @test :sample in lg.unmet && !lg.tolerance_met
+    st === :basis_limited && @test err <= 1e-8            # rank exhausted: nothing left to add
+    @test c.kc.n_stream_cols < 2 * c.wcap + 3 * s          # each pass is bounded, so is the loop
+    # a work ceiling below the first holdout
+    c2 = _dd_closures(f, mpo, lenv, renv, side; rng = Random.MersenneTwister(42))
+    _, st2, lg2, _ = _ctrl(c2, 1e-300; wcap = 3)
+    @test st2 === :work_limited && lg2.workcap_reached && :sample in lg2.unmet
+    @test c2.kc.n_stream_cols < 2 * 3 + 3 * s
+    # no discarded space: nothing to draw
+    c3 = _dd_closures(f, mpo, lenv, renv, side; rng = Random.MersenneTwister(43))
+    Q3, st3, _, _ = _ctrl(c3, 1.0; draw = (w, b) -> nothing)
+    @test st3 === :empty && Q3 === nothing && c3.kc.n_stream_cols == 0
+end
+
+@testset "T3.2: the linear budget sums to tol_basis, and the step records its rule" begin
+    b = RC.AdaptiveBudget(1e-6, 1e-8, 1e-8)
+    for nb in (1, 7, 15), nf in (1, 3)
+        a = RC.basis_allocation(b, nb; tau = 0.1, nrm = 2.0, nfront = nf, rule = :linear)
+        @test a.rule === :linear
+        @test 2 * (nb + 1) * nf * a.sample ≈ 1e-6                 # the shares add up
+        @test a.per_bond ≈ 2 * a.sample && a.krylov == a.sample && a.tail == a.sample
+        @test a.scale ≈ 0.05
+    end
+    @test RC.basis_allocation(b, 7).rule === :rss
+    @test_throws ArgumentError RC.basis_allocation(b, 7; rule = :bogus)
+    mpo, psi0, _, _, _ = _hb_bond()
+    kw = (tol_basis = 1e-7, maxdim = 32)
+    @test cbe_bug_step!(copy(psi0), mpo, -0.05im; kw...).record.budget_rule === :linear
+    @test cbe_bug_step!(copy(psi0), mpo, -0.05im; cbe_policy = :one_sided_qr_streamed,
+                        kw...).record.budget_rule === :linear
+    @test cbe_bug_step!(copy(psi0), mpo, -0.05im; cbe_policy = :svd_select,
+                        kw...).record.budget_rule === :rss
+    @test cbe_bug_step!(copy(psi0), mpo, -0.05im; dex = 4).record.budget_rule === :legacy
+end
+
+# Plan T3.5: eta_m = h^m/m! ||(I - P) H^m v|| / ||v|| for the root space P of the step's frames.
+# The DD step's basis error is its first-order leak; with that at the floor the higher terms are
+# what is left, i.e. the step is temporally limited (the HQGAP h^2 finding, hq12b 17409443).
+@testset "T3.5: Taylor leak of the step's frames against dense H, L = 8" begin
+    h = 0.1
+    mpo, psi0, _, _, _ = _hb_bond()
+    H = dense_heisenberg(length(psi0); J = 1.0, delta = 1.0)
+    v = dense_state(psi0)
+    v ./= norm(v)
+    rows = Any[]
+    for tol in (1e-4, 1e-8)
+        rep = Ref{Any}(nothing)
+        cbe_bug_step!(copy(psi0), mpo, -im * h; tol_basis = tol, tol_trunc = 1e-12,
+                      tol_expv = 1e-12, maxdim = 64, frames_report = rep)
+        U = _root_basis(psi0, mpo, rep[])
+        @test norm(v - U * (U' * v)) < 1e-8                      # the frames hold psi
+        leak, w = Float64[], v
+        for m in 1:3
+            w = H * w
+            push!(leak, h^m / factorial(m) * norm(w - U * (U' * w)))
+        end
+        push!(rows, (tol = tol, dim = size(U, 2), leak = leak))
+        @test leak[1] <= 10 * tol + 1e-12
+        tol == 1e-8 && @test leak[2] > leak[1]
+    end
+    @info "T3.5 Taylor leak h^m/m! ||(I-P) H^m v||, m = 1..3" h rows
 end
 
 end # DD-QR CBE

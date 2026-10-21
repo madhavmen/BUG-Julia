@@ -605,6 +605,10 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # evolved state (`estimate_global_complement_action`, one measuring sweep).
                        root_report::Union{Nothing, Base.RefValue} = nothing,
                        outside_residual::Bool = false,
+                       # ⚠ INSTRUMENTATION. A `Ref` receives the root's final Galerkin frames
+                       # (`KLFrames`), for small-system diagnostics of the product space the step
+                       # integrated in (plan T3.5 Taylor leak). Never read by the step.
+                       frames_report::Union{Nothing, Base.RefValue} = nothing,
                        # ── THE TRIAL SPACE IS CONSTRAINED TO CONTAIN THESE STATES (plan Task 2) ──
                        # Each half-sweep carries every `keep_states` MPS through the new frames, as
                        # it carries `psi`, and unions its local part into the frame, so the root
@@ -840,7 +844,10 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     # before they read. Guarded anyway: an out-of-range `center` gives 1.0 (an unnormalised
     # relative scale) rather than a bounds error from a diagnostic.
     _nrm = (1 <= psi.center <= L) ? norm(psi[psi.center]) : 1.0
-    alloc  = basis_allocation(budget, L - 1; tau = tau, nrm = _nrm, nfront = order)
+    # Plan T3.2: the DD-QR policies spend `tol_basis` as a linear sum of shares; `:svd_select`
+    # keeps the quadrature rule its recorded benchmarks were tuned under.
+    alloc  = basis_allocation(budget, L - 1; tau = tau, nrm = _nrm, nfront = order,
+                              rule = policy === :svd_select ? :rss : :linear)
     ledger = AdaptiveLedger()
     ledger.order = order
     bd0 = bond_dims(psi)                 # per-bond `r_old` for the bond log (plan §8)
@@ -1497,6 +1504,9 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     # ⚠ WITH `truncate = false` AND THESE DEFAULTS THERE IS NO RANK CONTROL AT THE ROOT AT ALL,
     # which is deliberate -- it is what makes "root truncation off" a reachable arm -- but it
     # means the closing pass is the only thing enforcing `maxdim` in the shipped configuration.
+    frames_report === nothing ||
+        (frames_report[] = KLFrames(W, Z, c, lenv_root, renv_root, 0, nothing, nothing,
+                                    Float64(eshift)))
     res = svd(S1, (1,); cutoff = root_cutoff,
               Nkeep = root_maxdim > 0 ? root_maxdim : nothing, get_lists = true)
     discarded = _trunc_weight(res)
@@ -1557,7 +1567,8 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                      maximum(bd0; init = 0), max(maximum(expanded; init = 0), leg_dim(Z[c], 1)),
                      maximum(bond_dims(psi); init = 0), nroot[], t_step,
                      Base.gc_bytes() - _b0step, Int(Sys.maxrss()),
-                     _step_limits(adaptive ? ledger : nothing))
+                     _step_limits(adaptive ? ledger : nothing),
+                     adaptive ? alloc.rule : :legacy)
     return CBEBugSweepInfo(expanded, n_new, c, root_rank, epre, efnl,
                            discarded, accL.nmv + accR.nmv + nroot[] + nclose, peak,
                            accL.ngrow + accR.ngrow, leg_dim(Z[c], 1),

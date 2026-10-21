@@ -393,6 +393,120 @@ end
 "The DD-QR backend this symmetry uses (`StepRecord.qr_backend`)."
 _qr_backend() = symmetry_mode() === :SU2 ? :svd_orth : :householder
 
+# ── T3.1-T3.4: the incremental DD sketch controller ───────────────────────────────────────
+
+"Plan T3.3: the default independent holdout width `s` (an implementation constant; tests 2, 4, 8)."
+const _DD_HOLDOUT = 4
+
+"""
+    _dd_controller(frame, side, draw, sketch, project, w0, wcap, ncap, alloc, ledger;
+                   kc, s, audit, holdout, trace) -> (Q, status)
+
+Plan T3.1-T3.4: grow the DD basis `Q` of one side BLOCK BY BLOCK until an independent DD holdout
+says the rest of `G = P^D X P^D` fits this side's share, `alloc.sample`.
+
+Every probe block is streamed through the MPO ONCE and its action cached: a candidate block's
+action is QR-appended against `[frame, Q]` (`_dd_select` on the grown frame, so the old
+directions stay verbatim and the two-pass floor of T2.4 applies per block), and a holdout's
+action is kept for its residual `rho^2 = sum_q ||(I - QQ') Z_q||^2 / n_q` (the per-sector
+normalisation of [`_sample_residual`](@ref)), re-measured against each larger `Q` by thin
+projections only. On a failed check a NEW independent holdout is drawn first, and only then is
+the old holdout's cached action promoted into `Q`, together with one new candidate block (the
+sectors the holdout named doubled, [`_target_sectors!`](@ref), else the base width doubled).
+
+ESCALATION (T3.3). A passing check is re-checked ONCE with a fresh holdout of width `2s` when it
+is borderline (`ind > alloc.sample / 2`), when `Q` holds a sector the frame did not (a newly
+reachable DD sector), or in `audit` mode; the re-check's verdict stands.
+
+TERMINATION (T3.4). Statuses: `:met`; `:work_limited` when the streamed columns reached `wcap`
+or the rank reached the admission limit `ncap` (`ledger.workcap_reached`); `:basis_limited`
+when a whole failed pass added no direction (numerical rank exhausted, an unchanged residual);
+`:empty` when no probe exists (no discarded space). Every continuing pass streams at least the
+`s` columns of its new holdout and adds at least one direction, so the loop ends after at most
+`min(ncap, wcap / s)` passes, whatever the spectrum. Both failures record `:sample` in the
+ledger. `holdout(w)` defaults to `draw(w, nothing)`; a separate distribution only in tests.
+`trace`, when given, receives `(rank, ind, ind_first)` per check, `ind_first` the FIRST
+holdout's cached residual re-measured against the current `Q` (T3 acceptance: nonincreasing).
+"""
+function _dd_controller(frame, side::Symbol, draw, sketch, project, w0::Int, wcap::Int,
+                        ncap::Int, alloc::BasisAllocation, ledger::Union{Nothing, AdaptiveLedger};
+                        kc::KernelCounters = KernelCounters(), s::Int = _DD_HOLDOUT,
+                        audit::Bool = false, holdout = w -> draw(w, nothing),
+                        trace::Union{Nothing, Vector} = nothing)
+    left = side === :left
+    fl, wleg = left ? (3, 1) : (1, 3)
+    tags = frame.inds[fl].itags
+    aug, Q, n, streamed = frame, nothing, 0, 0
+    boost = Dict{Any, Int}()
+    function absorb!(Z)
+        Qn, _ = _dd_select(aug, Z, side, kc)
+        Qn === nothing && return 0
+        Qn = to_concrete(setitag(Qn, fl, tags))
+        Q = Q === nothing ? Qn : to_concrete(oplus([Q, Qn], (fl,)))
+        aug = to_concrete(oplus([aug, Qn], (fl,)))
+        return leg_dim(Qn, fl)
+    end
+    function stream(Om, field::Symbol)
+        w = leg_dim(Om, wleg)
+        streamed += w
+        ledger === nothing || setfield!(ledger, field, getfield(ledger, field) + w)
+        return sketch(Om)
+    end
+    function fresh(w)
+        Om = holdout(w)
+        return Om === nothing ? nothing : (Om, stream(Om, :n_holdout))
+    end
+    resid(h) = _sample_residual(Q, project, _ -> h[2], _ -> h[1], 1, wleg, side)
+    newsector() = Q !== nothing && any(((q, _),) -> sector_dim(frame, fl, q) == 0, Q.spaces[fl])
+
+    w = clamp(w0, 1, max(wcap, 1))
+    last = draw(w, nothing)
+    last === nothing && return (nothing, :empty)
+    n += absorb!(stream(last, :n_probes))
+    h = fresh(s)
+    h1 = h
+    escalated = false
+    while true
+        h === nothing && return (Q, :met)            # nothing left to validate against
+        est, per, hcols = resid(h)
+        ind = indicator(alloc, est)
+        trace === nothing || push!(trace, (n, ind, indicator(alloc, resid(h1)[1])))
+        ok = ind <= alloc.sample
+        if ok && !escalated && (audit || ind > alloc.sample / 2 || newsector())
+            escalated = true
+            he = fresh(2s)
+            he === nothing || (h = he; continue)
+        end
+        capped = streamed >= wcap || n >= ncap
+        if ok || capped
+            ledger === nothing || _record_sample!(ledger, side, ind, per, hcols, last, wleg, alloc)
+            ok && return (Q, :met)
+            if ledger !== nothing
+                _unmet!(ledger, :sample)
+                ledger.workcap_reached = true
+            end
+            return (Q, :work_limited)
+        end
+        nt = _target_sectors!(boost, per, h[1], wleg, alloc)
+        ledger === nothing || (ledger.n_targeted += nt)
+        hnew = fresh(s)                          # new validation BEFORE the old one is promoted
+        added = absorb!(h[2])
+        nt == 0 && (w = min(2 * w, wcap))
+        blk = draw(w, isempty(boost) ? nothing : boost)
+        if blk !== nothing
+            last = blk
+            added += absorb!(stream(blk, :n_probes))
+        end
+        n += added
+        if added == 0
+            ledger === nothing || (_record_sample!(ledger, side, ind, per, hcols, last, wleg,
+                                                   alloc); _unmet!(ledger, :sample))
+            return (Q, :basis_limited)
+        end
+        h = hnew
+    end
+end
+
 # ── T2.5: one side of the bond expansion, by policy ───────────────────────────────────────
 
 """
@@ -409,8 +523,9 @@ const CBE_POLICIES = (:dd_qr_streamed, :one_sided_qr_streamed, :svd_select)
 Grow ONE frame at bond `(i, i+1)` -- `U0` for `side = :left` (the K-sweep), `V0` for
 `:right` (the L-sweep) -- by DD-projected, MPO-streamed, QR-only CBE; the other frame is
 returned unchanged. Rank comes from the numerical rank of the QR; the probe width from the
-same start width and Test B holdout loop as `cbe_expand` (`_certified_range`), here with
-DD-projected probes and holdouts (`alloc === nothing`: the numerical-rank stop alone).
+incremental DD holdout controller [`_dd_controller`](@ref) (plan T3.1; holdout width
+`holdout_width`, `audit` forces the escalated re-check), or with `alloc === nothing` / `exact`
+from the numerical-rank stop alone.
 `policy = :one_sided_qr_streamed` draws unprojected probes and keeps everything else.
 The retained directions are bounded by the local room and the work ceiling (a resource bound,
 reported as `workcap_reached`).
@@ -422,7 +537,8 @@ function dd_cbe_expand(f::BondFrame, mpo::MPO, i::Int, lenv::MPOLink, renv::MPOL
                        workcap::Int = 0, growth::Float64 = ADAPTIVE_GROWTH,
                        thin_search::Bool = true, exact::Bool = false,
                        rng::AbstractRNG = MersenneTwister(0x5EED),
-                       kc::KernelCounters = KernelCounters(), version::Int = 0)
+                       kc::KernelCounters = KernelCounters(), version::Int = 0,
+                       holdout_width::Int = _DD_HOLDOUT, audit::Bool = false)
     policy in (:dd_qr_streamed, :one_sided_qr_streamed) || throw(ArgumentError(
         "dd_cbe_expand runs :dd_qr_streamed or :one_sided_qr_streamed, got $policy"))
     side in (:left, :right) || throw(ArgumentError("side must be :left or :right"))
@@ -466,8 +582,18 @@ function dd_cbe_expand(f::BondFrame, mpo::MPO, i::Int, lenv::MPOLink, renv::MPOL
     project = left ? (X -> perp_component(U0, X)) : (X -> perp_component_right(V0, X))
     select(Om) = (first(_dd_select(frame, sketch(Om), side, kc)), 0.0)
 
-    Q, _, n = _certified_range(draw, wleg, select, fl, project, sketch, side, w0, wcap, cap,
-                               exact ? nothing : alloc, ledger; thin = thin_search)
+    # Plan T3.1: with an allocation the incremental controller decides the width (it is always
+    # thin, so `thin_search` does not apply); without one, or for the exact reference, the
+    # numerical-rank stop of `_range_find` alone.
+    Q, n = if alloc === nothing || exact
+        Qr, _, nr = _certified_range(draw, wleg, select, fl, project, sketch, side, w0, wcap,
+                                     cap, nothing, ledger; thin = thin_search)
+        (Qr, nr)
+    else
+        Qc, _ = _dd_controller(frame, side, draw, sketch, project, w0, wcap, cap, alloc,
+                               ledger; kc = kc, s = holdout_width, audit = audit)
+        (Qc, Qc === nothing ? 0 : leg_dim(Qc, fl))
+    end
     Q === nothing && return none()
     if n > cap
         Q = _trim_total(Q, fl, cap)
@@ -499,7 +625,8 @@ trial-space frame), `D_final` (after compression), root iterations, total second
 the process `peak_rss` (`Sys.maxrss()`, a high-water mark, not per step), and `limits`: which
 of `:basis_limited`, `:root_limited`, `:truncation_limited`, `:work_limited`, `:rank_limited`
 held the step back (empty when the budget held; `[:legacy]` on the legacy path, which makes no
-claim).
+claim), and `budget_rule`, how `tol_basis` was aggregated over the shares (`:linear`, `:rss`,
+`:legacy`; plan T3.2).
 """
 struct StepRecord
     policy::Symbol
@@ -516,6 +643,7 @@ struct StepRecord
     bytes_step::Int
     peak_rss::Int
     limits::Vector{Symbol}
+    budget_rule::Symbol
 end
 
 "Plan invariant 4: the separate limit statuses, read off the ledger's failed checks."

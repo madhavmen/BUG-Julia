@@ -86,6 +86,9 @@ and this rule is optimistic by `sqrt(n_bonds)`. The conservative alternative -- 
 n_bonds` -- costs real rank at every bond to insure against a case that the XX and Heisenberg
 benchmarks do not exhibit. Quadrature is the measured-adequate choice, and `IT07`'s tolerance
 sweep is what would overturn it.
+
+`rule` names the aggregation (`:rss`, above, or `:linear`, see [`basis_allocation`](@ref)) so
+the step record can log which one bounded the step (plan T3.2).
 """
 struct BasisAllocation
     per_bond::Float64
@@ -93,7 +96,10 @@ struct BasisAllocation
     tail::Float64
     krylov::Float64
     scale::Float64
+    rule::Symbol
 end
+BasisAllocation(per_bond, sample, tail, krylov, scale) =
+    BasisAllocation(per_bond, sample, tail, krylov, scale, :rss)
 
 """
     basis_allocation(budget, nbonds; tau, nrm, nfront = 1) -> BasisAllocation
@@ -113,17 +119,31 @@ so the same `tol_basis` means the same thing for a normalised state and an unnor
 machinery without evolving (`truncate = false` basis-only sweeps, and the `UT`s). The scale is
 then 1 -- a pure "is this subspace closed under H" question with no time in it -- rather than
 0, which would declare every residual negligible and return the unexpanded frame.
+
+`rule = :linear` (plan T3.2, the DD-QR policies) spends `tol_basis` as a plain SUM of
+nonnegative shares, which needs no independence assumption: the half-sweeps make `nbonds + 1`
+bond visits per frontier (the root bond is visited by both), each visit makes two decisions
+(the DD holdout, Test B, and the one-site Krylov, Tests C/D; QR selection has no Test A), so
+every share is `tol_basis / (2 (nbonds + 1) nfront)` and they add up to `tol_basis`. `per_bond`
+is one visit's two shares. `tail` keeps the same share for callers that still run Test A.
 """
 function basis_allocation(budget::AdaptiveBudget, nbonds::Int;
-                          tau::Number = 0, nrm::Real = 1.0, nfront::Int = 1)
+                          tau::Number = 0, nrm::Real = 1.0, nfront::Int = 1,
+                          rule::Symbol = :rss)
     nb = max(nbonds, 1)
-    per_bond = budget.basis / sqrt(nb * max(nfront, 1))
+    nf = max(nfront, 1)
+    rule in (:rss, :linear) || throw(ArgumentError("rule must be :rss or :linear, got $rule"))
+    at = abs(tau)
+    scale = iszero(at) ? 1.0 : at / max(Float64(nrm), eps(Float64))
+    if rule === :linear
+        per_test = budget.basis / (2 * (nb + 1) * nf)
+        return BasisAllocation(2 * per_test, per_test, per_test, per_test, scale, :linear)
+    end
+    per_bond = budget.basis / sqrt(nb * nf)
     # Four tests (A, B-left/right counted as one sampling decision, C/D as one closure
     # decision) -> sqrt(4) = 2. Kept as an explicit `sqrt(4)` so the count is visible.
     per_test = per_bond / sqrt(4)
-    at = abs(tau)
-    scale = iszero(at) ? 1.0 : at / max(Float64(nrm), eps(Float64))
-    return BasisAllocation(per_bond, per_test, per_test, per_test, scale)
+    return BasisAllocation(per_bond, per_test, per_test, per_test, scale, :rss)
 end
 
 """
