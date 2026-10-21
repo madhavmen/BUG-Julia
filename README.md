@@ -100,7 +100,7 @@ frame from the mirror, with the probe projected before the MPO contraction, the 
 after, and a sectorwise Householder QR (numerical rank only) choosing the directions -- no
 `H*Theta`, no projector and no SVD in the selection. `:one_sided_qr_streamed` (drops the
 opposite-leg projector) and `:svd_select` (the original two-sided SVD selection, and what the
-legacy path runs) are ablations. The `order > 1` frontier sweeps still use `:svd_select`
+legacy path runs) are ablations. The `order > 1` frontier sweeps expand under the same policy
 (`info.record.closure_policy`). `info.record` is the step's typed `StepRecord`: policy, QR
 backend, kernel counters (streamed actions, one-site and root applications, QR ranks, new
 sectors, seconds and bytes per kernel), `D_old`/`D_stage`/`D_final` and `limits`

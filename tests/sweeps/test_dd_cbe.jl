@@ -1,5 +1,8 @@
-# tests/sweeps/test_dd_cbe.jl -- updated_cbe_high_order_parallel.md, Tasks 1 to 3.
+# tests/sweeps/test_dd_cbe.jl -- updated_cbe_high_order_parallel.md, Tasks 1 to 4.
 #
+#   Task 4  the order-p frontier sweeps expand under the step's policy (`_frontier_expand`), the
+#           one-site Krylov stage keeps the DD directions verbatim and adds a direction once, and
+#           order-3 steps match the exact-CBE closure.
 #   Task 3  the incremental DD controller (`_dd_controller`): every streamed column cached and
 #           counted once, a nonincreasing cached holdout residual, the range error against the
 #           exact DD range following the share, a candidate block blind to the dominant sector
@@ -341,7 +344,7 @@ end
     ih = cbe_bug_step!(copy(psi0), mpo, -0.05im; parallel = :half_sweeps, kw...)
     @test ih.record.parallel === :half_sweeps
     io = cbe_bug_step!(copy(psi0), mpo, -0.05im; order = 2, kw...)
-    @test io.record.closure_policy === :svd_select     # frontier sweeps: Task 4/5, reported
+    @test io.record.closure_policy === :dd_qr_streamed  # frontier sweeps: plan T4.1
 end
 
 # ── Task 3: the incremental DD controller ─────────────────────────────────────────────────
@@ -494,6 +497,70 @@ end
         @test argmax(leak) > 1 && maximum(leak) > 100 * leak[1]
     end
     @info "T3.5 Taylor leak h^m/m! ||(I-P) H^m v||, m = 1..3" h rows
+end
+
+# ── Task 4: the one-site Krylov stage after DD-CBE ────────────────────────────────────────
+
+@testset "T4.1: frontier CBE runs the step's policy" begin
+    mpo, psi, f, lenv, renv = _hb_bond()
+    i = 4
+    alloc = RC.BasisAllocation(1e-6, 1e-6, 1e-6, 1e-6, 1.0)
+    skl, skr = RC._sketch_closures(f, () -> apply_h_two_site(frame_theta(f), mpo, i, lenv, renv))
+    run(pol, side) = RC._frontier_expand(f, skl, skr, mpo, i, lenv, renv, side,
+                                         (cbe_policy = pol, alloc = alloc), RC.AdaptiveLedger(),
+                                         Random.MersenneTwister(9))
+    for side in (:left, :right)
+        e = run(:dd_qr_streamed, side)
+        ref = dd_cbe_expand(f, mpo, i, lenv, renv, side; alloc = alloc, version = i,
+                            ledger = RC.AdaptiveLedger(), rng = Random.MersenneTwister(9))
+        @test _rel(e.U_ex, ref.U_ex) < 1e-14 && _rel(e.V_ex, ref.V_ex) < 1e-14
+        # one-sided: the frame opposite `side` comes back as it went in
+        @test side === :left ? e.V_ex === f.V0 : e.U_ex === f.U0
+    end
+    s = run(:svd_select, :left)                     # two-sided: both frames grow
+    @test leg_dim(s.U_ex, 3) > f.old_rank && leg_dim(s.V_ex, 1) > f.old_rank
+end
+
+# Plan T4.1: the Krylov stage starts from the DD frame and must not regenerate what it holds.
+@testset "T4.1: Krylov after DD-CBE keeps its directions and adds each once, $side" for side in
+        (:left, :right)
+    # `_hb_wide`: at `_hb_bond`'s cap 4 the local room is 8 and CBE alone fills it. A loose CBE
+    # share and a tight Krylov one leave the Krylov stage directions to find.
+    mpo, psi, f, lenv, renv = _hb_wide()
+    i, tau = 6, ComplexF64(-0.05im)
+    left = side === :left
+    alloc = RC.BasisAllocation(1e-2, 1e-2, 1e-2, 1e-9, 1.0)
+    ex = dd_cbe_expand(f, mpo, i, lenv, renv, side; alloc = alloc,
+                       rng = Random.MersenneTwister(31))
+    seed, Q0, applyH = _kl_stage(side, mpo, i, psi[i], psi[i + 1], lenv, renv, ex)
+    perp, fl = left ? (perp_component, 3) : (perp_component_right, 1)
+    Q1, st1 = RC._krylov_enrich(seed, applyH, Q0, side, tau, alloc)
+    @test st1.met && st1.added > 0
+    @test norm(perp(Q1, Q0)) < 1e-12 * norm(Q0)                 # the DD directions, verbatim
+    @test leg_dim(Q1, fl) == leg_dim(Q0, fl) + st1.added
+    Q2, st2 = RC._krylov_enrich(seed, applyH, Q1, side, tau, alloc)   # a recycled round
+    @test st2.met && st2.added == 0 && leg_dim(Q2, fl) == leg_dim(Q1, fl)
+    @test st2.eta_c <= alloc.krylov && st2.eta_d <= alloc.krylov
+    @info("T4.1 Krylov after DD-CBE", side, old = f.old_rank, cbe = leg_dim(Q0, fl),
+          krylov = st1.added, n_h1 = (st1.n_h1, st2.n_h1))
+end
+
+# The order-p frontier sweeps under each policy integrate like the exact-CBE closure. Not the
+# T3.5 Taylor leak at L = 8: there the frames nearly fill the sector (dim 57 / 69 of 70) and
+# order 1 already holds H^2, H^3 psi below the budget (hq13b 17419262: 3.5e-7, 1.6e-6 at 1e-4).
+@testset "T4.1: order-3 steps under $pol == exact CBE to tolerance" for pol in
+        (:dd_qr_streamed, :svd_select)
+    set_symmetry!(:U1)
+    L = 10
+    mpo = xxz_mpo(L; J = 1.0, delta = 1.0)
+    tau = ComplexF64(-0.05im)
+    akw = (tol_basis = 1e-7, tol_trunc = 1e-9, tol_expv = 1e-10, maxdim = 64, order = 3)
+    ex, ps = neel_state(L), neel_state(L)
+    for _ in 1:4
+        cbe_bug_step!(ex, mpo, tau; exact = true, akw...)
+        @test cbe_bug_step!(ps, mpo, tau; cbe_policy = pol, akw...).record.closure_policy === pol
+    end
+    @test 1 - _fid(ps, ex) < 1e-8
 end
 
 end # DD-QR CBE

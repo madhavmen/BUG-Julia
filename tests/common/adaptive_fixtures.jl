@@ -65,27 +65,29 @@ the Krylov stage has something left to find (at the defaults CBE fills the local
 """
 function _xx_kl(side::Symbol; L = 8, i = 4, steps = 2, dex = 0)
     mpo, psi = _xx_warm(L, steps)
+    canonical!(psi, side === :left ? i : i + 1)
+    f = RC._frame_from(psi[i], psi[i + 1])
+    lch, rch = _envs(psi, mpo, i, L)
+    ex = RC.cbe_expand(f, mpo, i, lch, rch; dex = dex)
+    return (; _kl_stage(side, mpo, i, psi[i], psi[i + 1], lch, rch, ex)...,
+            old = side === :left ? f.U0 : f.V0)
+end
+
+"""
+The seed and one-site operator `half_left!`/`half_right!` hand `_krylov_enrich` after the CBE
+`ex` at bond `i` of the two-site block `left * right` (centre in the block): `(seed, Q0, applyH)`.
+"""
+function _kl_stage(side::Symbol, mpo, i, left, right, lch, rch, ex)
     if side === :left
-        canonical!(psi, i)
-        K = psi[i]
-        f = RC._frame_from(K, psi[i + 1])
-        lch, rch = _envs(psi, mpo, i, L)
-        ex = RC.cbe_expand(f, mpo, i, lch, rch; dex = dex)
-        M = to_concrete(contract(psi[i + 1], (2, 3), ex.V_ex', (2, 3)))
-        seed = to_concrete(contract(K, (3,), M, (1,)))
+        M = to_concrete(contract(right, (2, 3), ex.V_ex', (2, 3)))
+        seed = to_concrete(contract(left, (3,), M, (1,)))
         H1 = one_site_h(mpo, i, lch, push_right_channels(rch, mpo, ex.V_ex, i + 1))
-        return (seed = seed, Q0 = ex.U_ex, old = f.U0, applyH = x -> apply_one_site(H1, x))
-    else
-        canonical!(psi, i + 1)
-        B = psi[i + 1]
-        f = RC._frame_from(psi[i], B)
-        lch, rch = _envs(psi, mpo, i, L)
-        ex = RC.cbe_expand(f, mpo, i, lch, rch; dex = dex)
-        M = to_concrete(contract(ex.U_ex', (1, 2), psi[i], (1, 2)))
-        seed = to_concrete(contract(M, (2,), B, (1,)))
-        H1 = one_site_h(mpo, i + 1, push_left_channels(lch, mpo, ex.U_ex, i), rch)
-        return (seed = seed, Q0 = ex.V_ex, old = f.V0, applyH = x -> apply_one_site(H1, x))
+        return (seed = seed, Q0 = ex.U_ex, applyH = x -> apply_one_site(H1, x))
     end
+    M = to_concrete(contract(ex.U_ex', (1, 2), left, (1, 2)))
+    seed = to_concrete(contract(M, (2,), right, (1,)))
+    H1 = one_site_h(mpo, i + 1, push_left_channels(lch, mpo, ex.U_ex, i), rch)
+    return (seed = seed, Q0 = ex.V_ex, applyH = x -> apply_one_site(H1, x))
 end
 
 "The Hermitian map `sum_k c_k (a_k b_k' + conj(c_k) b_k a_k')`, matrix-free on tensors."

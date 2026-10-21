@@ -1412,7 +1412,9 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     nclose = 0
     if adaptive && order > 1
         fr = KLFrames(W, Z, c, lenv_root, renv_root, 0, nothing, nothing, Float64(eshift))
-        ckw = Base.structdiff(exkw, NamedTuple{(:share_ht, :fold_omega)})
+        # Plan T4.1: the frontier sweeps expand under the step's policy, like the half-sweeps.
+        ckw = merge(Base.structdiff(exkw, NamedTuple{(:share_ht, :fold_omega)}),
+                    (cbe_policy = policy,))
         cl = _krylov_closure!(fr, psi, mpo, S0, tau, alloc, ckw; order = order,
                               workcap = wcap_step, nrm = _nrm, parallel = parallel, rng = rng,
                               ledger = ledger, fold = fold_omega, checks = closure_checks)
@@ -1563,7 +1565,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     kc = merge_counters!(merge_counters!(merge_counters!(KernelCounters(), accL.kc), accR.kc),
                          kroot)
     rec = StepRecord(policy, policy === :svd_select ? :svd_select : _qr_backend(),
-                     order > 1 ? :svd_select : :none, order, parallel_sym, kc,
+                     order > 1 ? policy : :none, order, parallel_sym, kc,
                      maximum(bd0; init = 0), max(maximum(expanded; init = 0), leg_dim(Z[c], 1)),
                      maximum(bond_dims(psi); init = 0), nroot[], t_step,
                      Base.gc_bytes() - _b0step, Int(Sys.maxrss()),

@@ -458,6 +458,27 @@ function _new_sectors(old, new, leg::Int)
     return count(s -> !(first(s) in have), new.spaces[leg])
 end
 
+"""
+    _frontier_expand(f, skl, skr, mpo, i, lch, rch, side, ckw, ledger, rng) -> CBEExpansion
+
+A frontier bond's CBE under the step's `cbe_policy` (in `ckw`, `cbe_bug_step!`'s; plan T4.1): the
+DD-QR policies grow `side`'s frame by [`dd_cbe_expand`](@ref), exactly as the half-sweeps do, so
+the Krylov stage after it starts from those directions; `:svd_select` runs `cbe_expand` on the
+frontier's sketch closures.
+"""
+function _frontier_expand(f::BondFrame, skl, skr, mpo, i::Int, lch, rch, side::Symbol,
+                          ckw::NamedTuple, ledger::AdaptiveLedger, rng::AbstractRNG)
+    policy = get(ckw, :cbe_policy, :svd_select)
+    policy === :svd_select &&
+        return cbe_expand(f, skl, skr; Base.structdiff(ckw, NamedTuple{(:cbe_policy,)})...,
+                          ledger = ledger, rng = rng)
+    return dd_cbe_expand(f, mpo, i, lch, rch, side; policy = policy, ledger = ledger, rng = rng,
+                         alloc = get(ckw, :alloc, nothing), workcap = get(ckw, :workcap, 0),
+                         growth = get(ckw, :growth, ADAPTIVE_GROWTH),
+                         thin_search = get(ckw, :thin_search, true),
+                         exact = get(ckw, :exact, false), version = i)
+end
+
 # Tag every bond entry a frontier sweep logged, after `_log_bond!` wrote it.
 _tag_last!(lg::AdaptiveLedger, extra::NamedTuple) =
     (lg.bond_log[end] = merge(lg.bond_log[end], extra); lg)
@@ -468,9 +489,10 @@ _tag_last!(lg::AdaptiveLedger, extra::NamedTuple) =
 The left half-sweep of one frontier MPS `Fm` (centre at the root, built from `fr`): bond by bond
 the current frame `fr.W[i]` is embedded into the grown basis of bond `i-1` (`U0 = Pm W[i]`, an
 overlap, not an assumption), the exact outside-space action of the frontier's two-site block is
-measured, and -- if it exceeds the bond's share and `enrich` -- `cbe_expand` and `_krylov_enrich`
-append validated directions to `U0`, which is kept verbatim. Returns the new frames (re-tagged to
-generation `gen`), the root environment, the bond ledger and the per-bond misses.
+measured, and -- if it exceeds the bond's share and `enrich` -- the step's CBE
+([`_frontier_expand`](@ref)) and `_krylov_enrich` append validated directions to `U0`, which is
+kept verbatim. Returns the new frames (re-tagged to generation `gen`), the root environment, the
+bond ledger and the per-bond misses.
 
 A MEASURING sweep (`enrich = false`) grows nothing, so it runs in the frames themselves: `U0 =
 fr.W[i]` with no overlap `Pm` (identity there) and the generation's cached frame chain for `lch`
@@ -521,7 +543,7 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
         bl = AdaptiveLedger()
         quiet = indicator(alloc, leak[i]) <= alloc.per_bond
         Wi = if enrich && !quiet
-            ex = cbe_expand(f, skl, skr; ckw..., ledger = bl, rng = rng)
+            ex = _frontier_expand(f, skl, skr, mpo, i, lch, rch, :left, ckw, bl, rng)
             M = to_concrete!(contract(Fm[i + 1], (2, 3), ex.V_ex', (2, 3)))
             Kex = to_concrete!(contract(K, (3,), M, (1,)))
             H1 = shift_h(one_site_h(mpo, i, lch, push_right_channels(rch, mpo, ex.V_ex, i + 1)),
@@ -598,7 +620,7 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
         bl = AdaptiveLedger()
         quiet = indicator(alloc, leak[j]) <= alloc.per_bond
         Zj = if enrich && !quiet
-            ex = cbe_expand(f, skl, skr; ckw..., ledger = bl, rng = rng)
+            ex = _frontier_expand(f, skl, skr, mpo, j, lch, rch, :right, ckw, bl, rng)
             M = to_concrete!(contract(ex.U_ex', (1, 2), Fm[j], (1, 2)))
             Bex = to_concrete!(contract(M, (2,), B, (1,)))
             H1 = shift_h(one_site_h(mpo, j + 1, push_left_channels(lch, mpo, ex.U_ex, j), rch),
