@@ -251,3 +251,27 @@ failure is OS-U3 positivity (L = 6 Lindblad, order 2, `hermitian = false`, 4 com
 `min_eig = -1.76e-4` against the test's `-1e-4`. Every run on 2026-10-18 (default
 `:svd_select`) gave `-2.9e-8`. This is the first run of the file since T1–2 made
 `:dd_qr_streamed` the default. hq14b was cancelled before test_imaginary_time.jl.
+
+## Task 5
+
+Branch `plan/hq-task-5` (stacked on `plan/hq-task-4`), tests `dc5275a`. No source change was
+needed: the root, the closure and the compression already met the plan. The gaps were in the
+tests:
+* p = 4 and 5 had never run;
+* UT3 accepted `errs[3] < 1e-12` in place of a slope;
+* there was no exact root-matrix comparison, no root ablation and no global order test.
+
+| item | status | evidence |
+|---|---|---|
+| T5.1 stage maps are the Krylov closure, not predictor stages | DONE | order p closes the frontiers `F_j = (τ^j/j!) B^j S0`, j = 1..p−1 (`_projected_frontiers`), each with one enriching frontier sweep (`_single_pass_closure!`), in the frames the previous sweep grew; there is no `Ỹ_j → Ỹ_{j+1}` predictor |
+| T5.1 root starts from the original state | DONE | `S0 = AL·AR` of ψ (cbe_bug.jl:1405); for `order > 1` `cl.S0`, re-projected `_project_root(psi, fr)` after every sweep that added (krylov_closure.jl:980, :1043) |
+| T5.1 test exactly 1..5, order measured | TEST | UT3 (test_krylov_closure.jl): `_dw_errors(p, (0.4, 0.2, 0.1))`, `_finest_order >= p + 0.6`, for p = 1..5; an order the floors hide fails |
+| T5.2 root terminated by a norm-scaled residual from `tol_root` | DONE | `tol_root → tol_expv → budget.expv → expv(conv_tol)`; `report.err` is Saad's estimate relative to ‖x‖ |
+| T5.2 estimator vs the exact small root-matrix exponential | TEST | test_hq_root.jl T5.2: `U'HU` on the root space of a real step's frames (`_root_basis`, m ≤ 10); `est ≤ tol_root`, `err ≤ 10 tol_root`, `err ≤ 10 est`, the root action count grows with the tolerance |
+| T5.2 root action count in the benchmark | DEFERRED to T8 | `record.root_iters` is recorded per step |
+| T5.3 root ablation q < p, q = p, exponential | TEST | T5.3 at p = 3: trapezoid (q = 2) is capped at local order 3; radau2, radau3 and exp reach 4 |
+| T5.4 lossless root split | DONE / TEST | `root_cutoff = 0`; T5.4, p = 1..5 with `truncate = false`: discarded < 1e-14, `proj_err < 1e-12`, `n_compress == 0`, norm kept to 1e-10 |
+| T5.4 per-bond `w_i` and cumulative diagnostic, max ≠ cumulative | DONE | `bond_log[].discarded` per bond, `ledger.discarded` cumulative; UT8 rebuilds the cumulative figure from the per-bond weights and asserts it exceeds the worst bond |
+| T5.5 global order at fixed T, valid range only | TEST | T5.5: T = 0.8, p = 1..5; `_observed_orders` reads `log2(e(h)/e(h/2))` only where both errors are 10× above their floor (`tol_basis` + `expv_err` + discarded + `proj_err`), else `nothing`, which fails |
+| Acceptance: original-state projection identity | TEST | T5.2 `‖v0 − UU'v0‖ < 1e-12`; T5.4 `proj_err` |
+| Acceptance: root-operator Hermiticity, equivalence to dense | TEST | T5.2 at `tol_root = 1e-4` |
