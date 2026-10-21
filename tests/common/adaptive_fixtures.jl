@@ -91,22 +91,29 @@ function _kl_stage(side::Symbol, mpo, i, left, right, lch, rch, ex)
 end
 
 """
-Orthonormal dense basis of the root space `(W ⊗ Z) core` of the frames `fr`, from random cores on
-the blocks of `S0 = P psi0` and of `B^m S0`, m <= `mmax`: every root block `H^m psi0` can reach.
-Needs `dense_state` (`dense_reference.jl`).
+Orthonormal dense basis of the space `embed` maps tensors into, from random tensors on the blocks
+of `T`, `apply(T)`, ..., `apply^mmax(T)`: every block the generator reaches from `T`.
 """
-function _root_basis(psi0, mpo, fr; mmax = 3, rng = Random.MersenneTwister(5))
-    B = RC._root_generator(mpo, fr)
-    T = RC._project_root(psi0, fr)
+function _span_basis(T, apply, embed; mmax = 3, rng = Random.MersenneTwister(5))
     cols = Vector{ComplexF64}[]
     for m in 0:mmax
-        m > 0 && (T = to_concrete(RC.apply_zero_site(B, T)))
+        m > 0 && (T = to_concrete(apply(T)))
         for _ in 1:sum(length, T.RMTs)
-            push!(cols, dense_state(RC._frontier_mps(psi0, fr, RC._randomize_like(T, rng))))
+            push!(cols, embed(RC._randomize_like(T, rng)))
         end
     end
     F = svd(reduce(hcat, cols))
     return F.U[:, 1:count(>(1e-10 * F.S[1]), F.S)]
+end
+
+"""
+Orthonormal dense basis of the root space `(W ⊗ Z) core` of the frames `fr`: the blocks of
+`S0 = P psi0` and of `B^m S0`, m <= `mmax`. Needs `dense_state` (`dense_reference.jl`).
+"""
+function _root_basis(psi0, mpo, fr; mmax = 3, rng = Random.MersenneTwister(5))
+    B = RC._root_generator(mpo, fr)
+    return _span_basis(RC._project_root(psi0, fr), x -> RC.apply_zero_site(B, x),
+                       X -> dense_state(RC._frontier_mps(psi0, fr, X)); mmax = mmax, rng = rng)
 end
 
 """

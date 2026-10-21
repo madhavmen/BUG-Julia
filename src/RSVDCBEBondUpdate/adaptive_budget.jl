@@ -254,13 +254,15 @@ mutable struct AdaptiveLedger
     # ||F_j||` (upper bound). Filled by `order > 1` with `closure_checks` and by `closure_probe` on `order = 1`.
     leak_initial::Vector{Float64}
     rho_initial::Vector{Float64}
+    # Plan Task 6: the parallel K/L/S step's account (`_kls_finish`), `nothing` on every other step.
+    kls::Any
 end
 
 AdaptiveLedger() = AdaptiveLedger(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
                                   0, 0, 0, 0, 0, 0, 0, 0, false, true,
                                   false, 0.0, 0, 0, 0, 0, Symbol[], Any[], Any[],
                                   1, 0, 0, Float64[], 0.0, 0, 0, 0, Any[], 0.0, 0,
-                                  Float64[], Float64[])
+                                  Float64[], Float64[], nothing)
 
 """
     _unmet!(ledger, what) -> ledger
@@ -364,6 +366,7 @@ function merge_ledger!(a::AdaptiveLedger, b::AdaptiveLedger)
     a.n_compress += b.n_compress
     append!(a.leak_initial, b.leak_initial)
     append!(a.rho_initial, b.rho_initial)
+    b.kls === nothing || (a.kls = b.kls)
     return a
 end
 

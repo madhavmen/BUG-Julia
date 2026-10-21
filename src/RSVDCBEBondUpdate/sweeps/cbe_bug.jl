@@ -734,6 +734,10 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # The plan's spelling is accepted too: `:serial` / `:half_sweeps`
                        # (`:full`, the Task 6 integrator, is refused; `_resolve_parallel`).
                        parallel::Union{Bool, Symbol} = false,
+                       # ⚠ A DIFFERENT INTEGRATOR, set by `parallel_kls_step!` (plan Task 6): the
+                       # parallel K/L/S step in the preliminary frames, with this K/L/S schedule
+                       # (`KLS_SCHEDULES`). `nothing` is the standard augmented root step.
+                       kls::Union{Nothing, Symbol} = nothing,
                        # ⚠ AN A/B FOR ONE PERFORMANCE FIX, NOT A TUNING KNOB. `false` restores the
                        # pre-2026-08-27 behaviour where each of `cbe_expand`'s three sketch calls
                        # rebuilt `H*Theta` from scratch. Results are IDENTICAL either way -- only
@@ -803,6 +807,16 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     adaptive || policy === :svd_select || throw(ArgumentError(
         "cbe_policy = $policy needs the adaptive solver; $(join(legacy_names, ", ")) selected " *
         "the legacy path, whose fixed-count selection is :svd_select"))
+    if kls !== nothing
+        kls in KLS_SCHEDULES || throw(ArgumentError(
+            "the K/L/S schedule must be one of $(KLS_SCHEDULES), got $kls"))
+        adaptive || throw(ArgumentError(
+            "the parallel K/L/S step needs the adaptive solver; $(join(legacy_names, ", ")) " *
+            "selected the legacy path"))
+        frame_state === nothing && !outside_residual || throw(ArgumentError(
+            "the parallel K/L/S step does not combine with the midpoint predictor or the " *
+            "outside-residual re-enrichment"))
+    end
 
     dex          = legacy_or_default(dex, :dex)
     growth       = adaptive ? ADAPTIVE_GROWTH : legacy_or_default(growth, :growth)
@@ -1361,9 +1375,9 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     #   * Telum's `svd`/`contract` allocate their HPTT buffers PER CALL (`permute_mat` is a local),
     #     so there is no shared scratch to race on. Its only globals are the opt-in cost counters
     #     and the display settings.
-    #   * `KRYLOV_LOG` IS a shared unsynchronised `Vector` -- but `expv` runs only in the ROOT
-    #     solve, which is outside both tasks. The half-sweeps use `_krylov_frame`, which does not
-    #     record. Moving an `expv` call into a half-sweep would make the log racy.
+    #   * `KRYLOV_LOG` is shared, and `expv` appends to it under `_KRYLOV_LOCK` (the parallel
+    #     K/L/S stages run three solves at once). The half-sweeps use `_krylov_frame`, which does
+    #     not record.
     #   * `_LOCAL_SPACES` is a lazily-filled global `Dict`; it is already populated by the time a
     #     state exists, so the sweeps only read it.
     if parallel
@@ -1450,6 +1464,16 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     peak = accL.peak + accR.peak +
            sum(tensor_elements(t) for t in (W[c], Z[c], S0); init = 0)
 
+    # Plan Task 6: the parallel K/L/S step's K and L stages start from `psi` in these frames
+    # before the root solve, so `:concurrent` overlaps them with it; the root solve below is its
+    # S stage, and `_kls_finish` merges the three after it. Same integrator settings as the root.
+    kls_stage(apply, x, rep) = expv(apply, tau, x; hermitian = hermitian, maxiter = maxiter,
+                                    tol = tol, reorth = reorth, conv_tol = root_conv_tol,
+                                    substeps = root_substeps, report = rep,
+                                    root_method = root_method)
+    klsst = kls === nothing ? nothing :
+        _kls_start(psi, mpo, W, Z, c, lenv_root, renv_root, kls_stage, eshift, kls)
+
     kroot = KernelCounters()
     H0 = RootOp(shift_h(zero_site_h(mpo, c, lenv_root, renv_root, W[c], Z[c]), eshift), c, kroot)
     nroot = Ref(0)
@@ -1482,6 +1506,22 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                          per_right = out === nothing ? Float64[] : out.per_right ./ n1,
                          # the step's outside-Galerkin defect, `|tau| ||(I-P) H psi_1|| / ||psi_1||`
                          resid = out === nothing ? NaN : abs(tau) * out.bound / n1)
+    end
+    nkls = 0
+    if klsst !== nothing
+        # The four-block core in the grown root frames, or -- when the omitted new-new block is
+        # above `tol_basis` -- the standard augmented root solve in them (plan T6.3).
+        solve_aug(h, S) = (op = RootOp(shift_h(h, eshift), c, kroot);
+                           kls_stage(x -> (nroot[] += 1; apply_zero_site(op, x)), S, rootrep))
+        kr = _kls_finish(klsst, mpo, W, Z, c, lenv_root, renv_root, S0, S1, tau, solve_aug;
+                         nrm = _nrm, tol_missing = budget.basis)
+        W[c], Z[c], S1 = kr.W, kr.Z, kr.S1
+        merge_counters!(kroot, kr.kc)
+        nkls = kr.account.n_K + kr.account.n_L
+        ledger.kls = kr.account
+        ledger.r_aug = max(ledger.r_aug, leg_dim(W[c], 3), leg_dim(Z[c], 1))
+        max(kr.account.err_K, kr.account.err_L) > budget.expv * (1 + 1e-8) &&
+            _unmet!(ledger, :expv)
     end
     if adaptive && rootrep[] !== nothing
         ledger.expv_err   = rootrep[].err
@@ -1565,14 +1605,14 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     kc = merge_counters!(merge_counters!(merge_counters!(KernelCounters(), accL.kc), accR.kc),
                          kroot)
     rec = StepRecord(policy, policy === :svd_select ? :svd_select : _qr_backend(),
-                     order > 1 ? policy : :none, order, parallel_sym, kc,
+                     order > 1 ? policy : :none, order, kls === nothing ? parallel_sym : :full, kc,
                      maximum(bd0; init = 0), max(maximum(expanded; init = 0), leg_dim(Z[c], 1)),
                      maximum(bond_dims(psi); init = 0), nroot[], t_step,
                      Base.gc_bytes() - _b0step, Int(Sys.maxrss()),
                      _step_limits(adaptive ? ledger : nothing),
                      adaptive ? alloc.rule : :legacy)
     return CBEBugSweepInfo(expanded, n_new, c, root_rank, epre, efnl,
-                           discarded, accL.nmv + accR.nmv + nroot[] + nclose, peak,
+                           discarded, accL.nmv + accR.nmv + nroot[] + nclose + nkls, peak,
                            accL.ngrow + accR.ngrow, leg_dim(Z[c], 1),
                            accL.tcbe + accR.tcbe, accL.tkry + accR.tkry, troot[], ttrunc[],
                            accL.tsplit + accR.tsplit, accL.tframe + accR.tframe,

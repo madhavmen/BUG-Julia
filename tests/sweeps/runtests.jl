@@ -66,6 +66,9 @@ include(joinpath(@__DIR__, "..", "common", "free_fermion.jl"))
     include("test_adaptive_diagnostics.jl")
     # ...and the general-order Krylov closure built on all of the above (`order = p`).
     include("test_krylov_closure.jl")
+    # ...the root accuracy and orders 1-5 (plan Task 5), and the parallel K/L/S step (Task 6).
+    include("test_hq_root.jl")
+    include("test_parallel_kls.jl")
     include("test_imaginary_time.jl")
     include("test_adaptive_dmrg.jl")
     include("test_adaptive_parallel.jl")

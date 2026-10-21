@@ -232,6 +232,10 @@ include("sweeps/cbe_bug.jl")
 #                          global Krylov frontiers of the root generator, embedded as MPS and
 #                          swept with the same CBE / Tests C/D kernels until they close.
 include("sweeps/krylov_closure.jl")
+#   sweeps/parallel_kls.jl  the fully parallel K/L/S integrator after the preliminary half-sweeps
+#                          (`parallel_kls_step!`, plan Task 6): K, L and the root S from `psi` in
+#                          the preliminary frames, merged in the four-block reconstruction.
+include("sweeps/parallel_kls.jl")
 #   sweeps/imaginary_time.jl  NORMALISED IMAGINARY TIME around `cbe_bug_step!` (imaginary-time /
 #                          open-system plan, Task 1): `Eshift`, the energy split root/compression,
 #                          the outside-Galerkin defect, reject/re-enrich/retry, and the panel grids.
@@ -326,7 +330,7 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        DMRGCBEInfo, DMRGCBERun, dmrg_cbe1s_sweep!, dmrg_cbe1s!,
        rsvd_cbe_dmrg1s!, exact_cbe_dmrg1s!, rsvd_cbe_dmrg1s_seeded!,
        TDVPCBEInfo, tdvp_cbe1s_step!,
-       CBEBugSweepInfo, cbe_bug_step!, cbe_bug_midpoint_step!,
+       CBEBugSweepInfo, cbe_bug_step!, cbe_bug_midpoint_step!, parallel_kls_step!,
        # sweeps/imaginary_time.jl -- normalised imaginary time (plan Task 1)
        ite_step!, ite_evolve!, log_panel_steps, uniform_beta_steps, beta_grid, shift_h,
        # models/liouville.jl -- symmetry-aware MPDOs (plan Task 2)

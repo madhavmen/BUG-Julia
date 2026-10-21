@@ -70,11 +70,15 @@
 # matrix-free applications it actually performed).
 const KRYLOV_LOG = Int[]
 const _KRYLOV_RECORD = Ref(false)
+# The parallel K/L/S step (plan Task 6) runs three `expv` solves at once; a racy `push!` would
+# silently drop entries rather than fail.
+const _KRYLOV_LOCK = ReentrantLock()
 
 enable_krylov_log() = (_KRYLOV_RECORD[] = true; empty!(KRYLOV_LOG); nothing)
 disable_krylov_log() = (_KRYLOV_RECORD[] = false; nothing)
 get_krylov_log() = copy(KRYLOV_LOG)
-_record_krylov(k::Int) = (_KRYLOV_RECORD[] && push!(KRYLOV_LOG, k); nothing)
+_record_krylov(k::Int) =
+    (_KRYLOV_RECORD[] && lock(() -> push!(KRYLOV_LOG, k), _KRYLOV_LOCK); nothing)
 
 """
 Largest `|Re(tau*lambda)|` tolerated inside one substep's matrix exponential.
