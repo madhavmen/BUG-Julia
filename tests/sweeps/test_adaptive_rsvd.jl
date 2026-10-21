@@ -428,16 +428,17 @@ end
 
     @testset "a tighter basis tolerance never buys less rank" begin
         # MONOTONICITY IS THE CONTRACT A TOLERANCE MUST HONOUR: asking for more accuracy may
-        # cost more rank, but it must never silently cost less.
-        function _rank(tb)
+        # cost more rank, but it must never silently cost less. The rank tol_basis buys is the
+        # step's FRAME (`record.D_stage`), at every step. Not the final bond: that is tol_trunc's
+        # rank of the computed state, and a looser state carries its error as extra singular
+        # values (hqrank2 17419263, DD: D_stage 18 / 37 but final max bond 15 / 14 at 1e-3 / 1e-8,
+        # exact-CBE reference 13).
+        function _frames(tb)
             psi = copy(psi0)
-            for _ in 1:4
-                cbe_bug_step!(psi, mpo, dt; tol_basis = tb, tol_trunc = 1e-10,
-                              tol_expv = 1e-10, maxdim = 64, parallel = true)
-            end
-            maximum(bond_dims(psi); init = 0)
+            [cbe_bug_step!(psi, mpo, dt; tol_basis = tb, tol_trunc = 1e-10, tol_expv = 1e-10,
+                           maxdim = 64, parallel = true).record.D_stage for _ in 1:4]
         end
-        @test _rank(1e-8) >= _rank(1e-3)
+        @test all(_frames(1e-8) .>= _frames(1e-3))
     end
 
     @testset "maxdim is still a hard ceiling under the adaptive path" begin
