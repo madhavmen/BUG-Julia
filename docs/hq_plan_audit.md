@@ -143,3 +143,8 @@ frames of `order = 1`; `order > 1` uses the same `_project_root` path (not re-te
   (a two-site-like K-step reaching `H²` two-site directions); on the DD path it runs through `V0`
   (the standard BUG K-step), and the DD QR adds only first-order `P_L^D H Θ P_R^D` directions.
   This is the leakage T3.5 (Taylor-leak) and the order-p rounds of T4/T5 address.
+* USER 2026-10-21: keep the plan design. `c05c87c` grades the end-to-end test on what the plan
+  supports (svd < 1e-4, DD dt-convergence ratio ≥ 3.5, tol_basis-independence, DD ≡ one-sided)
+  and marks the 10×-svd parity `@test_broken` (T3.5/T4).
+* hq12c 17410287 (`c05c87c`): **test_dd_cbe.jl 113 pass / 1 broken / 0 fail**, MaxRSS 1.6 G.
+  Tasks 1–2 CONFIRMED.
