@@ -93,6 +93,21 @@ accepted. `exact = true` replaces the random sketch by the complete local basis.
 are complex by default; `neel_state(L; eltype = Float64)` (likewise `domain_wall_state`,
 `product_state`) gives a real one.
 
+**The bond expansion is DD-projected, MPO-streamed and QR-only** on the adaptive path
+(`cbe_policy = :dd_qr_streamed`, [cbe_bug_high_order_rsvd_parallel_tasks.md](cbe_bug_high_order_rsvd_parallel_tasks.md)
+Task 2): the K-sweep grows only the left frame from `P_L^D X P_R^D Ω`, the L-sweep only the right
+frame from the mirror, with the probe projected before the MPO contraction, the output projected
+after, and a sectorwise Householder QR (numerical rank only) choosing the directions -- no
+`H*Theta`, no projector and no SVD in the selection. `:one_sided_qr_streamed` (drops the
+opposite-leg projector) and `:svd_select` (the original two-sided SVD selection, and what the
+legacy path runs) are ablations. The `order > 1` frontier sweeps still use `:svd_select`
+(`info.record.closure_policy`). `info.record` is the step's typed `StepRecord`: policy, QR
+backend, kernel counters (streamed actions, one-site and root applications, QR ranks, new
+sectors, seconds and bytes per kernel), `D_old`/`D_stage`/`D_final` and `limits`
+(`:basis_limited`, `:root_limited`, `:truncation_limited`, `:work_limited`, `:rank_limited`).
+`tol_root` is accepted as the plan's name for `tol_expv`, and `parallel = :half_sweeps` /
+`:serial` for `true` / `false`.
+
 **`order = p`** (default `1`) is the one method choice on top of the three tolerances. For
 `p > 1` the step closes the global Krylov frontiers of the root generator before its single root
 `expv`: each `F_j = (tau^j/j!) B^j S0`, `j = 1..p-1` (`B = P (tau H) P`), is embedded as an MPS and

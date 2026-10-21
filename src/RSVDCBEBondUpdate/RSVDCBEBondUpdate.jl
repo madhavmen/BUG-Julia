@@ -104,6 +104,10 @@ include("cbe_core.jl")
 # After `cbe_core.jl`, since it adds methods to `cbe_expand` and the sketches.
 include("mpo.jl")
 include("zero_site_core.jl")
+# The DD-projected, MPO-streamed, QR-only CBE (cbe_bug_high_order_rsvd_parallel_tasks.md Task 2),
+# the shared operator-action interface and the typed step record (Task 1). After `mpo.jl` and
+# `zero_site_core.jl`, whose operators it wraps.
+include("dd_cbe.jl")
 # Jan BUG: the full KLS step at EVERY bond across the whole chain -- CBE for the basis update and
 # the 0-site S step taken as well, then QR'd with `R` discarded so no evolution accumulates -- and
 # at the far bond the S step is KEPT, which is the step. One truncation after the sweep,
@@ -267,6 +271,11 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        AdaptiveBudget, BasisAllocation, basis_allocation, indicator,
        AdaptiveLedger, merge_ledger!, work_ceiling, budget_status, budget_diagnostic,
        CBEExpansion, cbe_expand,
+       # DD-QR CBE (plan Task 2), the operator interface and the step record (Task 1)
+       CBE_POLICIES, dd_cbe_expand, dd_reference_sketch,
+       TwoSiteSketchOp, OneSiteOp, RootOp,
+       apply_two_site_sketch!, apply_one_site!, apply_root!,
+       KernelCounters, StepRecord,
        truncate_sweep!, truncate_recursive!,
        CBEBugOptions, CBEBugRunInfo, tfim_mpo,
        sketch_bond_left, sketch_bond_right, cbe_expand_bond,

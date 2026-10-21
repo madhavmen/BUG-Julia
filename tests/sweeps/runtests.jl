@@ -54,6 +54,8 @@ include(joinpath(@__DIR__, "..", "common", "free_fermion.jl"))
     # ...and then the RSVD controller the tolerances drive: sector coverage, the tail test
     # and the holdout test, which are what turn `tol_basis` into a rank.
     include("test_adaptive_rsvd.jl")
+    # ...and the DD-projected, MPO-streamed, QR-only expansion the half-sweeps run by default.
+    include("test_dd_cbe.jl")
     # ...and the K/L Krylov enrichment (Tests C/D) that turns it into the half-sweep frames.
     include("test_adaptive_krylov.jl")
     # ...and the one budgeted compression plus the rank cap that bounds all of it (Stage 4).

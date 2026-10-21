@@ -345,8 +345,9 @@ mutable struct _HalfAcc
     tsplit::Float64
     tframe::Float64
     tenv::Float64
+    kc::KernelCounters      # this half-sweep's kernel counters (plan T1.4)
 end
-_HalfAcc() = _HalfAcc(0, 0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0)
+_HalfAcc() = _HalfAcc(0, 0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, KernelCounters())
 
 """
     CBEBugSweepInfo
@@ -431,6 +432,9 @@ struct CBEBugSweepInfo
     # Test A/B, or stopped at the work ceiling, returns looking exactly like one that passed --
     # the silent convergence claim the three-tolerance API exists to rule out.
     ledger::Union{Nothing, AdaptiveLedger}
+    # Plan Task 1.4: the typed record of the step -- CBE policy, kernel counters, ranks, limit
+    # statuses (`StepRecord`, dd_cbe.jl).
+    record::StepRecord
 end
 
 """
@@ -559,6 +563,15 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        tol_basis::Union{Nothing, Float64} = nothing,
                        tol_trunc::Union{Nothing, Float64} = nothing,
                        tol_expv::Union{Nothing, Float64} = nothing,
+                       # The plan's name for `tol_expv` (cbe_bug_high_order_rsvd_parallel_tasks.md
+                       # invariant 1); naming both is refused.
+                       tol_root::Union{Nothing, Float64} = nothing,
+                       # ⚠ ABLATION, NOT A METHOD CHOICE (plan T2.5). The CBE selection of the
+                       # half-sweeps: `nothing` is `:dd_qr_streamed` on the adaptive path and
+                       # `:svd_select` (the original two-sided SVD selection) on the legacy path;
+                       # `:one_sided_qr_streamed` drops only the opposite-leg projector. Recorded in
+                       # `info.record.policy`.
+                       cbe_policy::Union{Nothing, Symbol} = nothing,
                        # The temporal order `p` -- a METHOD choice, not a fourth tolerance.
                        # `p > 1` closes the global Krylov frontiers `j = 1..p-1` of the root
                        # generator before the one root solve (`krylov_closure.jl`); `1` is the
@@ -714,7 +727,9 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # the state, so `canonical!(psiL, 1)` runs from the incoming centre instead
                        # of from wherever the other sweep left it. Same spaces, different
                        # floating-point path. `tests/rsvd_cbe/` pins the agreement at 1e-10.
-                       parallel::Bool = false,
+                       # The plan's spelling is accepted too: `:serial` / `:half_sweeps`
+                       # (`:full`, the Task 6 integrator, is refused; `_resolve_parallel`).
+                       parallel::Union{Bool, Symbol} = false,
                        # ⚠ AN A/B FOR ONE PERFORMANCE FIX, NOT A TUNING KNOB. `false` restores the
                        # pre-2026-08-27 behaviour where each of `cbe_expand`'s three sketch calls
                        # rebuilt `H*Theta` from scratch. Results are IDENTICAL either way -- only
@@ -744,6 +759,11 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     L >= 2 || throw(ArgumentError("cbe_bug_step! needs at least two sites"))
     c = root === nothing ? _bug_root_link(L) : root
     1 <= c <= L - 1 || throw(ArgumentError("root must be a bond in 1:$(L - 1), got $c"))
+    parallel_sym = parallel isa Symbol ? parallel : (parallel ? :half_sweeps : :serial)
+    parallel = _resolve_parallel(parallel)
+    (tol_root !== nothing && tol_expv !== nothing) && throw(ArgumentError(
+        "tol_root and tol_expv name the same tolerance; pass one"))
+    tol_root === nothing || (tol_expv = tol_root)
 
     # ── WHICH API DID THE CALLER USE? ───────────────────────────────────────────────────────
     #
@@ -772,6 +792,13 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         "order > 1 is a single-step method and does not combine with the midpoint predictor"))
     closure_probe >= 0 && (closure_probe == 0 || adaptive) || throw(ArgumentError(
         "closure_probe = $closure_probe needs the adaptive solver and a non-negative count"))
+    # Plan T2.5: DD+QR is production; the others are ablations, and the policy is recorded.
+    policy = something(cbe_policy, adaptive ? :dd_qr_streamed : :svd_select)
+    policy in CBE_POLICIES || throw(ArgumentError(
+        "cbe_policy must be one of $(CBE_POLICIES), got $policy"))
+    adaptive || policy === :svd_select || throw(ArgumentError(
+        "cbe_policy = $policy needs the adaptive solver; $(join(legacy_names, ", ")) selected " *
+        "the legacy path, whose fixed-count selection is :svd_select"))
 
     dex          = legacy_or_default(dex, :dex)
     growth       = adaptive ? ADAPTIVE_GROWTH : legacy_or_default(growth, :growth)
@@ -892,11 +919,24 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
 
     troot = Ref(0.0); ttrunc = Ref(0.0)
     _t0step = time_ns()
-    """Time one `cbe_expand` into the calling half-sweep's own accumulator. An explicit
-    `ledger` (the bond's own, see `_log_bond!`) wins over the half-sweep's."""
-    function timed_expand(acc::_HalfAcc, args...; kw...)
+    _b0step = Base.gc_bytes()
+    """Time one bond expansion into the calling half-sweep's own accumulator. An explicit
+    `ledger` (the bond's own, see `_log_bond!`) wins over the half-sweep's. `side` is the frame
+    this half-sweep grows: the DD-QR policies expand that one (`dd_cbe_expand`, plan T2.4);
+    `:svd_select`, and the legacy growth passes (`side = :both`), run `cbe_expand` on both."""
+    function timed_expand(acc::_HalfAcc, args...; side::Symbol = :both, kw...)
         t0 = time_ns()
-        ex = cbe_expand(args...; halfkw(acc)..., kw...)
+        ex = if policy === :svd_select || side === :both
+            cbe_expand(args...; halfkw(acc)..., kw...)
+        else
+            hk = halfkw(acc)
+            dd_cbe_expand(args..., side; policy = policy,
+                          ledger = get(kw, :ledger, hk.ledger), rng = hk.rng,
+                          alloc = get(kw, :alloc, nothing), workcap = get(kw, :workcap, 0),
+                          growth = get(kw, :growth, ADAPTIVE_GROWTH),
+                          thin_search = get(kw, :thin_search, true),
+                          exact = get(kw, :exact, false), kc = acc.kc, version = args[3])
+        end
         acc.tcbe += (time_ns() - t0) / 1e9
         return ex
     end
@@ -1142,7 +1182,8 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                accL.tframe += (time_ns() - t0) / 1e9; f)
         bondlg = adaptive ? AdaptiveLedger() : nothing         # this bond's own ledger (§8)
         ex = record!(accL, n_newL, timed_expand(accL, _fr, mpo, i, lch,
-                                right_channels(rstack, i + 2); exkw..., ledger = bondlg), i, :left)
+                                right_channels(rstack, i + 2); exkw..., ledger = bondlg,
+                                side = :left), i, :left)
         peak!(accL, held + _state_stored(psiL), ex.U_ex, ex.V_ex)
         Vwide[i] = ex.V_ex
         Wcbe[i]  = ex.U_ex
@@ -1155,7 +1196,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             M    = to_concrete!(contract(psiL[i + 1], (2, 3), ex.V_ex', (2, 3)))
             Kex  = to_concrete!(contract(K, (3,), M, (1,)))
             rch1 = push_right_channels(right_channels(rstack, i + 2), mpo, ex.V_ex, i + 1)
-            H1   = shift_h(one_site_h(mpo, i, lch, rch1), eshift)
+            H1   = OneSiteOp(shift_h(one_site_h(mpo, i, lch, rch1), eshift), i, accL.kc)
             tkL0 = time_ns()
             Wkry, kstL = _krylov_enrich(Kex, x -> (accL.nmv += 1; apply_one_site(H1, x)),
                                         ex.U_ex, :left, tau, alloc; workcap = wcap_step)
@@ -1173,7 +1214,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                 bl
             else
                 rch1 = push_right_channels(right_channels(rstack, i + 2), mpo, ex.V_ex, i + 1)
-                H1 = shift_h(one_site_h(mpo, i, lch, rch1), eshift)
+                H1 = OneSiteOp(shift_h(one_site_h(mpo, i, lch, rch1), eshift), i, accL.kc)
                 (t0 = time_ns();
                  bl = _krylov_frame(Kex, x -> (accL.nmv += 1; apply_one_site(H1, x)),
                                     krylov_basis, ktol, tau);
@@ -1233,7 +1274,8 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                accR.tframe += (time_ns() - t0) / 1e9; f)
         bondlg = adaptive ? AdaptiveLedger() : nothing         # this bond's own ledger (§8)
         ex = record!(accR, n_newR, timed_expand(accR, _fr, mpo, j,
-                                left_channels(lstack, j), rch; exkw..., ledger = bondlg), j, :right)
+                                left_channels(lstack, j), rch; exkw..., ledger = bondlg,
+                                side = :right), j, :right)
         peak!(accR, held + _state_stored(psiR), ex.U_ex, ex.V_ex)
         Uwide[j] = ex.U_ex
         Zcbe[j]  = ex.V_ex
@@ -1243,7 +1285,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             M    = to_concrete!(contract(ex.U_ex', (1, 2), psiR[j], (1, 2)))  # (b_L, link_j)
             Bex  = to_concrete!(contract(M, (2,), B, (1,)))
             lch1 = push_left_channels(left_channels(lstack, j), mpo, ex.U_ex, j)
-            H1   = shift_h(one_site_h(mpo, j + 1, lch1, rch), eshift)
+            H1   = OneSiteOp(shift_h(one_site_h(mpo, j + 1, lch1, rch), eshift), j, accR.kc)
             tkR0 = time_ns()
             Zkry, kstR = _krylov_enrich(Bex, x -> (accR.nmv += 1; apply_one_site(H1, x)),
                                         ex.V_ex, :right, tau, alloc; workcap = wcap_step)
@@ -1262,7 +1304,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                 bl
             else
                 lch1 = push_left_channels(left_channels(lstack, j), mpo, ex.U_ex, j)
-                H1 = shift_h(one_site_h(mpo, j + 1, lch1, rch), eshift)
+                H1 = OneSiteOp(shift_h(one_site_h(mpo, j + 1, lch1, rch), eshift), j, accR.kc)
                 (t0 = time_ns();
                  bl = _krylov_frame(Bex, x -> (accR.nmv += 1; apply_one_site(H1, x)),
                                     krylov_basis, ktol, tau);
@@ -1399,7 +1441,8 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     peak = accL.peak + accR.peak +
            sum(tensor_elements(t) for t in (W[c], Z[c], S0); init = 0)
 
-    H0 = shift_h(zero_site_h(mpo, c, lenv_root, renv_root, W[c], Z[c]), eshift)
+    kroot = KernelCounters()
+    H0 = RootOp(shift_h(zero_site_h(mpo, c, lenv_root, renv_root, W[c], Z[c]), eshift), c, kroot)
     nroot = Ref(0)
     rootrep = Ref{Any}(nothing)
     _t0root = time_ns()
@@ -1506,13 +1549,22 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     # Under `parallel = true` they DELIBERATELY DO NOT: two sweeps running at once spend more CPU
     # seconds than the step takes, and a share above 1 is the speedup showing up, not a bug. Keep
     # comparing phases arm-to-arm in seconds; only the serial arm's shares are fractions of a step.
+    t_step = (time_ns() - _t0step) / 1e9
+    kc = merge_counters!(merge_counters!(merge_counters!(KernelCounters(), accL.kc), accR.kc),
+                         kroot)
+    rec = StepRecord(policy, policy === :svd_select ? :svd_select : _qr_backend(),
+                     order > 1 ? :svd_select : :none, order, parallel_sym, kc,
+                     maximum(bd0; init = 0), max(maximum(expanded; init = 0), leg_dim(Z[c], 1)),
+                     maximum(bond_dims(psi); init = 0), nroot[], t_step,
+                     Base.gc_bytes() - _b0step, Int(Sys.maxrss()),
+                     _step_limits(adaptive ? ledger : nothing))
     return CBEBugSweepInfo(expanded, n_new, c, root_rank, epre, efnl,
                            discarded, accL.nmv + accR.nmv + nroot[] + nclose, peak,
                            accL.ngrow + accR.ngrow, leg_dim(Z[c], 1),
                            accL.tcbe + accR.tcbe, accL.tkry + accR.tkry, troot[], ttrunc[],
                            accL.tsplit + accR.tsplit, accL.tframe + accR.tframe,
-                           accL.tenv + accR.tenv, (time_ns() - _t0step) / 1e9,
-                           adaptive ? ledger : nothing)
+                           accL.tenv + accR.tenv, t_step,
+                           adaptive ? ledger : nothing, rec)
 end
 
 cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::Number; kwargs...) =
