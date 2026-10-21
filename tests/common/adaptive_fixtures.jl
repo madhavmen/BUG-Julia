@@ -90,6 +90,70 @@ function _kl_stage(side::Symbol, mpo, i, left, right, lch, rch, ex)
     return (seed = seed, Q0 = ex.V_ex, applyH = x -> apply_one_site(H1, x))
 end
 
+"""
+Orthonormal dense basis of the root space `(W ⊗ Z) core` of the frames `fr`, from random cores on
+the blocks of `S0 = P psi0` and of `B^m S0`, m <= `mmax`: every root block `H^m psi0` can reach.
+Needs `dense_state` (`dense_reference.jl`).
+"""
+function _root_basis(psi0, mpo, fr; mmax = 3, rng = Random.MersenneTwister(5))
+    B = RC._root_generator(mpo, fr)
+    T = RC._project_root(psi0, fr)
+    cols = Vector{ComplexF64}[]
+    for m in 0:mmax
+        m > 0 && (T = to_concrete(RC.apply_zero_site(B, T)))
+        for _ in 1:sum(length, T.RMTs)
+            push!(cols, dense_state(RC._frontier_mps(psi0, fr, RC._randomize_like(T, rng))))
+        end
+    end
+    F = svd(reduce(hcat, cols))
+    return F.U[:, 1:count(>(1e-10 * F.S[1]), F.S)]
+end
+
+"""
+    _dw_errors(p, dts; T = nothing, L = 10, kw...) -> (errs, floors)
+
+Order-`p` steps of `dt` from the XX domain wall against the dense `exp(-iH t)`: one step
+(`T = nothing`, the local error) or `T/dt` steps (the global error at fixed `T`). Tight
+tolerances and `exact = true` by default, so the temporal error is what is left. `floors[k]` is
+the error the step's other mechanisms may account for: per step `tol_basis` plus the root's,
+compression's and projection's own ledger figures. Needs `dense_reference.jl`.
+"""
+function _dw_errors(p, dts; T = nothing, L = 10, kw...)
+    set_symmetry!(:U1)
+    mpo = xxz_mpo(L; J = 1.0, delta = 0.0)
+    Hd = dense_heisenberg(L; J = 1.0, delta = 0.0)
+    psi0 = domain_wall_state(L)
+    v0 = dense_state(psi0)
+    skw = merge((tol_basis = 1e-12, tol_trunc = 1e-14, tol_expv = 1e-14, maxdim = 256,
+                 exact = true), values(kw))
+    errs, floors = Float64[], Float64[]
+    for dt in dts
+        n = T === nothing ? 1 : round(Int, T / dt)
+        psi, floor = copy(psi0), 0.0
+        for _ in 1:n
+            lg = cbe_bug_step!(psi, mpo, ComplexF64(-1im * dt); order = p, skw...).ledger
+            floor += skw.tol_basis + lg.expv_err + lg.discarded + lg.proj_err
+        end
+        push!(errs, norm(dense_state(psi) - exp(-1im * n * dt * Hd) * v0))
+        push!(floors, floor)
+    end
+    return errs, floors
+end
+
+"""
+Plan T5.5: `p_obs = log2(e(h)/e(h/2))` for each refinement pair, `nothing` where either error is
+within `margin` of its floor -- there the slope measures basis/root/truncation error, not time.
+"""
+_observed_orders(errs, floors; margin = 10) =
+    [min(errs[k], errs[k + 1]) > margin * max(floors[k], floors[k + 1]) ?
+     log2(errs[k] / errs[k + 1]) : nothing for k in 1:(length(errs) - 1)]
+
+"The finest valid `p_obs` (plan T5.5), or `nothing`: the order was not observed."
+function _finest_order(errs, floors; kw...)
+    valid = filter(!isnothing, _observed_orders(errs, floors; kw...))
+    return isempty(valid) ? nothing : valid[end]
+end
+
 "The Hermitian map `sum_k c_k (a_k b_k' + conj(c_k) b_k a_k')`, matrix-free on tensors."
 function _hop(terms)
     return x -> begin

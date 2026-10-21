@@ -252,27 +252,14 @@ end
     end
 
     @testset "MPS: the step's local error order from a domain wall, against exp(-iH dt)" begin
-        set_symmetry!(:U1)
-        L = 10
-        mpo = xxz_mpo(L; J = 1.0, delta = 0.0)
-        Hd = dense_heisenberg(L; J = 1.0, delta = 0.0)
-        psi0 = domain_wall_state(L)
-        v0 = dense_state(psi0)
-        dts = (0.4, 0.2, 0.1)
-        Us = [exp(-1im * dt * Hd) for dt in dts]
-        for p in 1:3
-            errs = Float64[]
-            for (dt, U) in zip(dts, Us)
-                psi = copy(psi0)
-                info = cbe_bug_step!(psi, mpo, ComplexF64(-1im * dt); order = p,
-                                     tol_basis = 1e-12, tol_trunc = 1e-14, tol_expv = 1e-14,
-                                     maxdim = 256, exact = true)
-                push!(errs, norm(dense_state(psi) - U * v0))
-            end
-            slope = log2(errs[2] / errs[3])
-            @info "UT3 MPS p=$p: local errors $(errs), slope $(slope) (target >= $(p + 1))"
-            p == 1 && @test errs[3] > 1e-10               # non-vacuous: the step is not exact
-            @test errs[3] < 1e-12 || slope >= p + 0.6
+        # updated_cbe_high_order_parallel.md T5.1: exactly p = 1..5, each MEASURED; an order the
+        # floors hide is a failure (T5.5), not a pass.
+        for p in 1:5
+            errs, floors = _dw_errors(p, (0.4, 0.2, 0.1))
+            slope = _finest_order(errs, floors)
+            @info "UT3 MPS p=$p: local errors $(errs), floors $(floors), slope $(slope) " *
+                  "(target >= $(p + 1))"
+            @test slope !== nothing && slope >= p + 0.6
         end
     end
 end

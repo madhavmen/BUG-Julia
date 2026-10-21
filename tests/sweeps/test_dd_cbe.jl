@@ -104,25 +104,6 @@ function _drop(Om, leg, q)
     return to_concrete(getsub(Om, leg, s -> s == q ? nothing : (1:dims[s])))
 end
 
-"""
-Orthonormal dense basis of the root space `(W ⊗ Z) core` of the frames `fr` (T3.5), from random
-cores on the blocks of `S0 = P psi0` and of `B^m S0`, m <= 3: every root block `H^m psi0` can
-reach for m <= 3, which is all the Taylor leak below measures.
-"""
-function _root_basis(psi0, mpo, fr; rng = Random.MersenneTwister(5))
-    B = RC._root_generator(mpo, fr)
-    T = RC._project_root(psi0, fr)
-    cols = Vector{ComplexF64}[]
-    for m in 0:3
-        m > 0 && (T = to_concrete(RC.apply_zero_site(B, T)))
-        for _ in 1:sum(length, T.RMTs)
-            push!(cols, dense_state(RC._frontier_mps(psi0, fr, RC._randomize_like(T, rng))))
-        end
-    end
-    F = svd(reduce(hcat, cols))
-    return F.U[:, 1:count(>(1e-10 * F.S[1]), F.S)]
-end
-
 @testset "DD-QR CBE (plan Tasks 1-3)" begin
 
 @testset "U01: streamed DD sketch == explicit P^D X P^D Om, bond $i" for i in (1, 4, 7)
