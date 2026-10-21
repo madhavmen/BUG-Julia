@@ -20,13 +20,19 @@ import Random
 include(joinpath(@__DIR__, "..", "common", "adaptive_fixtures.jl"))
 include(joinpath(@__DIR__, "..", "common", "dense_reference.jl"))
 
-"A warmed, complex Heisenberg/U(1) chain (delta = 1: MPO width 5) and bond `i`'s frame."
-function _hb_bond(; L = 8, i = 4, steps = 2)
+"""
+A warmed, complex Heisenberg/U(1) chain (delta = 1: MPO width 5) and bond `i`'s frame.
+
+The warm-up rank cap binds (`maxdim = 4`) so the bulk bond keeps a discarded space on BOTH sides.
+At L = 8 an unbinding cap fills the centre bond (D_4 = 16 = 2^4): both `P^D` vanish there, the DD
+sketch is identically zero, and every bond-4 check compares roundoff (hq12br 17409190).
+"""
+function _hb_bond(; L = 8, i = 4, steps = 2, maxdim = 4)
     set_symmetry!(:U1)
     mpo = xxz_mpo(L; J = 1.0, delta = 1.0)
     psi = neel_state(L)
     for _ in 1:steps
-        tdvp2_step!(psi, mpo, -0.2im; maxdim = 64, trunc_thresh = 1e-14)
+        tdvp2_step!(psi, mpo, -0.2im; maxdim = maxdim, trunc_thresh = 1e-14)
     end
     canonical!(psi, i)
     f = bond_frame(psi, i)
@@ -35,12 +41,16 @@ function _hb_bond(; L = 8, i = 4, steps = 2)
 end
 
 _rel(a, b) = norm(to_concrete(a - b)) / max(norm(b), 1e-300)
+"Both frames of `f` leave a discarded space, so a DD check at this bond is not vacuous."
+_unsaturated(f) = leg_dim(f.U0, 1) * leg_dim(f.U0, 2) > f.old_rank &&
+                  leg_dim(f.V0, 2) * leg_dim(f.V0, 3) > f.old_rank
 _fid(a, b) = abs(overlap(a, b)) / (norm(a) * norm(b))
 
 @testset "DD-QR CBE (plan Tasks 1-2)" begin
 
 @testset "U01: streamed DD sketch == explicit P^D X P^D Om, bond $i" for i in (1, 4, 7)
     mpo, psi, f, lenv, renv = _hb_bond(; i = i)
+    i == 4 && @test _unsaturated(f)                              # the bulk case is not vacuous
     rng = Random.MersenneTwister(11 + i)
     out = Ref{Any}(nothing)
     HT = apply_h_two_site(frame_theta(f), mpo, i, lenv, renv)
@@ -71,6 +81,7 @@ end
 @testset "U03/T2.4: two-pass thin QR, both sides" begin
     mpo, psi, f, lenv, renv = _hb_bond()
     i = 4
+    @test _unsaturated(f)
     rng = Random.MersenneTwister(5)
     out = Ref{Any}(nothing)
     for side in (:left, :right)
@@ -114,6 +125,7 @@ end
 @testset "DK/DD fixture: DD drops the one-site-accessible part, keeps the DD range" begin
     mpo, psi, f, lenv, renv = _hb_bond()
     i = 4
+    @test _unsaturated(f)
     rng = Random.MersenneTwister(9)
     out = Ref{Any}(nothing)
     op = TwoSiteSketchOp(f, mpo, i, lenv, renv)
