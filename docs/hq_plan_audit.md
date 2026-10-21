@@ -101,7 +101,7 @@ frames of `order = 1`; `order > 1` uses the same `_project_root` path (not re-te
 | T2.5 full-DD exact tiny reference, tests only | DONE | `dd_reference_sketch` (materialised `HΘ`); `dd_cbe_expand(...; exact = true)` |
 | T2.5 original SVD selection for ablation | DONE | `cbe_policy = :svd_select`; also forced on the legacy path |
 | T2.5 record policy, never switch silently | DONE | `record.policy`, `record.qr_backend`, `record.closure_policy`; legacy + DD policy refused |
-| T2.5 `order > 1` frontier sweeps | **DIVERGES → DEFERRED(T4/T5)** | `_frontier_sweep!` still calls `cbe_expand` (two-sided SVD selection), reported as `record.closure_policy = :svd_select` |
+| T2.5 `order > 1` frontier sweeps | **DIVERGES → DEFERRED(T4/T5)** | `_frontier_sweep!` still calls `cbe_expand` (two-sided SVD selection), reported as `record.closure_policy = :svd_select`. Resolved in T4.1 (`b04e5da`) |
 | Acceptance: DK-dominant / DD-small fixture | PARTIAL | test "DK/DD": a kept-space probe has DK ≠ 0 one-sided and exactly 0 DD; the exact DD range is captured whole; one-sided keeps ≥ as many directions. A fixture where DK ≫ DD by construction is not built |
 | Acceptance: complex adjoints | DONE | complex states and probes, test U01 right direction |
 | Acceptance: missing-sector discovery | DONE | test "T2.3" and the two-spin test |
@@ -203,3 +203,51 @@ the discarded probe space is 4-dim and a width-4 holdout spans it).
 * hq13c 17419418 (`092684e`): **test_adaptive_rsvd.jl 177 / 177**, MaxRSS 1.7 G.
 
 **Task 3 CONFIRMED.**
+
+## Task 4
+
+Branch `plan/hq-task-4` (stacked on `plan/hq-task-3`), commit `b04e5da`. Most of Task 4 was
+already in the adaptive Krylov stage (`_krylov_enrich`, cbe_bug.jl) and the closure
+(krylov_closure.jl). The gap was the T2.5 deferral: the `order > 1` frontier sweeps still ran
+`cbe_expand`.
+
+| item | status | evidence |
+|---|---|---|
+| T4.1 DD directions reused before Krylov, both half-sweeps | DONE | `half_left!` / `half_right!` seed `_krylov_enrich` with `ex.U_ex` / `ex.V_ex` (old frame plus DD directions, kept verbatim, charge labels from `oplus`); test "T4.1: Krylov after DD-CBE" (DD directions verbatim, a recycled round adds 0, both sides) |
+| T4.1 frontier sweeps under the step's policy | DONE (`b04e5da`) | `_frontier_expand` dispatches on `ckw.cbe_policy`; `record.closure_policy = policy`; tests "T4.1: frontier CBE runs the step's policy", "order-3 steps == exact CBE" |
+| T4.1 no direction regenerated | DONE | `_krylov_enrich` scores `(I − QQ†) v_k` against the grown frame; UT07 (CBE holds `H1 K_ex`: 0 added) |
+| T4.2 transport basis and active frontier to the next stage | DONE | the frontier sweep embeds `fr.W[i]` by the overlap `Pm` (not `[I 0]`); frontiers `j` rebuilt from the root generator in the current frames; UT1, UT5 (old subspace nested at every bond, ψ and the frontier carried losslessly) |
+| T4.2 propagated seed tested by its new response, not appended | DONE | Arnoldi vectors of the seed are propagated unprojected, only their residual `(I − QQ†) v` is appended; UT08 (`η_1 = 0`, `e3` still found) |
+| T4.3 termination by a time-weighted residual, not a Ritz value | DONE | `_kry_weight`: `|τ β_k [φ_1(τ H_k)]_{k,1}|`, Saad's estimate, the residual integrated over `[0, τ]`; no eigenvalue is read |
+| T4.4 operator images invalidated on a gauge or frame change | DONE | `H1` is rebuilt from the current environments at every bond visit (`OneSiteOp`/`TwoSiteSketchOp` carry `version`); a frontier from an older frame generation is refused (UT5) |
+| T4.5 share `tol_basis` with CBE, work/rank stop | DONE | `alloc.krylov` is a share of the same allocation (T3.2); `workcap` bounds the frame; `capped` → `:work_limited` |
+| T4.5 basis-only sweeps do not advance ψ | DONE | the carry is `W' K`, not `W' K_ex` (cbe_bug.jl, "carry the ORIGINAL amplitude"); the root starts from `S0 = AL·AR` of ψ (T1.3) |
+| Acceptance: synthetic 3-level delayed frontier | DONE | UT08 |
+| Acceptance: duplicate CBE/Krylov vector added once | DONE | UT07; test "T4.1: Krylov after DD-CBE" |
+| Acceptance: left/right gauge-transport invariance | DONE | UT5; UT10 (old subspace and transport on both half-sweeps) |
+| Acceptance: Krylov counts reduced with recycling | PARTIAL | a recycled round appends nothing (T4.1 test), but `n_h1` does not drop: the depth is set by the propagator weight, which does not depend on `Q` |
+| Acceptance: stale operator images invalidated | DONE | UT5 stale-frontier refusal |
+| Acceptance: no full-frame `H1 Q` closure scan | DONE | only the seed's Arnoldi vectors are applied; the frame `Q` is never multiplied by `H1` |
+
+The frontier `dd_cbe_expand` calls are NOT counted in `record.counters`: the closure has no
+per-half-sweep `KernelCounters`, and one shared across the concurrent frontier sweeps would race.
+Their probes are in the bond ledgers.
+
+Each row above was checked against the code before the confirmation.
+
+### Confirmation (`b04e5da`)
+
+* hq14a 17419908: **test_krylov_closure.jl 313 / 313** (14 min), test_adaptive_krylov.jl 72 / 72,
+  test_adaptive_search.jl 38 / 38. MaxRSS 2.1 G.
+* hq14b 17419909: test_adaptive_parallel.jl, test_adaptive_compression.jl and
+  test_adaptive_expv.jl all pass.
+* hq14 17419907 ran out of memory at 2 G. The rerun, hq14r 17420173 at 3 G, gave
+  **test_dd_cbe.jl 227 pass / 1 broken** (the svd parity, as in Tasks 1–3), 23 min, MaxRSS 1.8 G.
+
+**Task 4 CONFIRMED.**
+
+Out of scope, parked by the user on 2026-10-22: hq14b's test_liouville.jl gave 91 / 92. The
+failure is OS-U3 positivity (L = 6 Lindblad, order 2, `hermitian = false`, 4 compressed steps):
+`min_eig = -1.76e-4` against the test's `-1e-4`. Every run on 2026-10-18 (default
+`:svd_select`) gave `-2.9e-8`. This is the first run of the file since T1–2 made
+`:dd_qr_streamed` the default. hq14b was cancelled before test_imaginary_time.jl.
