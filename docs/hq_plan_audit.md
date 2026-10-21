@@ -272,6 +272,19 @@ tests:
 | T5.3 root ablation q < p, q = p, exponential | TEST | T5.3 at p = 3: trapezoid (q = 2) is capped at local order 3; radau2, radau3 and exp reach 4 |
 | T5.4 lossless root split | DONE / TEST | `root_cutoff = 0`; T5.4, p = 1..5 with `truncate = false`: discarded < 1e-14, `proj_err < 1e-12`, `n_compress == 0`, norm kept to 1e-10 |
 | T5.4 per-bond `w_i` and cumulative diagnostic, max ≠ cumulative | DONE | `bond_log[].discarded` per bond, `ledger.discarded` cumulative; UT8 rebuilds the cumulative figure from the per-bond weights and asserts it exceeds the worst bond |
-| T5.5 global order at fixed T, valid range only | TEST | T5.5: T = 0.8, p = 1..5; `_observed_orders` reads `log2(e(h)/e(h/2))` only where both errors are 10× above their floor (`tol_basis` + `expv_err` + discarded + `proj_err`), else `nothing`, which fails |
+| T5.5 global order at fixed T, valid range only | TEST / PARTIAL | T5.5: T = 0.8, p = 1..5; `_observed_orders` reads `log2(e(h)/e(h/2))` only where both errors are 10× above their floor (`tol_basis` + `expv_err` + discarded + `proj_err`), else `nothing`, which fails. **First-step dominated at L = 10** (hq15a): the fixed-T errors equal T5.3's one-step errors to 9 digits, so steps 2..n are exact (the frames fill the reachable sector after one step) and p_obs = p + 1. It bounds the fixed-T error but does not exercise accumulation; that is P08 (Task 8, L = 16, analytic reference) |
 | Acceptance: original-state projection identity | TEST | T5.2 `‖v0 − UU'v0‖ < 1e-12`; T5.4 `proj_err` |
 | Acceptance: root-operator Hermiticity, equivalence to dense | TEST | T5.2 at `tol_root = 1e-4` |
+
+### Confirmation (`dc5275a`)
+
+* hq15b 17421133: **test_krylov_closure.jl 314 / 314** (UT3 now p = 1..5 by slope), test_dd_cbe.jl
+  227 pass / 1 broken (the svd parity, as before). MaxRSS 2.2 G.
+* hq15a 17421132: **test_hq_root.jl 46 / 46**, 86 min, MaxRSS 2.4 G.
+  * T5.3, local errors at h = 0.4, 0.2, 0.1, p = 3: trapezoid slope 2.99 (capped at q + 1 = 3);
+    radau2 4.00, radau3 4.00, exp 4.00.
+  * T5.5, observed orders at the two finest pairs: p = 1: 2.07, 2.02; p = 2: 3.00, 3.00;
+    p = 3: 3.99, 4.00; p = 4: 4.99, 5.00; p = 5: 5.99, 6.00. All floors are below 1e-11. These are
+    p + 1, not p: see the T5.5 row.
+
+**Task 5 CONFIRMED**, with T5.5's accumulation test carried to Task 8 (P08).
