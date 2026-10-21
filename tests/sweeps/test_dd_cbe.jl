@@ -175,27 +175,40 @@ end
     @test abs(b - sin(t / 2)) < 1e-10
 end
 
-@testset "end to end: Heisenberg L=8 against exact propagation" begin
+"""
+`T = 0.2` of Heisenberg L = 8 from Neel with `policy` at step `dt`: the phase-free error vs exact.
+"""
+function _hb_end_to_end(pol, dt; tol_basis = 1e-8, T = 0.2, L = 8)
     set_symmetry!(:U1)
-    L, dt, n = 8, 0.05, 4
     mpo = xxz_mpo(L; J = 1.0, delta = 1.0)
-    H = dense_heisenberg(L; J = 1.0, delta = 1.0)
-    v0 = dense_state(neel_state(L))
-    vref = dense_exact_propagate(H, v0, n * dt)
-    akw = (tol_basis = 1e-8, tol_trunc = 1e-12, tol_expv = 1e-12, maxdim = 64)
-    errs = Dict{Symbol, Float64}()
-    for pol in CBE_POLICIES
-        p = neel_state(L)
-        for _ in 1:n
-            info = cbe_bug_step!(p, mpo, -im * dt; cbe_policy = pol, akw...)
-            @test info.record.policy === pol
-        end
-        v = dense_state(p)
-        errs[pol] = sqrt(max(2 * (1 - abs(dot(v, vref)) / (norm(v) * norm(vref))), 0.0))
+    vref = dense_exact_propagate(dense_heisenberg(L; J = 1.0, delta = 1.0),
+                                 dense_state(neel_state(L)), T)
+    p = neel_state(L)
+    for _ in 1:round(Int, T / dt)
+        info = cbe_bug_step!(p, mpo, -im * dt; cbe_policy = pol, tol_basis = tol_basis,
+                             tol_trunc = 1e-12, tol_expv = 1e-12, maxdim = 64)
+        @test info.record.policy === pol
     end
-    @info "L=8 Heisenberg, 4 x dt 0.05, error vs exact" errs
-    @test errs[:dd_qr_streamed] < 1e-4
-    @test errs[:dd_qr_streamed] <= 10 * errs[:svd_select] + 1e-8
+    v = dense_state(p)
+    return sqrt(max(2 * (1 - abs(dot(v, vref)) / (norm(v) * norm(vref))), 0.0))
+end
+
+# hq12b 17409443 (HQGAP, benchmarks/hq_dd_gap_l8.jl): DD converges as h^2 and is tolerance-blind;
+# svd_select as h^3 and ~100x smaller. The gap is the K/L-step wiring, not the selection: the svd
+# path's one-site Krylov runs through the CBE-widened `V_ex`, the plan's DD path through `V0`
+# (one QR per orientation) and its QR adds only first-order DD directions. USER 2026-10-21: keep
+# the plan design; parity is deferred to the Taylor-leak (T3.5) and recycled-round (T4) work.
+@testset "end to end: Heisenberg L=8 against exact propagation" begin
+    errs = Dict(pol => _hb_end_to_end(pol, 0.05) for pol in CBE_POLICIES)
+    half = _hb_end_to_end(:dd_qr_streamed, 0.025)
+    loose = _hb_end_to_end(:dd_qr_streamed, 0.05; tol_basis = 1e-6)
+    @info "L=8 Heisenberg, T 0.2, error vs exact" errs half loose
+    @test errs[:svd_select] < 1e-4
+    @test errs[:dd_qr_streamed] / half >= 3.5                    # converges in dt
+    @test abs(loose - errs[:dd_qr_streamed]) <= 1e-2 * errs[:dd_qr_streamed]
+    @test abs(errs[:one_sided_qr_streamed] - errs[:dd_qr_streamed]) <=
+          1e-6 * errs[:dd_qr_streamed]
+    @test_broken errs[:dd_qr_streamed] <= 10 * errs[:svd_select] + 1e-8   # T3.5 / T4
 end
 
 @testset "T1.2: the original state projects into the new frames losslessly, both gauges" begin
