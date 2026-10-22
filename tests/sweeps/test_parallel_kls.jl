@@ -5,10 +5,12 @@
 #         are Hermitian and K(h) is the exact exponential of the projected K problem
 #   T6.3  the omitted new-new block: the kernel's leading term `tau U_+' H Y_n V_+` matches the
 #         exact block to O(h^2); the four-block core has no new-new component; the fallback is
-#         the augmented root Galerkin step in the grown frames
+#         the augmented root Galerkin step in the grown frames (on the state's own Schmidt
+#         frames: real preliminary frames leave no new direction at these sizes)
 #   T6.4  |00>, H = J XX: unenriched frames miss the O(h) DD amplitude even with K and L; the
 #         preliminary CBE finds it on both sides and the step is exact (and the U(1) analogue)
-#   T6.5  the three schedules return one state; the concurrent schedule is reproducible
+#   T6.5  the three schedules return one state (the step, and the kernel where U_+, V_+ exist);
+#         the concurrent schedule is reproducible; `parallel = :full`
 #   orders 1..5 of the K/L/S recurrence on its own (local errors, as UT3)
 
 using Test
@@ -77,14 +79,26 @@ end
     @test leg_dim(Kh, 3) == leg_dim(fr.Z[c], 1) && leg_dim(Lh, 1) == leg_dim(fr.W[c], 3)
 end
 
+# ⛔ NOT the preliminary frames of a real step. At L <= 10 the half-sweeps' local Krylov fills the
+# one-site spaces K and L live in, so K(h), L(h) have no direction outside them (hq16a 17422381:
+# `Up`/`Vp` were `nothing`; T6.5's ledger shows n_new = 0) and there is no omitted block to measure.
+# The state's own Schmidt frames are strictly smaller than the one-site spaces at this size, so
+# U_+ and V_+ exist at O(h) on both sides -- the case the kernel's claims are about.
+"The state's own (unenriched) frames at the root bond of the warmed XX chain."
+function _schmidt_frames(L, steps)
+    mpo, psi0 = _xx_warm(L, steps)
+    return mpo, psi0, RC.frames_from_state(psi0, mpo, L ÷ 2)
+end
+
 @testset "T6.3: the omitted new-new block" begin
     L, tau = 8, ComplexF64(-0.2im)
-    mpo, psi0, fr = _prelim(L, 2, tau; tol_basis = 1e-3)
+    mpo, psi0, fr = _schmidt_frames(L, 2)
     c, H, v0 = fr.c, dense_heisenberg(L; J = 1.0, delta = 0.0), dense_state(psi0)
     n0 = norm(v0)
     S0 = RC._project_root(psi0, fr)
     r = RC._parallel_kls(psi0, mpo, fr, S0, tau, _stage(tau); nrm = n0)
     @test r.Up !== nothing && r.Vp !== nothing                   # both sides found directions
+    @test r.account.n_new_l > 0 && r.account.n_new_r > 0
     @test !r.account.fallback
     @test r.account.missing ≈ norm(r.M11) / n0
     # S11 = U_+' Y(t+h) V_+ = h U_+' F(Y_n) V_+ + O(h^2) for U_+, V_+ fixed: the remainder after
@@ -154,7 +168,26 @@ end
     @test [o[2].ledger.kls.schedule for o in outs] == collect(RC.KLS_SCHEDULES)
     @test all(o -> o[2].record.parallel === :full, outs)
     @test norm(first(step(:concurrent)) - outs[end][1]) < 1e-12  # reproducible
+    # the plan's `parallel = :full`: concurrent half-sweeps (their own gauge path, so 1e-10 as
+    # in tests/rsvd_cbe/) and the concurrent K/L/S schedule
+    psi = copy(psi0)
+    info = cbe_bug_step!(psi, mpo, tau; parallel = :full, order = 2, tol_basis = 1e-6,
+                         tol_root = 1e-12)
+    @test info.record.parallel === :full && info.ledger.kls.schedule === :concurrent
+    @test norm(dense_state(psi) - outs[end][1]) < 1e-10
     @info "T6.5 schedules" Threads.nthreads() [o[2].ledger.kls for o in outs]
+    # the step above finds no new direction at this size (see T6.3), so the schedules are also
+    # compared where the new blocks exist: the kernel on the state's own frames
+    mpo8, p8, fr8 = _schmidt_frames(8, 2)
+    S8 = RC._project_root(p8, fr8)
+    ks = [RC._parallel_kls(p8, mpo8, fr8, S8, tau, _stage(tau); schedule = s)
+          for s in RC.KLS_SCHEDULES]
+    @test all(k -> k.account.n_new_l > 0 && k.account.n_new_r > 0, ks)
+    # as states: each schedule orthogonalises its own U_+, V_+
+    vs = [dense_state(RC._frontier_mps(p8, _with_root(fr8, k.W, k.Z), k.S1)) for k in ks]
+    for v in vs[2:end]
+        @test norm(v - vs[1]) < 1e-10 * norm(vs[1])
+    end
 end
 
 @testset "local order of the K/L/S recurrence, p = $p" for p in 1:5

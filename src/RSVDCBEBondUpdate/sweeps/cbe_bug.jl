@@ -732,7 +732,8 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # of from wherever the other sweep left it. Same spaces, different
                        # floating-point path. `tests/rsvd_cbe/` pins the agreement at 1e-10.
                        # The plan's spelling is accepted too: `:serial` / `:half_sweeps`
-                       # (`:full`, the Task 6 integrator, is refused; `_resolve_parallel`).
+                       # (`:full` is the Task 6 K/L/S integrator, schedule `:concurrent` unless
+                       # `kls` names one; `_resolve_parallel`).
                        parallel::Union{Bool, Symbol} = false,
                        # ⚠ A DIFFERENT INTEGRATOR, set by `parallel_kls_step!` (plan Task 6): the
                        # parallel K/L/S step in the preliminary frames, with this K/L/S schedule
@@ -769,6 +770,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     1 <= c <= L - 1 || throw(ArgumentError("root must be a bond in 1:$(L - 1), got $c"))
     parallel_sym = parallel isa Symbol ? parallel : (parallel ? :half_sweeps : :serial)
     parallel = _resolve_parallel(parallel)
+    parallel_sym === :full && (kls = something(kls, :concurrent))
     (tol_root !== nothing && tol_expv !== nothing) && throw(ArgumentError(
         "tol_root and tol_expv name the same tolerance; pass one"))
     tol_root === nothing || (tol_expv = tol_root)

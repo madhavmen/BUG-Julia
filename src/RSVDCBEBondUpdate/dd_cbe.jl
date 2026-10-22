@@ -662,15 +662,13 @@ end
 """
     _resolve_parallel(p) -> Bool
 
-`parallel` of the plan's API: `:serial`/`false`, `:half_sweeps`/`true`. `:full` is the separate
-parallel K/L/S integrator of plan Task 6 and is refused until it exists and passes its tests.
+`parallel` of the plan's API: `:serial`/`false`, `:half_sweeps`/`true`. `:full` also runs the
+half-sweeps concurrently; `cbe_bug_step!` then takes the separate parallel K/L/S integrator of
+plan Task 6 (`parallel_kls_step!`).
 """
 function _resolve_parallel(p)
     p isa Bool && return p
     p === :serial && return false
-    p === :half_sweeps && return true
-    p === :full && throw(ArgumentError(
-        "parallel = :full is the parallel K/L/S integrator (plan Task 6), not implemented yet; " *
-        "use :half_sweeps or :serial"))
-    throw(ArgumentError("parallel must be :serial, :half_sweeps or a Bool, got $p"))
+    p in (:half_sweeps, :full) && return true
+    throw(ArgumentError("parallel must be :serial, :half_sweeps, :full or a Bool, got $p"))
 end

@@ -16,7 +16,7 @@
 #           expansion, and the two-spin entangling case.
 #   Task 1  original-state projection into the new frames (both gauges), the policy and limit
 #           statuses in the typed step record, reproducibility from a fixed seed, and the plan's
-#           API spellings (`tol_root`, `parallel = :half_sweeps`, `:full` refused).
+#           API spellings (`tol_root`, `parallel = :half_sweeps`, `:full` refused on the legacy path).
 
 using Test
 using LinearAlgebra
@@ -316,7 +316,8 @@ end
     @test_throws ArgumentError cbe_bug_step!(copy(psi0), mpo, -0.05im; dex = 4,
                                              cbe_policy = :dd_qr_streamed)
     @test_throws ArgumentError cbe_bug_step!(copy(psi0), mpo, -0.05im; cbe_policy = :bogus)
-    @test_throws ArgumentError cbe_bug_step!(copy(psi0), mpo, -0.05im; parallel = :full, kw...)
+    @test_throws ArgumentError cbe_bug_step!(copy(psi0), mpo, -0.05im; parallel = :full, dex = 4)
+    @test_throws ArgumentError cbe_bug_step!(copy(psi0), mpo, -0.05im; parallel = :bogus, kw...)
     @test_throws ArgumentError cbe_bug_step!(copy(psi0), mpo, -0.05im; tol_root = 1e-9,
                                              tol_expv = 1e-9)
     ia = cbe_bug_step!(copy(psi0), mpo, -0.05im; tol_root = 1e-9, kw...)
