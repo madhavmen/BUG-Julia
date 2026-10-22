@@ -507,6 +507,16 @@ def p09(runs, ref, outdir):
 
 
 # ── P10 time to accuracy ───────────────────────────────────────────────────────────────────────
+def step_time(run):
+    """The integrator's seconds, steps 2..n: step 1 of every process carries the JIT compilation
+    (hq43t: 145-165 s against < 1 s of physics at D = 1), which would swamp every comparison."""
+    return sum(s["t_step"] for s in run["steps"][1:])
+
+
+def finished(run):
+    return len(run["steps"]) > 1 and run["records"] and abs(run["records"][-1]["t"] - run["config"]["tf"]) < 1e-9
+
+
 def p10(runs, ref, outdir):
     rs = [r for r in runs if standard(r) and final_error(r, ref) is not None]
     if not rs:
@@ -519,7 +529,7 @@ def p10(runs, ref, outdir):
             if not sel:
                 continue
             em = [final_error(r, ref)[0] for r in sel]
-            wall = [sum(s["t_step"] for s in r["steps"]) for r in sel]   # the integrator, not the observables
+            wall = [step_time(r) for r in sel]           # the integrator, not the observables or the JIT
             apps = [sum(s["krylov_dims"] for s in r["steps"]) for r in sel]
             rss = [max(s["record"]["peak_rss"] for s in r["steps"]) / 2 ** 30 for r in sel]
             mk = "o-" if twoS == 1 else "s--"
@@ -528,7 +538,8 @@ def p10(runs, ref, outdir):
             ax[2].semilogx(em, rss, mk)
             ax[3].loglog([r["config"]["h"] for r in sel],
                          [max(abs(r["records"][-1]["norm"] - 1), 1e-17) for r in sel], mk)
-    for a, lab in zip(ax, ("wall [s]", "operator applications", "peak RSS [GiB]", r"$|\Delta\|\psi\|^2|$ at $t_f$")):
+    for a, lab in zip(ax, ("integrator time, steps 2..n [s]", "operator applications", "peak RSS [GiB]",
+                           r"$|\Delta\|\psi\|^2|$ at $t_f$")):
         a.set_ylabel(lab)
     for a in ax[:3]:
         a.set_xlabel(r"$\max_i|\Delta m_i(t_f)|$")
@@ -538,24 +549,56 @@ def p10(runs, ref, outdir):
 
 
 # ── P11 / P12 parallel ─────────────────────────────────────────────────────────────────────────
+P11_SCHEDULES = ("sequential", "kl_then_s", "concurrent")
+
+
 def p11(runs, ref, outdir):
-    sch = defaultdict(list)
+    """Per (s, p, h, tf, tol_basis): integrator time vs workers for the three K/L/S schedules on the
+    same scheme (`parallel = :full`); speedup and efficiency against sequential at one worker."""
+    cells = defaultdict(dict)
     for r in runs:
         c = r["config"]
-        if c["policy"] == "dd_qr_streamed":
-            sch[(c["parallel"], c["kls"])].append(r)
-    if len(sch) < 3:
-        return skip("P11", f"needs the three schedules on one scheme, have {sorted(sch)}")
-    print("HQ-P11 schedule  s  p  h  threads  sum t_step  sum t_K  sum t_L  sum t_root  peak_rss")
-    for (par, kls), rs in sorted(sch.items()):
-        for r in rs:
-            st = r["steps"]
-            tK = sum((s.get("kls") or {}).get("t_K", 0) for s in st)
-            tL = sum((s.get("kls") or {}).get("t_L", 0) for s in st)
-            print(f"HQ-P11 {par}/{kls} {spin(r):g} {r['config']['order']} {r['config']['h']:g} "
-                  f"{r['config']['threads']}/{r['config']['blas_threads']} {sum(s['t_step'] for s in st):.1f} "
-                  f"{tK:.1f} {tL:.1f} {sum(s['t_root'] for s in st):.1f} "
-                  f"{max(s['record']['peak_rss'] for s in st) / 2 ** 30:.2f}G")
+        if c["policy"] == "dd_qr_streamed" and c["parallel"] == "full" and c["kls"] in P11_SCHEDULES and finished(r):
+            cells[key(r, "twoS", "order", "h", "tf", "tol_basis")][(c["kls"], c["threads"])] = r
+    cells = {k: v for k, v in cells.items() if {s for s, _ in v} == set(P11_SCHEDULES)}
+    if not cells:
+        return skip("P11", "needs the three schedules on one scheme for one setting")
+    print("HQ-P11 schedule  s  p  h  threads/blas  t(steps 2..n)  sum t_K  sum t_L  sum t_root  peak_rss  speedup")
+    fig, ax = plt.subplots(1, 4, figsize=(20, 4.6))
+    colors = {p: plt.cm.viridis((p - 1) / 4.2) for p in range(1, 6)}
+    styles = {"sequential": ("o", "-"), "kl_then_s": ("^", "--"), "concurrent": ("s", ":")}
+    for (twoS, p, h, tf, tb), byk in sorted(cells.items()):
+        base = byk.get(("sequential", 1))
+        t1 = step_time(base) if base else np.nan
+        for sch in P11_SCHEDULES:
+            ws = sorted(w for s, w in byk if s == sch)
+            T = np.array([step_time(byk[(sch, w)]) for w in ws])
+            rss = [max(s["record"]["peak_rss"] for s in byk[(sch, w)]["steps"]) / 2 ** 30 for w in ws]
+            mk, ls = styles[sch]
+            ax[0].plot(ws, T, mk + ls, color=colors[p])
+            ax[1].plot(ws, t1 / T, mk + ls, color=colors[p])
+            ax[2].plot(ws, t1 / T / np.array(ws), mk + ls, color=colors[p])
+            ax[3].plot(ws, rss, mk + ls, color=colors[p])
+            for w, x in zip(ws, T):
+                st = byk[(sch, w)]["steps"][1:]
+                print(f"HQ-P11 {sch} {twoS / 2:g} {p} {h:g} {w}/{byk[(sch, w)]['config']['blas_threads']} {x:.1f} "
+                      f"{sum((s.get('kls') or {}).get('t_K', 0) for s in st):.1f} "
+                      f"{sum((s.get('kls') or {}).get('t_L', 0) for s in st):.1f} "
+                      f"{sum(s['t_root'] for s in st):.1f} {rss[ws.index(w)]:.2f}G {t1 / x:.2f}")
+    from matplotlib.lines import Line2D
+    ax[0].legend(handles=[Line2D([], [], color=colors[p], lw=2, label=f"p={p}") for p in range(1, 6)]
+                 + [Line2D([], [], color="k", marker=styles[s][0], ls=styles[s][1], label=s) for s in P11_SCHEDULES],
+                 fontsize=7)
+    for a, lab in zip(ax, ("integrator time, steps 2..n [s]", "speedup vs sequential, 1 worker",
+                           "parallel efficiency (speedup / workers)", "peak RSS [GiB]")):
+        a.set_xlabel("workers (julia -t; BLAS 1 thread)"); a.set_ylabel(lab); a.set_xticks([1, 2, 3])
+        a.grid(True, alpha=0.3)
+    ax[1].axhline(1, color="grey", lw=0.8)
+    (twoS, _, h, tf, tb) = next(iter(cells))
+    fig.suptitle(f"P11 K/L/S schedules on parallel = :full, s = {twoS / 2:g}, L = 16, h = {h:g}, "
+                 f"Jt = {tf:g}, tol_basis = {tb:.0e} (one job, one node)")
+    fig.tight_layout()
+    save(fig, outdir, "P11_schedules.png")
 
 
 P12_T = 0.4      # every twin scan (s = 3 stops there) holds this record
