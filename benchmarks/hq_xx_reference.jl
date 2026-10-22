@@ -14,12 +14,18 @@
 # Frozen conventions (plan T7.4): open chain, J = 1, H = J sum (SxSx + SySy), physical index
 # order 1..L left to right, sites 1..L/2 at S^z = +s, U(1) charge 2 S^z, total sector 0.
 #
+# The first step is split `HQ_RAMP` times (tests/common/ramped_tdvp.jl): unsplit, the product
+# state's first projected step leaves Var(H) off by ~dt^2 for the whole run.
+#
 # Env: HQ_TWOS (6), HQ_L (16), HQ_TF (8.0), HQ_EVERY (0.1), HQ_ORDER (4), HQ_DT (0.025),
-#      HQ_MAXDIM (256), HQ_TRUNC (1e-10), HQ_OUT (hq_xx_ref_<twoS>_<order>_<dt>_<maxdim>_<trunc>.json)
+#      HQ_MAXDIM (256), HQ_TRUNC (1e-10), HQ_RAMP (12),
+#      HQ_OUT (hq_xx_ref_<twoS>_<order>_<dt>_<maxdim>_<trunc>.json)
 
 using LinearAlgebra, Printf, JSON
 using LurCGT, Telum
 using BUGJulia, BUGJulia.BondUpdateBUG, BUGJulia.RSVDCBEBondUpdate
+
+include(joinpath(@__DIR__, "..", "tests", "common", "ramped_tdvp.jl"))
 
 const TWOS = parse(Int, get(ENV, "HQ_TWOS", "6"))
 const L = parse(Int, get(ENV, "HQ_L", "16"))
@@ -29,6 +35,7 @@ const ORDER = parse(Int, get(ENV, "HQ_ORDER", "4"))
 const DT = parse(Float64, get(ENV, "HQ_DT", "0.025"))
 const MAXDIM = parse(Int, get(ENV, "HQ_MAXDIM", "256"))
 const TRUNC = parse(Float64, get(ENV, "HQ_TRUNC", "1e-10"))
+const RAMP = parse(Int, get(ENV, "HQ_RAMP", "12"))
 const OUT = get(ENV, "HQ_OUT", "hq_xx_ref_$(TWOS)_$(ORDER)_$(DT)_$(MAXDIM)_$(TRUNC).json")
 
 TWOS == 1 && include(joinpath(@__DIR__, "..", "tests", "common", "free_fermion.jl"))
@@ -65,18 +72,19 @@ record(t, disc, wall) = begin
     flush(stdout)
 end
 
-println("HQREF-CONFIG twoS=$TWOS L=$L tf=$TF dt=$DT order=$ORDER maxdim=$MAXDIM trunc=$TRUNC")
+println("HQREF-CONFIG twoS=$TWOS L=$L tf=$TF dt=$DT order=$ORDER maxdim=$MAXDIM trunc=$TRUNC ramp=$RAMP")
 t0, disc = time(), 0.0
 record(0.0, disc, 0.0)
 for k in 1:NSTEP
-    info = tdvp2_composed_step!(psi, MPO_, ComplexF64(-1im * DT); order = ORDER,
-                                maxdim = MAXDIM, trunc_thresh = TRUNC)
+    info = ramped_tdvp2_step!(psi, MPO_, DT, k; ramp = RAMP, order = ORDER,
+                              maxdim = MAXDIM, trunc_thresh = TRUNC)
     global disc += info.cumulative
     k % KREC == 0 && record(k * DT, disc, time() - t0)
 end
 open(OUT, "w") do io
     JSON.print(io, Dict("config" => Dict("twoS" => TWOS, "L" => L, "tf" => TF, "dt" => DT,
                                          "order" => ORDER, "maxdim" => MAXDIM, "trunc" => TRUNC,
+                                         "ramp" => RAMP,
                                          "solver" => "tdvp2_composed_step!", "J" => 1.0),
                         "records" => recs))
 end

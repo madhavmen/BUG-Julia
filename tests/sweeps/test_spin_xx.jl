@@ -8,7 +8,9 @@
 #   T7.2  s = 3 against sector ED at L = 4 and 6 (profile, centre current, conserved quantities)
 #   T7.3  the short-time coefficient <S^z_{L/2}> = s - J^2 s^2 t^2 (1/4 and 9), MPS and ED
 #
-# The reference solver is order-4 TDVP2 (`tdvp2_composed_step!`), not the integrator under study.
+# The reference solver is order-4 TDVP2 (`tdvp2_composed_step!`), not the integrator under study,
+# with its first step split (`ramped_tdvp.jl`): unsplit, the domain wall's first projected step
+# leaves Var(H) off by ~dt^2 for good, far above T7.3's 1e-6.
 # The s = 3 references are never analytical: s = 3 XX is not free-fermionic.
 
 using Test
@@ -21,13 +23,14 @@ import Random
 
 include(joinpath(@__DIR__, "..", "common", "free_fermion.jl"))
 include(joinpath(@__DIR__, "..", "common", "spin_ed.jl"))
+include(joinpath(@__DIR__, "..", "common", "ramped_tdvp.jl"))
 
-const _TD = (maxdim = 512, trunc_thresh = 1e-14)
+const _TD = (maxdim = 512, trunc_thresh = 1e-14, ramp = 12)
 
-"`n` order-4 TDVP2 steps of `dt` in place; `f(psi, k)` after step `k`."
+"`n` order-4 TDVP2 steps of `dt` in place, the first one ramped; `f(psi, k)` after step `k`."
 function _evolve!(psi, mpo, dt, n, f = (_, _) -> nothing)
     for k in 1:n
-        tdvp2_composed_step!(psi, mpo, ComplexF64(-1im * dt); order = 4, _TD...)
+        ramped_tdvp2_step!(psi, mpo, dt, k; order = 4, _TD...)
         f(psi, k)
     end
     return psi
