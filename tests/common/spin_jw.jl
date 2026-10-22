@@ -132,20 +132,21 @@ Krylov space of the domain wall; default the whole space). Least squares on the 
 """
 function jw_quadratic_residual(m::JWMap, T, Hspin; V = sparse(1.0I, size(T, 2), size(T, 2)))
     M = length(m.c)
-    TV, rhs = T * sparse(V), vec(T * sparse(Hspin * V))
+    col(X) = reshape(X, size(X, 1) * size(X, 2), 1)     # stays sparse; `vec` would not
+    TV, rhs = T * sparse(V), col(T * sparse(Hspin * V))
     cd = [sparse(c') for c in m.c]
     cT = [m.c[a] * TV for a in 1:M]                     # c_a T V and c_a^dag T V, the columns'
     dT = [cd[a] * TV for a in 1:M]                      # factors: no 2^M-square product formed
-    cols = [vec(TV)]
+    cols = [col(TV)]
     for a in 1:M, b in 1:M
-        push!(cols, vec(cd[a] * cT[b]))
+        push!(cols, col(cd[a] * cT[b]))
     end
     for a in 1:M, b in (a + 1):M
-        push!(cols, vec(m.c[a] * cT[b])); push!(cols, vec(cd[a] * dT[b]))
+        push!(cols, col(m.c[a] * cT[b])); push!(cols, col(cd[a] * dT[b]))
     end
     A = reduce(hcat, cols)
-    rows = sort!(unique!([rowvals(A); findnz(rhs)[1]]))
-    A, rhs = A[rows, :], Vector(rhs[rows])
-    x = Matrix(A) \ rhs
+    rows = sort!(unique!([rowvals(A); rowvals(rhs)]))
+    A, rhs = A[rows, :], Vector(rhs[rows, 1])
+    x = qr(A) \ rhs                                     # sparse least squares (rank-revealing)
     return norm(A * x - rhs) / norm(rhs), length(cols)
 end
