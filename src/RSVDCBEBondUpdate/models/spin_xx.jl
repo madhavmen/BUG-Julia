@@ -40,7 +40,11 @@ function _nn_couplings(L::Int, w::Number, bonds = 1:(L - 1))
     return M
 end
 
-"`pair(Sp, Sp')` = `S^+_i S^-_{i+1} / 2` and `pair(Sm, Sm')` = `S^-_i S^+_{i+1} / 2` (U(1) op-legs)."
+"""
+`pair(Sp, Sp')` and `pair(Sm, Sm')` (U(1) op-legs): stored as `S^+_i S^-_{i+1} / 2` and
+`S^-_i S^+_{i+1} / 2`, APPLIED by `pair_mpo` as their transposes (the `liouville.jl` header), i.e.
+the other one. The sum `H_s` is symmetric and does not see it; `spin_current_mpo` does.
+"""
 _spin_xx_vertices(q) = [PairVertex(q.Sp, to_concrete(q.Sp'), 1.0),
                         PairVertex(q.Sm, to_concrete(q.Sm'), 1.0)]
 
@@ -66,7 +70,10 @@ function spin_current_mpo(L::Int, twoS::Int, b::Int; J::Float64 = 1.0)
     1 <= b <= L - 1 || throw(ArgumentError("bond must be in 1:$(L - 1), got $b"))
     q = spin_space(twoS)
     w = ComplexF64(0, J)
-    return pair_mpo(L, [_nn_couplings(L, w, b:b), _nn_couplings(L, -w, b:b)],
+    # ⛔ `j_b` is imaginary ANTISYMMETRIC, so the transpose `pair_mpo` applies is `-j_b`: `+w` goes
+    # on the vertex that APPLIES `S^+_b S^-_{b+1}`, which is `(Sm, Sm')`. Measured (hq24a, L = 4
+    # against dense): `+w` on `(Sp, Sp')` gave `-j_b` exactly, and evolved as `exp(+i tau j_b)`.
+    return pair_mpo(L, [_nn_couplings(L, -w, b:b), _nn_couplings(L, w, b:b)],
                     _spin_xx_vertices(q); Iloc = q.I)
 end
 

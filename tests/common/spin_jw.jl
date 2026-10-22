@@ -132,21 +132,33 @@ Krylov space of the domain wall; default the whole space). Least squares on the 
 """
 function jw_quadratic_residual(m::JWMap, T, Hspin; V = sparse(1.0I, size(T, 2), size(T, 2)))
     M = length(m.c)
-    col(X) = reshape(X, size(X, 1) * size(X, 2), 1)     # stays sparse; `vec` would not
-    TV, rhs = T * sparse(V), col(T * sparse(Hspin * V))
+    TV, HV = T * sparse(V), T * sparse(Hspin * V)
     cd = [sparse(c') for c in m.c]
     cT = [m.c[a] * TV for a in 1:M]                     # c_a T V and c_a^dag T V, the columns'
     dT = [cd[a] * TV for a in 1:M]                      # factors: no 2^M-square product formed
-    cols = [col(TV)]
+    cols = [TV]
     for a in 1:M, b in 1:M
-        push!(cols, col(cd[a] * cT[b]))
+        push!(cols, cd[a] * cT[b])
     end
     for a in 1:M, b in (a + 1):M
-        push!(cols, col(m.c[a] * cT[b])); push!(cols, col(cd[a] * dT[b]))
+        push!(cols, m.c[a] * cT[b]); push!(cols, cd[a] * dT[b])
     end
-    A = reduce(hcat, cols)
-    rows = sort!(unique!([rowvals(A); rowvals(rhs)]))
-    A, rhs = A[rows, :], Vector(rhs[rows, 1])
+    # Column-major linear indices from `findnz` triplets: `vec`/`reshape` of a sparse matrix are
+    # dense wrappers (`ReshapedArray`) that `findnz`/`rowvals` refuse (hq23a, hq25a).
+    function lin(X)
+        i, j, v = findnz(X)
+        return i .+ (j .- 1) .* size(X, 1), v
+    end
+    n =size(TV, 1) * size(TV, 2)
+    Is, Js, Vs = Int[], Int[], Float64[]
+    for (k, X) in enumerate(cols)
+        i, v = lin(X)
+        append!(Is, i); append!(Js, fill(k, length(i))); append!(Vs, v)
+    end
+    ri, rv = lin(HV)
+    rows = sort!(unique!([Is; ri]))
+    A = sparse(Is, Js, Vs, n, length(cols))[rows, :]
+    rhs = Vector(sparsevec(ri, rv, n)[rows])
     x = qr(A) \ rhs                                     # sparse least squares (rank-revealing)
     return norm(A * x - rhs) / norm(rhs), length(cols)
 end
