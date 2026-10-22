@@ -52,6 +52,15 @@ abs(NSTEP * DT - TF) < 1e-12 && abs(KREC * DT - EVERY) < 1e-12 ||
 psi = spin_domain_wall_state(L, TWOS)
 sector = psi[L].spaces[3]
 recs = Any[]
+# Rewritten after every record: a large-D s = 3 run can hit the walltime long before HQ_TF, and
+# the band script needs the records it reached.
+save_records() = open(OUT, "w") do io
+    JSON.print(io, Dict("config" => Dict("twoS" => TWOS, "L" => L, "tf" => TF, "dt" => DT,
+                                         "order" => ORDER, "maxdim" => MAXDIM, "trunc" => TRUNC,
+                                         "ramp" => RAMP, "solver" => "tdvp2_composed_step!",
+                                         "J" => 1.0),
+                        "records" => recs))
+end
 record(t, disc, wall) = begin
     m = spin_sz_profile(psi, TWOS)
     r = Dict{String, Any}("t" => t, "m" => m, "j" => real(mpo_energy(psi, JMPO)),
@@ -65,6 +74,7 @@ record(t, disc, wall) = begin
         r["err_exact_j"] = abs(r["j"] - xx_open_current(C)[L ÷ 2])
     end
     push!(recs, r)
+    save_records()
     @printf("HQREF t=%.3f D=%d m_c=%.12f j=%.12f E=%.2e dvar=%.2e dnorm=%.2e disc=%.2e%s wall=%.1f\n",
             t, r["D"], m[L ÷ 2], r["j"], r["E"], r["var"] - S^2, r["norm"] - 1, disc,
             TWOS == 1 ? @sprintf(" exact_m=%.2e exact_j=%.2e", r["err_exact_m"], r["err_exact_j"]) : "",
@@ -80,12 +90,5 @@ for k in 1:NSTEP
                               maxdim = MAXDIM, trunc_thresh = TRUNC)
     global disc += info.cumulative
     k % KREC == 0 && record(k * DT, disc, time() - t0)
-end
-open(OUT, "w") do io
-    JSON.print(io, Dict("config" => Dict("twoS" => TWOS, "L" => L, "tf" => TF, "dt" => DT,
-                                         "order" => ORDER, "maxdim" => MAXDIM, "trunc" => TRUNC,
-                                         "ramp" => RAMP,
-                                         "solver" => "tdvp2_composed_step!", "J" => 1.0),
-                        "records" => recs))
 end
 println("HQREF-DONE $OUT wall=$(round(time() - t0; digits = 1)) s")

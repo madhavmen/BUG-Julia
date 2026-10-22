@@ -24,17 +24,20 @@ axes = [k for k in ("maxdim", "dt", "trunc", "order") if any(r["config"][k] != c
 println("HQBAND-AXES varied: ", join(axes, ", "))
 length(axes) >= 2 || (println("HQBAND-REFUSED fewer than two convergence axes varied"); exit(1))
 
-times = [r["t"] for r in fin["records"]]
-at(run, t) = run["records"][findfirst(x -> abs(x["t"] - t) < 1e-9, run["records"])]
+recorded(run, t) = findfirst(x -> abs(x["t"] - t) < 1e-9, run["records"])
+at(run, t) = run["records"][recorded(run, t)]
+# A run stopped by its walltime holds the records it reached: the band covers only the times
+# EVERY setting reached, and says where that horizon is.
+times = [r["t"] for r in fin["records"] if all(x -> recorded(x, r["t"]) !== nothing, runs)]
+println("HQBAND-HORIZON t <= $(last(times)) (FINEST reached $(fin["records"][end]["t"]))")
 band_m, band_j = zeros(length(times)), zeros(length(times))
 for (k, t) in enumerate(times), r in runs
-    x, y = at(r, t), fin["records"][k]
+    x, y = at(r, t), at(fin, t)
     band_m[k] = max(band_m[k], maximum(abs.(Float64.(x["m"]) - Float64.(y["m"]))))
     band_j[k] = max(band_j[k], abs(x["j"] - y["j"]))
 end
 for (r, p) in zip(runs, others)
-    dm = maximum(maximum(abs.(Float64.(at(r, t)["m"]) - Float64.(fin["records"][k]["m"])))
-                 for (k, t) in enumerate(times))
+    dm = maximum(maximum(abs.(Float64.(at(r, t)["m"]) - Float64.(at(fin, t)["m"]))) for t in times)
     @printf("HQBAND-SETTING %s max|dm|=%.3e\n", basename(p), dm)
 end
 for k in eachindex(times)
@@ -44,8 +47,8 @@ end
 open(out, "w") do io
     JSON.print(io, Dict("config" => cf, "settings" => [r["config"] for r in runs],
                         "varied" => axes, "t" => times,
-                        "m" => [r["m"] for r in fin["records"]],
-                        "j" => [r["j"] for r in fin["records"]],
+                        "m" => [at(fin, t)["m"] for t in times],
+                        "j" => [at(fin, t)["j"] for t in times],
                         "band_m" => band_m, "band_j" => band_j))
 end
 println("HQBAND-DONE $out max band_m=$(maximum(band_m)) band_j=$(maximum(band_j))")
