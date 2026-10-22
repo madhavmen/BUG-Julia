@@ -19,12 +19,12 @@ end
 _only(T, leg, q) = to_concrete(getsub(T, leg, s -> s == q ? (1:_dims(T, leg)[s]) : nothing))
 
 "A warmed XX/U(1) chain: Neel evolved `steps` TDVP2 steps of `0.2` (`steps = 0` keeps Neel)."
-function _xx_warm(L, steps)
+function _xx_warm(L, steps; delta = 0.0, maxdim = 64)
     set_symmetry!(:U1)
-    mpo = xxz_mpo(L; J = 1.0, delta = 0.0)
+    mpo = xxz_mpo(L; J = 1.0, delta = delta)
     psi = neel_state(L)
     for _ in 1:steps
-        tdvp2_step!(psi, mpo, -0.2im; maxdim = 64, trunc_thresh = 1e-14)
+        tdvp2_step!(psi, mpo, -0.2im; maxdim = maxdim, trunc_thresh = 1e-14)
     end
     return mpo, psi
 end

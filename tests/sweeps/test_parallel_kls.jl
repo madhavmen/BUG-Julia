@@ -84,16 +84,21 @@ end
 # `Up`/`Vp` were `nothing`; T6.5's ledger shows n_new = 0) and there is no omitted block to measure.
 # The state's own Schmidt frames are strictly smaller than the one-site spaces at this size, so
 # U_+ and V_+ exist at O(h) on both sides -- the case the kernel's claims are about.
-"The state's own (unenriched) frames at the root bond of the warmed XX chain."
-function _schmidt_frames(L, steps)
-    mpo, psi0 = _xx_warm(L, steps)
+"The state's own (unenriched) frames at the root bond of the warmed XX(Z) chain."
+function _schmidt_frames(L, steps; kw...)
+    mpo, psi0 = _xx_warm(L, steps; kw...)
     return mpo, psi0, RC.frames_from_state(psi0, mpo, L ÷ 2)
 end
 
+# ⛔ Not the XX chain, and not h = 0.2. The XX Neel state is Gaussian and its exact new-new block
+# has no O(h) term (hq17d 17429012: ||M11|| = 5e-14). On a truncated XXZ state the O(h) term is
+# real but small: at h = 0.2 the h^2 remainder is 35-1600x the leading term (hq19b 17429851,
+# slopes 1.99). The ratio falls as h, so the leading term dominates only at small h; h = 1e-3
+# puts it near 0.2 on this fixture (Delta = 0.5, D = 4: ratio 35 at h = 0.2).
 @testset "T6.3: the omitted new-new block" begin
-    L, tau = 8, ComplexF64(-0.2im)
-    mpo, psi0, fr = _schmidt_frames(L, 2)
-    c, H, v0 = fr.c, dense_heisenberg(L; J = 1.0, delta = 0.0), dense_state(psi0)
+    L, tau, delta = 8, ComplexF64(-1e-3im), 0.5
+    mpo, psi0, fr = _schmidt_frames(L, 4; delta = delta, maxdim = 4)
+    c, H, v0 = fr.c, dense_heisenberg(L; J = 1.0, delta = delta), dense_state(psi0)
     n0 = norm(v0)
     S0 = RC._project_root(psi0, fr)
     r = RC._parallel_kls(psi0, mpo, fr, S0, tau, _stage(tau); nrm = n0)
