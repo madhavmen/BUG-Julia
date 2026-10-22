@@ -519,7 +519,7 @@ def p10(runs, ref, outdir):
             if not sel:
                 continue
             em = [final_error(r, ref)[0] for r in sel]
-            wall = [r["steps"][-1]["wall"] for r in sel]
+            wall = [sum(s["t_step"] for s in r["steps"]) for r in sel]   # the integrator, not the observables
             apps = [sum(s["krylov_dims"] for s in r["steps"]) for r in sel]
             rss = [max(s["record"]["peak_rss"] for s in r["steps"]) / 2 ** 30 for r in sel]
             mk = "o-" if twoS == 1 else "s--"
@@ -546,14 +546,14 @@ def p11(runs, ref, outdir):
             sch[(c["parallel"], c["kls"])].append(r)
     if len(sch) < 3:
         return skip("P11", f"needs the three schedules on one scheme, have {sorted(sch)}")
-    print("HQ-P11 schedule  s  p  h  threads  wall  sum t_K  sum t_L  sum t_root  peak_rss")
+    print("HQ-P11 schedule  s  p  h  threads  sum t_step  sum t_K  sum t_L  sum t_root  peak_rss")
     for (par, kls), rs in sorted(sch.items()):
         for r in rs:
             st = r["steps"]
             tK = sum((s.get("kls") or {}).get("t_K", 0) for s in st)
             tL = sum((s.get("kls") or {}).get("t_L", 0) for s in st)
             print(f"HQ-P11 {par}/{kls} {spin(r):g} {r['config']['order']} {r['config']['h']:g} "
-                  f"{r['config']['threads']}/{r['config']['blas_threads']} {st[-1]['wall']:.1f} "
+                  f"{r['config']['threads']}/{r['config']['blas_threads']} {sum(s['t_step'] for s in st):.1f} "
                   f"{tK:.1f} {tL:.1f} {sum(s['t_root'] for s in st):.1f} "
                   f"{max(s['record']['peak_rss'] for s in st) / 2 ** 30:.2f}G")
 
