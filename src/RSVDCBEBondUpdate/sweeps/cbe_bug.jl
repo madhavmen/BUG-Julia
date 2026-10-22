@@ -318,6 +318,9 @@ seeding it).
 """
 function _merge_frame(Q, U, side::Symbol)
     R = to_concrete(side === :left ? perp_component(Q, U) : perp_component_right(Q, U))
+    # `U` inside `Q` (no CBE direction this step): Telum drops the cancelled blocks and its SVD of
+    # a blockless tensor throws (hq34b 17436300)
+    norm(R) == 0 && return Q
     return first(_extend_frame(Q, R, U, side, 1.0, 0.0))
 end
 

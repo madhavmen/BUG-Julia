@@ -566,6 +566,9 @@ end
     @test soff.n_h1 == son.n_h1
     @test norm(perp(Qoff, Q0)) < 1e-12 * norm(Q0)
     @test norm(perp(Qoff, Qk)) < 1e-12 * norm(Qk)
+    # nothing outside: the frame comes back as it was (hq34b: a blockless residual crashed the SVD)
+    @test leg_dim(RC._merge_frame(Q0, Q0, side), fl) == leg_dim(Q0, fl)
+    @test leg_dim(RC._merge_frame(Q0, left ? f.U0 : f.V0, side), fl) == leg_dim(Q0, fl)
     @info("P07 reuse on/off", side, cbe = leg_dim(Q0, fl) - f.old_rank,
           krylov_added = (son.added, soff.added), merged = leg_dim(Qoff, fl), n_h1 = son.n_h1)
 end

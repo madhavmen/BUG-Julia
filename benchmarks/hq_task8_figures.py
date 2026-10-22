@@ -379,52 +379,74 @@ def final_error(run, ref):
     return e[-1, 1], e[-1, 3], step_floor(run, run["config"]["tf"]) + e[-1, 4]
 
 
+def fit_range(h, e):
+    """The asymptotic range from the largest h down, until halving h stops gaining a factor 1.5
+    (a basis/root/reference plateau); the least-squares slope over it. `h` ascending."""
+    k = len(h) - 1
+    while k > 0 and e[k - 1] < e[k] / 1.5:
+        k -= 1
+    if len(h) - k < 2:
+        return None
+    return np.polyfit(np.log(h[k:]), np.log(e[k:]), 1)[0], k
+
+
+P08_METRICS = (("obs", r"$\max_i|m_i - m_i^{\rm ref}|$ at $t_f$"),
+               ("state", r"$e_p = \|\psi(t_f) - \psi_{\rm exact}(t_f)\|$"))
+
+
+def p08_points(rs, metric, ref):
+    """(h, error) at t_f, one per h, seed 1."""
+    pts = {}
+    for r in rs:
+        last = r["records"][-1] if r["records"] else {}
+        if abs(last.get("t", -1) - r["config"]["tf"]) > 1e-9:
+            continue
+        if metric == "state":
+            if "err_state" in last:
+                pts[r["config"]["h"]] = last["err_state"]
+        else:
+            fe = final_error(r, ref)
+            if fe is not None:
+                pts[r["config"]["h"]] = fe[0]
+    return [np.array(x) for x in zip(*sorted(pts.items()))] if len(pts) >= 2 else None
+
+
 def p08(runs, ref, outdir):
     groups = defaultdict(list)
     for r in runs:
         if standard(r) and r["config"]["seed"] == 1:        # the seed spread is P13's
-            groups[key(r, "twoS", "order", "tol_basis", "tol_root", "tol_trunc")].append(r)
+            groups[key(r, "twoS", "tol_basis", "order")].append(r)
     if not groups:
         return skip("P08", "no standard runs")
-    fig, ax = plt.subplots(1, 3, figsize=(19, 5))
-    for (twoS, p, tb, tr, tt), rs in sorted(groups.items()):
-        # e_p(h): the state error at t_f (hq_bench `err_state`, s = 1/2), one point per h
-        st = sorted({r["config"]["h"]: r["records"][-1]["err_state"] for r in rs
-                     if r["records"] and "err_state" in r["records"][-1]
-                     and abs(r["records"][-1]["t"] - r["config"]["tf"]) < 1e-9}.items())
-        if len(st) >= 2:
-            hs, es = map(np.array, zip(*st))
-            # raw local slopes: `step_floor` (sum of per-step tol_basis) is an upper bound far above
-            # the measured plateaus, so the plateau is read off the curve, not cut by it
-            sl = [np.log2(es[k + 1] / es[k]) / np.log2(hs[k + 1] / hs[k]) for k in range(len(hs) - 1)]
-            ln, = ax[2].loglog(hs, es, "o-", label=f"p={p} tb={tb:.0e}")
-            ax[2].loglog(hs, es[0] * (hs / hs[0]) ** p, "--", color=ln.get_color(), lw=0.5)
-            print(f"HQ-P08-STATE s={twoS / 2} p={p} tb={tb:.0e} h={[float(x) for x in hs]} "
-                  f"e_p={[f'{x:.2e}' for x in es]} slopes={[round(float(s), 2) for s in sl]}")
-        pts = sorted((r["config"]["h"],) + final_error(r, ref) for r in rs if final_error(r, ref) is not None)
-        if len(pts) < 2:
-            continue
-        h, em, ej, fl = map(np.array, zip(*pts))
-        a = ax[int(twoS == 6)]                      # a bool index is a numpy mask, not 0/1
-        line, = a.loglog(h, em, "o-", label=f"p={p} tb={tb:.0e}")
-        a.loglog(h, fl, ":", color=line.get_color(), lw=0.7)
-        ok = (em > MARGIN * fl)
-        slopes = [np.log2(em[k + 1] / em[k]) / np.log2(h[k + 1] / h[k])
-                  for k in range(len(h) - 1) if ok[k] and ok[k + 1] and abs(h[k + 1] / h[k] - 2) < 1e-9]
-        raw = [np.log2(em[k + 1] / em[k]) / np.log2(h[k + 1] / h[k])
-               for k in range(len(h) - 1) if h[k + 1] != h[k]]
-        print(f"HQ-P08 s={twoS / 2} p={p} tb={tb:.0e} tr={tr:.0e} tt={tt:.0e} h={[float(x) for x in h]} "
-              f"err={[f'{x:.2e}' for x in em]} floor={[f'{x:.2e}' for x in fl]} "
-              f"slopes={[round(float(s), 2) for s in slopes]} raw={[round(float(s), 2) for s in raw]}")
-        h0, e0 = h[-1], em[-1]
-        a.loglog(h, e0 * (h / h0) ** p, "--", color=line.get_color(), lw=0.5)
-    for a, s in zip(ax, ("1/2", "3")):
-        a.set_xlabel("J h"); a.set_ylabel(r"$\max_i|\Delta m_i(t_f)|$")
-        a.set_title(f"s = {s}: dashed = $h^p$, dotted = the run's floor")
-        a.legend(fontsize=6)
-    ax[2].set_xlabel("J h"); ax[2].set_ylabel(r"$e_p = \|\psi(t_f) - \psi_{\rm exact}(t_f)\|$")
-    ax[2].set_title("s = 1/2 state error: dashed = $h^p$")
-    ax[2].legend(fontsize=6)
+    # one row per (metric, spin) with data, one column per tol_basis
+    rows = [(m, s) for m, _ in P08_METRICS for s in (1, 6)
+            if any(p08_points(rs, m, ref) is not None for (tw, _, _), rs in groups.items() if tw == s)]
+    tbs = sorted({tb for (_, tb, _) in groups})
+    fig, ax = plt.subplots(len(rows), len(tbs), figsize=(5.2 * len(tbs), 4.4 * len(rows)),
+                           squeeze=False, sharex=True)
+    colors = {p: plt.cm.viridis((p - 1) / 4.2) for p in range(1, 6)}
+    for i, (metric, twoS) in enumerate(rows):
+        for j, tb in enumerate(tbs):
+            a = ax[i, j]
+            for p in range(1, 6):
+                xy = p08_points(groups.get((twoS, tb, p), []), metric, ref)
+                if xy is None:
+                    continue
+                h, e = xy
+                f = fit_range(h, e)
+                lab = f"p={p}" + (f": slope {f[0]:.2f} on h={h[f[1]]:g}-{h[-1]:g}" if f else "")
+                a.loglog(h, e, "o-", color=colors[p], ms=4, label=lab)
+                k = f[1] if f else len(h) - 1                # guide through the fit's smallest h
+                a.loglog(h, e[k] * (h / h[k]) ** p, "--", color=colors[p], lw=0.8, alpha=0.6)
+                print(f"HQ-P08 {metric} s={twoS / 2:g} tb={tb:.0e} p={p} h={[float(x) for x in h]} "
+                      f"err={[f'{x:.2e}' for x in e]} fit={'none' if f is None else round(float(f[0]), 2)}")
+            a.set_title(f"s = {twoS / 2:g}, tol_basis = {tb:.0e}", fontsize=10)
+            a.set_xlabel("J h")
+            j == 0 and a.set_ylabel(dict(P08_METRICS)[metric])
+            a.grid(True, which="major", alpha=0.3)
+            a.legend(fontsize=7, loc="lower right")
+    fig.suptitle(r"P08 time-step order at $Jt_f = 8$, L = 16 (dashed: $h^p$ through each fit's smallest h)")
+    fig.tight_layout()
     save(fig, outdir, "P08_order.png")
 
 
