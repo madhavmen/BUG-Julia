@@ -286,6 +286,48 @@ def p05(runs, ref, outdir):
     save(fig, outdir, "P05_sketch.png")
 
 
+# ── P06 DD-QR kernel scaling (hq_dd_scaling.jl) ────────────────────────────────────────────────
+KERNELS = ("input_dd", "stream", "output_dd", "qr", "sectors", "env",
+           "onesided_draw", "onesided_stream", "onesided_output_dd", "onesided_qr")
+
+
+def p06(rundir, outdir):
+    files = []
+    for p in sorted(glob.glob(os.path.join(rundir, "*.json"))):
+        with open(p) as f:
+            d = json.load(f)
+        if "rows" in d:
+            files.append((p, d))
+    if not files:
+        return skip("P06", "no hq_dd_scaling.jl JSON in the run directory")
+    for path, d in files:
+        rows = d["rows"]
+        ws = sorted({r["w"] for r in rows})
+        fig, ax = plt.subplots(2, len(ws) * 2, figsize=(6 * len(ws) * 2, 9), squeeze=False)
+        for c, (w, side) in enumerate((w, s) for w in ws for s in ("left", "right")):
+            rs = sorted((r for r in rows if r["w"] == w and r["side"] == side), key=lambda r: r["D_actual"])
+            D = np.array([r["D_actual"] for r in rs], dtype=float)
+            for k in KERNELS:
+                t = np.array([r[k][0] for r in rs])
+                b = np.array([r[k][1] for r in rs], dtype=float)
+                g = np.log2(t[-1] / t[-2]) / np.log2(D[-1] / D[-2]) if len(D) > 1 else np.nan
+                style = "--" if k.startswith("onesided") else "-"
+                ax[0, c].loglog(D, t, style + "o", ms=3, label=f"{k} (gamma_last={g:.2f})")
+                if np.all(b > 0):
+                    ax[1, c].loglog(D, b, style + "o", ms=3, label=k)
+                print(f"HQ-P06 w={w} {side} {k} gamma=" +
+                      " ".join(f"{np.log2(t[n + 1] / t[n]) / np.log2(D[n + 1] / D[n]):.2f}" for n in range(len(D) - 1)))
+            t0 = rs[0]["stream"][0]                                  # guides through the first stream point
+            for e, lab in ((2, "D^2"), (3, "D^3")):
+                ax[0, c].loglog(D, t0 * (D / D[0]) ** e, "k:", lw=0.6)
+                ax[0, c].annotate(lab, (D[-1], t0 * (D[-1] / D[0]) ** e), fontsize=7)
+            ax[0, c].set_title(f"w = {w}, {side}: cols {[r['cols'] for r in rs]}")
+            ax[0, c].set_xlabel("D"); ax[0, c].set_ylabel("median seconds per call")
+            ax[1, c].set_xlabel("D"); ax[1, c].set_ylabel("allocated bytes per call")
+            ax[0, c].legend(fontsize=5)
+        save(fig, outdir, "P06_dd_scaling.png")
+
+
 # ── P07 Krylov reuse ───────────────────────────────────────────────────────────────────────────
 def p07(runs, ref, outdir):
     rs = [r for r in runs if standard(r)]
@@ -472,7 +514,7 @@ def main():
     print(f"HQFIG-RUNS {len(runs)}")
     for fn in (p01, p02, p03, p04, p05, p07, p08, p09, p10, p11, p12, p13):
         fn(runs, ref, outdir)
-    skip("P06", "kernel scaling vs D is its own benchmark (hq_dd_scaling.jl)")
+    p06(sys.argv[1], outdir)
 
 
 if __name__ == "__main__":
