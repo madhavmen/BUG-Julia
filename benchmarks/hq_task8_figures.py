@@ -1,8 +1,9 @@
 """HQ plan Task 8: figures P01--P13 from `benchmarks/hq_bench.jl` runs.
 
-usage:  python benchmarks/hq_task8_figures.py RUNDIR OUTDIR [S3REF.json]
+usage:  python benchmarks/hq_task8_figures.py RUNDIR[,RUNDIR...] OUTDIR [S3REF.json] [--figs=P12,...]
 
-RUNDIR holds the `hq_bench.jl` JSON files (any number, any settings); S3REF is the spin-3 reference
+RUNDIR holds the `hq_bench.jl` JSON files (any number, any settings); `--figs` draws only the named
+figures, so short twin scans can feed P12 without entering P01-P04's finest-run choice. S3REF is the spin-3 reference
 band from `hq_xx_reference_band.jl` (keys t, m, j, band_m, band_j). A figure whose runs are absent
 is skipped with a line saying which settings it needs, never drawn from a subset that looks whole.
 
@@ -529,22 +530,88 @@ def p11(runs, ref, outdir):
                   f"{max(s['record']['peak_rss'] for s in st) / 2 ** 30:.2f}G")
 
 
+P12_T = 0.4      # every twin scan (s = 3 stops there) holds this record
+# hq39: both arms flatten at 3-5e-9 while max|dm| is 1e-14 -- the ED-overlap measurement, not the
+# method -- so state errors below this never enter a fit
+STATE_FLOOR = 1e-8
+DIST_FLOOR = 3e-8    # dist_twin = sqrt(<a|a> + <b|b> - 2 Re<a|b>): sqrt-roundoff 2.1e-8 for equal states
+NORM_FLOOR = 1e-12   # accumulated roundoff of <psi|psi> over the steps
+
+
+def _record_at(run, t):
+    return next((x for x in run["records"] if abs(x["t"] - t) < 1e-9), None)
+
+
 def p12(runs, ref, outdir):
-    rs = [r for r in runs if r["config"]["twin"]]
-    if not rs:
-        return skip("P12", "no HQB_TWIN = 1 run")
-    fig, ax = plt.subplots(1, 2, figsize=(12, 4))
-    for r in rs:
-        t = [x["t"] for x in r["records"]]
-        lab = f"s={spin(r):g} p={r['config']['order']} h={r['config']['h']:g} {r['config']['kls']}"
-        ax[0].semilogy(t, [max(x["dist_twin"], 1e-17) for x in r["records"]], label=lab)
-        ax[1].semilogy(t, [max(x.get("err_exact_m", np.nan), 1e-17) for x in r["records"]], label=lab + " K/L/S")
-        if r["config"]["twoS"] == 1:
-            ex = [abs(np.max(np.abs(np.array(x["twin_m"]) - (np.array(x["m"]))))) for x in r["records"]]
-            ax[1].semilogy(t, np.maximum(ex, 1e-17), ":", label=lab + " |m_par - m_std|")
-    ax[0].set_ylabel(r"$\|\psi_{par}-\psi_{std}\|$"); ax[1].set_ylabel("error")
+    """Versus h, per (s, order, tol_basis): (a) each arm's OWN state error against the exact state
+    (s = 1/2, last state time), so the K/L/S-minus-standard distance is attributed to an arm;
+    (b) that distance at `P12_T`; (c) the invariants' drift up to `P12_T` -- the only grade at s = 3."""
+    groups = defaultdict(dict)
+    for r in runs:
+        if r["config"]["twin"] and _record_at(r, P12_T) is not None:
+            groups[key(r, "twoS", "order", "tol_basis")][r["config"]["h"]] = r
+    if not groups:
+        return skip("P12", f"no HQB_TWIN = 1 run reaching t = {P12_T}")
+    from matplotlib.lines import Line2D
+    fig, ax = plt.subplots(1, 3, figsize=(18, 5.2))
+    colors = {p: plt.cm.viridis((p - 1) / 4.2) for p in range(1, 6)}
+    masked = lambda v, lo: np.where(np.asarray(v) > lo, v, np.nan)   # below a floor = not a measurement
+    slopes = defaultdict(dict)
+    for (twoS, p, tb), byh in sorted(groups.items()):
+        hs = np.array(sorted(byh))
+        mk = "o" if twoS == 1 else "s"
+        ls_tb = "-" if (twoS == 6 or tb == 1e-7) else "--"
+        lab = f"s={twoS / 2:g} p={p} tb={tb:.0e}"
+        st = [next((x for x in reversed(byh[h]["records"]) if "twin_err_state" in x), None) for h in hs]
+        if all(x is not None for x in st) and len(hs) >= 2:
+            for arm, ls, name in (("err_state", "-", "K/L/S"), ("twin_err_state", "--", "std")):
+                e = np.array([x[arm] for x in st])
+                k0 = int(np.sum(e < STATE_FLOOR))                    # h ascending: floor points first
+                f = fit_range(hs[k0:], e[k0:])
+                slopes[p][name] = f[0] if f else np.nan
+                ax[0].loglog(hs, e, mk + ls, color=colors[p], ms=4, mfc="none" if name == "std" else None)
+                print(f"HQ-P12 state {lab} {name} t={st[0]['t']:g} h={list(map(float, hs))} "
+                      f"err={[f'{x:.2e}' for x in e]} fit={'none' if f is None else round(float(f[0]), 2)}")
+        rec = [_record_at(byh[h], P12_T) for h in hs]
+        d = np.array([x["dist_twin"] for x in rec])
+        ax[1].loglog(hs, masked(d, DIST_FLOOR), mk + ls_tb, color=colors[p], ms=4)
+        dn = np.array([max(abs(x["norm"] - 1) for x in byh[h]["records"] if x["t"] <= P12_T + 1e-9) for h in hs])
+        dv = np.array([abs(x["var"] - (twoS / 2) ** 2) for x in rec])
+        ax[2].loglog(hs, masked(dn, NORM_FLOOR), mk + ls_tb, color=colors[p], ms=4)
+        if twoS == 6:                     # at s = 1/2 Var H drift is each arm's own error (panel a)
+            ax[2].loglog(hs, dv, mk + ":", color=colors[p], ms=4, mfc="none")
+        if all("twin_var" in x for x in rec):
+            ax[2].loglog(hs, [abs(x["twin_var"] - (twoS / 2) ** 2) for x in rec], "x-.", color=colors[p])
+        print(f"HQ-P12 kls {lab} t={P12_T} h={list(map(float, hs))} dist={[f'{x:.2e}' for x in d]} "
+              f"dnorm={[f'{x:.2e}' for x in dn]} dvar={[f'{x:.2e}' for x in dv]}")
+    pkey = [Line2D([], [], color=colors[p], lw=2,
+                   label=f"p={p}" + (f"  slope K/L/S {slopes[p]['K/L/S']:.2f}, std {slopes[p]['std']:.2f}"
+                                     if p in slopes else "")) for p in range(1, 6)]
+    ax[0].axhline(STATE_FLOOR, color="grey", lw=0.8, ls=":")
+    ax[0].legend(handles=pkey + [Line2D([], [], color="k", marker="o", label="K/L/S"),
+                                 Line2D([], [], color="k", marker="o", mfc="none", ls="--", label="standard")],
+                 fontsize=7, loc="lower right")
+    ax[0].set_title(r"(a) $s=1/2$, tol_basis 1e-7: each arm vs exact, $Jt=0.8$", fontsize=9)
+    ax[0].set_ylabel(r"$\|\psi-\psi_{\rm exact}\|$")
+    ax[1].axhline(DIST_FLOOR, color="grey", lw=0.8, ls=":")
+    ax[1].set_title(rf"(b) $\|\psi_{{par}}-\psi_{{std}}\|$ at $Jt={P12_T:g}$ (missing = below floor)", fontsize=9)
+    sk = [Line2D([], [], color="k", marker="s", label="s=3, tb 1e-5"),
+          Line2D([], [], color="k", marker="o", label="s=1/2, tb 1e-7"),
+          Line2D([], [], color="k", marker="o", ls="--", label="s=1/2, tb 1e-5")]
+    ax[1].legend(handles=[Line2D([], [], color=colors[p], lw=2, label=f"p={p}") for p in range(1, 6)] + sk,
+                 fontsize=7, loc="lower right")
+    ax[2].set_title(rf"(c) K/L/S invariant drift up to $Jt={P12_T:g}$ (Var H exact $=s^2$)", fontsize=9)
+    ax[2].legend(handles=[Line2D([], [], color="k", marker="s", label=r"$|\|\psi\|^2-1|$ (solid)"),
+                          Line2D([], [], color="k", marker="s", mfc="none", ls=":",
+                                 label=r"$|{\rm Var}H - s^2|$, s=3"),
+                          Line2D([], [], color="k", marker="x", ls="-.", label="standard Var H (if recorded)")],
+                 fontsize=7, loc="lower right")
+    hall = sorted({h for byh in groups.values() for h in byh})
     for a in ax:
-        a.set_xlabel("J t"); a.legend(fontsize=6)
+        a.set_xticks(hall, [f"{h:g}" for h in hall]); a.minorticks_off()
+        a.set_xlabel("J h"); a.grid(True, which="major", alpha=0.3)
+    fig.suptitle("P12 parallel K/L/S vs standard BUG, L = 16 (circles s = 1/2, squares s = 3)")
+    fig.tight_layout()
     save(fig, outdir, "P12_parallel_accuracy.png")
 
 
@@ -571,19 +638,25 @@ def p13(runs, ref, outdir):
 
 
 def main():
-    if len(sys.argv) < 3:
+    args = [a for a in sys.argv[1:] if not a.startswith("--figs=")]
+    only = [a.split("=", 1)[1].split(",") for a in sys.argv[1:] if a.startswith("--figs=")]
+    if len(args) < 2:
         sys.exit(__doc__)
-    runs = load_runs(sys.argv[1])
-    outdir = sys.argv[2]
+    rundirs = args[0].split(",")
+    runs = [r for d in rundirs for r in load_runs(d)]
+    outdir = args[1]
     os.makedirs(outdir, exist_ok=True)
     ref = None
-    if len(sys.argv) > 3:
-        with open(sys.argv[3]) as f:
+    if len(args) > 2:
+        with open(args[2]) as f:
             ref = json.load(f)
     print(f"HQFIG-RUNS {len(runs)}")
+    want = (lambda name: name in only[0]) if only else (lambda name: True)
     for fn in (p01, p02, p03, p04, p05, p07, p08, p09, p10, p11, p12, p13):
-        fn(runs, ref, outdir)
-    p06(sys.argv[1], outdir)
+        want(fn.__name__.upper()) and fn(runs, ref, outdir)
+    if want("P06"):
+        for d in rundirs:
+            p06(d, outdir)
 
 
 if __name__ == "__main__":
