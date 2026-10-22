@@ -77,6 +77,8 @@ using ..BondUpdateBUG: SymMPS, canonical!, bond_dims, leg_dim, local_space,
                        # `product_state`s (same leg spaces under `:none`, so they add tensor by
                        # tensor) and `S^x_tot` is read out with `site_expval`.
                        product_state, site_expval,
+                       # models/spin_xx.jl: the spin-s domain wall on `spin_space`
+                       sector_product_state,
                        # models/oat.jl under `:Z2` -- the symmetry arXiv:2208.10972 Fig. 2
                        # actually uses. The sigma^x basis of `z2_ising.jl` is what makes it work:
                        # `S^x` is DIAGONAL there (hence measurable) and the x-polarised start is
@@ -184,6 +186,9 @@ include("models/hubbard_d4.jl")
 #                      superoperators, the exact Lindblad MPO (`pair_mpo` + on-site `field`), and
 #                      trace / expectation / RDM / dense contractions over the abelian blocks.
 include("models/liouville.jl")
+# models/spin_xx.jl  the two U(1) XX chains of the HQ plan (Task 7): spin-1/2 (d = 2) and spin-3
+#                    (d = 7) on one exchange convention, the domain wall and the bond current.
+include("models/spin_xx.jl")
 
 # The two TDVP integrators live in their own directories. They are FILES of this module, not
 # submodules: both are built on `henv.jl` (environments) and `cbe_core.jl` (the expansion)
@@ -325,6 +330,7 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        HUB4_EMPTY, HUB4_UP, HUB4_DOWN, HUB4_BOTH,
        hubbard_aa_mpo_d4, hub4_density, hub4_imbalance, hub4_cdw_occupations,
        pxp_operators, pxp_mpo, z2_state, zk_state,
+       spin_space, spin_xx_mpo, spin_current_mpo, spin_domain_wall_state, spin_sz_profile,
        # sweeps/ -- the structured RSVD-CBE sweeps
        BondExpansionInfo, expand_bond!, lanczos_lowest,
        DMRGCBEInfo, DMRGCBERun, dmrg_cbe1s_sweep!, dmrg_cbe1s!,

@@ -48,6 +48,42 @@ function xx_free_fermion_sz(L::Int, t::Real; J::Real = 1.0,
 end
 
 """
+    xx_open_propagator(L, t; J=1.0) -> Matrix{ComplexF64}
+
+The open-chain one-body propagator in closed form (HQ plan T7.1),
+
+    u_ij(t) = 2/(L+1) sum_m sin(pi m i/(L+1)) sin(pi m j/(L+1)) exp(-i J t cos(pi m/(L+1))),
+
+the eigen-decomposition of `xx_single_particle_hamiltonian` written out, NOT computed from it.
+"""
+function xx_open_propagator(L::Int, t::Real; J::Real = 1.0)
+    k = [pi * m / (L + 1) for m in 1:L]
+    return [2 / (L + 1) * sum(sin(k[m] * i) * sin(k[m] * j) * cis(-J * t * cos(k[m]))
+                              for m in 1:L) for i in 1:L, j in 1:L]
+end
+
+"""
+    xx_open_correlation(L, t; J=1.0, occupied=1:(L÷2)) -> Matrix{ComplexF64}
+
+`C(t) = u(t) C(0) u(t)'` with `C_ij = <c_j^dag c_i>` (plan T7.1's convention), from the Slater
+determinant occupying `occupied`: `<S^z_i> = C_ii - 1/2`.
+"""
+function xx_open_correlation(L::Int, t::Real; J::Real = 1.0, occupied = 1:(L ÷ 2))
+    u = xx_open_propagator(L, t; J = J)
+    C0 = Diagonal([i in occupied ? 1.0 : 0.0 for i in 1:L])
+    return u * C0 * u'
+end
+
+"""
+    xx_open_current(C; J=1.0) -> Vector{Float64}
+
+The bond currents `j_b = (iJ/2) <S^+_b S^-_{b+1} - h.c.> = -J Im C_{b+1,b}` of the spin-1/2 XX chain
+(`S^+_b S^-_{b+1} = c_b^dag c_{b+1}`: the string cancels on adjacent sites), `C` in the convention of
+`xx_open_correlation`. Signed so that `dC_bb/dt = j_{b-1} - j_b`.
+"""
+xx_open_current(C::AbstractMatrix; J::Real = 1.0) = [-J * imag(C[b + 1, b]) for b in 1:(size(C, 1) - 1)]
+
+"""
     xx_dephasing_correlation(L, t; J=1.0, gamma=0.0, occupied=1:2:L) -> Matrix{ComplexF64}
 
 `C_ij(t) = <c_i^dag c_j>` for the XX chain under ONSITE DEPHASING, EXACTLY.

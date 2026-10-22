@@ -22,7 +22,7 @@ include("observables.jl")
 
 export SymMPS, canonical!, move_left!, move_right!, bond_dims, leg_dim,
        overlap,
-       product_state, domain_wall_state, neel_state, dimer_state,
+       product_state, domain_wall_state, neel_state, dimer_state, sector_product_state,
        SECTOR_SU2_HALF, SECTOR_SU2_SINGLET,
        total_sz, sz_expectation, site_expval, apply_sz!, sz_overlaps,
        magnetisation, center_bond, center_bond_dimension,

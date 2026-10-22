@@ -240,21 +240,30 @@ function product_state(spins::Vector{Symbol}; eltype::Type{<:Number} = ComplexF6
 end
 
 function _product_state_u1(spins::Vector{Symbol}, T::Type{<:Number} = ComplexF64)
-    L = length(spins)
-    q = local_space(:U1)
+    targets = map(enumerate(spins)) do (i, s)
+        s === :up ? SECTOR_UP : s === :down ? SECTOR_DOWN :
+            throw(ArgumentError("spin $i must be :up or :down, got $s"))
+    end
+    return sector_product_state(local_space(:U1), targets; eltype = T)
+end
+
+"""
+    sector_product_state(q, sectors; eltype = ComplexF64) -> SymMPS
+
+The product state with site `i` in the ONE-DIMENSIONAL U(1) sector `sectors[i]` of the local
+space `q` -- `product_state` for any abelian site whose local states are distinct charges, such
+as the spin-`s` sites of `spin_space` (charge `2 S^z`).
+"""
+function sector_product_state(q, sectors::AbstractVector; eltype::Type{<:Number} = ComplexF64)
+    L, T = length(sectors), eltype
+    L >= 1 || throw(ArgumentError("sector_product_state needs at least one site"))
 
     tensors = Any[]
     # Left boundary: a one-dimensional vacuum link.
     prev = (getvac(q.I, ("L,0", "L,1")), 2)
 
     for i in 1:L
-        target = if spins[i] === :up
-            SECTOR_UP
-        elseif spins[i] === :down
-            SECTOR_DOWN
-        else
-            throw(ArgumentError("spin $i must be :up or :down, got $(spins[i])"))
-        end
+        target = sectors[i]
 
         # Fuse the incoming link with a fresh physical leg. getIdentity returns
         # a lazy TLArrayView and getsub only accepts a concrete TLArray.
@@ -266,6 +275,9 @@ function _product_state_u1(spins::Vector{Symbol}, T::Type{<:Number} = ComplexF64
 
         # Trim the outgoing link to the sectors that survived.
         A = to_concrete(A)
+        # a label the site does not carry selects nothing, silently -- refuse it
+        isempty(A.qlabels) && throw(ArgumentError(
+            "site $i: sector $target is not a state of the local space"))
         present = Set(ql[3] for ql in A.qlabels)
         A = to_concrete(getsub(A, 3, s -> s in present ? Colon() : nothing))
 
