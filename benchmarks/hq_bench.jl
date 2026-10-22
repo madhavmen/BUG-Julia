@@ -69,8 +69,10 @@ config = Dict("twoS" => TWOS, "L" => L, "tf" => TF, "h" => H, "every" => EVERY, 
               "solver" => "cbe_bug_step!")
 steps, recs = Any[], Any[]
 
+# `allownan`: a ledger ratio with a zero denominator (e.g. `rho_initial` of an empty frontier) is NaN,
+# and is kept as such rather than dropped (the figure script's `json` reads it).
 save() = open(OUT, "w") do io
-    JSON.print(io, Dict("config" => config, "steps" => steps, "records" => recs))
+    JSON.json(io, Dict("config" => config, "steps" => steps, "records" => recs); allownan = true)
 end
 
 _fields(x) = Dict(string(f) => getfield(x, f) for f in fieldnames(typeof(x)))
