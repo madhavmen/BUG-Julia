@@ -69,8 +69,8 @@ config = Dict("twoS" => TWOS, "L" => L, "tf" => TF, "h" => H, "every" => EVERY, 
               "solver" => "cbe_bug_step!")
 steps, recs = Any[], Any[]
 
-# `allownan`: a ledger ratio with a zero denominator (e.g. `rho_initial` of an empty frontier) is NaN,
-# and is kept as such rather than dropped (the figure script's `json` reads it).
+# `allownan`: `ledger.leak[1]` (frontier j = 0) is NaN on the default checks-off closure, which does
+# not measure it (krylov_closure.jl); kept as NaN rather than dropped (the figure script reads it).
 save() = open(OUT, "w") do io
     JSON.json(io, Dict("config" => config, "steps" => steps, "records" => recs); allownan = true)
 end
