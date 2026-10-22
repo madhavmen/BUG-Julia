@@ -412,6 +412,20 @@ def p08_points(rs, metric, ref):
     return [np.array(x) for x in zip(*sorted(pts.items()))] if len(pts) >= 2 else None
 
 
+def state_floor(groups, twoS, tb, ref):
+    """The tol_basis floor of the state error: at an h where the two most accurate orders agree to
+    3x both sit on it. It moves slowly with h (hq38: 1.7-3.7e-8 over h = 0.2-0.05), so the smallest
+    such value stands for every h -- an order still above it at that h has not shown it (0: none)."""
+    byh = defaultdict(list)
+    for p in range(1, 6):
+        xy = p08_points(groups.get((twoS, tb, p), []), "state", ref)
+        if xy is not None:
+            for h, e in zip(*xy):
+                byh[h].append(e)
+    hits = [sorted(es)[0] for es in byh.values() if len(es) >= 2 and sorted(es)[1] < 3 * sorted(es)[0]]
+    return min(hits) if hits else 0.0
+
+
 def p08(runs, ref, outdir):
     groups = defaultdict(list)
     for r in runs:
@@ -429,14 +443,27 @@ def p08(runs, ref, outdir):
     for i, (metric, twoS) in enumerate(rows):
         for j, tb in enumerate(tbs):
             a = ax[i, j]
+            if all(p08_points(groups.get((twoS, tb, p), []), metric, ref) is None for p in range(1, 6)):
+                a.axis("off")
+                a.text(0.5, 0.5, f"no {metric} runs at s = {twoS / 2:g}, tol_basis = {tb:.0e}",
+                       ha="center", va="center", transform=a.transAxes, fontsize=9, color="grey")
+                continue
             for p in range(1, 6):
                 xy = p08_points(groups.get((twoS, tb, p), []), metric, ref)
                 if xy is None:
                     continue
                 h, e = xy
-                f = fit_range(h, e)
+                k0 = 0
+                if metric == "state":                        # drop the floor points (h ascending)
+                    fl = state_floor(groups, twoS, tb, ref)
+                    ok = e > MARGIN * fl
+                    k0 = len(ok) - int(np.argmin(ok[::-1])) if not ok.all() else 0
+                    a.loglog(h[:k0], e[:k0], "o", color=colors[p], ms=5, mfc="none")
+                f = fit_range(h[k0:], e[k0:])
+                f = f and (f[0], f[1] + k0)
                 lab = f"p={p}" + (f": slope {f[0]:.2f} on h={h[f[1]]:g}-{h[-1]:g}" if f else "")
-                a.loglog(h, e, "o-", color=colors[p], ms=4, label=lab)
+                a.loglog(h, e, "-", color=colors[p], lw=0.8)
+                a.loglog(h[k0:], e[k0:], "o-", color=colors[p], ms=4, label=lab)
                 k = f[1] if f else len(h) - 1                # guide through the fit's smallest h
                 a.loglog(h, e[k] * (h / h[k]) ** p, "--", color=colors[p], lw=0.8, alpha=0.6)
                 print(f"HQ-P08 {metric} s={twoS / 2:g} tb={tb:.0e} p={p} h={[float(x) for x in h]} "
@@ -449,7 +476,8 @@ def p08(runs, ref, outdir):
             j == 0 and a.set_ylabel(dict(P08_METRICS)[metric])
             a.grid(True, which="major", alpha=0.3)
             a.legend(fontsize=7, loc="lower right")
-    fig.suptitle(r"P08 time-step order at $Jt_f = 8$, L = 16 (dashed: $h^p$ through each fit's smallest h)")
+    fig.suptitle(r"P08 time-step order at $Jt_f = 8$, L = 16 (dashed: $h^p$ through each fit's smallest h;"
+                 r" open: within 10x of the tol_basis floor, not fitted)")
     fig.tight_layout()
     save(fig, outdir, "P08_order.png")
 
