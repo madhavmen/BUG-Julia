@@ -382,29 +382,49 @@ def final_error(run, ref):
 def p08(runs, ref, outdir):
     groups = defaultdict(list)
     for r in runs:
-        if standard(r):
+        if standard(r) and r["config"]["seed"] == 1:        # the seed spread is P13's
             groups[key(r, "twoS", "order", "tol_basis", "tol_root", "tol_trunc")].append(r)
     if not groups:
         return skip("P08", "no standard runs")
-    fig, ax = plt.subplots(1, 2, figsize=(13, 5))
+    fig, ax = plt.subplots(1, 3, figsize=(19, 5))
     for (twoS, p, tb, tr, tt), rs in sorted(groups.items()):
+        # e_p(h): the state error at t_f (hq_bench `err_state`, s = 1/2), one point per h
+        st = sorted({r["config"]["h"]: r["records"][-1]["err_state"] for r in rs
+                     if r["records"] and "err_state" in r["records"][-1]
+                     and abs(r["records"][-1]["t"] - r["config"]["tf"]) < 1e-9}.items())
+        if len(st) >= 2:
+            hs, es = map(np.array, zip(*st))
+            # raw local slopes: `step_floor` (sum of per-step tol_basis) is an upper bound far above
+            # the measured plateaus, so the plateau is read off the curve, not cut by it
+            sl = [np.log2(es[k + 1] / es[k]) / np.log2(hs[k + 1] / hs[k]) for k in range(len(hs) - 1)]
+            ln, = ax[2].loglog(hs, es, "o-", label=f"p={p} tb={tb:.0e}")
+            ax[2].loglog(hs, es[0] * (hs / hs[0]) ** p, "--", color=ln.get_color(), lw=0.5)
+            print(f"HQ-P08-STATE s={twoS / 2} p={p} tb={tb:.0e} h={[float(x) for x in hs]} "
+                  f"e_p={[f'{x:.2e}' for x in es]} slopes={[round(float(s), 2) for s in sl]}")
         pts = sorted((r["config"]["h"],) + final_error(r, ref) for r in rs if final_error(r, ref) is not None)
         if len(pts) < 2:
             continue
         h, em, ej, fl = map(np.array, zip(*pts))
-        line, = ax[twoS == 6].loglog(h, em, "o-", label=f"p={p} tb={tb:.0e}")
-        ax[twoS == 6].loglog(h, fl, ":", color=line.get_color(), lw=0.7)
+        a = ax[int(twoS == 6)]                      # a bool index is a numpy mask, not 0/1
+        line, = a.loglog(h, em, "o-", label=f"p={p} tb={tb:.0e}")
+        a.loglog(h, fl, ":", color=line.get_color(), lw=0.7)
         ok = (em > MARGIN * fl)
         slopes = [np.log2(em[k + 1] / em[k]) / np.log2(h[k + 1] / h[k])
                   for k in range(len(h) - 1) if ok[k] and ok[k + 1] and abs(h[k + 1] / h[k] - 2) < 1e-9]
-        print(f"HQ-P08 s={twoS / 2} p={p} tb={tb:.0e} tr={tr:.0e} tt={tt:.0e} h={list(h)} "
-              f"err={[f'{x:.2e}' for x in em]} floor={[f'{x:.2e}' for x in fl]} slopes={[round(s, 2) for s in slopes]}")
+        raw = [np.log2(em[k + 1] / em[k]) / np.log2(h[k + 1] / h[k])
+               for k in range(len(h) - 1) if h[k + 1] != h[k]]
+        print(f"HQ-P08 s={twoS / 2} p={p} tb={tb:.0e} tr={tr:.0e} tt={tt:.0e} h={[float(x) for x in h]} "
+              f"err={[f'{x:.2e}' for x in em]} floor={[f'{x:.2e}' for x in fl]} "
+              f"slopes={[round(float(s), 2) for s in slopes]} raw={[round(float(s), 2) for s in raw]}")
         h0, e0 = h[-1], em[-1]
-        ax[twoS == 6].loglog(h, e0 * (h / h0) ** p, "--", color=line.get_color(), lw=0.5)
+        a.loglog(h, e0 * (h / h0) ** p, "--", color=line.get_color(), lw=0.5)
     for a, s in zip(ax, ("1/2", "3")):
         a.set_xlabel("J h"); a.set_ylabel(r"$\max_i|\Delta m_i(t_f)|$")
         a.set_title(f"s = {s}: dashed = $h^p$, dotted = the run's floor")
         a.legend(fontsize=6)
+    ax[2].set_xlabel("J h"); ax[2].set_ylabel(r"$e_p = \|\psi(t_f) - \psi_{\rm exact}(t_f)\|$")
+    ax[2].set_title("s = 1/2 state error: dashed = $h^p$")
+    ax[2].legend(fontsize=6)
     save(fig, outdir, "P08_order.png")
 
 

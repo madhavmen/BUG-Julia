@@ -51,6 +51,26 @@ const OUT = get(ENV, "HQB_OUT", "hq_bench_$(TAG).json")
 
 TWOS == 1 && include(joinpath(@__DIR__, "..", "tests", "common", "free_fermion.jl"))
 
+# P08's e_p(h): the phase-sensitive state error ||psi - psi_exact|| in the S^z = 0 sector (s = 1/2,
+# 12870 states at L = 16), at Jt in STATE_TIMES only (one overlap per basis state). The observable
+# alone can converge faster than the state (an error orthogonal to O psi cancels in <O>).
+const STATEERR = TWOS == 1 && L <= 16 && get(ENV, "HQB_STATEERR", "1") == "1"
+const STATE_TIMES = (1.0, 2.0, 4.0, 8.0)
+if STATEERR
+    include(joinpath(@__DIR__, "..", "tests", "common", "spin_ed.jl"))
+    const HED, BASIS = spin_xx_sector(L, 1)
+    ved, ted = spin_sector_state(BASIS, [i <= L ÷ 2 ? 1 : -1 for i in 1:L]), 0.0
+end
+
+"`(||psi - psi_ex||, |<psi_ex|psi>|)` at time `t` (exact vector propagated from the last call)."
+function state_error(t)
+    global ved, ted
+    ved = spin_ed_propagate(HED, ved, t - ted)
+    ted = t
+    a = [overlap(sector_product_state(spin_space(1), [((b,),) for b in x]), psi) for x in BASIS]
+    return norm(a - ved), abs(dot(ved, a))
+end
+
 set_symmetry!(:U1)
 const S = TWOS / 2
 const MPO_ = spin_xx_mpo(L, TWOS)
@@ -128,6 +148,14 @@ record(t, wall) = begin
         r["err_exact_m"] = maximum(abs.(m - (real(diag(C)) .- 0.5)))
         r["err_exact_l2"] = norm(m - (real(diag(C)) .- 0.5))
         r["err_exact_j"] = abs(r["j"] - xx_open_current(C)[L ÷ 2])
+        if STATEERR && (t == 0 || any(s -> abs(t - s) < 1e-9, STATE_TIMES))
+            ts = time()
+            r["err_state"], r["fid_state"] = state_error(t)
+            @printf("HQB-STATE t=%.3f err_state=%.3e |<ex|psi>|=%.15f (%.1f s)\n", t, r["err_state"],
+                    r["fid_state"], time() - ts)
+            # the ED basis and the MPS must agree on the domain wall itself, or no later value means anything
+            t == 0 && r["err_state"] > 1e-12 && error("state error at t = 0 is $(r["err_state"]): basis mismatch")
+        end
     end
     if twin !== nothing
         ov = overlap(twin, psi)
