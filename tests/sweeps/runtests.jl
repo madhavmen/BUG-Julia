@@ -71,6 +71,7 @@ include(joinpath(@__DIR__, "..", "common", "free_fermion.jl"))
     include("test_parallel_kls.jl")
     # ...and the two XX models the HQ benchmarks run on, with their references (Task 7).
     include("test_spin_xx.jl")
+    include("test_spin_jw.jl")      # is the spin-3 chain free under generalized JW?
     include("test_imaginary_time.jl")
     include("test_adaptive_dmrg.jl")
     include("test_adaptive_parallel.jl")
