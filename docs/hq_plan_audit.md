@@ -288,3 +288,66 @@ tests:
     p + 1, not p: see the T5.5 row.
 
 **Task 5 CONFIRMED**, with T5.5's accumulation test carried to Task 8 (P08).
+
+## Task 6
+
+Branch `plan/hq-task-6` (stacked on `plan/hq-task-5`): integrator and tests `7c6195a`;
+`parallel = :full` and the Schmidt-frame kernel tests `abd2f02`; the T6.3 fixture `bb26a0c`.
+Kernel `sweeps/parallel_kls.jl`; entry `parallel_kls_step!` = `cbe_bug_step!(...; kls = schedule)`,
+or `cbe_bug_step!(...; parallel = :full)`.
+
+The K/L stages start right after the preliminary half-sweeps (and, for `order = p > 1`, the frontier
+closure), before the root solve, and are merged after it. S(h) IS the standard root solve. With
+`kls = nothing` (the default) no line of the standard step's arithmetic changes.
+
+| item | status | evidence |
+|---|---|---|
+| T6.1 separate implementation, shared kernels | DONE | `_kls_start` / `_kls_finish`: `one_site_h`, `push_*_channels`, `_preselect_*`, `_stream_left`, `zero_site_h`, the step's root `expv` settings, the one compression; the default path is the standard step |
+| T6.1 p preliminary half-sweeps kept; K/L time-integrating | DONE | the K/L stages run in the frames the half-sweeps and the closure built; each is `expv` of `tau` at `tol_root`, not a basis-only sweep |
+| T6.2 all three initial values from Y_n in the same frames | TEST | T6.2: `K0`, `L0` dense-equal ψ; `W[c]'K0 = S0 = L0 Z[c]'`; ψ untouched |
+| T6.2 shapes, complex adjoints, charges | TEST | K/L operators Hermitian on random complex tensors (1e-11); leg dimensions; block-sparse U(1) legs carry the charges |
+| T6.2 stage order >= p | DONE / TEST | converged exponentials at `tol_root`: K(h), L(h) equal the dense `exp(τ Q'HQ)` on their one-site spaces to 1e-10 |
+| T6.3 omitted block measured on every step | DONE / TEST | `M11 = τ U_+' H Θ_n V_+` streamed against the thin `V_+` (no `H Θ`); `missing = ‖M11‖/‖ψ‖` in `account`, compared with `tol_missing = budget.basis` at the call site (cbe_bug.jl). T6.3, on the Schmidt frames of a truncated XXZ (Δ = 0.5) state at h = 1e-3: the exact new-new block minus `M11` falls as h^2 |
+| T6.3 never silently accept the zero block | DONE / TEST | `missing > tol_basis` → the augmented root Galerkin step in `[W[c],U_+] ⊗ [Z[c];V_+]`, `account.fallback`; T6.3 checks it against the dense augmented Galerkin to 1e-10; four-block core has no new-new component (< 1e-12) |
+| T6.3 observed order | TEST | "local order of the K/L/S recurrence" p = 1..5, `_finest_order >= p + 0.6` |
+| T6.4 the two-spin DD test | TEST | Z2: unenriched frames miss the O(h) amplitude (< 1e-14); the full step gives `cos(Jh)`, `sin(Jh)` to 1e-12 with no new K/L directions; U(1) analogue against the dense exponential to 1e-12 |
+| T6.5 three schedules, one state | TEST | the step: `:sequential`, `:kl_then_s`, `:concurrent` agree to 1e-10, `:concurrent` reproducible to 1e-12, `parallel = :full` (concurrent half-sweeps) agrees to 1e-10; the kernel on Schmidt frames, where U_+ and V_+ exist on both sides: the three states agree to 1e-10 |
+| T6.5 standard vs K/L/S at matched physical error | DEFERRED to T8 (P12) | both are `cbe_bug_step!` keywords on the same model |
+| T6.6 immutable frames, ψ not mutated before the merge | DONE | `_kls_start` writes nothing; `W[c]`/`Z[c]` replaced only after the root solve; ψ is written by the root split |
+| T6.6 separate environments, scratch, counters per worker | DONE | `HK`/`HL` own new environments (`push_*_channels`), `KernelCounters`, report `Ref`s; `KRYLOV_LOG` appends under `_KRYLOV_LOCK` |
+| T6.6 per-worker RNG streams | N/A | the K/L/S stages are deterministic `expv` and draw no random numbers |
+| T6.6 no BLAS oversubscription | PARTIAL | not pinned inside the library (as for the half-sweeps, cbe_bug.jl "IT COMPETES WITH BLAS"); jobs run `-t 2` on 2 CPUs; P11 must record the BLAS/thread counts |
+| T6.6 memory overhead of three solvers | MEASURED (job) / P11 | MaxRSS below; per-stage allocation is not separable under concurrency (`Base.gc_bytes` is process-wide) |
+| critical-path model, measured speedup | DEFERRED to T8 (P11) | `ledger.kls.t_K`, `t_L`, the root counters' `t_root` are recorded per step |
+
+**What the step does at the test sizes (hq16a).** At L ≤ 10 the real preliminary frames already
+contain K(h) and L(h) to numerical rank, because the half-sweeps' local Krylov runs on the same
+one-site spaces and fills them. So `n_new_l = n_new_r = 0`, the four-block core is `S(h)`, and the
+K/L/S step equals the standard step: T6.5's ledger shows 0 new directions, and the K/L/S local
+errors at p = 3 and 5 equal the standard ones to every digit. The local-order tests therefore
+show the order of the recurrence but do not tell it apart from standard BUG at these sizes.
+The kernel tests (T6.3, the kernel half of T6.5) run on the state's own Schmidt frames, which are
+strictly smaller than the one-site spaces, so U_+ and V_+ exist there. The comparison that can
+tell the two methods apart is P12 at L = 16 (Task 8).
+
+**T6.3's fixture.** The guard `rems[1] < ‖dM‖` (the leading term dominates the remainder) is
+ours, not the plan's. The plan asks for the block to be measured and for the fallback; both are
+tested unchanged. The fixture was changed twice:
+* On the XX Néel Schmidt frames (hq17d 17429012) the exact new-new block has no O(h) term:
+  `‖dM‖ = 5e-14`, while the h^2 slopes passed. The kernel is correct; the fixture is degenerate.
+* Every truncated XXZ fixture has a real O(h) block, but at h = 0.2 the remainder is 35–1600
+  times the leading term, and the ratio is ∝ h (hq19b 17429851).
+* By the user's decision (2026-10-22), T6.3 now runs at h = 1e-3 (`bb26a0c`), assertions unchanged.
+
+### Confirmation
+
+* hq16b 17422382 (`7c6195a`): test_expv 25, test_adaptive_parallel 32, test_dd_cbe 227 pass /
+  1 broken (the svd parity, as before). MaxRSS 1.8 G.
+* hq17c 17427751 (`abd2f02`): test_dd_cbe 228 pass / 1 broken, at 3 G.
+* hq17d 17429012 (`abd2f02`): test_parallel_kls 41 / 1 failed, the T6.3 guard on the XX fixture
+  above.
+* hq20a 17430527 (`bb26a0c`): **test_parallel_kls.jl 42 / 42**, 63 min. MaxRSS 2.3 G at 4 G,
+  no `oom_kill`. T6.3: `missing = 1.41e-6`; the remainders 2.50e-7, 6.24e-8, 1.56e-8, 3.90e-9
+  fall at slopes 2.000, 2.000, 2.000; remainder / leading term = 0.18.
+
+**Task 6 CONFIRMED**, with the speed-up and the matched-error comparison carried to Task 8 (P11, P12).
