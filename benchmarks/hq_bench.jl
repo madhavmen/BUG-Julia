@@ -178,13 +178,17 @@ record(t, wall) = begin
         r["dist_twin"] = sqrt(max(real(overlap(psi, psi) + overlap(twin, twin) - 2 * real(ov)), 0.0))
         r["twin_m"] = spin_sz_profile(twin, TWOS)
         r["twin_j"] = real(mpo_energy(twin, JMPO))
+        # P12 drift of BOTH arms: at s > 1/2 there is no exact state, so Var(H) and the norm are the only grades
+        r["twin_var"] = mpo_variance(twin, MPO_)
+        r["twin_norm"] = real(overlap(twin, twin))
     end
     push!(recs, r)
     save()
     @printf("HQB t=%.3f D=%d m_c=%.12f j=%.12f E=%.2e dvar=%.2e dnorm=%.2e%s%s wall=%.1f\n",
             t, r["D"], m[L ÷ 2], r["j"], r["E"], r["var"] - S^2, r["norm"] - 1,
             TWOS == 1 ? @sprintf(" exact_m=%.2e exact_j=%.2e", r["err_exact_m"], r["err_exact_j"]) : "",
-            twin === nothing ? "" : @sprintf(" dist_twin=%.2e", r["dist_twin"]), wall)
+            twin === nothing ? "" : @sprintf(" dist_twin=%.2e twin_dvar=%.2e twin_dnorm=%.2e", r["dist_twin"],
+                                             r["twin_var"] - S^2, r["twin_norm"] - 1), wall)
     flush(stdout)
 end
 
