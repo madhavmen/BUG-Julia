@@ -106,7 +106,8 @@ def skip(name, why):
 
 def standard(run):
     c = run["config"]
-    return c["policy"] == "dd_qr_streamed" and c["kls"] == "none" and c["parallel"] == "serial"
+    return (c["policy"] == "dd_qr_streamed" and c["kls"] == "none" and c["parallel"] == "serial"
+            and c.get("krylov_reuse", True))
 
 
 def finest(runs):
@@ -261,7 +262,7 @@ def p05(runs, ref, outdir):
     pols = defaultdict(list)
     for r in runs:
         c = r["config"]
-        if c["kls"] == "none":
+        if c["kls"] == "none" and c.get("krylov_reuse", True):
             pols[c["policy"]].append(r)
     if len(pols) < 2:
         skip("P05", f"needs dd_qr_streamed and one_sided_qr_streamed (and svd_select), have {sorted(pols)}")
@@ -331,17 +332,40 @@ def p06(rundir, outdir):
 # ── P07 Krylov reuse ───────────────────────────────────────────────────────────────────────────
 def p07(runs, ref, outdir):
     rs = [r for r in runs if standard(r)]
+    off = [r for r in runs if not r["config"].get("krylov_reuse", True)]
     if not rs:
         return skip("P07", "no standard run")
-    skip("P07 reuse on/off", "the step has no reuse-off ablation; only reuse-on counts are drawn")
-    fig, ax = plt.subplots(1, 3, figsize=(15, 4))
-    for r in rs:
+    if not off:
+        skip("P07 reuse on/off", "no HQB_REUSE=0 run; only reuse-on counts are drawn")
+    fig, ax = plt.subplots(1, 4, figsize=(20, 4))
+    for r in rs + off:
         t = [s["t"] for s in r["steps"]]
-        lab = f"s={spin(r):g} p={r['config']['order']} h={r['config']['h']:g}"
-        ax[0].plot(t, [s.get("ledger", {}).get("n_krylov", 0) for s in r["steps"]], lw=0.7, label=lab)
-        ax[1].plot(t, [s["record"]["counters"]["n_one_site"] for s in r["steps"]], lw=0.7)
-        ax[2].plot(t, [s["record"]["root_iters"] for s in r["steps"]], lw=0.7)
-    for a, lab in zip(ax, ("new Krylov directions", "one-site H actions", "root iterations")):
+        on = r["config"].get("krylov_reuse", True)
+        lab = f"s={spin(r):g} p={r['config']['order']} h={r['config']['h']:g} reuse={'on' if on else 'off'}"
+        st = "-" if on else "--"
+        ax[0].plot(t, [s.get("ledger", {}).get("n_krylov", 0) for s in r["steps"]], st, lw=0.7, label=lab)
+        ax[1].plot(t, [s["record"]["counters"]["n_one_site"] for s in r["steps"]], st, lw=0.7)
+        ax[2].plot(t, [s["record"]["root_iters"] for s in r["steps"]], st, lw=0.7)
+        e = errors(r, ref)
+        if len(e):
+            ax[3].semilogy(e[:, 0], np.maximum(e[:, 1], 1e-17), st, lw=0.7)
+    # matched error: each reuse-off run against the reuse-on run of the same setting
+    same = ("twoS", "order", "h", "tol_basis", "seed", "policy")
+    for r in off:
+        twin = [q for q in rs if key(q, *same) == key(r, *same)]
+        if not twin:
+            continue
+        q = twin[0]
+        tot = lambda x, f: sum(f(s) for s in x["steps"])
+        ek, eq = final_error(r, ref), final_error(q, ref)
+        print(f"HQ-P07 s={spin(r):g} p={r['config']['order']} h={r['config']['h']:g} "
+              f"krylov_dirs on/off={tot(q, lambda s: s.get('ledger', {}).get('n_krylov', 0))}/"
+              f"{tot(r, lambda s: s.get('ledger', {}).get('n_krylov', 0))} "
+              f"h1 on/off={tot(q, lambda s: s['record']['counters']['n_one_site'])}/"
+              f"{tot(r, lambda s: s['record']['counters']['n_one_site'])} "
+              f"err_tf on/off={eq and eq[0]}/{ek and ek[0]}")
+    for a, lab in zip(ax, ("new Krylov directions", "one-site H actions", "root iterations",
+                           "max_i |m_i - m_i^ref|")):
         a.set_ylabel(lab); a.set_xlabel("J t")
     ax[0].legend(fontsize=5)
     save(fig, outdir, "P07_krylov.png")

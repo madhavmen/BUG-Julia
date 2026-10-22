@@ -2,7 +2,8 @@
 #
 #   Task 4  the order-p frontier sweeps expand under the step's policy (`_frontier_expand`), the
 #           one-site Krylov stage keeps the DD directions verbatim and adds a direction once, and
-#           order-3 steps match the exact-CBE closure.
+#           order-3 steps match the exact-CBE closure. P07's reuse-off ablation (`krylov_reuse =
+#           false`) keeps the H1 count and both stages' directions, and still integrates.
 #   Task 3  the incremental DD controller (`_dd_controller`): every streamed column cached and
 #           counted once, a nonincreasing cached holdout residual, the range error against the
 #           exact DD range following the share, a candidate block blind to the dominant sector
@@ -543,6 +544,46 @@ end
         @test cbe_bug_step!(ps, mpo, tau; cbe_policy = pol, akw...).record.closure_policy === pol
     end
     @test 1 - _fid(ps, ex) < 1e-8
+end
+
+# Plan P07, the reuse-off ablation (`krylov_reuse = false`): the Krylov stage grows from the old
+# frame and the CBE directions are merged after it. The depth is set by the propagator weight,
+# not by the frame, so the `H1` count is the same; the merged frame holds both stages' directions.
+@testset "P07: krylov_reuse = false, same H1 count, merged frame holds CBE and Krylov, $side" for
+        side in (:left, :right)
+    mpo, psi, f, lenv, renv = _hb_wide()
+    i, tau = 6, ComplexF64(-0.05im)
+    left = side === :left
+    alloc = RC.BasisAllocation(1e-2, 1e-2, 1e-2, 1e-9, 1.0)
+    ex = dd_cbe_expand(f, mpo, i, lenv, renv, side; alloc = alloc,
+                       rng = Random.MersenneTwister(31))
+    seed, Q0, applyH = _kl_stage(side, mpo, i, psi[i], psi[i + 1], lenv, renv, ex)
+    perp, fl = left ? (perp_component, 3) : (perp_component_right, 1)
+    _, son = RC._krylov_enrich(seed, applyH, Q0, side, tau, alloc)
+    Qk, soff = RC._krylov_enrich(seed, applyH, left ? f.U0 : f.V0, side, tau, alloc)
+    Qoff = RC._merge_frame(Qk, Q0, side)
+    @test son.met && soff.met
+    @test soff.n_h1 == son.n_h1
+    @test norm(perp(Qoff, Q0)) < 1e-12 * norm(Q0)
+    @test norm(perp(Qoff, Qk)) < 1e-12 * norm(Qk)
+    @info("P07 reuse on/off", side, cbe = leg_dim(Q0, fl) - f.old_rank,
+          krylov_added = (son.added, soff.added), merged = leg_dim(Qoff, fl), n_h1 = son.n_h1)
+end
+
+@testset "P07: order-3 steps with krylov_reuse = false == exact CBE to tolerance" begin
+    set_symmetry!(:U1)
+    L = 10
+    mpo = xxz_mpo(L; J = 1.0, delta = 1.0)
+    tau = ComplexF64(-0.05im)
+    akw = (tol_basis = 1e-7, tol_trunc = 1e-9, tol_expv = 1e-10, maxdim = 64, order = 3)
+    ex, ps = neel_state(L), neel_state(L)
+    nk = 0
+    for _ in 1:4
+        cbe_bug_step!(ex, mpo, tau; exact = true, akw...)
+        nk += cbe_bug_step!(ps, mpo, tau; krylov_reuse = false, akw...).ledger.n_krylov
+    end
+    @test 1 - _fid(ps, ex) < 1e-8
+    @info "P07 order 3, reuse off: Krylov directions added over 4 steps" nk
 end
 
 end # DD-QR CBE

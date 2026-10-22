@@ -309,6 +309,18 @@ function _krylov_enrich(v0, applyH, Q0, side::Symbol, tau::ComplexF64,
                 capped = capped, met = closed && !capped))
 end
 
+"""
+    _merge_frame(Q, U, side) -> Q'
+
+`Q` grown by the part of the frame `U` it does not span, cut only at the numerical floor (the
+`krylov_reuse = false` ablation: the CBE directions join after the Krylov stage instead of
+seeding it).
+"""
+function _merge_frame(Q, U, side::Symbol)
+    R = to_concrete(side === :left ? perp_component(Q, U) : perp_component_right(Q, U))
+    return first(_extend_frame(Q, R, U, side, 1.0, 0.0))
+end
+
 "Fold one `_krylov_enrich` verdict into the step ledger (plan §8 Krylov diagnostics)."
 function _record_krylov!(ledger::Union{Nothing, AdaptiveLedger}, st, alloc::BasisAllocation)
     ledger === nothing && return nothing
@@ -589,6 +601,12 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # measure every frontier first, loop until a pass adds nothing, measure
                        # j = 0 on the final frames (`_krylov_closure!(...; checks)`).
                        closure_checks::Bool = false,
+                       # ⚠ ABLATION, NOT A METHOD CHOICE (plan T4.1 / P07). `true`: every local
+                       # Krylov stage (half-sweeps and frontier sweeps) grows from the CBE output
+                       # `[U0 | U_CBE]`, so it never regenerates a CBE direction. `false`: it grows
+                       # from `U0` alone and the CBE directions are merged afterwards
+                       # (`_merge_frame`) -- the reuse-off arm of P07.
+                       krylov_reuse::Bool = true,
                        # ── IMAGINARY TIME (plan: cbe_bug_imaginary_open_benchmark, Task 1) ──
                        # The root integrator (`ROOT_METHODS`): `:exp` is the Saad-converged
                        # exponential (the reference); `:trapezoid`/`:radau2`/`:radau3` apply that
@@ -1222,7 +1240,9 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             H1   = OneSiteOp(shift_h(one_site_h(mpo, i, lch, rch1), eshift), i, accL.kc)
             tkL0 = time_ns()
             Wkry, kstL = _krylov_enrich(Kex, x -> (accL.nmv += 1; apply_one_site(H1, x)),
-                                        ex.U_ex, :left, tau, alloc; workcap = wcap_step)
+                                        krylov_reuse ? ex.U_ex : _fr.U0, :left, tau, alloc;
+                                        workcap = wcap_step)
+            krylov_reuse || (Wkry = _merge_frame(Wkry, ex.U_ex, :left))
             accL.tkry += (time_ns() - tkL0) / 1e9
             _record_krylov!(bondlg, kstL, alloc)
             peak!(accL, held + _state_stored(psiL), Wkry)
@@ -1311,7 +1331,9 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             H1   = OneSiteOp(shift_h(one_site_h(mpo, j + 1, lch1, rch), eshift), j, accR.kc)
             tkR0 = time_ns()
             Zkry, kstR = _krylov_enrich(Bex, x -> (accR.nmv += 1; apply_one_site(H1, x)),
-                                        ex.V_ex, :right, tau, alloc; workcap = wcap_step)
+                                        krylov_reuse ? ex.V_ex : _fr.V0, :right, tau, alloc;
+                                        workcap = wcap_step)
+            krylov_reuse || (Zkry = _merge_frame(Zkry, ex.V_ex, :right))
             accR.tkry += (time_ns() - tkR0) / 1e9
             _record_krylov!(bondlg, kstR, alloc)
             peak!(accR, held + _state_stored(psiR), Zkry)
@@ -1430,7 +1452,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         fr = KLFrames(W, Z, c, lenv_root, renv_root, 0, nothing, nothing, Float64(eshift))
         # Plan T4.1: the frontier sweeps expand under the step's policy, like the half-sweeps.
         ckw = merge(Base.structdiff(exkw, NamedTuple{(:share_ht, :fold_omega)}),
-                    (cbe_policy = policy,))
+                    (cbe_policy = policy, krylov_reuse = krylov_reuse))
         cl = _krylov_closure!(fr, psi, mpo, S0, tau, alloc, ckw; order = order,
                               workcap = wcap_step, nrm = _nrm, parallel = parallel, rng = rng,
                               ledger = ledger, fold = fold_omega, checks = closure_checks)

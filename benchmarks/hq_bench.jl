@@ -19,7 +19,8 @@
 #      HQB_ORDER (1), HQB_TOLB (1e-5), HQB_TOLR (1e-12), HQB_TOLT (1e-12), HQB_MAXDIM (1024),
 #      HQB_SEED (1), HQB_POLICY (dd_qr_streamed | one_sided_qr_streamed | svd_select),
 #      HQB_PARALLEL (serial | half_sweeps | full), HQB_KLS (none | sequential | kl_then_s |
-#      concurrent), HQB_TWIN (0), HQB_BONDLOG (1), HQB_OUT (hq_bench_<tag>.json)
+#      concurrent), HQB_REUSE (1; 0 = P07's reuse-off ablation, `krylov_reuse = false`),
+#      HQB_TWIN (0), HQB_BONDLOG (1), HQB_OUT (hq_bench_<tag>.json)
 
 using LinearAlgebra, Printf, JSON, Random
 using LurCGT, Telum
@@ -39,9 +40,13 @@ const SEED = parse(Int, get(ENV, "HQB_SEED", "1"))
 const POLICY = Symbol(get(ENV, "HQB_POLICY", "dd_qr_streamed"))
 const PARALLEL = Symbol(get(ENV, "HQB_PARALLEL", "serial"))
 const KLS = (k = get(ENV, "HQB_KLS", "none"); k == "none" ? nothing : Symbol(k))
+const REUSE = get(ENV, "HQB_REUSE", "1") == "1"
 const TWIN = get(ENV, "HQB_TWIN", "0") == "1"
 const BONDLOG = get(ENV, "HQB_BONDLOG", "1") == "1"
-const TAG = "s$(TWOS)_p$(ORDER)_h$(H)_b$(TOLB)_$(POLICY)_$(PARALLEL)_$(something(KLS, :std))_seed$(SEED)"
+# `parallel = :full` runs K/L/S with schedule `:concurrent` unless HQB_KLS names one (cbe_bug.jl)
+const KLS_EFF = PARALLEL === :full ? something(KLS, :concurrent) : KLS
+const TAG = "s$(TWOS)_p$(ORDER)_h$(H)_b$(TOLB)_$(POLICY)_$(PARALLEL)_$(something(KLS_EFF, :std))" *
+            (REUSE ? "" : "_noreuse") * "_seed$(SEED)"
 const OUT = get(ENV, "HQB_OUT", "hq_bench_$(TAG).json")
 
 TWOS == 1 && include(joinpath(@__DIR__, "..", "tests", "common", "free_fermion.jl"))
@@ -55,7 +60,8 @@ const KREC = round(Int, EVERY / H)
 abs(NSTEP * H - TF) < 1e-12 && abs(KREC * H - EVERY) < 1e-12 ||
     error("HQB_TF and HQB_EVERY must be multiples of HQB_H")
 const STEPKW = (order = ORDER, tol_basis = TOLB, tol_root = TOLR, tol_trunc = TOLT,
-                maxdim = MAXDIM, cbe_policy = POLICY, parallel = PARALLEL, kls = KLS)
+                maxdim = MAXDIM, cbe_policy = POLICY, parallel = PARALLEL, kls = KLS,
+                krylov_reuse = REUSE)
 
 psi = spin_domain_wall_state(L, TWOS)
 twin = TWIN ? copy(psi) : nothing
@@ -64,7 +70,7 @@ sector = psi[L].spaces[3]
 config = Dict("twoS" => TWOS, "L" => L, "tf" => TF, "h" => H, "every" => EVERY, "order" => ORDER,
               "tol_basis" => TOLB, "tol_root" => TOLR, "tol_trunc" => TOLT, "maxdim" => MAXDIM,
               "seed" => SEED, "policy" => POLICY, "parallel" => PARALLEL,
-              "kls" => something(KLS, :none), "twin" => TWIN, "J" => 1.0,
+              "kls" => something(KLS_EFF, :none), "krylov_reuse" => REUSE, "twin" => TWIN, "J" => 1.0,
               "threads" => Threads.nthreads(), "blas_threads" => BLAS.get_num_threads(),
               "solver" => "cbe_bug_step!")
 steps, recs = Any[], Any[]

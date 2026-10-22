@@ -470,7 +470,8 @@ function _frontier_expand(f::BondFrame, skl, skr, mpo, i::Int, lch, rch, side::S
                           ckw::NamedTuple, ledger::AdaptiveLedger, rng::AbstractRNG)
     policy = get(ckw, :cbe_policy, :svd_select)
     policy === :svd_select &&
-        return cbe_expand(f, skl, skr; Base.structdiff(ckw, NamedTuple{(:cbe_policy,)})...,
+        return cbe_expand(f, skl, skr;
+                          Base.structdiff(ckw, NamedTuple{(:cbe_policy, :krylov_reuse)})...,
                           ledger = ledger, rng = rng)
     return dd_cbe_expand(f, mpo, i, lch, rch, side; policy = policy, ledger = ledger, rng = rng,
                          alloc = get(ckw, :alloc, nothing), workcap = get(ckw, :workcap, 0),
@@ -548,11 +549,12 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
             Kex = to_concrete!(contract(K, (3,), M, (1,)))
             H1 = shift_h(one_site_h(mpo, i, lch, push_right_channels(rch, mpo, ex.V_ex, i + 1)),
                          fr.eshift)
-            Q, st = _krylov_enrich(Kex, x -> (nh1[] += 1; apply_one_site(H1, x)), ex.U_ex,
-                                   :left, tau, alloc; workcap = workcap, amp = amp,
-                                   state_seed = false)
+            reuse = get(ckw, :krylov_reuse, true)
+            Q, st = _krylov_enrich(Kex, x -> (nh1[] += 1; apply_one_site(H1, x)),
+                                   reuse ? ex.U_ex : U0, :left, tau, alloc; workcap = workcap,
+                                   amp = amp, state_seed = false)
             _record_krylov!(bl, st, alloc)
-            Q
+            reuse ? Q : _merge_frame(Q, ex.U_ex, :left)
         else
             nskip += 1
             U0
@@ -625,11 +627,12 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
             Bex = to_concrete!(contract(M, (2,), B, (1,)))
             H1 = shift_h(one_site_h(mpo, j + 1, push_left_channels(lch, mpo, ex.U_ex, j), rch),
                          fr.eshift)
-            Q, st = _krylov_enrich(Bex, x -> (nh1[] += 1; apply_one_site(H1, x)), ex.V_ex,
-                                   :right, tau, alloc; workcap = workcap, amp = amp,
-                                   state_seed = false)
+            reuse = get(ckw, :krylov_reuse, true)
+            Q, st = _krylov_enrich(Bex, x -> (nh1[] += 1; apply_one_site(H1, x)),
+                                   reuse ? ex.V_ex : V0, :right, tau, alloc; workcap = workcap,
+                                   amp = amp, state_seed = false)
             _record_krylov!(bl, st, alloc)
-            Q
+            reuse ? Q : _merge_frame(Q, ex.V_ex, :right)
         else
             nskip += 1
             V0
