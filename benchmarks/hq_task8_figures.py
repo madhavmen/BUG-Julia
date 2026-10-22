@@ -441,6 +441,9 @@ def p08(runs, ref, outdir):
                 print(f"HQ-P08 {metric} s={twoS / 2:g} tb={tb:.0e} p={p} h={[float(x) for x in h]} "
                       f"err={[f'{x:.2e}' for x in e]} fit={'none' if f is None else round(float(f[0]), 2)}")
             a.set_title(f"s = {twoS / 2:g}, tol_basis = {tb:.0e}", fontsize=10)
+            hs = sorted({r["config"]["h"] for (tw, t, _), rs in groups.items() if tw == twoS for r in rs})
+            a.set_xticks(hs, [f"{x:g}" for x in hs])
+            a.minorticks_off()
             a.set_xlabel("J h")
             j == 0 and a.set_ylabel(dict(P08_METRICS)[metric])
             a.grid(True, which="major", alpha=0.3)
