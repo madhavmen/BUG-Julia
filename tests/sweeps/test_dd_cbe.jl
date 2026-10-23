@@ -214,8 +214,10 @@ end
 # the one-site Krylov stage; one-sided+QR spends CBE rank on them. The plan claims complementarity,
 # NOT that DD is universally faster or more accurate (plan §2, "DK+DD"), so the physical error is
 # asserted equal to tolerance and the rank / Krylov effort are recorded side by side.
+# L = 10, not `_hb_bond`'s 8: at L = 8 the step's frames reach D_stage = 15 of 16 and the step is
+# exact for both policies (hq44a 17454809: err 0.0 and 0.0), which makes the comparison vacuous.
 @testset "U06: DK fixture, one step per policy: physical error, selected rank, Krylov effort" begin
-    L, dt = 8, 0.05
+    L, dt = 10, 0.05
     mpo, psi0 = _xx_warm(L, 2; delta = 1.0, maxdim = 4)          # `_hb_bond`'s warm-up
     vref = dense_exact_propagate(dense_heisenberg(L; J = 1.0, delta = 1.0), dense_state(psi0), dt)
     res = Dict{Symbol, Any}()
@@ -232,6 +234,7 @@ end
     end
     dd, os = res[:dd_qr_streamed], res[:one_sided_qr_streamed]
     @info "U06 DK fixture, one step dt = $dt" dd os
+    @test min(dd.err, os.err) > 1e-6                             # the step is not exact here
     @test abs(dd.err - os.err) <= 0.1 * max(dd.err, os.err) + 1e-9
     @test dd.qr_rank > 0 && os.qr_rank > 0
 end
