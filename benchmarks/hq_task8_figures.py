@@ -536,13 +536,17 @@ def p10(runs, ref, outdir):
             ax[0].loglog(em, wall, mk, label=f"s={twoS / 2} p={p}")
             ax[1].loglog(em, apps, mk)
             ax[2].semilogx(em, rss, mk)
-            ax[3].loglog([r["config"]["h"] for r in sel],
-                         [max(abs(r["records"][-1]["norm"] - 1), 1e-17) for r in sel], mk)
+            hs = [r["config"]["h"] for r in sel]
+            line, = ax[3].loglog(hs, [max(abs(r["records"][-1]["norm"] - 1), 1e-17) for r in sel], mk)
+            # E(0) = 0 on the domain wall, so the drift is |E(t_f)| (plan P03/P10: absolute)
+            ax[3].loglog(hs, [max(abs(r["records"][-1]["E"]), 1e-17) for r in sel], "x:", color=line.get_color())
     for a, lab in zip(ax, ("integrator time, steps 2..n [s]", "operator applications", "peak RSS [GiB]",
-                           r"$|\Delta\|\psi\|^2|$ at $t_f$")):
+                           r"$|\Delta\|\psi\|^2|$ (o) and $|\Delta E|$ (x) at $t_f$")):
         a.set_ylabel(lab)
     for a in ax[:3]:
         a.set_xlabel(r"$\max_i|\Delta m_i(t_f)|$")
+    hall = sorted({r["config"]["h"] for r in rs})
+    ax[3].set_xticks(hall, [f"{h:g}" for h in hall]); ax[3].minorticks_off()
     ax[3].set_xlabel("J h")
     ax[0].legend(fontsize=6)
     save(fig, outdir, "P10_time_to_accuracy.png")
