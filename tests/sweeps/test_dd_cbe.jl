@@ -234,9 +234,12 @@ end
     end
     dd, os = res[:dd_qr_streamed], res[:one_sided_qr_streamed]
     @info "U06 DK fixture, one step dt = $dt" dd os
-    @test min(dd.err, os.err) > 1e-6                             # the step is not exact here
+    # the step is not exact here: the fidelity distance's roundoff floor is sqrt(2 eps) ~ 1.5e-8
+    # (hq46a 17454974: 3.7e-7 for both)
+    @test min(dd.err, os.err) > 1e-7
     @test abs(dd.err - os.err) <= 0.1 * max(dd.err, os.err) + 1e-9
-    @test dd.qr_rank > 0 && os.qr_rank > 0
+    # DD+QR keeps the smaller set: the DK directions are left to the Krylov stage (hq46a: 24 vs 38)
+    @test 0 < dd.qr_rank < os.qr_rank
 end
 
 @testset "U02: no SVD inside the DD expansion (rank stop and T3 controller)" begin
