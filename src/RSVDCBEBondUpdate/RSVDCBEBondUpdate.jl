@@ -1,64 +1,41 @@
 """
     RSVDCBEBondUpdate
 
-Exploratory integrator: **controlled bond expansion (CBE) as the BUG basis update**.
+Controlled bond expansion (CBE) as the basis update of the rank-adaptive BUG integrator, on
+MPO environments. Follows the von Delft group's QSMPSLib routines `RSVDpreBE0SiQS.m`,
+`CBE1SiQS.m` and `TDVPSweepCBE1Si.m`; the design is in `docs/cbe_bug.md`.
 
-Follows the von Delft group's QSMPSLib routines `RSVDpreBE0SiQS.m` (randomized-SVD
-bond expansion before a 0-site update), `CBE1SiQS.m` and `TDVPSweepCBE1Si.m`. The
-design, and the reasons each piece of `BondUpdateBUG` it replaces is being replaced,
-are in `docs/cbe_bug.md`.
+A SEPARATE submodule on purpose: `BondUpdateBUG.bond_update_bug!` is the validated gate-based
+Trotter integrator, and nothing here mutates it. This module reuses its containers and
+primitives (`SymMPS`, `BondFrame`, `expv`, the sector tooling) by import only.
 
-Deliberately a SEPARATE submodule. `BondUpdateBUG.bond_update_bug!` is the validated
-gate-based Trotter integrator and the unitarity-critical path; nothing here mutates
-it. This module reuses its containers and primitives (`SymMPS`, `BondFrame`, `expv`,
-the sector tooling) by import only.
-
-Contents, in dependency order:
-
-  - `henv.jl`  — channel environments for a nearest-neighbour XXZ chain: `H` globally,
-    which neither the CBE selection nor a single centre-bond Galerkin step can do
-    without. Replaces the per-bond gate the Trotter sweep uses.
-  - `mpo.jl` — the same `H` as a GENUINE MPO: one rank-4 `W^[i]` per site (Eq. 1.3 of
-    arXiv:2606.28169) and one rank-3 `(bra, mpo, ket)` environment per link (Eq. 1.8), from
-    which the effective Hamiltonians follow as a single contraction (Eq. 1.7). This is the
-    representation the parallel-BUG sweep of that paper is written in, and it is what
-    `cbe_bug_step!` runs on; `henv.jl` is kept as the independent witness that the two
-    are one operator (`test_mpo.jl` pins them elementwise). Unlike the factored form it is
-    site-dependent, so it is not restricted to a uniform nearest-neighbour term list.
-
-  - `cbe_core.jl` — THE MAIN CODE, and what all three modes share. Part I is the RSVD bond
-    expansion (sector-graded sketch, preselection, final selection); Part II drives it from
-    a bond frame and solves the local problem in the expanded basis (`_expanding_krylov`),
-    plus the shared `CBEBugOptions` / `CBEBugRunInfo`.
-  - `zero_site_core.jl` — the zero-site Galerkin generator, `_frame_from`, and the truncation
-    sweeps. ⛔ `cbe_lubich_sweep` was REMOVED 2026-08-29; only this shared core remains, on
-    the environment-dressed effective `H`.
-  - `modes/` — `GroundState` alone. A THIN submodule: it fixes the reduction applied to the
-    Krylov tridiagonal and adds no algorithm of its own.
-
-ONE PATH: MPO ENVIRONMENTS. Every sweep here poses its local problem with the
-environment-dressed effective `H`, so a run differs from another run only in the operator and
-the sweep, never in how `H` was applied.
-
-| entry point           | S-step reduction        | what it is                          |
-|-----------------------|-------------------------|-------------------------------------|
-| `cbe_bug_step!`       | `exp(tau H)`            | RSVD-CBE + rank-adaptive BUG        |
-| `tdvp_cbe1s_step!`    | `exp(tau H)`            | 1-site TDVP + CBE, the baseline     |
-| `tdvp2_step!`         | `exp(tau H)`            | 2-site TDVP, the reference          |
-| `GroundState.solve!`  | lowest Ritz vector      | the variational mode                |
+| entry point           | S-step reduction   | what it is                                   |
+|-----------------------|--------------------|----------------------------------------------|
+| `cbe_bug_step!`       | `exp(tau H)`       | DD-QR CBE + rank-adaptive BUG, orders 1-5    |
+| `tdvp_cbe1s_step!`    | `exp(tau H)`       | 1-site TDVP + CBE, the baseline              |
+| `tdvp2_step!`         | `exp(tau H)`       | 2-site TDVP, the reference                   |
+| `dmrg_cbe1s!`         | lowest eigenvector | 1-site CBE-DMRG                              |
+| `GroundState.solve!`  | lowest Ritz vector | 2-site DMRG on the expanding Krylov solve    |
 
 `tau = -im*dt` is real time and `tau = -dt` imaginary time; nothing in the S step cares which,
-and the caller renormalises. The Krylov space, and every RSVD-CBE growth pass that builds it,
-is IDENTICAL across them: the ground-state solver is a drop-in replacement for the S step, not
-a second algorithm.
+and the caller renormalises.
 
-⛔ `RealTime` AND `ImaginaryTime` NO LONGER EXIST, and neither does the gate-based path they
-forwarded to. See the note above `include("modes/ground_state.jl")` for why a name that is
-present and throws is worse than one that is absent. The design constraint that made
-`GroundState` MPO-only in the first place is now vacuous rather than wrong: the gate path's
-environments were the identity by canonical form, so its local operator was the bare two-site
-term, and minimising that bond-by-bond does not have the global ground state as its fixed
-point. With the gate path gone there is no other path for it to be excluded from.
+Layout, in include order (each directory depends only on the ones above it):
+
+  - `operators/` -- `H` and its environments: the channel form for nearest-neighbour XXZ
+    (`henv*.jl`, kept as the independent witness), the genuine MPO with its rank-3
+    environments and effective Hamiltonians (`mpo*.jl`, arXiv:2606.28169 Eqs. 1.3/1.7/1.8),
+    and the zero-site generator, frames and truncation sweeps (`zero_site_core.jl`).
+  - `budget/` -- the three-tolerance accuracy budget (`tol_basis`, `tol_trunc`, `tol_expv`),
+    its per-bond allocation and ledger, and multiplet-versus-state accounting.
+  - `expansion/` -- bond expansion: the RSVD CBE (`cbe_*.jl`) used by DMRG and TDVP-CBE, the
+    DD-projected QR-only CBE (`dd_cbe*.jl`) that `cbe_bug_step!` runs, and the per-bond
+    expansion at the reference's granularity (`bond_expansion.jl`).
+  - `models/` -- the benchmark Hamiltonians, initial states and observables.
+  - `baselines/` -- the integrators the BUG is measured against: 2-site TDVP, 1-site TDVP +
+    CBE on both environment paths, CBE-DMRG and the `GroundState` submodule.
+  - `bug/` -- THE SOLVER, `cbe_bug_step!`: the half-sweeps, the Krylov enrichment, the
+    order-p frontier closure, the parallel K/L/S step and normalised imaginary time.
 """
 module RSVDCBEBondUpdate
 
@@ -86,281 +63,150 @@ using ..BondUpdateBUG: SymMPS, canonical!, bond_dims, leg_dim, local_space,
                        # all, so every Z2 tensor has to come from here.
                        ising_local_space, ising_polarised_state
 
-include("henv.jl")
-include("henv_stacks.jl")
-# Multiplet-vs-state accounting. `leg_dim`, `Nkeep`, `maxdim` and every CBE budget count
-# MULTIPLETS, so under SU(2) they are not comparable with a U(1) number; `state_dim` converts.
-# The weights are already correct (`sum(sigma^2 * degeneracy) == norm^2`, measured) -- this is
-# bookkeeping so a cross-symmetry claim is checkable, not a fix.
-include("multiplets.jl")
-# The three-tolerance accuracy budget (`tol_basis`, `tol_trunc`, `tol_expv`) and the fixed
-# rule that apportions it across bonds and tests. BEFORE `cbe_core.jl`, which derives its
-# rank decisions from the allocation rather than from the retired `dex`/`dover` guesses.
-include("adaptive_budget.jl")
-include("cbe_core.jl")
-include("cbe_sketch.jl")
-include("cbe_range.jl")
-include("cbe_expand.jl")
-include("cbe_options.jl")
-include("cbe_bond_update.jl")
-# The Hamiltonian as a genuine MPO (rank-4 `W^[i]`) plus its rank-3 environments, i.e. the
-# objects arXiv:2606.28169 Eqs. (1.3), (1.7) and (1.8) name. It provides a METHOD for every
-# verb `cbe_bug_step!` uses -- `boundary_channels`, `left/right_env_stack`,
-# `push_left/right_channels`, `apply_h_two_site`, `sketch_h_*`, `cbe_expand`,
-# `zero_site_h` -- so the sweep runs on either representation unchanged and the channel
-# path in `henv.jl` stays as the independent witness that the two are one operator.
-# After `cbe_core.jl`, since it adds methods to `cbe_expand` and the sketches.
-include("mpo.jl")
-include("mpo_env.jl")
-include("mpo_fold.jl")
-include("zero_site_core.jl")
-# The DD-projected, MPO-streamed, QR-only CBE (cbe_bug_high_order_rsvd_parallel_tasks.md Task 2),
-# the shared operator-action interface and the typed step record (Task 1). After `mpo.jl` and
-# `zero_site_core.jl`, whose operators it wraps.
-include("dd_cbe.jl")
-include("dd_cbe_controller.jl")
-# Jan BUG: the full KLS step at EVERY bond across the whole chain -- CBE for the basis update and
-# the 0-site S step taken as well, then QR'd with `R` discarded so no evolution accumulates -- and
-# at the far bond the S step is KEPT, which is the step. One truncation after the sweep,
-# direction alternating between steps. MPO-only, so a long-range or site-dependent H needs a
-# different `MPO` and nothing else. After `zero_site_core.jl`, whose `_frame_from` /
-# `_absorb_left!` / `_absorb_right!` it reuses.
+# ── the order of the includes is load-bearing ────────────────────────────────────────────────
+# Files are not grouped strictly by directory: `operators/mpo*.jl` adds methods to
+# `cbe_expand` and the sketches, so it comes after `expansion/cbe_*.jl`, and the DD-QR CBE
+# wraps the MPO operators, so it comes after `operators/zero_site_core.jl`. Every split file
+# (`*_stacks`, `*_env`, `*_controller`, ...) is included right after its parent.
 
-# models/ -- the BENCHMARK HAMILTONIANS, and the MPO machinery Haldane-Shastry needs that
-# `mpo.jl` deliberately refused to write.
-#
-#   models/pair_mpo.jl         an EXACT MPO for an arbitrary two-body coupling matrix
-#                              `J[i,j]`, including CHARGED (rank-3) operators. `long_range_mpo`
-#                              throws on those: a rank-3 operator puts its op-leg on the
-#                              virtual leg, so the channel's self-loop would need the identity
-#                              on a charged space (`mpo.jl:239-247`). This file writes that
-#                              block -- and spends `O(L)` virtual dimension per vertex in
-#                              exchange for being EXACT for any coupling, so no fit error is
-#                              introduced into the Hamiltonian being measured.
-#   models/haldane_shastry.jl  the SU(2) Haldane-Shastry ring of arXiv:2208.10972 and the
-#                              Heisenberg chain/ring, each in whatever symmetry mode is
-#                              active. The number of vertices is the ONLY thing that differs
-#                              between `:U1` (three) and `:SU2` (one), which is a cost
-#                              difference and not a physics one.
-#   models/oat.jl              the ONE-AXIS TWISTING model of arXiv:2208.10972 Fig. 2, the
-#                              paper's second benchmark. Uniform all-to-all `S^z S^z`, which is
-#                              the `lambda = 1` DEGENERATE case of `long_range_mpo`'s geometric
-#                              self-loop -- so its exact MPO has virtual dimension 3 whatever
-#                              `L` is, against Haldane-Shastry's `O(L)`. Also the initial state
-#                              `⊗|→⟩` and the observable `S^x_tot`, both `:none`-only because
-#                              `S^x` is charge-raising and a U(1) run would report a silent zero.
+include("operators/henv.jl")
+include("operators/henv_stacks.jl")
+include("budget/multiplets.jl")
+# Before `cbe_core.jl`, which derives its rank decisions from the allocation.
+include("budget/adaptive_budget.jl")
+include("expansion/cbe_core.jl")
+include("expansion/cbe_sketch.jl")
+include("expansion/cbe_range.jl")
+include("expansion/cbe_expand.jl")
+include("expansion/cbe_options.jl")
+include("expansion/cbe_bond_update.jl")
+include("operators/mpo.jl")
+include("operators/mpo_env.jl")
+include("operators/mpo_fold.jl")
+include("operators/zero_site_core.jl")
+include("expansion/dd_cbe.jl")
+include("expansion/dd_cbe_controller.jl")
+
+# models/ -- `pair_mpo.jl` first: it is the exact MPO for an arbitrary two-body coupling
+# matrix (charged vertices included) that every lattice model below is written through.
 include("models/pair_mpo.jl")
 include("models/haldane_shastry.jl")
-# models/square_cylinder.jl  the 2D SQUARE LATTICE on a cylinder, as a coupling matrix that
-#                            `pair_mpo` turns into an operator. No new MPO machinery: a 2D model
-#                            reaches an MPS only through an ORDERING of its sites, and the
-#                            ordering is the whole content -- see the file's header for why the
-#                            SHORT direction is the one that wraps.
 include("models/square_cylinder.jl")
-# models/triangular_cylinder.jl  the square cylinder plus one diagonal per
-# plaquette -- the FRUSTRATED lattice of the set, and the one whose bond
-# dimension at fixed accuracy is highest.
 include("models/triangular_cylinder.jl")
-# models/kagome.jl           the KAGOME cylinder -- corner-sharing triangles, coordination 4, and
-#                            the frustrated lattice whose Heisenberg antiferromagnet is a
-#                            spin-liquid candidate. Coupling matrix only, like the square one.
 include("models/kagome.jl")
-# models/breathing_kagome.jl the DIPOLAR XY model of arXiv:2603.21147 -- breathing kagome, 1/R^3
-#                            tail, U(1) only (the XY model has no SU(2) symmetry).
 include("models/breathing_kagome.jl")
 include("models/oat.jl")
 include("models/tfim.jl")
-# models/mbl_scars.jl        the two ERGODICITY-BREAKING models, whose published results exist
-#                            only as ED at `L <= 22`: the DISORDERED XXZ chain of RMP 91, 021001
-#                            (arXiv:1804.11065) Eq. (5)/(6) -- U(1)-native, since a random `S^z`
-#                            field conserves total `S^z` exactly -- and the PXP blockade chain of
-#                            arXiv:2011.09486, which is `:none` only because `σ^x` conserves
-#                            nothing. Both quench from a PRODUCT state, which is what makes them
-#                            the test of a rank-adaptive sweep rather than of a tuned schedule.
 include("models/mbl_scars.jl")
 include("models/pxp_scars.jl")
-
-# models/hubbard_d4.jl   THE SAME EXPERIMENT'S SPINFUL MODEL, ON FUSED d = 4 SITES, and the only
-#                        layout in which it can be evolved from a product state at all. The
-#                        interleaved ↑₁↓₁↑₂↓₂… chain in `mbl_scars.jl` makes every hop RANGE-2,
-#                        and a range-2 Hamiltonian has no term inside any two-site block, so the
-#                        CDW start state is an exact fixed point of every two-site sweep --
-#                        measured, and identical for bug/tdvp2/cbe1s. One physical site = one MPS
-#                        site restores range-1 hops. Uses Telum's own spinful-fermion local
-#                        space, so the Jordan-Wigner signs come from the library rather than from
-#                        a string identity written out by hand.
 include("models/hubbard_d4.jl")
-# models/liouville.jl  VECTORISED DENSITY MATRICES with explicit ket/bra charge rules (imaginary-
-#                      time / open-system plan, Task 2): a d^2 Liouville site graded :weak
-#                      (q_ket - q_bra), :strong (q_ket, q_bra) or :none, covariance-checked
-#                      superoperators, the exact Lindblad MPO (`pair_mpo` + on-site `field`), and
-#                      trace / expectation / RDM / dense contractions over the abelian blocks.
 include("models/liouville.jl")
 include("models/liouville_blocks.jl")
-# models/spin_xx.jl  the two U(1) XX chains of the HQ plan (Task 7): spin-1/2 (d = 2) and spin-3
-#                    (d = 7) on one exchange convention, the domain wall and the bond current.
 include("models/spin_xx.jl")
 
-# The two TDVP integrators live in their own directories. They are FILES of this module, not
-# submodules: both are built on `henv.jl` (environments) and `cbe_core.jl` (the expansion)
-# above, so splitting them into modules would only add import ceremony around code that has
-# to see the same internals anyway.
-#
-#   tdvp2/       2-site TDVP, the accuracy/memory baseline. No CBE -- the two-site block
-#                supplies its own rank, which is exactly what makes it the baseline.
-#   tdvp1_cbe/   1-site TDVP + CBE, where CBE is MANDATORY rather than optional: a 1-site
-#                sweep cannot change the bond dimension by itself, so without the expansion
-#                the rank is frozen at whatever it started as. `variants.jl` names the two
-#                selection rules (plain CBE and the RSVD extension) over one implementation.
-include("tdvp2/tdvp2_baseline.jl")
-include("tdvp1_cbe/tdvp1_cbe.jl")
-include("tdvp1_cbe/variants.jl")
+# baselines/ -- files of this module rather than submodules: they need the same internals.
+# `tdvp2.jl` before `bond_expansion.jl`, which uses its `tensor_elements`.
+include("baselines/tdvp2.jl")
+include("baselines/tdvp1_cbe.jl")
+include("baselines/tdvp1_cbe_variants.jl")
+include("expansion/bond_expansion.jl")
+include("baselines/dmrg_cbe1s.jl")
+include("baselines/dmrg_cbe1s_driver.jl")
+include("baselines/tdvp_cbe1s.jl")
 
-# sweeps/ -- THE STRUCTURED IMPLEMENTATION, all on the MPO path so a long-range or
-# site-dependent `H` (Haldane-Shastry is both) works unchanged.
-#
-#   sweeps/expansion.jl    the per-bond expansion at the reference's own granularity --
-#                          `CBE(TL,TR,VL,VR,HL,HR,dir)` of `RSVDpreBE1SiQS.m` -- so all three
-#                          sweeps below expand through ONE code path and a difference between
-#                          them can never be a difference in how they expanded. Plus
-#                          `lanczos_lowest`, the local eigensolve DMRG needs (same Krylov space
-#                          as `expv`, `LowestEigen` reduction instead of the exponential).
-#   sweeps/dmrg_cbe1s.jl   `DMRGSweepCBE1Si.m`. Expand, 1-site Lanczos eigensolve, truncated
-#                          split, absorb. NO 0-site backward step -- DMRG has no time step to
-#                          over-count, and adding one would not converge to anything.
-#   sweeps/tdvp_cbe1s.jl   `TDVPSweepCBE1Si.m`. Expand, 1-site `+tau/2`, 0-site `-tau/2`,
-#                          absorb. The MPO-path twin of `tdvp1_cbe/`, which is channel-path and
-#                          therefore nearest-neighbour only.
-#   sweeps/cbe_bug.jl      THE FINAL SWEEP: RSVD-CBE expansion + the fixed-rank BUG sweep of
-#                          arXiv:2606.28169 SEC. 1 (not Sec. 2, which is the hybrid
-#                          quantum/classical layer). Left-to-root and right-to-root 1-site
-#                          K-step basis updates with `R` discarded, environments NOT frozen,
-#                          one Galerkin update at the root bond.
-#
-# After `jan_bug.jl` and `zero_site_core.jl`, whose `_relink`, `_frame_from`, `_absorb_left!`,
-# `_absorb_right!`, `truncate_sweep!` and `_state_stored` they reuse rather than reimplement,
-# and after `tdvp2/` for `tensor_elements`.
-include("sweeps/expansion.jl")
-include("sweeps/dmrg_cbe1s.jl")
-include("sweeps/dmrg_cbe1s_driver.jl")
-include("sweeps/tdvp_cbe1s.jl")
-include("sweeps/krylov_enrich.jl")
-include("sweeps/half_sweeps.jl")
-include("sweeps/cbe_bug_info.jl")
-include("sweeps/cbe_bug.jl")
-include("sweeps/cbe_bug_midpoint.jl")
-#   sweeps/krylov_closure.jl  the GENERAL-ORDER extension of `cbe_bug_step!` (`order = p`): the
-#                          global Krylov frontiers of the root generator, embedded as MPS and
-#                          swept with the same CBE / Tests C/D kernels until they close.
-include("sweeps/krylov_closure.jl")
-include("sweeps/frontier_sweeps.jl")
-include("sweeps/krylov_closure_loop.jl")
-#   sweeps/parallel_kls.jl  the fully parallel K/L/S integrator after the preliminary half-sweeps
-#                          (`parallel_kls_step!`, plan Task 6): K, L and the root S from `psi` in
-#                          the preliminary frames, merged in the four-block reconstruction.
-include("sweeps/parallel_kls.jl")
-#   sweeps/imaginary_time.jl  NORMALISED IMAGINARY TIME around `cbe_bug_step!` (imaginary-time /
-#                          open-system plan, Task 1): `Eshift`, the energy split root/compression,
-#                          the outside-Galerkin defect, reject/re-enrich/retry, and the panel grids.
-include("sweeps/imaginary_time.jl")
+# bug/ -- the solver. The step (`cbe_bug.jl`) needs the Krylov enrichment, the half-sweeps and
+# its record type before it; the order-p closure, the parallel K/L/S step and imaginary time
+# build on the step.
+include("bug/krylov_enrich.jl")
+include("bug/half_sweeps.jl")
+include("bug/cbe_bug_info.jl")
+include("bug/cbe_bug.jl")
+include("bug/cbe_bug_midpoint.jl")
+include("bug/krylov_closure.jl")
+include("bug/frontier_sweeps.jl")
+include("bug/krylov_closure_loop.jl")
+include("bug/parallel_kls.jl")
+include("bug/imaginary_time.jl")
 
-# The modes come last: each imports from the parent, so everything they name must already be
-# defined. A submodule rather than a file so `GroundState.solve!` reads as what it is at the
-# call site.
-#
-# ⛔ `RealTime` AND `ImaginaryTime` ARE GONE, and the reason is worth recording. Both were pure
-# forwarders to the GATE-BASED engine (`cbe_gate_evolve!`, `cbe_bond_update_bug!`,
-# `cbe_lubich_bug!`), which went with the other BUG implementations -- so their bodies named
-# functions that no longer exist. That does NOT stop the package loading: Julia resolves a
-# called name at CALL time, so `isdefined(RealTime, :evolve!)` kept answering `true` while every
-# actual call threw `UndefVarError` from inside. A name that is present and throws is worse than
-# one that is absent, because "it loads" reads as evidence and is not.
-#
-# Real and imaginary time are now the `tau` argument of the sweeps themselves -- `-im*dt` and
-# `-dt` passed to `cbe_bug_step!` / `tdvp_cbe1s_step!` / `tdvp2_step!` -- which is one fewer
-# layer and cannot drift from them.
-include("modes/ground_state.jl")
+# Last: a submodule that imports from the parent, so everything it names must exist already.
+include("baselines/ground_state.jl")
 
+# ── exports, by directory ────────────────────────────────────────────────────────────────────
+# operators/
 export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bond_gate,
+       ChannelSet, boundary_channels, left_channels, right_channels,
+       push_left_channels, push_right_channels,
+       LeftEnvStack, RightEnvStack, left_env_stack, right_env_stack, env_energy, env_energy_right,
+       apply_h_two_site, sketch_h_left, sketch_h_right,
        MPO, mpo_from_terms, xxz_mpo, heisenberg_su2_mpo, mpo_virtual_dims, mpo_energy, mpo_variance,
        LongRangeTerm, long_range_mpo, long_range_zz_mpo,
        LongRangeFit, fit_long_range, default_decays, long_range_terms, power_law_zz_mpo,
        MPOLink, MPOLeftEnvStack, MPORightEnvStack, MPOZeroSiteH, MPOOneSiteH,
-       LeftEnvStack, RightEnvStack,
-       left_env_stack, right_env_stack, env_energy, env_energy_right,
-       ChannelSet, boundary_channels, left_channels, right_channels,
-       push_left_channels, push_right_channels,
-       apply_h_two_site,
-       sketch_h_left, sketch_h_right,
-       sector_graded_sketch, full_local_basis,
-       # The three-tolerance budget: the normal accuracy API, and the ledger that reports
-       # when a rank ceiling rather than a tolerance ended a search.
-       AdaptiveBudget, BasisAllocation, basis_allocation, indicator,
+       shift_h, ZeroSiteH, zero_site_h, apply_zero_site, truncate_sweep!, truncate_recursive!
+
+# budget/ -- the three-tolerance budget, the ledger that reports when a rank ceiling rather
+# than a tolerance ended a search, and multiplet-vs-state accounting (`maxdim` is in
+# MULTIPLETS, so cross-symmetry comparisons at fixed rank must convert)
+export AdaptiveBudget, BasisAllocation, basis_allocation, indicator,
        AdaptiveLedger, merge_ledger!, work_ceiling, budget_status, budget_diagnostic,
-       CBEExpansion, cbe_expand,
-       # DD-QR CBE (plan Task 2), the operator interface and the step record (Task 1)
+       state_dim, state_bond_dims, multiplet_ratio
+
+# expansion/ -- RSVD CBE, the DD-QR CBE with its operator interface and step record, and the
+# per-bond expansion
+export sector_graded_sketch, full_local_basis, CBEExpansion, cbe_expand,
+       CBEBugOptions, CBEBugRunInfo, SStepSolver, Propagate, LowestEigen,
+       sketch_bond_left, sketch_bond_right, cbe_expand_bond, cbe_bond_update,
        dd_cbe_expand, dd_reference_sketch,
        TwoSiteSketchOp, OneSiteOp, RootOp,
        apply_two_site_sketch!, apply_one_site!, apply_root!,
        KernelCounters, StepRecord,
-       truncate_sweep!, truncate_recursive!,
-       CBEBugOptions, CBEBugRunInfo, tfim_mpo,
-       sketch_bond_left, sketch_bond_right, cbe_expand_bond,
-       cbe_bond_update,
-       SStepSolver, Propagate, LowestEigen,
-       GroundState,
-       ZeroSiteH, zero_site_h, apply_zero_site,
-       OneSiteH, one_site_h, apply_one_site, TDVP2Info, tdvp2_step!, tdvp2_composed_step!, tensor_elements,
-       TDVP1CBEInfo, tdvp1_cbe_step!,
-       tdvp1_rsvd_cbe_step!, tdvp1_cbe_exact_step!,
-       # multiplet vs state accounting -- `maxdim` is in MULTIPLETS, so cross-symmetry
-       # comparisons at fixed rank must convert
-       state_dim, state_bond_dims, multiplet_ratio,
-       # models/ -- exact MPOs for arbitrary two-body couplings, and the benchmark models
-       PairVertex, pair_vertices, pair_mpo,
-       nn_coupling_matrix, distance_coupling_matrix,
-       spin_vertices,
+       BondExpansionInfo, expand_bond!, lanczos_lowest
+
+# models/
+export PairVertex, pair_vertices, pair_mpo,
+       nn_coupling_matrix, distance_coupling_matrix, spin_vertices,
        haldane_shastry_couplings, haldane_shastry_mpo,
+       heisenberg_chain_mpo, heisenberg_ring_couplings, heisenberg_ring_mpo,
        square_cylinder_couplings, square_cylinder_mpo, square_cylinder_bonds,
        triangular_cylinder_couplings, triangular_cylinder_mpo,
        triangular_cylinder_bonds, triangular_coordination,
        triangular_site_position, triangular_wrap_vector,
        kagome_cylinder_couplings, kagome_cylinder_mpo, kagome_bonds, kagome_triangles,
        breathing_kagome_positions, breathing_kagome_couplings, breathing_kagome_mpo,
-       heisenberg_chain_mpo, heisenberg_ring_couplings, heisenberg_ring_mpo,
-       # models/oat.jl -- one-axis twisting (arXiv:2208.10972 Fig. 2). `x_polarized_state`,
-       # `sx_operator`, `sx_profile` and `total_sx` are :none-only BY PHYSICS: S^x is
-       # charge-raising, so a U(1) run reports zero rather than the revival signal.
+       # oat.jl -- `x_polarized_state`, `sx_operator`, `sx_profile` and `total_sx` are
+       # :none-only BY PHYSICS: S^x is charge-raising, so a U(1) run reports zero.
        oat_couplings, oat_energy_shift, oat_mpo, oat_mpo_pairs,
        x_polarized_state, sx_operator, sx_profile, total_sx,
-       # models/mbl_scars.jl -- MBL (disordered XXZ, U(1)) and scars (PXP, :none)
+       tfim_mpo,
+       # mbl_scars.jl / pxp_scars.jl -- disordered and quasiperiodic XXZ (U(1)), the
+       # interleaved Aubry-André-Hubbard chain, and PXP (:none)
        disorder_fields, field_mpo_from_terms, disordered_xxz_mpo,
-       # ... and the QUASIPERIODIC (Aubry-André) potential of arXiv:1501.05661, which is a
-       # different model from random disorder rather than a variant of it
        quasiperiodic_fields, aubry_andre_xxz_mpo,
-       # ... and the SPINFUL Aubry-André-Hubbard chain, which is the experiment's own
-       # Hamiltonian: interleaved 2L-site ordering, three-site Jordan-Wigner string hops
        hubbard_aa_mpo, hubbard_cdw_state,
-       # models/hubbard_d4.jl -- the FUSED d=4 spinful chain. `hubbard_aa_mpo` above is the
-       # interleaved 2L-site form and is retained only as the object whose freeze is documented;
-       # it cannot be evolved from a product state (range-2 => H_eff == 0 on every bond).
+       pxp_operators, pxp_mpo, z2_state, zk_state,
+       # hubbard_d4.jl -- the fused d=4 spinful chain; `hubbard_aa_mpo` above cannot be evolved
+       # from a product state (range-2 hops => H_eff == 0 on every bond)
        hub4_space, hub4_basis_index, hub4_sector, hub4_product_state,
        HUB4_EMPTY, HUB4_UP, HUB4_DOWN, HUB4_BOTH,
        hubbard_aa_mpo_d4, hub4_density, hub4_imbalance, hub4_cdw_occupations,
-       pxp_operators, pxp_mpo, z2_state, zk_state,
-       spin_space, spin_xx_mpo, spin_current_mpo, spin_domain_wall_state, spin_sz_profile,
-       # sweeps/ -- the structured RSVD-CBE sweeps
-       BondExpansionInfo, expand_bond!, lanczos_lowest,
-       DMRGCBEInfo, DMRGCBERun, dmrg_cbe1s_sweep!, dmrg_cbe1s!,
-       rsvd_cbe_dmrg1s!, exact_cbe_dmrg1s!, rsvd_cbe_dmrg1s_seeded!,
-       TDVPCBEInfo, tdvp_cbe1s_step!,
-       CBEBugSweepInfo, cbe_bug_step!, cbe_bug_midpoint_step!, parallel_kls_step!,
-       # sweeps/imaginary_time.jl -- normalised imaginary time (plan Task 1)
-       ite_step!, ite_evolve!, log_panel_steps, uniform_beta_steps, beta_grid, shift_h,
-       # models/liouville.jl -- symmetry-aware MPDOs (plan Task 2)
+       # liouville*.jl -- symmetry-aware MPDOs
        LiouvilleSpace, liouville_space, liouville_index, liouville_pair, liouville_charge,
        liouville_op, ket_super, bra_super, dissipator_super, lindblad_mpo, mpdo_apply!,
        mpdo_product_state, mpdo_trace, mpdo_expect, mpdo_rdm, mpdo_dense,
-       mpdo_normalise_trace!, mpdo_checks, mpdo_identity, mpdo_identity_sector
+       mpdo_normalise_trace!, mpdo_checks, mpdo_identity, mpdo_identity_sector,
+       spin_space, spin_xx_mpo, spin_current_mpo, spin_domain_wall_state, spin_sz_profile
+
+# baselines/
+export OneSiteH, one_site_h, apply_one_site, TDVP2Info, tdvp2_step!, tdvp2_composed_step!,
+       tensor_elements,
+       TDVP1CBEInfo, tdvp1_cbe_step!, tdvp1_rsvd_cbe_step!, tdvp1_cbe_exact_step!,
+       TDVPCBEInfo, tdvp_cbe1s_step!,
+       DMRGCBEInfo, DMRGCBERun, dmrg_cbe1s_sweep!, dmrg_cbe1s!,
+       rsvd_cbe_dmrg1s!, exact_cbe_dmrg1s!, rsvd_cbe_dmrg1s_seeded!,
+       GroundState
+
+# bug/
+export CBEBugSweepInfo, cbe_bug_step!, cbe_bug_midpoint_step!, parallel_kls_step!,
+       ite_step!, ite_evolve!, log_panel_steps, uniform_beta_steps, beta_grid
 
 end # module

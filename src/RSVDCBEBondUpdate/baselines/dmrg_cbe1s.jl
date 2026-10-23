@@ -25,7 +25,7 @@
 # WHY THE EXPANSION IS MANDATORY, not an accelerator. A one-site update CANNOT change a bond
 # dimension: it varies a single tensor with both its bond legs fixed. Without CBE this sweep is
 # frozen at whatever rank it started with -- from a product state, at `chi = 1` forever. That is
-# the same failure the `grow_iters = 0` measurement in `modes/ground_state.jl` records (energy
+# the same failure the `grow_iters = 0` measurement in `baselines/ground_state.jl` records (energy
 # frozen at the Neel product value `-1.75`, "converged" in two sweeps). The expansion is where
 # ALL rank generation happens, so `info.converged` is not by itself evidence of anything.
 #

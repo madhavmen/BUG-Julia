@@ -18,7 +18,7 @@
 # flow, and dropping it does not give a slightly worse integrator, it gives one that is not
 # consistent.
 #
-# WHY THIS EXISTS ALONGSIDE `tdvp1_cbe/tdvp1_cbe.jl`. That file is the same algorithm on the
+# WHY THIS EXISTS ALONGSIDE `baselines/tdvp1_cbe.jl`. That file is the same algorithm on the
 # CHANNEL path (`XXZChain`), and the channel form cannot express a long-range or site-dependent
 # `H` at all: `henv.jl::_left_step` explicitly REFUSES to carry an open channel past a site
 # (`"would carry an open channel past site $i"`), which is exactly what a distance-2 or longer

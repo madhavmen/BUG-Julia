@@ -128,7 +128,7 @@ recomputing `<v|H|v>` afterwards would cost another operator application per bon
 THE RITZ VALUE IS A VARIATIONAL UPPER BOUND on the lowest eigenvalue of `A`, because the
 tridiagonal is the exact Galerkin matrix of `A` in a FIXED subspace. (That is not true of
 `_expanding_krylov`, whose subspace moves under it as it iterates -- see the two-phase
-argument in `modes/ground_state.jl`. Nothing here expands, so nothing here loses the bound.)
+argument in `baselines/ground_state.jl`. Nothing here expands, so nothing here loses the bound.)
 
 `reorth = true` by default, and for the same measured reason `tdvp1_cbe_step!` defaults it on:
 without it the recurrence loses orthogonality and the failure is silent -- a Ritz value below

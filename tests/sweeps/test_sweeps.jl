@@ -160,7 +160,7 @@ include(joinpath(@__DIR__, "..", "common", "bug_tolerances.jl"))
         # The structural claim behind "CBE is mandatory, not an accelerator": a one-site update
         # varies one tensor with both bond legs FIXED, so with the expansion budget crushed to
         # nothing the rank is frozen and the energy stalls above the true ground state. This is
-        # the same signature `modes/ground_state.jl` records for `grow_iters = 0`.
+        # the same signature `baselines/ground_state.jl` records for `grow_iters = 0`.
         set_symmetry!(:U1)
         L = 6
         mpo = RSVDCBEBondUpdate.mpo_from_terms(nn_chain(:U1, L))

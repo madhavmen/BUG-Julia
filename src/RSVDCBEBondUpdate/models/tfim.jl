@@ -3,7 +3,7 @@
 #     H = -J Σ_i Z_i Z_{i+1}  -  h Σ_i X_i
 #
 # WHY AN MPO AND NOT THE EXISTING GATES. `ising_bond_gates` already builds this Hamiltonian as
-# one gate per bond, but every sweep in `sweeps/` -- `cbe_bug_step!`, `tdvp_cbe1s_step!`,
+# one gate per bond, but every sweep in `bug/` and `baselines/` -- `cbe_bug_step!`, `tdvp_cbe1s_step!`,
 # `tdvp2_step!` -- takes an `MPO` and drives its environments through `henv.jl`. Gates cannot be
 # used there. Building a genuine MPO means the environment machinery, the one-site and two-site
 # effective Hamiltonians and the Krylov solves are all shared with every other model, so a TFIM

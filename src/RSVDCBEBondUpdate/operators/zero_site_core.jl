@@ -1,7 +1,7 @@
 # ── ZERO-SITE GENERATOR, FRAME CONSTRUCTION AND THE TRUNCATION SWEEPS ────────
 #
 # ⛔ THIS FILE NO LONGER HOLDS A SWEEP. `cbe_lubich_sweep` was REMOVED (2026-08-29) -- the
-# campaign's BUG is `sweeps/cbe_bug.jl` and nothing routes through the Lubich variant any more.
+# campaign's BUG is `bug/cbe_bug.jl` and nothing routes through the Lubich variant any more.
 # What stayed is the shared core it happened to be defined next to, and every piece of it is
 # load-bearing for `cbe_bug_step!`:
 #
@@ -428,5 +428,5 @@ end
 # ── the step ─────────────────────────────────────────────────────────────────
 
 "Total stored elements of every tensor in the state -- block-sparse, so the honest size.
-(`tensor_elements` lives in tdvp2/tdvp2_baseline.jl; both callers resolve it at run time.)"
+(`tensor_elements` lives in baselines/tdvp2.jl; both callers resolve it at run time.)"
 _state_stored(psi::SymMPS) = sum(tensor_elements(psi[i]) for i in 1:length(psi); init = 0)

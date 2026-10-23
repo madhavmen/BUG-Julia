@@ -1,4 +1,4 @@
-# sweeps/parallel_kls.jl -- the fully parallel K/L/S integrator after the p preliminary CBE
+# bug/parallel_kls.jl -- the fully parallel K/L/S integrator after the p preliminary CBE
 # half-sweeps (updated_cbe_high_order_parallel.md, Task 6).
 #
 # A DIFFERENT INTEGRATOR, not a schedule of the standard step. On the root bipartition at bond `c`,

@@ -264,14 +264,14 @@ python3 benchmarks/plot_oat.py
 
 ## 3a. The TDVP integrators, and where they live
 
-Beside the two BUG paths there are two TDVP integrators, each in its own directory under
-`src/RSVDCBEBondUpdate/`:
+Beside the two BUG paths there are two TDVP integrators, with the other baselines under
+`src/RSVDCBEBondUpdate/baselines/`:
 
 ```
-src/RSVDCBEBondUpdate/
-  tdvp2/tdvp2_baseline.jl      2-site TDVP — the accuracy/memory baseline
-  tdvp1_cbe/tdvp1_cbe.jl       1-site TDVP + CBE — the step
-  tdvp1_cbe/variants.jl        its two selection rules, named
+src/RSVDCBEBondUpdate/baselines/
+  tdvp2.jl                     2-site TDVP — the accuracy/memory baseline
+  tdvp1_cbe.jl                 1-site TDVP + CBE — the step
+  tdvp1_cbe_variants.jl        its two selection rules, named
 ```
 
 ```julia
