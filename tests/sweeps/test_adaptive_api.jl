@@ -64,8 +64,7 @@ include(joinpath(@__DIR__, "..", "common", "adaptive_fixtures.jl"))
         mpo, h = xxz_mpo(6; J = 1.0, delta = 0.0), xxz_chain(6; J = 1.0, delta = 0.0)
         dt = ComplexF64(-0.05im)
         for kw in ((dex = 4,), (growth = 2.0,), (dover = 4,), (comp_ratio = 1.0,),
-                   (trunc_thresh = 1e-12,), (sulz_cap = true,), (preselect_only = true,),
-                   (thin_search = false,))
+                   (trunc_thresh = 1e-12,), (sulz_cap = true,), (preselect_only = true,))
             @test_throws MethodError dmrg_cbe1s!(neel_state(6), mpo; n_sweeps = 1, kw...)
         end
         for kw in ((dex = 4,), (growth = 2.0,), (dover = 4,), (comp_ratio = 1.0,),

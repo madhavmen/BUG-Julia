@@ -149,6 +149,8 @@ function dmrg_cbe1s_sweep!(psi::SymMPS, mpo::MPO;
                            maxiter::Int = 30,
                            restol::Float64 = 1e-6,
                            seed_expanded::Bool = false,
+                           # Adaptive search width from Test B (`_certified_range`); `false` = old.
+                           thin_search::Bool = true,
                            rng::AbstractRNG = MersenneTwister(0x5EED))
     L = length(psi)
     length(mpo) == L || throw(DimensionMismatch(
@@ -179,7 +181,8 @@ function dmrg_cbe1s_sweep!(psi::SymMPS, mpo::MPO;
     # the numerical rank floor (`stol_pre = 0`, plan §1); Tests A/B against `tol_basis` decide
     # what matters.
     exkw = (growth = ADAPTIVE_GROWTH, comp_ratio = 1.0, stol_pre = 0.0, rmax = rmax,
-            exact = exact, rng = rng, alloc = alloc, workcap = work_ceiling(maxdim, rmax))
+            exact = exact, thin_search = thin_search, rng = rng, alloc = alloc,
+            workcap = work_ceiling(maxdim, rmax))
 
     function record!(info)
         maxexp = max(maxexp, info.dim_out)
