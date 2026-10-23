@@ -706,8 +706,13 @@ def p12(runs, ref, outdir):
 
 
 # ── P13 failure modes ──────────────────────────────────────────────────────────────────────────
+P13_EVENTS = ("n_targeted", "n_d_after_c", "n_passes")
+
+
 def p13(runs, ref, outdir):
     print("HQ-P13 run  steps  unmet  limits  seeds")
+    # per (tol_basis, order) on the standard step: steps, unmet steps, limit hits, ledger events
+    ev = defaultdict(lambda: defaultdict(int))
     for r in runs:
         lim = defaultdict(int)
         nun = 0
@@ -716,15 +721,69 @@ def p13(runs, ref, outdir):
             for x in s["record"]["limits"]:
                 lim[x] += 1
         print(f"HQ-P13 {r['path']} {len(r['steps'])} {nun} {dict(lim)} seed={r['config']['seed']}")
+        if standard(r):
+            e = ev[key(r, "tol_basis", "order")]
+            e["steps"] += len(r["steps"])
+            e["unmet"] += nun
+            e["limits"] += sum(lim.values())
+            for s in r["steps"]:
+                for k in P13_EVENTS:
+                    e[k] += s["ledger"].get(k, 0)
+    # `krylov_reuse` is in the key: a reuse-off rerun at seed 1 is not a second seed
     seeds = defaultdict(list)
     for r in runs:
         fe = final_error(r, ref)
         if fe is not None:
-            seeds[key(r, "twoS", "order", "h", "tol_basis", "policy", "kls")].append((r["config"]["seed"], fe[0]))
+            seeds[key(r, "twoS", "order", "h", "tol_basis", "policy", "kls") +
+                  (r["config"].get("krylov_reuse", True),)].append(
+                (r["config"]["seed"], fe[0], max(r["steps"][-1]["D_final"])))
+    spread = {}
     for k, v in sorted(seeds.items()):
         if len(v) >= 2:
             e = [x[1] for x in v]
-            print(f"HQ-P13-SEEDS {k} n={len(v)} err min={min(e):.2e} max={max(e):.2e}")
+            d = [x[2] for x in v]
+            spread[k] = (e, d)
+            print(f"HQ-P13-SEEDS {k} n={len(v)} err min={min(e):.2e} max={max(e):.2e} D {min(d)}-{max(d)}")
+    if not ev or not spread:
+        return skip("P13", "needs standard-step runs and >= 2 seeds of one setting")
+    fig, ax = plt.subplots(1, 3, figsize=(15, 4.2))
+    cols = plt.cm.viridis(np.linspace(0, 0.9, 5))
+    for (twoS, p, h, tb, pol, kls, _), (e, d) in spread.items():
+        ax[0].errorbar(h, np.median(e), yerr=[[np.median(e) - min(e)], [max(e) - np.median(e)]],
+                       fmt="o", color=cols[p - 1], capsize=4, label=f"p = {p}")
+        ax[1].plot(p + (h - 0.15), (max(e) - min(e)) / np.median(e), "o" if h < 0.15 else "s",
+                   color=cols[p - 1])
+        ax[1].plot(p + (h - 0.15), (max(d) - min(d)) / np.median(d), "x", color=cols[p - 1])
+    hd, lb = ax[0].get_legend_handles_labels()
+    u = dict(zip(lb, hd))
+    ax[0].legend(u.values(), u.keys(), fontsize=8)
+    hs = sorted({k[2] for k in spread})
+    ax[0].set_xscale("log"); ax[0].set_yscale("log")
+    ax[0].set_xticks(hs, [f"{h:g}" for h in hs]); ax[0].minorticks_off()
+    ax[0].set_xlabel("J h"); ax[0].set_ylabel("max|Δm(t_f)|, median and seed range")
+    tbs = sorted({k[3] for k in spread})
+    ax[0].set_title(f"seed spread of the error (tol_basis {', '.join(f'{t:g}' for t in tbs)})")
+    ax[1].set_yscale("log"); ax[1].set_xticks(range(1, 6))
+    ax[1].set_xlabel("order p (offset: h = 0.1 left, 0.2 right)")
+    ax[1].set_ylabel("(max − min) / median over seeds")
+    ax[1].set_title("relative seed spread: error (o h = 0.1, □ 0.2), D_max (×)", fontsize=10)
+    for i, tb in enumerate(sorted({k[0] for k in ev})):
+        ps = sorted(p for (t, p) in ev if t == tb)
+        ax[2].plot(ps, [ev[(tb, p)]["n_d_after_c"] / ev[(tb, p)]["steps"] for p in ps], "o-",
+                   label=f"tol_basis {tb:g}")
+    tot = defaultdict(int)
+    for e in ev.values():
+        for k, v in e.items():
+            tot[k] += v
+    ax[2].set_xlabel("order p"); ax[2].set_ylabel("Test D grew the frame after Test C passed, per step")
+    ax[2].set_xticks(range(1, 6)); ax[2].legend(fontsize=8)
+    ax[2].set_title(f"{tot['steps']} steps: unmet {tot['unmet']}, limits {tot['limits']}, "
+                    f"holdout widening {tot['n_targeted']}", fontsize=9)
+    for a in ax:
+        a.grid(True, alpha=0.3)
+    fig.suptitle(f"P13 failure modes, L = 16, s = {', '.join(sorted({f'{k[0] / 2:g}' for k in spread}))}")
+    fig.tight_layout()
+    save(fig, outdir, "P13_failure_modes.png")
 
 
 def main():

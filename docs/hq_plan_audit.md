@@ -446,7 +446,7 @@ below as a finding; its JSONs are in `figures/hq_task8/runs/*_s3`, outside the f
 | P10 time to accuracy | DONE | below |
 | P11 three schedules × workers 1/2/3 | DONE: no speedup at this size | below |
 | P12 parallel vs standard, separate reference errors | DONE | below; at matched error K/L/S is 10–15 % slower |
-| P13 failure modes, seeds | PARTIAL | hq33 seeds 1–3; limits and unmet steps logged per run |
+| P13 failure modes, seeds | DONE from hq33 (no limit fires) | `P13_failure_modes.png`; below |
 
 **P08: the state error is set by the first step.** At L = 16, T = 8, tol_basis 1e-7 (hq38), `e_p`
 falls as h^(p+1), not h^p: fitted slopes 2.33, 3.00, 3.99, 4.97, 5.96 for p = 1..5 (p = 1 is 2.0
@@ -513,6 +513,20 @@ little work; the `small` partition allows at most 4 CPUs. Peak RSS 2.3–2.8 G t
   flat. At h = 0.2 it is not usable for p ≤ 3 (p = 2: norm² − 1 = 0.05 and Var(H) − s² = +14.3
   on a conserved 9); at h ≤ 0.1 and p ≥ 3 it is below 1e-4.
 * A measurement floor of 3–5e-9 in the state error (max|Δm| is 1e-14 there) is not fitted.
+
+**P13: no failure mode fires at s = 1/2, L = 16; the seed spread is set by the tol_basis floor.**
+From the hq33 campaign (standard step, tb 1e-3 / 1e-5 / 1e-7, p = 1..5, h = 0.05–0.8, Jt = 8;
+`P13_failure_modes.png`):
+* 5850 steps: 0 `budget_unmet`, 0 limit hits (`maxdim` 1024 never binds, D ≤ 207; no `workcap`), 0
+  Test B holdout widenings, and the order-p closure closes in one pass on every step. The rank- and
+  work-limited branches are exercised only by the unit tests (U05 rank limit, UT14 `maxdim`).
+* The one non-default branch that fires is Test D growing the frame after Test C passed (the
+  delayed direction of U08): 0–0.6 % of steps at p = 1, rising with p to 16 % at tb 1e-7.
+* Seeds 1–3 (tb 1e-5, h = 0.1 and 0.2): where the error is far above the floor (p ≤ 3) it agrees
+  across seeds to 5e-7 … 2 % relative; at p = 4–5, h = 0.1 (error 5–8e-8, near the floor) the
+  spread is 17–38 %. D_max differs by at most 4 (0.5–2 %) and the probe count by ≤ 2.3 %.
+* The plan's explicit cases (reachable missing-charge sectors, flat tails, DK-dominant vs DD-small,
+  the two-spin entangling transition) are U03, U05, U06 and U16: tests, not campaign runs.
 
 ## Task 9 -- regression suite and performance gates (branch plan/hq-task-9)
 
@@ -608,4 +622,4 @@ Against the plan's "avoid" list:
 | standard p = 1..5 orders measured or the defect documented | MET (documented) | P08: p_obs = p + 1, set by the first step from the D = 1 domain wall |
 | full parallel K/L/S as a separate algorithm; omitted block tested; order and speedup evidence | PARTIAL | parallel_kls.jl; M11 test + fallback (U16); order (U17, P12). Speedup: none at Jt = 8, h = 0.1 (P11, 0.65–0.77 at 3 workers); the Jt = 5 per-order rerun (hq45t) is pending |
 | s = 1/2 vs analytical finite chain; s = 3 vs converged numerical reference | s = 1/2 MET; s = 3 OUT OF SCOPE | U18, P01/P02; s = 3 cancelled by the user (Task 8 scope) |
-| all plots with saved configurations and scripts | MET at s = 1/2, P13 PARTIAL | `figures/hq_task8/` + `runs/`; `benchmarks/hq_bench.jl`, `hq_task8_figures.py`, `hq_dd_scaling.jl` |
+| all plots with saved configurations and scripts | MET at s = 1/2 (P13 from hq33: no limit fires) | `figures/hq_task8/` + `runs/`; `benchmarks/hq_bench.jl`, `hq_task8_figures.py`, `hq_dd_scaling.jl` |
