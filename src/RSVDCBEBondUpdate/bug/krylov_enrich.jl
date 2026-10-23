@@ -8,15 +8,11 @@ _tagZ(j::Int) = "cbeZ,$j"
 # convergence judgement.
 const _KRY_BREAKDOWN = 1e-13
 
-# ── STAGE 3: RESIDUAL-DRIVEN K/L KRYLOV ENRICHMENT (plan §4, Tests C and D) ──────────────────
-#
-# ⛔ TWO SPACES, AND THE TESTS LIVE IN THE SMALLER ONE. The Krylov recursion runs on ONE-SITE
-# TENSORS (`(link, site, g)` on the left). What the half-sweep
-# keeps is a FRAME -- an isometry on the local legs `(link, site)` -- and the plan's `Q` with
-# its projector `I - QQ'` is that frame: a Krylov vector adds something only through the part
-# of its local range the frame does not already span. `Q0` is the CBE output `U_ex = [U_old |
-# U_CBE]`, so the old directions are kept VERBATIM and the CBE-selected ones are reused; the
-# seed `K_ex` already lies in `U_old` (it is the state's own site tensor).
+# ── STAGE 3: residual-driven K/L Krylov enrichment (plan §4, Tests C and D) ──
+# Krylov vectors live on one-site tensors, but the plan's projector `I - QQ'` acts on the frame (an
+# isometry on `(link, site)`): a vector adds only through the part of its local range the frame
+# lacks. `Q0` is the CBE output `U_ex`, so old directions are kept verbatim; the seed `K_ex` already
+# lies in `U_old`.
 
 const _TAG_K, _TAG_KR = "cbeK,L", "cbeK,R"
 
@@ -31,35 +27,28 @@ const _ROOT_MAXITER = 30
     _kry_weight(Hm, k, tau; state_seed = true) -> Float64
 
 The weight the newest Krylov vector `v_{k+1}` carries in `exp(tau*H) v_1`, from the Arnoldi
-Hessenberg after `k` steps: `|tau * beta_k * [phi_1(tau*H_k)]_{k,1}|`, read off ONE `(k+1)x(k+1)`
-exponential of `[tau*H_k 0; tau*beta_k*e_k' 0]`. This is Saad's a posteriori error of the
-`k`-dimensional Krylov approximation, so it is also the CLOSURE test: once it is below the
-allowance, no later direction can matter more (for `k = 1` it is `|tau| beta_1 (1 + O(tau))`,
-the plan's Test C normalisation `|dt| ||H1 K_ex|| / ||K_ex||`).
+Hessenberg after `k` steps: `|tau * beta_k * [phi_1(tau*H_k)]_{k,1}|`, read from one `(k+1)x(k+1)`
+exponential. This is Saad's a posteriori error of the `k`-dimensional approximation, so it is also
+the closure test: below the allowance, no later direction matters more.
 
-`state_seed`: `v_1` is the state's own tensor (the half-sweeps), not a closure frontier. It
-matters only for a non-unitary propagator (below).
+`state_seed` is false when `v_1` is a closure frontier rather than the state's own tensor; it
+matters only for a non-unitary propagator.
 """
 function _kry_weight(Hm::Matrix{ComplexF64}, k::Int, tau::ComplexF64; state_seed::Bool = true)
     A = zeros(ComplexF64, k + 1, k + 1)
     A[1:k, 1:k] .= tau .* @view Hm[1:k, 1:k]
     A[k + 1, k] = tau * Hm[k + 1, k]
     real(tau) == 0 && return abs(exp(A)[k + 1, 1])
-    # ⛔ NON-UNITARY (imaginary time, Lindblad): RELATIVE TO THE STATE, SHIFTED TO STAY
-    # REPRESENTABLE. `|[exp(A)]_{k+1,1}|` carries the seed's own growth `g = ||exp(tau*H_k) e_1||`
-    # -- `exp(dbeta*|E|)` for an unshifted generator, i.e. `e^44` at L=100, dbeta=1 -- and every
-    # direction would look that much more important than it is to the state the caller keeps (and
-    # overflow past dbeta*|E| ~ 700). A half-sweep seed IS the state's tensor, so dividing by `g`
-    # gives the weight in the propagated state; the shift `s` cancels in that ratio exactly.
+    # Non-unitary (imaginary time, Lindblad): weigh relative to the state's own growth `g =
+    # ||exp(tau*H_k) e_1||`, which is `exp(dbeta*|E|)` unshifted and overflows at large dbeta. The
+    # shift `s` cancels in that ratio exactly.
     s = maximum(real, eigvals(A[1:k, 1:k]))
     E = exp(A - s * I)
     state_seed && return abs(E[k + 1, 1]) / max(norm(@view E[1:k, 1]), floatmin(Float64))
-    # A closure FRONTIER is not the state: it is made of excitations and DECAYS under the shifted
-    # generator (`g = e^{-dbeta h11}`), so dividing by ITS growth inflated its directions by
-    # `e^{dbeta h11}` -- 1e8 to 3e15 at dbeta = 8 on a converged L=16 chain (d49); `_extend_frame`
-    # could not fit and a converged step was flagged as capped. Its weight is the absolute one in
-    # the shifted frame, `|E[k+1,1]| e^s`: relative to a state whose growth over the step is 1 --
-    # >= 1 in imaginary time (Jensen, the shift is its energy), so this never under-weights there.
+    # A closure frontier is not the state: it decays under the shifted generator, so dividing by its
+    # own growth inflated its directions by `e^{dbeta h11}`, enough to block a converged step. Its
+    # weight is the absolute one, `|E[k+1,1]| e^s`, in the shifted frame, which never under-weights
+    # in imaginary time (the shift is the energy there).
     w = abs(E[k + 1, 1])
     return w == 0 ? 0.0 : exp(log(w) + s)
 end
@@ -102,30 +91,11 @@ end
                    amp = 1.0, state_seed = true)
         -> (Q, stats)
 
-Grow the frame `Q0` by the Krylov directions of `applyH` seeded at `v0` that the step needs.
-`side` is `:left` (frame legs `(link, site, g)`, local legs 1-2) or `:right` (`(g, site, link)`,
-local legs 2-3). Each Arnoldi direction `v_k` is scored
-
-    eta_k = weight_k * ||(I - QQ') v_k||          (weight_k from `_kry_weight`)
-
-`eta_1` is TEST C (does the CBE frame already hold the first one-site action?), `eta_{k>=2}`
-TEST D (is the grown frame closed under `H1` on the active frontier?). A score above
-`alloc.krylov` appends that residual's directions. A small `eta_1` is NOT a stop: the plan's
-counterexample (`H e1 = e2`, `H e2 = e1 + e3`, `Q0 = [e1, e2]`) has `eta_1 = 0` and a needed
-`e3`. The loop stops when the propagator weight itself is below the allowance -- every
-remaining direction is then negligible however new -- or when the recursion closes exactly.
-Directions with no amplitude on the seed's Krylov space are never visited, so dormant ones are
-not forced closed.
-
-Returns the grown frame and `stats = (eta_c, eta_d, added, n_h1, d_after_c, capped, met)`.
-`capped` means the work ceiling or the depth bound stopped the search with weight left;
-`met = false` then, and the caller records it -- never a silent pass.
-
-`amp` is the seed's norm relative to the STATE's (`||v0|| / ||psi||`). The weights above are
-relative to the unit seed, which is the state's own scale on the ordinary half-sweep (`amp = 1`);
-a Krylov frontier (`krylov_closure.jl`) is a small vector, and its directions matter only in
-proportion to its size -- and, for a non-unitary propagator, never relative to its own decay
-(`state_seed = false`, see `_kry_weight`).
+Grow the frame `Q0` by the Krylov directions of `applyH` from seed `v0` that the step needs. Each
+direction is scored by `weight * ||(I - QQ') v_k||`: `eta_1` is Test C, `eta_{k>=2}` Test D. Scores
+above `alloc.krylov` are appended. A small `eta_1` is not a stop (`H e1 = e2`, `H e2 = e1 + e3` with
+`Q0 = [e1, e2]`). `capped` with `met = false` means the work ceiling or depth bound stopped the
+search with weight left. `amp` is the seed's norm relative to the state.
 """
 function _krylov_enrich(v0, applyH, Q0, side::Symbol, tau::ComplexF64,
                         alloc::BasisAllocation; workcap::Int = 0,

@@ -1,49 +1,16 @@
-# ONE-SITE TDVP WITH CONTROLLED BOND EXPANSION, ON THE MPO PATH.
-#
-# A LINE-FOR-LINE PORT of `cbe_matlab/TDVPSweepCBE1Si.m`:
-#
-#   MATLAB (`>>` half-sweep, si = 1 … L-1)                     here
-#   -------------------------------------------------------    ------------------------------
-#   VR = loadV(EnV.VR{si+1})                                   right_channels(rstack, i+2)
-#   [TL,TR,VR,InfoCBE] = CBE(TL,TR,VL,VR,HL,HR,'>>')           expand_bond!(…, :right, …)
-#   [TL,VL,OrthC,Info1Si] = Update1Si(TL,VL,VR,HL,'>>')        forward 1-site expv, +tau
-#   [OrthC,Info0Si] = Update0Si(OrthC, VL, VR)                 backward 0-site expv, -tau
-#   TL = AbsorbOrthCent(OrthC, TR, '>>')                       C absorbed into psi[i+1]
-#   … closing `[TL,Info1Si] = Update1Si(TL,VL,VR,HL,'vv')`     the site-L update, no split
-#
-# WHY THE BACKWARD 0-SITE STEP IS THERE, since it is the one thing the DMRG sweep next door does
-# NOT have. Two consecutive forward site updates both act on the bond between them, so the bond
-# is advanced twice; the `-tau` 0-site step removes exactly one of those. It is not a
-# correction bolted on -- it is what makes the composition a projector splitting of the TDVP
-# flow, and dropping it does not give a slightly worse integrator, it gives one that is not
-# consistent.
-#
-# WHY THIS EXISTS ALONGSIDE `baselines/tdvp1_cbe.jl`. That file is the same algorithm on the
-# CHANNEL path (`XXZChain`), and the channel form cannot express a long-range or site-dependent
-# `H` at all: `henv.jl::_left_step` explicitly REFUSES to carry an open channel past a site
-# (`"would carry an open channel past site $i"`), which is exactly what a distance-2 or longer
-# term needs. Haldane-Shastry is all-pairs, so it needs the MPO. The two are pinned against each
-# other on a nearest-neighbour chain, where both apply, and that agreement is what licenses
-# reading results from this one.
-#
-# THE STEP IS SECOND ORDER AND SYMMETRIC: each half-sweep carries `tau/2`, so the pair
-# composes to `tau` and the two halves are mirror images. The MATLAB sweep takes `tau` from
-# whatever its driver supplied and does not fix the convention itself; the standard one is used
-# here and the `dt`-order is asserted in the tests rather than assumed.
+# ── one-site TDVP with CBE on the MPO path: a line-for-line port of TDVPSweepCBE1Si.m ──
+# The backward 0-site step (-tau) removes the double count of the bond between two forward updates.
+# MPO path: needed for long-range H (Haldane-Shastry), which tdvp1_cbe.jl cannot carry.
 
 """
     TDVPCBEInfo
 
 What one [`tdvp_cbe1s_step!`](@ref) did.
 
-  - `max_bond`, `max_expanded` -- final rank, and the widest CBE PROPOSED before the split
-    truncated it. Compare the two to see whether the expansion or the truncation is limiting.
-  - `n_new` -- directions admitted per bond, summed over both half-sweeps.
-  - `err_pre`, `err_fnl` -- largest preselection / final-selection weight discarded.
-  - `discarded` -- largest truncation weight over the step.
-  - `krylov_dims` -- operator applications over both the one-site and zero-site solves. NOT
-    comparable bond for bond with a 0-site-only scheme: a one-site matvec is `O(d chi^2 w)`
-    against a zero-site `O(chi^2 w)`.
+  - `max_bond`, `max_expanded`: final rank, and the widest CBE proposal before the split. Compare
+    them to see whether the expansion or the truncation is limiting.
+  - `n_new`, `err_pre`, `err_fnl`, `discarded`: directions admitted and the largest discarded weights.
+  - `krylov_dims`: operator applications over both solves; not comparable with a 0-site-only scheme.
 """
 struct TDVPCBEInfo
     max_bond::Int
@@ -59,63 +26,28 @@ end
 """
     tdvp_cbe1s_step!(psi, mpo, tau; kwargs...) -> TDVPCBEInfo
 
-One symmetric second-order 1-site-TDVP-with-CBE step of `tau`, in place.
+One symmetric second-order one-site TDVP-with-CBE step of `tau`, in place. `tau = -im*dt` is real
+time and `tau = -dt` imaginary time. The caller renormalises; for imaginary time that is load-bearing.
 
-`tau = -im*dt` is real time and `tau = -dt` imaginary time; nothing here cares which. **The
-caller renormalises** -- for imaginary time that is load-bearing, since `exp(-dt H)` is not
-norm preserving and the norm is the thing being minimised through.
+The expansion is [`cbe_expand`](@ref) with its fixed-count settings. `exact = false` (default) is the
+RSVD selection; `exact = true` the full fused basis. `maxdim` and `trunc_thresh` bound the splits.
 
-The expansion is [`cbe_expand`](@ref) at its own (fixed-count) settings; `exact = false`
-(default) is the RSVD selection and is the method, `exact = true` the full fused basis.
-`maxdim` / `trunc_thresh` bound the splits, `maxiter` / `tol` the Krylov budget.
-
-`reorth = true` by default, and it is a CORRECTNESS fix rather than a tuning choice: measured
-on the channel path at L=8, XX, dt=0.02, 20 steps, the un-reorthogonalised Lanczos lost 4.6e-3
-of the state's norm (real-time TDVP is unitary, so any loss is error), the exact and sketched
-arms diverged by 2.0e-2 where they must agree, and the unconverged arm carried a SPURIOUS
-extra bond -- so it looked like richer physics rather than a broken solve.
-
-Environment work is `O(L)` per half-sweep: each half carries its own side bond to bond and
-reads the other from one stack built at the start. That stack survives the half-sweep because
-a rightward pass only rewrites sites at or behind the bond it is on.
+`reorth = true` is a correctness fix: without it the Lanczos silently loses norm.
 """
 function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                           exact::Bool = false,
-                          # ⛔ WITHOUT THIS THE SKETCH CANNOT SAVE ANYTHING, AND THIS ARM WAS THE
-                          # ONLY ONE THAT COULD NOT BE ASKED. `cbe_bug_step!` has taken
-                          # `fold_omega` since the fold-first rewrite; this sweep never got the
-                          # kwarg, so every CBE-1s run ever timed went down the project-first
-                          # path -- `apply_h_two_site` builds the FULL `H*Theta` at every bond and
-                          # `Om` is contracted into the RESULT. That is a complete two-site matvec
-                          # per bond spent purely on BASIS SELECTION, on top of this arm's own
-                          # one-site and zero-site solves, which is why `cbe1s` measured SLOWER
-                          # than `tdvp2` (72.8 s vs 56.9 s at chi = 1024) when a one-site sweep
-                          # should be the cheaper of the two.
-                          #
-                          # The fold replaces `d*chi_r` columns with `g = npre` BEFORE the
-                          # environment contractions, so the saving is `chi/g` and GROWS with the
-                          # bond dimension. Folding cannot share one `H*Theta` across the three
-                          # sketch calls, so it wins when `3g < chi` -- the large-chi regime this
-                          # is being tuned for. It can LOSE at small chi or a wide sketch, so the
-                          # default stays off and nothing already measured moves silently.
+                          # ── fold_omega: fold the sketch before the environment contractions ──
+                          # Without it every bond builds the full H*Theta for basis selection alone. Folding saves chi/g and so
+                          # grows with chi, but it can lose at small chi or a wide sketch; the default stays off.
                           fold_omega::Bool = false,
                           maxdim::Int = 200,
                           trunc_thresh::Float64 = 1e-12,
                           maxiter::Int = 30,
                           tol::Float64 = 1e-15,
                           reorth::Bool = true,
-                          # ⛔ WITHOUT THESE THIS ARM COULD NOT STOP EARLY AT ALL. `lanczos_expv`
-                          # exits on BREAKDOWN only, which on a generic `H` never fires, so every
-                          # one of the ~4(L-1) solves per step burned the full `maxiter` whether it
-                          # had converged at iteration 3 or not. `tdvp2_step!` has taken `conv_tol`
-                          # since the substep work; this arm was simply never plumbed.
-                          #
-                          # ⚠ THIS IS A FAIRNESS FIX, NOT ONLY A SPEED ONE. CBE-BUG's half-sweeps
-                          # already stop adaptively (`_krylov_enrich` stops on the propagator weight
-                          # against `tol_basis` every iteration), so comparing wall clock
-                          # with `conv_tol = 0` here measured an adaptive method against two
-                          # non-adaptive ones and credited the difference to the ALGORITHM.
-                          # Defaults stay off so nothing already measured moves silently.
+                          # ── conv_tol: early exit of the Krylov solves, a fairness fix ──
+                          # `lanczos_expv` exits on breakdown only, so every solve burned `maxiter`. CBE-BUG already stops
+                          # adaptively, so timing against `conv_tol = 0` would credit that difference to the algorithm.
                           conv_tol::Float64 = 0.0,
                           substeps::Int = 1,
                           # `hermitian = false` -> Arnoldi, for a non-Hermitian generator. See

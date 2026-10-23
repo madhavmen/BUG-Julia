@@ -1,60 +1,18 @@
-# DMRG WITH CONTROLLED BOND EXPANSION, ONE SITE AT A TIME.
-#
-# A LINE-FOR-LINE PORT of `cbe_matlab/DMRGSweepCBE1Si.m`. The correspondence is exact and
-# worth writing down, because "does our code do what the reference does" is a question that
-# should be answerable by reading rather than by measuring:
-#
-#   MATLAB (`>>` half-sweep, si = 1 … L-1)                     here
-#   -------------------------------------------------------    ------------------------------
-#   VR = loadV(EnV.VR{si+1})                                   right_channels(rstack, i+2)
-#   [TL,TR,VR,InfoCBE] = CBE(TL,TR,VL,VR,HL,HR,'>>')           expand_bond!(…, :right, …)
-#   [TL,VL,OrthC,Info1Si] = Update1Si(TL,VL,VR,HL,'>>')        lanczos_lowest + truncated svd
-#   MPS.T{si} = TL;  EnV.VL{si+1} = VL                         psi[i] = res.U;  push_left…
-#   TL = AbsorbOrthCent(OrthC, TR, '>>')                       C absorbed into psi[i+1]
-#   … closing `[TL,Info1Si] = Update1Si(TL,VL,VR,HL,'vv')`     the site-L solve, no split
-#
-# WHAT DMRG DOES **NOT** DO, and it is the one structural difference from the TDVP sweep next
-# door: THERE IS NO 0-SITE BACKWARD UPDATE. `DMRGSweepCBE1Si.m` goes straight from `Update1Si`
-# to `AbsorbOrthCent` (lines 31→40), where `TDVPSweepCBE1Si.m` puts an `Update0Si` between them
-# (line 42). The reason is not an oversight in either: TDVP's backward half-step exists to
-# cancel the double counting of the bond between two consecutive forward site updates, which is
-# a statement about a TIME step. DMRG has no time step to over-count -- each local solve simply
-# minimises, and the sweep's fixed point is the variational minimum. Adding a 0-site step here
-# would not be a small error; it would not converge to anything.
-#
-# WHY THE EXPANSION IS MANDATORY, not an accelerator. A one-site update CANNOT change a bond
-# dimension: it varies a single tensor with both its bond legs fixed. Without CBE this sweep is
-# frozen at whatever rank it started with -- from a product state, at `chi = 1` forever. That is
-# the same failure the `grow_iters = 0` measurement in `baselines/ground_state.jl` records (energy
-# frozen at the Neel product value `-1.75`, "converged" in two sweeps). The expansion is where
-# ALL rank generation happens, so `info.converged` is not by itself evidence of anything.
-#
-# ONE-SITE, NOT TWO-SITE, IS THE POINT. Two-site DMRG gets its rank from the two-site block and
-# pays `O(d^2 chi^3)` per solve; this pays `O(d chi^3)` at one site plus a thin sketch, and gets
-# its rank from the expansion instead. That trade is the whole reason CBE exists
-# (`mainDMRG_CBE.m:84`: CBE is switched on only once `Nkeep > D_CBE`, i.e. once the bond
-# dimension is large enough for the two-site cost to hurt).
+# ── one-site CBE-DMRG: a line-for-line port of DMRGSweepCBE1Si.m ──
+# There is no 0-site backward update, unlike the TDVP sweep: DMRG minimises, so a backward step would
+# not converge to anything.
+# The expansion is mandatory, since a one-site update cannot change a bond dimension.
 
 """
     DMRGCBEInfo
 
 What one [`dmrg_cbe1s_sweep!`](@ref) half-sweep pair did.
 
-  - `energy` -- the LOWEST Ritz value seen anywhere in the sweep. A variational upper bound on
-    the ground energy, because every local solve is an exact Rayleigh-Ritz in a fixed subspace
-    (see [`lanczos_lowest`](@ref)). **A reported energy below the true ground energy is a bug,
-    not a lucky sweep.**
-  - `energies` -- the Ritz value at every local solve, in sweep order. The spread across a
-    sweep is the reference's `err_swp` (`mainDMRG_CBE.m:131-137`, `std(egList)`) and is the
-    honest convergence signal: a converged sweep reports the same number at every bond.
-  - `bond_dims` -- after the sweep, in MULTIPLETS.
-  - `max_expanded` -- the widest any bond was expanded to before truncation.
-  - `n_new` -- directions admitted per bond, summed over both half-sweeps.
-  - `err_pre`, `err_fnl`, `discarded` -- the largest preselection / final-selection /
-    truncation weight over the sweep.
-  - `krylov_dims` -- total operator applications in the local eigensolves.
-  - `ledger` -- the sweep's [`AdaptiveLedger`](@ref) (Tests A/B per bond in `bond_log`, the
-    split's discarded norm, `:budget_unmet` reasons).
+  - `energy`: the lowest Ritz value in the sweep, a variational upper bound. Below the true ground
+    energy it is a bug, not a lucky sweep.
+  - `energies`: the Ritz value at each local solve; their spread is the convergence signal.
+  - `bond_dims` (multiplets), `max_expanded`, `n_new`, `err_pre`, `err_fnl`, `discarded`,
+    `krylov_dims`, and `ledger` ([`AdaptiveLedger`](@ref)).
 """
 struct DMRGCBEInfo
     energy::Float64
@@ -96,50 +54,13 @@ dmrg_etol(tb::Real, tt::Real, N::Int) =
 """
     dmrg_cbe1s_sweep!(psi, mpo; kwargs...) -> DMRGCBEInfo
 
-One full CBE-DMRG sweep (left to right, then right to left), in place. Accuracy is set by
-`tol_basis`, `tol_trunc` and the rank cap `maxdim` alone.
+One full CBE-DMRG sweep (left to right, then right to left), in place, with the RSVD expansion engine
+of `cbe_bug_step!`. Accuracy is set by `tol_basis`, `tol_trunc` and `maxdim`; the centre ends on site 1.
 
-The SAME RSVD engine `cbe_bug_step!` uses (simulation_plan_2 Task 4: "the same adaptive RSVD
-discovery ... may be shared with the ground-state optimizer"). At every bond `cbe_expand` runs
-with the step's [`BasisAllocation`](@ref): sector coverage, Test B (holdout sampling residual,
-targeted widening) decides how much to SAMPLE and Test A (projected singular tail) how many
-directions to KEEP, under the [`work_ceiling`](@ref) derived from `maxdim`. No `dex`, `dover`,
-`growth`, `comp_ratio` or `stol_pre`.
+`tol_basis` is taken at unit time, so `tol_basis^2 / gap` bounds the energy error a met sweep can hide.
 
-⚠ WHAT `tol_basis` MEASURES HERE. There is no time step, so the allocation is taken at unit
-time (`tau = 1`): a bond's indicator is `||(I - P) H Theta|| / ||psi||` in ENERGY units of `H`
--- the part of `H`'s action that leaves the expanded two-site space. Summed in quadrature over
-bonds that is the two-site variance estimate, so `tol_basis^2 / gap` is the scale of energy
-error a met sweep can still hide. A ground state at finite `maxdim` keeps a nonzero two-site
-variance, so a `tol_basis` tighter than that reports `:budget_unmet` (Test A at the work
-ceiling) instead of pretending -- the variational energy is unaffected either way.
-
-`tol_trunc` budgets each split's discarded RELATIVE norm at `tol_trunc / sqrt(L - 1)` (the
-rule of [`_budget_svd`](@ref)); `maxdim` binding past that share is `:trunc` in the ledger.
-`restol` / `maxiter` stay: the local stopping test of an EIGENSOLVE is the Ritz residual, not a
-basis tolerance (plan Task 4). `exact = true` forms the full fused basis (the A/B reference
-arm). `maxiter` / `restol` bound the local eigensolve (the reference's `K` / `Ktol`).
-
-Leaves the orthogonality centre at site 1, so consecutive sweeps chain with no extra
-canonicalisation.
-
-## Two settings that differ from the other CBE sweeps, and the measurement behind each
-
-Both were set on the square 5x4 `N = 20` cylinder at `D = 128` (`benchmarks/ground_state/`),
-scored against the exact `S^z = 0` sparse ground state, `E0/N = -0.649788994793`.
-
-`restol = 1e-6`, not the `1e-10` the TDVP arms use. Accuracy is FLAT across that axis
-(`dev/site` 5.023e-07 / 5.039e-07 / 5.037e-07 at `1e-6` / `1e-8` / `1e-10`) while the local
-eigensolve cost halves (2704 vs 5467 matvec) -- a free 2x.
-
-⚠️ THE SAME KNOB POINTS THE OPPOSITE WAY IN A TIME INTEGRATOR, so do not copy this to
-`tdvp_cbe1s_sweep!`. DMRG re-solves every site on the next sweep, so an over-tight local
-tolerance is thrown away; a time step gets ONE shot per site and the Krylov depth is the
-accuracy -- see the `krylov-depth-is-a-hidden-error-source` finding.
-
-`comp_ratio = 1.0` inside the expansion, not the reference's `0.5`. Best on BOTH
-deterministic columns here: `dev/site` 5.037e-07 vs 5.080e-07 (`0.5`) and 5.303e-07
-(`0.25`), and fewest matvec (5467 vs 5585 / 5720).
+`restol = 1e-6` and `comp_ratio = 1.0` measured best. Do not copy `restol` to a time integrator: DMRG
+re-solves each site on the next sweep, whereas a time step gets one shot and needs the Krylov depth.
 """
 function dmrg_cbe1s_sweep!(psi::SymMPS, mpo::MPO;
                            tol_basis::Union{Nothing, Float64} = nothing,
@@ -209,21 +130,10 @@ function dmrg_cbe1s_sweep!(psi::SymMPS, mpo::MPO;
     """
     The one-site eigensolve at site `j`, in the environments given.
 
-    `seed_expanded` changes ONLY the Lanczos START VECTOR, never the operator or the space, so
-    the Ritz value stays a variational upper bound either way (see [`lanczos_lowest`](@ref)).
-
-    WHY A DIFFERENT START HELPS. `expand_bond!` widens the bond "leaving the state unchanged" --
-    the admitted directions are appended with ZERO amplitude. So the default start `psi[j]` is
-    the old vector zero-padded, and it has no component along precisely the directions the
-    expansion just paid to find. Lanczos still reaches them, but only through the operator: they
-    first appear in `H v`, i.e. from the SECOND Krylov vector, and the Ritz vector needs further
-    iterations to weight them properly. Seeding with `v + eta * P_new(H v)` puts them in the
-    space from the FIRST vector.
-
-    ⚠ It is not free: the seed costs ONE extra operator application per solve, counted in `nmv`
-    below like any other, so a fair reading of the result is applications-to-accuracy and not
-    sweeps alone. `eta` is small and the seed is renormalised, so the start stays dominated by
-    the current state -- this is a perturbation of the start direction, not a different ansatz.
+    `seed_expanded` changes only the Lanczos start vector, never the operator or the space, so the Ritz
+    value stays a variational upper bound (see [`lanczos_lowest`](@ref)). The default start is the
+    zero-padded old vector, with no component along the directions the expansion just admitted;
+    seeding with `v + eta * P_new(H v)` puts them in the space from the first vector.
     """
     function solve1(j, lch, rch; expanded::Bool = false)
         H1 = one_site_h(mpo, j, lch, rch)
@@ -232,13 +142,9 @@ function dmrg_cbe1s_sweep!(psi::SymMPS, mpo::MPO;
         if expanded && seed_expanded
             w = apply(x0)                      # the one extra application, counted below
             nmv += 1
-            # Project out the current direction: what remains is exactly the content H mixes in
-            # from OUTSIDE the old frame, which is where the new bond directions live.
-            #
-            # ⛔ THE DENOMINATOR MUST BE REAL. `tensor_inner` returns `ComplexF64` even for a
-            # self-overlap whose imaginary part is zero by construction, and `max(::Float64,
-            # ::ComplexF64)` is a MethodError, not a promotion -- complex numbers have no total
-            # order. `norm(x0)^2` is the same quantity, real by type rather than by accident.
+            # Project out the current direction: what remains is what H mixes in from outside the old frame.
+            # The denominator must be real: `tensor_inner` returns ComplexF64, and `max` on complex numbers is a
+            # MethodError, so `norm(x0)^2` is used.
             ip = tensor_inner(x0, w) / max(norm(x0)^2, eps())
             r = to_concrete(w + (-ip) * x0)
             nr = norm(r)
@@ -254,12 +160,9 @@ function dmrg_cbe1s_sweep!(psi::SymMPS, mpo::MPO;
         return A
     end
 
-    # ======== left to right ========
-    #
-    # The right stack is prebuilt ONCE and read at link `i+2`, which depends only on sites
-    # `>= i+2`; the sweep has written only `psi[i]` and `psi[i+1]` by then. Getting this
-    # backwards reads a STALE environment, which does not throw -- it silently minimises the
-    # wrong Hamiltonian.
+    # ── left to right ──
+    # The right stack is prebuilt once and read at link i+2, which depends only on sites >= i+2. Reading it
+    # backwards silently minimises the wrong Hamiltonian, since a stale environment does not throw.
     rstack = right_env_stack(psi, mpo; downto = 3)
     lch = boundary_channels(mpo)
     for i in 1:(L - 1)

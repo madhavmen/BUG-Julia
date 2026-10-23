@@ -1,68 +1,19 @@
 # pxp_scars.jl: scars: the PXP model of a Rydberg blockade chain (from `mbl_scars.jl`, included right after it).
 
-# ── SCARS: the PXP model of a Rydberg blockade chain ──────────────────────────────────────────
-#
-# THE AUTOMATON, virtual dimension 4 whatever `L` is. A three-site term needs one more state
-# than a two-site one: the middle operator has to be remembered as well as the opening.
-#
-#     1 = id       nothing opened
-#     2 = P placed the left projector is down, `X` is owed on the NEXT site
-#     3 = X placed the flip is down, the right projector is owed on the NEXT site
-#     4 = done     a complete term lies behind us
-#
-#          ⎡ I   P   X*   0  ⎤       * `id -> X placed` fires ONLY at site 1
-#     W =  ⎢ 0   0   X    X† ⎥       † `P placed -> done` fires ONLY at site L
-#          ⎢ 0   0   0    P  ⎥
-#          ⎣ 0   0   0    I  ⎦
-#
-# NO SELF-LOOP on states 2 or 3, which is what makes the three operators land on three
-# CONSECUTIVE sites rather than at any three increasing positions.
-#
-# ⛔ THE TWO BOUNDARY ENTRIES ARE THE MODEL, NOT A CORRECTION TO IT. `H = Σ_i P_{i-1} X_i P_{i+1}`
-# with `P_0 = P_{L+1} = 1` contains `X_1 P_2` and `P_{L-1} X_L`, which are TWO-site terms and
-# cannot be produced by the bulk path. Dropping them gives an open chain whose two end atoms are
-# frozen out of the dynamics; the `|Z2>` revival period shifts by O(1/L) and the state stays
-# perfectly plausible. They are entered as the starred/daggered blocks above and both are
-# exercised by the `L = 3` case in the tests (`H = X_1 P_2 + P_1 X_2 P_3 + P_2 X_3`).
+# ── SCARS: the PXP model of a Rydberg blockade chain ──
+# Virtual dimension 4 for every L: states id, P placed, X placed, done. The two boundary entries
+# (id -> X placed at site 1, P placed -> done at site L) are part of the model, since P_0 = P_{L+1} = 1,
+# not a correction; dropping them freezes the end atoms.
 
 """
     pxp_operators() -> (; I, P, X)
 
-The local blockade operators, `:none` only.
+The local blockade operators, `:none` only. `P = 1/2 - S^z` projects on the unexcited atom and
+`X = 2 S^x` is the Rabi flip; `|•>` is spin up, so a `|Z_2>` quench starts from [`neel_state`](@ref).
 
-`P = 1/2 - S^z` projects on the UNEXCITED atom (`|∘>`, spin down) and `X = 2 S^x = σ^x` is the
-Rabi flip. The convention is `|•> = up`, so a `|Z2> = |•∘•∘…>` quench starts from
-[`neel_state`](@ref) and `⟨n_i⟩ = ⟨S^z_i⟩ + 1/2`.
-
-⛔⛔ `X` IS **NOT** `S^+ + S^-`, AND WRITING IT THAT WAY MAKES `H` NON-HERMITIAN. Telum's `:none`
-raising/lowering operators carry a normalisation AND A SIGN that `sx_operator` records as
-MEASURED: `S^x = (S^- - S^+)/√2`, with the resulting matrix asserted to be `[0 1/2; 1/2 0]`.
-Solving that for the two operators gives
-
-    S^+ = -(1/√2) |↑⟩⟨↓|        S^- = +(1/√2) |↓⟩⟨↑|
-
-so `S^+ + S^-` is the real ANTISYMMETRIC matrix `[0 -1/√2; 1/√2 0]` -- proportional to `-i σ^y`,
-hence ANTI-Hermitian. The consequence is not a wrong coefficient, it is a non-unitary
-`exp(-iHt)`: MEASURED on the `L = 8` gate, `‖ψ‖` reached 3.95 (BUG) and 5.07 (TDVP2) after 20
-steps of `dt = 0.05`, and the fidelity came out 0.25-0.34 against an exact 0.0076. Nothing threw;
-Lanczos on a non-Hermitian generator does not fail, it lies.
-
-⚠ THE SIGN ALONE WOULD HAVE BEEN INVISIBLE. `X -> -X` gives `H -> -H`, i.e. `exp(+iHt)`, which
-is the complex conjugate evolution and leaves `|⟨Z_2|ψ(t)⟩|²` and every `⟨S^z_j⟩` unchanged. It
-is the LOSS OF SYMMETRY, not the sign, that breaks unitarity -- which is why the failure had to
-be found through `‖ψ‖` rather than through a wrong-looking observable.
-
-So `X` is built from [`sx_operator`](@ref), which carries its own assertion against the measured
-`[0 1/2; 1/2 0]` and throws if Telum's normalisation ever changes. `P` needs no such check: it is
-a FUNCTION of `S^z`, so `P = 1/2 - S^z` annihilates the `S^z = +1/2` state by algebra whichever
-dense index that happens to be -- the only thing that could break it is `S^z` having eigenvalues
-`±1` instead of `±1/2`, and that is asserted below.
-
-⛔ `:none` IS FORCED. `σ^x` does not conserve `S^z`, so there is no U(1) form of this model at
-all; under `:U1` the raising and lowering operators are rank-3 (their op-leg carries the ±2
-charge) and the sum is not even a well-formed sum of tensors, so the failure is loud rather than
-a silent zero. It is still worth naming, because the MBL model in this same file is `:U1`-native
-and a driver that sets the symmetry once for both gets one of them wrong.
+`X` must come from [`sx_operator`](@ref): `S^+ + S^-` is anti-Hermitian in Telum's normalisation,
+which makes `exp(-iHt)` non-unitary without any error being raised. `P` needs no such check beyond
+the +-1/2 eigenvalues asserted below.
 """
 function pxp_operators()
     symmetry_mode() === :none || throw(ArgumentError(
@@ -89,24 +40,14 @@ end
 """
     pxp_mpo(L; Omega = 1.0) -> MPO
 
-`H = Ω Σ_{i=1}^{L} P_{i-1} X_i P_{i+1}` (with `P_0 = P_{L+1} = 1`) as an exact MPO of virtual
-dimension 4 -- the PXP model of arXiv:2011.09486, the Rydberg blockade chain in the limit where
-a neighbouring excitation is forbidden outright rather than merely costly.
+`H = Omega sum_{i=1}^{L} P_{i-1} X_i P_{i+1}` (with `P_0 = P_{L+1} = 1`) as an exact MPO of virtual
+dimension 4: the PXP model of arXiv:2011.09486, where a neighbouring excitation is forbidden outright.
 
-`Ω` is the Rabi frequency and sets the time unit. The `|Z2>` quench revives with a period that is
-an `O(1)` multiple of `1/Ω` and is NOT `2π/Ω` -- arXiv:2011.09486 makes exactly that point: the
-observed frequency "did not coincide with the bare Rabi frequency, signalling the importance of
-many-body effects".
+`Omega` is the Rabi frequency and sets the time unit. The `|Z_2>` revival period is an O(1) multiple
+of 1/Omega and is not 2pi/Omega. No period is asserted here: it is measured against ED propagation
+in `benchmarks/mbl_scars.jl`, so it is an output of the campaign, not an input.
 
-⛔ NO PERIOD IS ASSERTED HERE, DELIBERATELY. A specific figure (`4.79/Ω` is the number usually
-quoted, and it could not be confirmed from the review itself) hard-coded in a docstring becomes
-the thing a plot is aligned to, and then a revival at the wrong period reads as agreement. The
-period is MEASURED against the ED propagation in `benchmarks/mbl_scars.jl`, whose reference and
-whose MPS arms are both graded on `|⟨Z_2|ψ(t)⟩|²` sampled at the same times -- so the period is an
-output of the campaign, not an input to it.
-
-Requires `L >= 3` (at `L = 2` there is no three-site term and the model degenerates) and the
-`:none` symmetry mode.
+Requires `L >= 3` (at L = 2 there is no three-site term) and the `:none` symmetry mode.
 """
 function pxp_mpo(L::Int; Omega::Float64 = 1.0)
     L >= 3 || throw(ArgumentError("pxp_mpo needs at least three sites, got $L"))
@@ -159,29 +100,14 @@ z2_state(L::Int) = product_state([isodd(i) ? :up : :down for i in 1:L])
 """
     zk_state(L, k) -> SymMPS
 
-`|Z_k> = |•∘…∘•∘…>`, an excitation every `k` sites; `k = 0` is the POLARISED VACUUM `|∘∘∘…>`.
+`|Z_k>` has an excitation every `k` sites; `k = 0` is the polarised vacuum.
 
-⛔⛔ **THE CONTRAST STATE IS NOT OPTIONAL -- IT IS WHAT MAKES A REVIVAL A SCAR.** `|Z_2>` reviving
-says nothing on its own: a revival is only evidence of weak ergodicity breaking if a GENERIC
-state in the same Hamiltonian, at the same size and the same bond dimension, does NOT revive.
-Reporting the `|Z_2>` fidelity alone would be a curve with no control, and it would look
-identical whether or not the physics were there.
+A revival of `|Z_2>` is evidence of weak ergodicity breaking only against a control at the same size
+and bond dimension. Ladder (arXiv:2011.09486): `k = 2` strong, long-lived revivals (the scarred
+state); `k = 3` weaker but visible; `k = 0` no revivals, the control.
 
-The ladder the scar literature uses (arXiv:2011.09486 and Turner et al., Nature Physics 14, 745):
-
-  * `k = 2`  `|•∘•∘…>`   STRONG, long-lived revivals -- the scarred state.
-  * `k = 3`  `|•∘∘•∘∘…>` WEAKER but still visible revivals -- an intermediate case, and the one
-             that shows the effect is not a peculiarity of the period-2 pattern alone.
-  * `k = 0`  `|∘∘∘…>`    the polarised state: NO revivals, fast thermalisation. THE CONTROL.
-
-⚠ Every `k >= 2` pattern satisfies the Rydberg blockade (no two adjacent excitations), so all of
-these live inside the constrained basis and are directly comparable. `k = 1` would be all-up,
-which violates the blockade at every bond, and is rejected rather than silently evolved.
-
-⚠ All are bond-dimension-1 product states, which is the whole difficulty for the integrator: it
-must build every bit of rank it will ever need starting from none. That is also why this is the
-right place to separate a rank-adaptive integrator from a fixed-rank one -- the scarred
-trajectory stays LOW rank while the control's rank grows.
+`k = 1` violates the blockade and is rejected. All are bond-dimension-1 product states, so the
+integrator must build its own rank.
 """
 function zk_state(L::Int, k::Int)
     k == 1 && throw(ArgumentError(

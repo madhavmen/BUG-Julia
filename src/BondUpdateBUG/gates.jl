@@ -1,25 +1,7 @@
-# Two-site bond gates.
-#
-# Mirrors bond.py::kernel_gate + bond_hamiltonian. Alice reaches its gate through
-# AutoMPO; here the nearest-neighbour term is built directly from the Telum local
-# space, which is the same tensor with fewer moving parts.
-#
-# LEG CONVENTION -- identical to Python's `einsum("LRlr,aLRb->alrb", gate, theta)`:
-#
-#     gate legs = (ket_l '+', ket_r '+', bra_l '-', bra_r '-')
-#
-# The two '+' ket legs contract theta's site legs (which are '-'), and the two
-# '-' bra legs come out carrying the SAME (itag, arrow) the site legs had, so the
-# result drops straight back in. Telum distinguishes the pairs by arrow alone,
-# exactly as it does for the bare `q.Sz`, so all four can share the two site tags.
-#
-# THE 1/sqrt(2) IN Sp. Telum's raising operator is normalised so that
-# `Sp (x) Sp'` already equals (1/2) S^- (x) S^+ -- MEASURED, not assumed:
-# <du|Sp(x)Sp'|ud> = 0.5, and <uu|Sz(x)Sz|uu> = 0.25 alongside it. The XY term
-# 1/2 (S^+S^- + S^-S^+) is therefore the plain SUM of the two adjoint pairings
-# with no further factor. Writing the textbook `0.5*(...)` here would be wrong by
-# a factor of two; `tests/BondUpdateBUG/test_gates.jl` pins all sixteen matrix
-# elements against the analytic Heisenberg block so the convention cannot drift.
+# Two-site bond gates, mirroring bond.py::kernel_gate. Legs are (ket_l '+', ket_r '+', bra_l '-',
+# bra_r '-'), as in Python's einsum, so the result drops back into the site legs. Telum separates
+# legs by arrow alone. Telum's Sp is normalised so that Sp (x) Sp' = (1/2) S^- (x) S^+: the XY term
+# is a plain sum, with no 0.5 factor.
 
 # Itag of a site leg given as a `TLIndex`, an `Itag`, or a plain string.
 # A plain string has to be run through `setitag` rather than compared directly:
@@ -42,16 +24,12 @@ _retag_site(O, tag) = to_concrete(setitag(setitag(O, 1, tag), 2, tag))
 """
     heisenberg_bond_gate(site_l, site_r; J=1.0, delta=1.0) -> TLArray
 
-The nearest-neighbour term `J (Sx Sx + Sy Sy + delta Sz Sz)` on one bond, tagged
-for the two given site legs. `delta = 0` gives the XX model, `delta = 1` isotropic
+The nearest-neighbour term `J (Sx Sx + Sy Sy + delta Sz Sz)` on one bond, tagged for the two site
+legs (`TLIndex` handles or bare itags). `delta = 0` is the XX model, `delta = 1` isotropic
 Heisenberg.
 
-`site_l` / `site_r` may be `TLIndex` handles (e.g. `f.site_l`) or bare itags.
-
-Built as `Sp(x)Sp' + Sm(x)Sm' + delta Sz(x)Sz`: the first two are the U(1)
-charge-conserving hop in both directions, contracted over the operator leg, whose
-charge (+/-2) is what forces them to pair with their own adjoint rather than with
-each other.
+Built as `Sp(x)Sp' + Sm(x)Sm' + delta Sz(x)Sz`: the two hops conserve charge in both directions, and
+the op-leg charge (+/-2) forces each to pair with its own adjoint.
 """
 function heisenberg_bond_gate(site_l, site_r; J::Float64 = 1.0, delta::Float64 = 1.0)
     tl, tr = _site_tag(site_l), _site_tag(site_r)
@@ -63,16 +41,11 @@ function heisenberg_bond_gate(site_l, site_r; J::Float64 = 1.0, delta::Float64 =
     pair(A, B) = to_concrete(permutedims(
         contract(_retag_site(A, tl), (3,), _retag_site(B, tr)', (3,)), (1, 4, 2, 3)))
 
-    # ── :SU2 ────────────────────────────────────────────────────────────────
-    # ONE term, not three. Under SU(2) the local space exposes only `:S` (rank 3, op-leg
-    # carrying the S=1 irrep -- MEASURED: the same shape as `:U1`'s `Sp`), because none of
-    # Sx/Sy/Sz is an SU(2) tensor by itself. Contracting the op-leg sums over the vector
-    # index, so a single `pair` IS the full `S_i . S_j` rather than one Cartesian piece.
-    #
-    # NO `delta` HERE, and that is physics rather than an unimplemented case: anisotropy
-    # singles out the z axis, which breaks SU(2) down to U(1). Refusing is the only correct
-    # response -- silently building an isotropic gate for a `delta != 1` request would
-    # evolve the wrong Hamiltonian.
+    # ── :SU2 ──
+    # One term, not three: under SU(2) only `:S` (a rank-3 op-leg, S = 1 irrep) is exposed, and its
+    # op-leg contraction sums the vector index, so one `pair` is the full `S_i . S_j`. `delta != 1`
+    # is refused, not built isotropically: anisotropy breaks SU(2) to U(1), so the gate would be the
+    # wrong Hamiltonian.
     if symmetry_mode() === :SU2
         delta == 1.0 || throw(ArgumentError(
             "SU(2) admits only the isotropic point, got delta = $delta; anisotropy breaks " *
@@ -82,15 +55,10 @@ function heisenberg_bond_gate(site_l, site_r; J::Float64 = 1.0, delta::Float64 =
     outer(A, B) = to_concrete(permutedims(
         contract(_retag_site(A, tl), (), _retag_site(B, tr), ()), (1, 3, 2, 4)))
 
-    # Under :U1 the raising/lowering operators are rank-3 (an op-leg carries the
-    # ±2 charge) and the XY term is the op-leg contraction `pair`, which already
-    # folds in the 1/2 (`pair(Sp,Sp) == ½ S⁻⊗S⁺`; see the header note). Under
-    # :none they are plain rank-2 matrices with no op-leg, so the identical
-    # operator is written as an explicit outer product. Telum normalises the
-    # spin operators to `Sp = -(1/√2)·S⁺_std`, `Sm = (1/√2)·S⁻_std`, so
-    # `outer(Sp,Sm) = -½ (S⁺⊗S⁻)_std`; the coefficient that reproduces the
-    # physical XY term `½(S⁺S⁻ + S⁻S⁺)_std` is therefore -1 (MEASURED: matches
-    # the :U1 gate element-for-element, pinned in the gate test).
+    # Under :U1 the raising/lowering ops are rank 3 and `pair` already folds in the 1/2 (see the
+    # header). Under :none they are plain matrices: Telum's Sp = -(1/√2) S⁺ and Sm = (1/√2) S⁻ make
+    # the XY term an outer product with coefficient -1. The gate test pins this element for element
+    # against :U1.
     xy = if length(q.Sp.inds) == 3
         pair(q.Sp, q.Sp) + pair(q.Sm, q.Sm)
     else

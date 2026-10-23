@@ -1,4 +1,5 @@
-# symmetric_mps_canonical.jl: canonical form and observables of `SymMPS` (from `symmetric_mps.jl`, included right after it).
+# symmetric_mps_canonical.jl: canonical form and observables of `SymMPS` (from `symmetric_mps.jl`,
+# included right after it).
 
 # ── canonical form ──────────────────────────────────────────────────────────
 
@@ -59,15 +60,10 @@ end
 """
     site_expval(psi, j, O) -> ComplexF64
 
-`⟨ψ|O_j|ψ⟩` for a rank-2 local operator `O` with legs `(site '+', site '-')`.
-Canonicalises to `j` first, so the contraction is purely local.
-
-The operator's site leg must span the FULL local space, which is why
-`product_state` builds site tensors with `preserve_space=true`.
-
-`contract` asserts matching itags as well as opposite arrows, so the operator
-is retagged onto site `j` first. Setting both its legs to the same tag is safe:
-they stay distinct because `TLIndex` equality includes the arrow.
+`⟨ψ|O_j|ψ⟩` for a rank-2 local operator `O` with legs `(site '+', site '-')`. Canonicalises to `j`
+first, so the contraction is local. `O` must span the full local space (`product_state` builds with
+`preserve_space=true`). `contract` needs matching itags, so `O` is retagged onto site `j`; equal
+tags on its two legs are safe because their arrows differ.
 """
 function site_expval(psi::SymMPS, j::Int, O)
     canonical!(psi, j)
@@ -94,43 +90,18 @@ total_sz(psi::SymMPS) = sum(sz_expectation(psi, j) for j in 1:length(psi))
 """
     apply_sz!(psi, j) -> psi
 
-`S^z_j |ψ⟩` in place, NOT renormalised, by SECTOR PROJECTION rather than by contracting the
-operator onto the site leg.
-
-⛔ THE OBVIOUS ROUTE IS WRONG AND IT FAILS SILENTLY. Contracting `local_space().Sz` onto the site
-leg returns a correctly SHAPED rank-3 tensor whose site leg has had its charge sectors RE-SORTED
-by `contract`, so the state it encodes is not `S^z_j|ψ⟩`. MEASURED against the dense elementwise
-`S^z`: residual 2.02e-1 on a state of norm 0.5, and not a sign flip -- there is a genuinely
-orthogonal component. [`site_expval`](@ref) uses that same contraction and is fine only because it
-closes the loop with the SAME tensor, so the re-sort cancels; producing a NEW MPS tensor is where
-it bites. Same class of bug as the augmenter's QR re-sorting bond sectors.
-
-`S^z = ½P↑ − ½P↓`, and `getsub(...; preserve_space = true)` keeps the FULL site space on each
-projection -- the flag `product_state` uses for exactly this reason -- so the two halves stay
-addable and the site leg comes back with its original sector order.
-
-Lives here rather than in a benchmark because more than one benchmark needs it
-(`cbe_sweeps_l16.jl` for the `S^z|GS⟩` real-time start, `hs_structure_factor.jl` for the Li et al.
-correlator) and duplicating a function whose whole point is a silent-failure trap invites exactly
-one copy being fixed.
+`S^z_j |ψ⟩` in place, NOT renormalised, by sector projection (`S^z = ½P↑ − ½P↓`). Contracting
+`local_space().Sz` onto the site leg is wrong and silent: `contract` re-sorts the site leg's charge
+sectors, giving a different state with a genuinely orthogonal component. `getsub(...; preserve_space
+= true)` keeps the full site space, so the halves add and the leg keeps its sector order.
+[`site_expval`](@ref) is unaffected because it closes the loop with the same tensor. Kept here so
+the fix lives in one place.
 """
 function apply_sz!(psi::SymMPS, j::Int)
-    # ⛔ UNDER `:SU2` THE TWO `getsub` FILTERS BELOW DEGRADE `S^z` TO `(1/2) * I` WITH NO ERROR,
-    # by the SAME label coincidence documented in `product_state`: `SECTOR_UP` is `((1,),)` and so
-    # is `SECTOR_SU2_HALF`, so the `up` filter selects the WHOLE physical leg, while
-    # `SECTOR_DOWN = ((-1,),)` is a label SU(2) does not have and selects nothing. The result is
-    # `0.5 * psi` -- a perfectly valid state, which is why nothing downstream trips.
-    #
-    # What that does to a structure factor: `G(x,t)` collapses to `0.25` for EVERY site and time,
-    # so `G(c,0) = 0.25` still PASSES its sum rule by coincidence and only `sum_i G(i,0) = 0`
-    # catches it (it would read `0.25*N`). One gate away from a published-looking flat spectrum.
-    #
-    # This is not a missing feature. `S^z` is the `m = 0` component of a rank-1 tensor operator,
-    # not an SU(2) scalar: it takes the state out of its total-spin sector, and an `:SU2` MPS
-    # stores reduced matrix elements on multiplets and has nowhere to put the result. The SU(2)
-    # route is the VECTOR correlator `<S.S> = 3 x <S^z S^z>` via a Wigner-Eckart reduced matrix
-    # element -- a different observable and a different code path, exactly the factor of 3 that
-    # arXiv:2209.00739 Eq. (5) drops.
+    # Under `:SU2` both `getsub` filters silently turn `S^z` into `0.5 * I`, because `SECTOR_UP` and
+    # the SU(2) spin-1/2 label are both `((1,),)` and `SECTOR_DOWN` selects nothing. `S^z` is the m
+    # = 0 part of a rank-1 operator and leaves the total-spin sector, so there is no SU(2) version.
+    # Use `<S.S> = 3 <S^z S^z>` instead (arXiv:2209.00739 Eq. (5) drops that factor of 3).
     symmetry_mode() === :SU2 && throw(ArgumentError(
         "apply_sz! is not available under :SU2 -- S^z is the m=0 component of a rank-1 tensor " *
         "operator, not a scalar, so it leaves the total-spin sector an :SU2 MPS is built on. " *
@@ -227,22 +198,11 @@ right_gram(A) = contract(prime(A, 1)', (2, 3), A, (2, 3))
 """
     left_isometry_defect(A) -> Float64
 
-`||A (I - A'A)||_F` over the `(link_l, site)` legs: zero exactly when `A` is a
-left isometry, and computed WITHOUT catastrophic cancellation.
-
-Two tempting alternatives are both worse:
-
-  - `norm(left_gram(A) - 1)` builds its identity from the tensor's own legs via
-    `Base.:-(q, ::Number)` and fails to align them for frames that came out of
-    `oplus` ("No leg in TLArray matches leg 2 ...").
-  - the Frobenius expansion `||G-I||^2 = ||G||^2 - 2||A||^2 + d` needs no
-    identity, but subtracts two quantities of size `d`, so its absolute error is
-    `~d*eps` and after the square root the floor is `~1e-8`. A genuinely exact
-    isometry measured that way reports 3.7e-8, which is indistinguishable from
-    a real defect.
-
-`A - A(A'A)` is a difference of two O(1) tensors whose true value is small, so
-its norm is accurate to full precision.
+`||A (I - A'A)||_F` over the `(link_l, site)` legs: zero exactly for a left isometry, computed
+without cancellation. The alternatives are worse: `norm(left_gram(A) - 1)` cannot align legs for
+frames from `oplus`, and the Frobenius expansion `||G-I||^2 = ||G||^2 - 2||A||^2 + d` subtracts
+quantities of size `d`, flooring the defect near 1e-8. `A - A(A'A)` is a difference of O(1) tensors
+whose true value is small, so its norm keeps full precision.
 """
 left_isometry_defect(A) = norm(perp_component(A, A))
 

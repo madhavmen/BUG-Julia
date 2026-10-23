@@ -2,15 +2,10 @@
 """
     AdaptiveBudget(basis, trunc, expv)
 
-The three accuracy tolerances for one CBE-BUG step.
-
-  - `basis` -- RSVD sampling and retained rank, plus one-site Krylov enrichment. Governs the
-    TRIAL SPACE: what the step is allowed to look for and obliged to keep.
-  - `trunc` -- relative cumulative discarded weight of the final state compression. Governs
-    what may be thrown away from the EVOLVED STATE.
-  - `expv` -- error estimate of the root `expv` exponential action.
-
-See the block above for why these three are separate and why nothing else is exposed.
+The three accuracy tolerances of one CBE-BUG step. `basis` governs the trial space (what the step
+may look for and must keep), `trunc` the relative cumulative discarded weight of the final
+compression, and `expv` the error estimate of the root exponential. They are kept separate on
+purpose.
 """
 struct AdaptiveBudget
     basis::Float64
@@ -28,39 +23,14 @@ end
 """
     BasisAllocation
 
-`tol_basis` apportioned across the step's bonds and across the four basis tests, together
-with the relative scale the residuals are measured in.
+`tol_basis` apportioned across the step's bonds and four basis tests, with the residual scale:
+`per_bond` (one bond's whole decision), `sample` (Test B), `tail` (Test A), `krylov` (Tests C/D),
+`scale` (factor applied to raw Frobenius residuals).
 
-  - `per_bond` -- allowance for one bond's whole basis decision.
-  - `sample`   -- Test B, the RSVD sampling residual (did the sketch reach the range?).
-  - `tail`     -- Test A, the projected-Hamiltonian singular tail (did we keep enough?).
-  - `krylov`   -- Tests C/D, one-site Krylov closure.
-  - `scale`    -- the factor a raw Frobenius residual is multiplied by before comparison.
-
-THE ALLOCATION RULE IS FIXED AND DOCUMENTED, NOT A SETTING, which is the entire reason this
-struct exists rather than four more keywords. It is also deliberately the SIMPLEST rule that
-is dimensionally honest, so that when it proves too conservative the benchmark says so against
-a rule somebody can state in one sentence:
-
-    per_bond = tol_basis / sqrt(n_bonds * n_frontiers)   errors over bonds add in quadrature
-    each test = per_bond / sqrt(4)                       four independent checks, likewise
-
-`n_frontiers` is the requested temporal ORDER `p` (`krylov_closure.jl`): the step closes the
-Krylov frontiers `j = 0 .. p-1`, each a separate set of basis decisions over every bond. Frontier
-`j` enters the local error weighted by `1/(j+1)` (variation of constants), so the integrated
-defect is at most `sum_j eta_j/(j+1) <= (H_p / sqrt(p)) tol_basis`, i.e. `1.06, 1.06, 1.04 x
-tol_basis` for `p = 2, 3, 4`. `p = 1` is the rule above unchanged.
-
-⚠ QUADRATURE IS AN ASSUMPTION ABOUT INDEPENDENCE, not an identity. Residuals at different
-bonds are only approximately orthogonal, and under a strongly correlated error (a systematic
-under-sampling that hits every bond the same way) the true accumulation is closer to LINEAR
-and this rule is optimistic by `sqrt(n_bonds)`. The conservative alternative -- `tol_basis /
-n_bonds` -- costs real rank at every bond to insure against a case that the XX and Heisenberg
-benchmarks do not exhibit. Quadrature is the measured-adequate choice, and `IT07`'s tolerance
-sweep is what would overturn it.
-
-`rule` names the aggregation (`:rss`, above, or `:linear`, see [`basis_allocation`](@ref)) so
-the step record can log which one bounded the step (plan T3.2).
+The default `:rss` rule is `per_bond = tol_basis / sqrt(n_bonds * n_frontiers)`, each test `per_bond
+/ sqrt(4)`: errors over bonds add in quadrature. That assumes independent residuals across bonds; a
+systematic correlation makes it optimistic by up to `sqrt(n_bonds)`. The `:linear` alternative
+([`basis_allocation`](@ref)) needs no such assumption. `rule` records which one bounded the step.
 """
 struct BasisAllocation
     per_bond::Float64
@@ -76,28 +46,11 @@ BasisAllocation(per_bond, sample, tail, krylov, scale) =
 """
     basis_allocation(budget, nbonds; tau, nrm, nfront = 1) -> BasisAllocation
 
-Apportion `budget.basis` over `nbonds` bonds, `nfront` Krylov frontiers (the order, see
-[`BasisAllocation`](@ref)) and the four tests, and fix the relative scale residuals are
-measured in.
-
-THE SCALE IS `|tau| / ||psi||`, AND BOTH HALVES ARE LOAD-BEARING. The CBE and Krylov
-residuals measure the part of `H*Theta` the trial space misses; what that costs the STEP is
-that residual propagated through `exp(tau*H)`, i.e. it enters at `O(tau)`. Omitting `|tau|`
-makes every indicator look `1/dt` too large and the solver over-expands at small timesteps --
-precisely where the basis matters least. Dividing by `||psi||` makes the comparison relative,
-so the same `tol_basis` means the same thing for a normalised state and an unnormalised one.
-
-⚠ `tau = 0` IS A REAL CALL, not a degenerate one: it is how a caller asks for the basis
-machinery without evolving (`truncate = false` basis-only sweeps, and the `UT`s). The scale is
-then 1 -- a pure "is this subspace closed under H" question with no time in it -- rather than
-0, which would declare every residual negligible and return the unexpanded frame.
-
-`rule = :linear` (plan T3.2, the DD-QR policies) spends `tol_basis` as a plain SUM of
-nonnegative shares, which needs no independence assumption: the half-sweeps make `nbonds + 1`
-bond visits per frontier (the root bond is visited by both), each visit makes two decisions
-(the DD holdout, Test B, and the one-site Krylov, Tests C/D; QR selection has no Test A), so
-every share is `tol_basis / (2 (nbonds + 1) nfront)` and they add up to `tol_basis`. `per_bond`
-is one visit's two shares. `tail` keeps the same share for callers that still run Test A.
+Apportion `budget.basis` over `nbonds` bonds, `nfront` frontiers and the four tests, and fix the
+scale the residuals are measured in. The scale is `|tau| / ||psi||`: the residuals enter the step
+through `exp(tau*H)` at O(tau), so omitting `|tau|` over-expands at small steps. Dividing by
+`||psi||` keeps `tol_basis` meaningful for unnormalised states. `tau = 0` (basis-only sweeps) gives
+scale 1, a pure closure question.
 """
 function basis_allocation(budget::AdaptiveBudget, nbonds::Int;
                           tau::Number = 0, nrm::Real = 1.0, nfront::Int = 1,
@@ -127,13 +80,9 @@ place rather than being re-derived (and re-mistaken) at four call sites.
 """
 indicator(alloc::BasisAllocation, resid::Real) = alloc.scale * Float64(resid)
 
-# ── THE STEP LEDGER ───────────────────────────────────────────────────────────────────────
-#
-# ⛔ A SOLVER THAT CANNOT MEET ITS TOLERANCE MUST SAY SO. The failure this guards against is
-# the one the whole plan is aimed at: a run that hits a rank ceiling, silently keeps whatever
-# fitted, and reports a converged-looking result that is simply wrong. `maxdim` is a RESOURCE
-# LIMIT, never a substitute for satisfying an accuracy tolerance, so when it binds the status
-# changes rather than the claim.
+# ── THE STEP LEDGER ──
+# A solver that cannot meet its tolerance must say so. `maxdim` is a resource limit, never a
+# substitute for an accuracy tolerance, so when it binds the status changes rather than the claim.
 
 """
     AdaptiveLedger
@@ -221,9 +170,10 @@ mutable struct AdaptiveLedger
     t_closure::Float64
     n_compress::Int              # final `root_out` compressions (plan: exactly one per step)
     # The same frontiers measured on the frames the half-sweeps built, BEFORE any closure
-    # enrichment: what the ordinary CBE + local-Krylov step already captures. `leak_initial`
-    # is time-weighted like `leak`; `rho_initial[j]` is scale-free, `||(I - P) A F_j|| /
-    # ||F_j||` (upper bound). Filled by `order > 1` with `closure_checks` and by `closure_probe` on `order = 1`.
+    # enrichment: what the ordinary CBE + local-Krylov step already captures. `leak_initial` is
+    # time-weighted like `leak`; `rho_initial[j]` is scale-free, `||(I - P) A F_j|| / ||F_j||`
+    # (upper bound). Filled by `order > 1` with `closure_checks` and by `closure_probe` on `order =
+    # 1`.
     leak_initial::Vector{Float64}
     rho_initial::Vector{Float64}
     # Plan Task 6: the parallel K/L/S step's account (`_kls_finish`), `nothing` on every other step.
@@ -377,22 +327,14 @@ end
 """
     work_ceiling(maxdim, r) -> Int
 
-The internal cap on TEMPORARY working rank at one bond, derived from the resource limit and
-the bond's current rank. Not a user setting.
+The internal cap on temporary working rank at one bond, from the resource limit and the bond's
+current rank. Not a user setting.
 
-Bond expansion is allowed to overshoot `maxdim` while the trial space is being built -- that
-is the entire mechanism by which a rank-`r` state discovers rank-`r'` structure, and clamping
-the trial space at `maxdim` would make the final compression a formality that can never
-recover anything. What it may NOT do is grow without bound, which is what an uncapped
-spectrum-driven rule does on a bond whose singular values never decay (near full rank, every
-drawn direction carries weight) -- the sketch then widens to the complete fused basis, which
-is exactly the cost the RSVD exists to avoid.
-
-`2*maxdim` with a floor of `2r` is the policy: twice the resource limit is enough headroom for
-the augmented rank-`2r` basis the BUG construction asks for, and the `2r` floor keeps a bond
-that is ALREADY at or above `maxdim` from being frozen at its current rank. ⚠ IT IS A POLICY,
-TUNED BY BENCHMARK, NOT A THEOREM -- and deliberately not another keyword. If it binds often
-enough to cost accuracy, `workcap_reached` in the ledger is what reports it.
+Expansion may overshoot `maxdim` while the trial space is built, since that is how a rank-`r` state
+discovers rank-`r'` structure. It may not grow without bound, which an uncapped spectrum-driven rule
+does on bonds whose singular values never decay. The policy `max(2*maxdim, 2*r, 1)` gives headroom
+for the augmented rank-`2r` basis, and the `2r` floor stops a bond already above `maxdim` from being
+frozen. It is a tuned policy, not a theorem; `workcap_reached` in the ledger reports when it binds.
 """
 work_ceiling(maxdim::Int, r::Int) = max(2 * maxdim, 2 * r, 1)
 

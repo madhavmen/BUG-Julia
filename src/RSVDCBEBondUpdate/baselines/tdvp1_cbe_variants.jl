@@ -1,11 +1,5 @@
-# THE TWO SELECTION RULES OF 1-SITE TDVP + CBE, NAMED.
-#
-# `tdvp1_cbe.jl` next door holds ONE step. These are its two variants, and they are named
-# functions rather than two copies of the algorithm ON PURPOSE:
-#
-#   tdvp1_cbe_exact_step!   normal (plain) CBE   -- `exact = true`
-#   tdvp1_rsvd_cbe_step!    the RSVD extension   -- `exact = false`
-#
+# ── the two selection rules of 1-site TDVP + CBE, named ──
+# `tdvp1_cbe_exact_step!` is plain CBE (`exact = true`); `tdvp1_rsvd_cbe_step!` is the RSVD extension.
 
 
 """

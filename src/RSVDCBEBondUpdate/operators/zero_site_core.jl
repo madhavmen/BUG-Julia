@@ -1,66 +1,11 @@
-# ── ZERO-SITE GENERATOR, FRAME CONSTRUCTION AND THE TRUNCATION SWEEPS ────────
-#
-# ⛔ THIS FILE NO LONGER HOLDS A SWEEP. `cbe_lubich_sweep` was REMOVED (2026-08-29) -- the
-# campaign's BUG is `bug/cbe_bug.jl` and nothing routes through the Lubich variant any more.
-# What stayed is the shared core it happened to be defined next to, and every piece of it is
-# load-bearing for `cbe_bug_step!`:
-#
-#   zero_site_h / apply_zero_site / ZeroSiteH   the Galerkin generator at the root bond
-#   _frame_from                                 factorises both sides of a bond
-#   truncate_sweep! / truncate_recursive!       the closing truncation (cbe_bug.jl:919)
-#   _state_stored / _absorb_* / _relink         working-set accounting and gauge helpers
-#
-# ⚠ THE GROWTH KNOB DID NOT COME WITH IT. `cbe_lubich_sweep`'s `grow_iters` RE-RAN THE CBE
-# SELECTION each pass, re-truncating by budget and discarding what the next application of `H`
-# needs -- MEASURED on OAT it bought 1.8x and then went flat however many passes it was given.
-# `cbe_bug_step!`'s frame instead grows by the Tests C/D Krylov stage, which ACCUMULATES AND NEVER
-# RE-RANKS; do not port measurements between the two.
+# ── zero-site generator, frame construction and truncation sweeps ──
+# The Lubich sweep that used to sit here was removed. Its re-ranking growth passes do not carry over
+# to the Krylov-accumulated frame of `cbe_bug_step!`, so measurements do not port between the two.
 
-# CBE-BUG: a K/L basis sweep in CBE frames, then ONE Galerkin step at the centre bond.
-#
-# The structure of the proven chain BUG (`exploratory_bug/src/BUG/discarded_bug.jl:16-31`,
-# the MPS realisation of Sulz algorithms 5-7):
-#
-#   1. K-sweep   left to right,  augmented LEFT frames  W_1 … W_c
-#   2. L-sweep   right to left,  augmented RIGHT frames Z_c … Z_{L-1}
-#   3. Galerkin  seed S = <W, Z | psi> from the sweep carries, then integrate the single
-#                centre connecting tensor -- THE ONLY TIME EVOLUTION, so no over-counting
-#                and no backward substep
-#   4. Truncate  (Sulz algorithm 1)
-#
-# THE K/L ODEs ARE NEVER SOLVED. `cbe_expand` supplies the directions those solves would
-# have found -- one sketched application of H -- and the centre `expv` builds the Krylov
-# basis on the expanded bond and takes the step in it. No frozen projector, no discarded
-# projector, no one-site `expv`.
-#
-# THE BASIS SWEEPS MUST NOT TOUCH THE STATE. Two earlier versions failed here, and both
-# failures are worth naming because neither throws:
-#
-#   * Writing each frame back as it is found (`_absorb_left!`) leaves the zero-padded
-#     remainder in `psi[i+1]`; the next `bond_frame` then re-derives from that padded tensor
-#     with `svd(cutoff = 0.0)`, collapsing the padding and propagating the collapse back into
-#     the bond just expanded. L=18 sat at maxbond 2 with an error INDEPENDENT of dt.
-#   * Compensating with a Galerkin step at every bond grows the rank but applies the global
-#     H L-1 times per sweep: full-rank exactness broke to 2.24e-2.
-#
-# Rank grows because the evolved core is DENSE and the frames are RETAINED: S(t1) propagates
-# out through W_{i+1}…W_c, so every bond ends up carrying r + Dex. The rank at bond i is NOT
-# `U_ex†psi[i]` -- that is its value before the step, still zero-padded.
-#
-# Frames are therefore accumulated in `W`/`Z`, each built from a CARRY of the original state,
-# and `psi` is assembled only after the Galerkin step.
-#
-# NO RANK-4 TENSOR IS EVER ALLOCATED. That is the module's second design goal
-# (docs/cbe_bug.md §2b) and it is a property of how each step is factorised, not an
-# optimisation applied afterwards:
-#
-#   write-back      U_ex†(A_i A_{i+1}) = (U_ex†A_i) A_{i+1}
-#   augmented core  S₀ = (U_ex†A_c)(A_{c+1}V_ex†)
-#   Galerkin        0-site channel environments pushed through U_ex / V_ex, so each
-#                   Krylov matvec is a handful of bond x bond products
-#
-# 2-site TDVP cannot do this -- it evolves the rank-4 block -- and `kls_bond_update` does
-# not either, since it forms `frame_theta(f)` and applies the gate to it.
+# CBE-BUG: K and L basis sweeps in CBE frames, then ONE Galerkin step at the centre bond (only the
+# centre tensor is evolved, so nothing is counted twice). The K/L ODEs are never solved:
+# `cbe_expand` supplies the directions. The sweeps must not write back into `psi` (zero padding would
+# collapse the rank), and no rank-4 tensor is ever allocated.
 
 # ── writing an expansion back into the state ─────────────────────────────────
 
@@ -114,20 +59,12 @@ _relink(T, t1, t3) = to_concrete(setitag(setitag(T, 1, t1), 3, t3))
 """
     _frame_from(left, right) -> BondFrame
 
-`bond_frame`'s factorisation, but on tensors handed in rather than read out of `psi`.
+`bond_frame`'s factorisation on tensors handed in rather than read from `psi`. The basis sweeps must
+not touch the state, so the tensor is a carry `C_{i-1} psi[i]`, which `bond_frame` cannot express.
 
-The basis sweeps must not touch the state (see `cbe_bug_step!`), so the tensor whose
-left frame is wanted is a CARRY -- `C_{i-1}·psi[i]`, the left block already expressed in the
-expanded basis -- and not `psi[i]` itself. `bond_frame` cannot express that: it insists the
-orthogonality centre sit on site `i`, and reads the state directly.
-
-Correctness rests on exactly one of `left`/`right` carrying the amplitude while the other is
-an isometry, which is what makes `left*right` the true two-site block:
-
-  * K-sweep, `psi` canonical at 1: `left = C_{i-1}·psi[i]` carries it, `psi[i+1]` is a right
-    isometry, so `res_r.S == 1`.
-  * L-sweep, `psi` canonical at L: `psi[j]` is a left isometry (`res_l.S == 1`) and
-    `right = psi[j+1]·D_{j+1}` carries it.
+Correctness needs exactly one of `left`/`right` to carry the amplitude while the other is an
+isometry: the K-sweep (psi canonical at 1) carries it in `left`, the L-sweep (psi canonical at L)
+in `right`.
 """
 function _frame_from(left, right)
     res_l = svd(left,  (1, 2), "bU,L", "bU,R"; cutoff = 0.0)
@@ -245,16 +182,11 @@ end
 """
     truncate_sweep!(psi; maxdim, cutoff) -> psi
 
-Compress every bond back down after the sweep over-dimensioned them.
+Compress every bond after the Galerkin steps. It must run only after every bond has had its step:
+earlier, it would remove directions that are merely not yet populated, which pinned the rank at 2
+in the single-centre version.
 
-Not housekeeping: without it the rank would ratchet up by `Dex` every step regardless of
-whether the dynamics wanted the room. Safe to apply only AFTER every bond has had its
-Galerkin step -- run before that, it would remove directions that are merely
-not-yet-populated rather than unwanted, which is what pinned the rank at 2 in the
-single-centre-step version.
-
-One left-to-right pass with a truncating SVD, then one right-to-left, ending with the
-centre back at site 1.
+One left-to-right truncating pass, then one right-to-left, ending with the centre at site 1.
 """
 function truncate_sweep!(psi::SymMPS; maxdim::Int = 200, cutoff::Float64 = 1e-12)
     L = length(psi)
@@ -315,47 +247,11 @@ end
 """
     truncate_recursive!(psi, root; maxdim, cutoff, weight_tol) -> (psi, discarded, cumulative, capped)
 
-`Θ_τ` — the **recursive root-to-leaves rank truncation** of the rank-adaptive tree integrator
-(Ceruti, Lubich & Sulz, *Rank-adaptive time integration of tree tensor networks*,
-arXiv:2201.10291 §4.2, Algorithm 7), specialised to the chain. `discarded` is the largest
-relative weight any single bond threw away.
-
-The paper's sentence is the specification: *"For the truncation of a tree tensor network we
-perform a recursive root-to-leaves SVD-based truncation with a given tolerance ϑ."* At each node
-it takes `Mat_i(Ĉ_τ) = P̂_{τ_i} Σ̂_{τ_i} Q̂*_{τ_i}`, keeps the smallest rank satisfying
-`(Σ_{k>r} σ_k²)^{1/2} ≤ ϑ`, pushes the isometry into the subtree (`U_l = Û_l P_l` at a leaf,
-`C̃_{τ_i} = Ĉ_{τ_i} ×₀ P_{τ_i}^⊤` below one) and then RECURSES into that subtree.
-
-TWO RANK RULES, chosen by which keyword is set:
-
-  - `cutoff` (legacy, `weight_tol = nothing`): Telum's RELATIVE singular-value cut,
-    `σ > cutoff·σ_max`, at every bond independently. Nothing bounds what the bonds discard
-    TOGETHER, and `discarded` is only the worst single bond.
-  - `weight_tol` (the adaptive path's `tol_trunc`, plan §5): the SHARED BUDGET on the relative
-    error `||psi - psi_trunc|| / ||psi||`. Every SVD here is taken at the orthogonality centre,
-    so each cut is an orthogonal projection of the current state removing exactly its
-    discarded Schmidt weight `w_b`. WITHIN ONE SUBTREE the errors are mutually orthogonal (each
-    later state lies in the range the earlier cut kept), so they add in quadrature exactly;
-    ACROSS the two subtrees they need not be (the left cuts project onto right Schmidt spaces,
-    the right cuts onto left ones), so the two are combined by the triangle inequality:
-
-        cumulative = (sqrt(Σ_left w_b) + sqrt(Σ_right w_b)) / ||psi||   >=  true error
-
-    the plan's "conservative accumulated estimate" where one canonical pass does not justify
-    plain Pythagoras. Every bond gets the same fixed share `weight_tol / (sqrt(n_L) +
-    sqrt(n_R))` (the ϑ above, absolute, against `||psi||`; `n_L`, `n_R` the subtrees' bond
-    counts) and keeps the smallest rank that fits it, so `cumulative <= weight_tol` unless
-    `maxdim` binds. The norm the pass removes is `Σ_all w_b` exactly.
-
-`capped` is true when `maxdim` cut a bond past the rank its share asked for -- reported even if
-the total still fits, because the largest single SVD's weight cannot show that a cap, not the
-tolerance, decided the rank. `cumulative` is returned in both modes.
-
-`bond_weights` (a length `L-1` vector, optional) receives each bond's own relative discarded
-norm `sqrt(w_b) / ||psi||` -- the per-bond diagnostic of plan §8; untouched bonds stay 0.
-
-⚠ THE BUDGETED RULE COSTS A SECOND SVD at a bond where it cuts: the first (`cutoff = 0`, keeping
-every nonzero singular value up to `maxdim`) produces the spectrum, the second applies the rank.
+Recursive root-to-leaves rank truncation of the rank-adaptive tree integrator (arXiv:2201.10291
+§4.2, Algorithm 7). `cutoff` applies Telum's relative cut at each bond; `discarded` is the worst
+single bond. `weight_tol` is a shared budget on `||psi - psi_trunc|| / ||psi||`: each bond gets an
+equal share, and `cumulative` bounds the error by the triangle inequality across the two subtrees.
+`capped` is true when `maxdim` binds past the budget; `bond_weights` receives each bond's share.
 """
 function truncate_recursive!(psi::SymMPS, root::Int; maxdim::Int = 200,
                              cutoff::Float64 = 1e-12,

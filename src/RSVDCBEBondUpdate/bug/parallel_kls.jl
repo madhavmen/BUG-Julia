@@ -1,29 +1,8 @@
-# bug/parallel_kls.jl -- the fully parallel K/L/S integrator after the p preliminary CBE
-# half-sweeps (updated_cbe_high_order_parallel.md, Task 6).
-#
-# A DIFFERENT INTEGRATOR, not a schedule of the standard step. On the root bipartition at bond `c`,
-# with the preliminary frames `U_p = W[1..c]`, `V_p = Z[c..L-1]`, three projected equations run
-# from `Y_n` at once:
-#
-#     K(0) = Y_n V_p          K' = F(K V_p') V_p          one site tensor at `c`
-#     L(0) = U_p' Y_n         L' = (U_p' F(U_p L'))       one site tensor at `c+1`
-#     S(0) = U_p' Y_n V_p     S' = U_p' F(U_p S V_p') V_p the root core: the standard solve
-#
-# K lives in `W[1..c-1] ⊗ site c ⊗ V_p` and L in `U_p ⊗ site c+1 ⊗ Z[c+1..]`: the one-site spaces
-# the half-sweeps' local Krylov already works in, so every action is a local tensor contraction
-# against MPO environments. The new directions are the parts of K(h), L(h) outside the root frames,
-#
-#     U_+ = orth[(1 - W[c] W[c]') K(h)],   V_+ = orth[L(h) (1 - Z[c]' Z[c])],
-#
-# and the step returns the four-block core in `[W[c], U_+] ⊗ [Z[c]; V_+]`
-#
-#     S_par = [ S(h)       L(h) V_+' ]
-#             [ U_+' K(h)  0         ]
-#
-# ⛔ THE ZERO BLOCK IS AN APPROXIMATION: `U_+' Y(t+h) V_+ = h U_+' F(Y_n) V_+ + O(h^2)` (plan
-# T6.3). Its leading term is measured on every step (one thin streamed action at the root bond) and
-# a block above `tol_basis` is never accepted: the step falls back to the standard augmented root
-# solve in `[W[c], U_+] ⊗ [Z[c]; V_+]`, recorded as `fallback`.
+# ── fully parallel K/L/S integrator (Task 6) ──
+# Not a schedule of the standard step: K, L and the root core S are projected equations at bond `c`,
+# run from `Y_n` at once. The new directions `U_+`, `V_+` are the parts of K(h) and L(h) outside the
+# root frames. The zero block of the core is O(h^2), measured every step; above `tol_basis` the step
+# falls back to the standard root solve.
 
 const KLS_SCHEDULES = (:sequential, :kl_then_s, :concurrent)
 

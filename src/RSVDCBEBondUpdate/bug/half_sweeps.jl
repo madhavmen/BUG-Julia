@@ -1,52 +1,8 @@
 
-# ── THE TWO HALF-SWEEPS OF `cbe_bug_step!` (plan: StageBasisBuilder) ──────────────────────────
-#
-# Both are BASIS GENERATORS: CBE widens each bond (`dd_cbe_expand`), the frame grows from the CBE
-# output by the Tests C/D Krylov stage (`_krylov_enrich`), the environment is pushed through it,
-# and no site tensor is evolved. They share no data -- the left reads the state canonical at 1 and
-# writes `W`, the right reads it canonical at `L` and writes `Z` -- so `cbe_bug_step!` can run them
-# concurrently. Each carries its own accumulator, ledger and RNG stream for exactly that reason.
-#
-# ── THE TWO HALF-SWEEPS ARE INDEPENDENT, AND THAT IS NOW EXPLOITED ────────────────────
-#
-# ⛔ THEY WERE NEVER COUPLED. The left sweep reads the state canonical at 1 and writes
-# `W`; the right reads it canonical at `L` and writes `Z`.
-# Neither reads the other's output -- the only meeting point is the SINGLE Galerkin solve at
-# the root, which needs both and runs after both. The sequential order was an artefact of
-# re-gauging ONE state object in place, not a dependence in the method.
-#
-# ⚠ SO THE LEFT SWEEP GETS ITS OWN COPY. `copy(psi)` copies the tensor VECTOR only, and every
-# mutation in this package REPLACES a slot rather than writing into a tensor, so the two
-# objects can be re-gauged independently while sharing the tensors neither of them modifies.
-#
-# ⛔ AND `psi` ITSELF STAYS THE `L`-CANONICAL ONE, deliberately: `AL`, `AR` and the whole
-# assembly in `cbe_bug_step!` read `psi`, and they must all see ONE gauge. Mixing `C` (built in
-# the 1-canonical gauge) with `D` (built in the L-canonical one) would contract two different
-# bases at link `c+1` and is silently wrong -- which is why the step recomputes `AL` against
-# `psi` and only `AR` can be taken straight from the right sweep.
-#
-# ── RUN THEM ─────────────────────────────────────────────────────────────────────────
-#
-# ⚠ `parallel = true` NEEDS `julia -t 2` OR MORE TO DO ANYTHING. With one thread the tasks are
-# interleaved on the same worker and the step is the sequential one plus scheduling overhead,
-# so the flag is a pessimisation rather than a no-op -- which is why it is not the default.
-#
-# ⚠ AND IT COMPETES WITH BLAS. Two tasks each calling into a BLAS already configured for every
-# core will oversubscribe; Telum also passes `Threads.nthreads()` to HPTT for every
-# `permutedims`, so the nesting is three deep. `benchmarks/rsvd_parallel.jl` reports the
-# thread counts it ran under for exactly this reason.
-#
-# ⛔ WHAT MAKES THIS SAFE, CHECKED RATHER THAN ASSUMED:
-#   * `copy(psi)` copies the tensor VECTOR; every mutation in this package REPLACES a slot,
-#     so `canonical!` on one copy cannot be seen by the other.
-#   * Telum's `svd`/`contract` allocate their HPTT buffers PER CALL (`permute_mat` is a local),
-#     so there is no shared scratch to race on. Its only globals are the opt-in cost counters
-#     and the display settings.
-#   * `KRYLOV_LOG` is shared, and `expv` appends to it under `_KRYLOV_LOCK` (the parallel
-#     K/L/S stages run three solves at once). The half-sweeps use `_krylov_enrich`, which
-#     does not record.
-#   * `_LOCAL_SPACES` is a lazily-filled global `Dict`; it is already populated by the time a
-#     state exists, so the sweeps only read it.
+# ── the two half-sweeps of `cbe_bug_step!` (plan: StageBasisBuilder) ──
+# Both only build bases (they never evolve a site tensor) and share no data, so they run
+# concurrently on their own gauges. `psi` stays L-canonical so `AL`, `AR` and the assembly read one
+# gauge; `copy` is safe because every mutation replaces a slot.
 
 """
     _HalfAcc
@@ -108,14 +64,10 @@ function _expand_bond!(acc::_HalfAcc, cx::_HalfSweepCtx, nn, f, i, lch, rch, sid
     return ex
 end
 
-# ⛔ PEAK IS TRACKED PER HALF-SWEEP AND SUMMED, NOT SCANNED ACROSS ALL FRAME ARRAYS. Summing every
-# array on every call (a) reads arrays the OTHER half-sweep is concurrently writing -- `isassigned`
-# racing a `setindex!` -- and (b) is `O(L)` tensor walks per bond, i.e. `O(L^2)` per step of pure
-# diagnostic work. Each sweep accumulates its own frames incrementally.
-#
-# ⚠ THE REPORTED NUMBER IS THEREFORE AN UPPER BOUND: both halves' frames are counted as
-# simultaneously live. Under `parallel = true` that is literally true, and it keeps the two arms'
-# working sets comparable, which is the point of the column.
+# Peak is tracked per half-sweep and summed, not scanned across the frame arrays: scanning reads
+# arrays the other half-sweep is writing concurrently, and costs O(L) walks per bond. The reported
+# number is therefore an upper bound, counting both halves' frames as live at once, which keeps the
+# two arms' working sets comparable when they run in parallel.
 function _peak!(acc::_HalfAcc, held::Int, ts...)
     acc.peak = max(acc.peak, held + sum(tensor_elements(t) for t in ts; init = 0))
     return nothing
@@ -209,17 +161,13 @@ end
 """
     _half_right!(psiR, Z, expanded, nn, acc, hledger, rng, cx) -> (renv_root, AR)
 
-PHASE B(b), RIGHT -> ROOT: writes `Z[c:L-1]`, `expanded[c+1:L-1]` and `nn`, and returns the right
-environment at link `c+2` in the NEW basis and the sweep's final carry.
+Right-to-root phase: writes `Z[c:L-1]`, `expanded[c+1:L-1]` and `nn`, and returns the right
+environment at link `c+2` in the new basis together with the sweep's final carry.
 
-⛔ ITS FINAL CARRY **IS** `AR`. The `D` recursion here and an `AR` loop after the sweeps would be
-the SAME recursion over the SAME tensors in the SAME gauge -- `psi` is not touched between them --
-so `AR` is just the value `D` ends on.
-
-⚠ `AL` GETS NO SUCH SHORTCUT and is recomputed by the step. The left sweep's own carry `C` is
-built in the 1-canonical gauge while `AR` is in the L-canonical one, and the two meet over link
-`c+1` -- different bases for the same link. Contracting them would be silently wrong rather than
-an error.
+The final carry IS `AR`: the recursion here and an `AR` loop after the sweeps would be the same
+recursion over the same tensors in the same gauge, so `AR` is simply where `D` ends. `AL` gets no
+such shortcut and is recomputed, since the left carry is built in the 1-canonical gauge and the two
+meet over link `c+1`; contracting them would be silently wrong.
 """
 function _half_right!(psiR, Z, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_HalfSweepCtx)
     mpo, c = cx.mpo, cx.c

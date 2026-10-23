@@ -60,27 +60,13 @@ end
 """
     TDVP2Info
 
-Per-step record: `max_bond` after the step, `theta_elements` the largest two-site block
-built (the memory figure CBE-BUG is measured against), and `discarded` the largest
-relative weight a bond truncation threw away.
+Per-step record: `max_bond`, `theta_elements` (largest two-site block formed), and `discarded`
+(largest relative weight one bond truncation threw away).
 
-`peak_elements` is the WORKING SET, defined identically to `CBEBugInfo.peak_elements`:
-`state + transients alive at that moment`. Here the transient is `Theta`, and it is alive
-*alongside* `psi[i]` and `psi[i+1]` -- the two-site block duplicates them rather than
-replacing them, which is the cost CBE-BUG avoids by never forming one.
-
-`krylov_dims` counts OPERATOR APPLICATIONS over the whole step, the same field name and the same
-counting rule `CBEBugSweepInfo` uses, so a cost comparison between the two is reading one number
-rather than two conventions. ⚠ It counts APPLICATIONS, NOT FLOPS, and the applications are not
-the same size on both sides: this sweep applies a TWO-site `H_eff` plus a one-site backward
-update per bond, while `cbe_bug_step!` applies `L` one-site operators and one zero-site operator.
-So a ratio of these counts understates the two-site sweep's per-application cost, and the wall
-clock is the honest arbiter -- the count is here to say WHERE the time goes.
-
-`cumulative` is the step's relative discarded norm, accounted as `truncate_recursive!` accounts
-the BUG's final compression: quadrature within each half-sweep (every cut is a Schmidt cut at the
-orthogonality centre), the two half-sweeps added (triangle). Reported for comparison with the
-BUG's; `weight_tol` fixes each cut's allowance, not this total.
+`peak_elements` is the working set, as for `CBEBugInfo.peak_elements`; `krylov_dims` uses the same
+counting rule as `CBEBugSweepInfo` (applications, not flops). `cumulative` is the relative discarded
+norm, accounted as in `truncate_recursive!`; `weight_tol` fixes each cut's allowance, not this
+total.
 """
 struct TDVP2Info
     max_bond::Int
@@ -180,38 +166,20 @@ end
 """
     tdvp2_step!(psi, h, tau; kwargs...) -> TDVP2Info
 
-One symmetric two-site TDVP step of `tau = -im*dt`, in place. Second order.
-
-Present as the memory/accuracy baseline for CBE-BUG; it is not part of the CBE scheme and
-nothing in `cbe_lubich.jl` calls it. Like `cbe_lubich_sweep`, it carries its channel
-environments along each half-sweep, so environment work is `O(L)` per step and a wall-time
-comparison between the two is not distorted by one of them rebuilding.
-
-TAKES EITHER AN `XXZChain` OR AN `MPO`, and the body is the same either way -- every helper it
-calls (`apply_h_two_site`, `one_site_h`, `push_*_channels`, `boundary_channels`, the env stacks)
-already has a method for both representations, so admitting the MPO was a matter of widening this
-signature and nothing else. The `XXZChain` path is bit-identical to before.
-
-WHY THAT MATTERS: the channel form cannot express a long-range or site-dependent `H` at all
-(`henv.jl`'s `_left_step` refuses to carry an open channel past a site), so with the old
-`h::XXZChain` annotation the 2-site TDVP BASELINE could not run on Haldane-Shastry or on a
-periodic ring -- i.e. it could not run on the models the CBE sweeps are being judged on, which
-would have left the comparison with no baseline exactly where one is most wanted.
+One symmetric two-site TDVP step of `tau = -im*dt`, in place; second order. The memory and accuracy
+baseline for CBE-BUG. `h` may be an `XXZChain` or an `MPO`; the channel form cannot express
+long-range or site-dependent `H` (`henv.jl`), so the MPO signature lets the baseline run on
+Haldane-Shastry or periodic models.
 """
 function tdvp2_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::ComplexF64;
                      maxdim::Int = 200,
                      trunc_thresh::Float64 = 1e-12,
                      maxiter::Int = 30,
                      tol::Float64 = 1e-15,
-                     # `hermitian = false` -> Arnoldi. TDVP2 needs it for the same reason the
-                     # other two do: Lanczos on a non-Hermitian generator does not fail, it lies.
-                     #
-                     # ⛔ THIS KEYWORD WAS ACCEPTED AND THEN IGNORED. Both `_tdvp2_bond!` calls
-                     # below passed a hardcoded `hermitian = true`, so `tdvp2_step!(...;
-                     # hermitian = false)` ran LANCZOS on a non-Hermitian generator -- silently,
-                     # since that is the failure mode the comment above describes. Anything
-                     # measured on a non-Hermitian model through this entry point before
-                     # 2026-08-27 used the wrong solver.
+                     # `hermitian = false` selects Arnoldi, since Lanczos on a non-Hermitian
+                     # generator does not fail, it lies. This keyword was once accepted and then
+                     # ignored: both `_tdvp2_bond!` calls hard-coded `hermitian = true`, so
+                     # non-Hermitian runs used Lanczos until it was wired through.
                      hermitian::Bool = true,
                      # See `BondUpdateBUG/expv.jl`: a real convergence test, and splitting `tau`
                      # so a large step does not need a larger `maxiter`. Both integrators take
@@ -219,15 +187,10 @@ function tdvp2_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::ComplexF64;
                      # make the comparison meaningless.
                      conv_tol::Float64 = 0.0,
                      substeps::Int = 1,
-                     # THE BUG'S DISCARD RULE, CUT FOR CUT (USER 2026-10-16/17: the singular values
-                     # discarded must be the same for both -- per bond, not a per-step budget).
-                     # `nothing` keeps the legacy relative `trunc_thresh`. A Float64 is `tol_trunc`:
-                     # every two-site update is cut by `_budget_svd` with the SAME allowance
-                     # `weight_tol ||Theta|| / _cut_divisor(L, root)` that `truncate_recursive!`
-                     # gives each bond of the BUG's S-step result (`root` = the BUG's default). The
-                     # step makes 2(L-1) such cuts against the BUG's L-1, so `info.cumulative` is
-                     # reported, not bounded by `weight_tol` (it can reach ~sqrt(2) weight_tol).
-                     # `trunc_thresh` is then unused.
+                     # The BUG's discard rule, cut for cut: each two-site update uses the allowance
+                     # `weight_tol ||Theta|| / _cut_divisor(L, root)` (as in `truncate_recursive!`);
+                     # `nothing` keeps `trunc_thresh`. Its 2(L-1) cuts against the BUG's L-1 mean
+                     # `info.cumulative` can reach ~sqrt(2) `weight_tol`.
                      weight_tol::Union{Nothing, Float64} = nothing,
                      # IMAGINARY TIME: integrate `H - eshift`, as `cbe_bug_step!(...; eshift)` does,
                      # so the order-2 partner of `ite_step!` sees the same generator. Without it the
@@ -282,29 +245,16 @@ function tdvp2_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::ComplexF64;
     return TDVP2Info(maximum(bond_dims(psi); init = 0), acc[2], acc[3], acc[4], acc[1], cum)
 end
 
-# ⛔ `h` MUST be the same `Union` as the method above. When the main method was widened from
-# `h::XXZChain` to `h::Union{XXZChain, MPO}` and this wrapper was left at `XXZChain`, the pair
-# became AMBIGUOUS for `(XXZChain, ComplexF64)`: the main method is more specific in `tau`
-# (`ComplexF64` < `Number`) while this one is more specific in `h` (`XXZChain` < the Union), so
-# neither dominates and Julia refuses the call. It stayed hidden because the campaign always
-# passes an `MPO` -- only the `XXZChain` + complex-`tau` combination the tests use hits it.
+# The `h` annotation must match the main method's Union. With `XXZChain` here and the widened Union
+# there, the pair is ambiguous for `(XXZChain, ComplexF64)`: neither method dominates in both `h`
+# and `tau`, so Julia refuses the call. The campaigns pass an `MPO`, which is why this stayed
+# hidden.
 tdvp2_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::Number; kwargs...) =
     tdvp2_step!(psi, h, ComplexF64(tau); kwargs...)
 
-# ── HIGHER ORDER BY COMPOSITION ──────────────────────────────────────────────────────────────
-#
-# `tdvp2_step!` is a SYMMETRIC composition (left->right at tau/2, then its adjoint right->left at
-# tau/2), so it is time-reversible and second order in the step. A symmetric second-order map
-# composes to fourth order with real coefficients (Yoshida 1990; Suzuki 1990): the stage weights
-# sum to 1 and their cubes sum to 0, which forces one BACKWARD stage. Backward stages are
-# harmless for real time (`exp(-i H t)` is unitary either way); in imaginary time they amplify,
-# so this is for real time.
-#
-# ⚠ ORDER IN THE STEP, NOT IN THE PROJECTION. Composition removes the splitting error of the
-# projected dynamics. The 2-site TDVP projection error (a fixed-rank manifold, truncation at every
-# bond) is not a time-step error and is untouched -- measured from a Neel start on 6x4 the plain
-# step is FIRST order globally (TASK4_VALIDATION_RESULTS.md, job 17282573), i.e. projection-limited,
-# and no composition can change that. The gain is where the step error dominates.
+# ── HIGHER ORDER BY COMPOSITION ──
+# Composing the symmetric step (Yoshida / Suzuki) gives 4th order via a backward stage (real time
+# only). Only splitting error goes away, not projection error, so gains are limited.
 const _TDVP2_COMPOSITIONS = Dict(
     # Yoshida's triple jump: 3 stages, the backward one -1.70 tau.
     :yoshida => let g = 1 / (2 - cbrt(2)); (g, 1 - 2g, g) end,

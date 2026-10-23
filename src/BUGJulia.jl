@@ -9,57 +9,19 @@ include("BondUpdateBUG/BondUpdateBUG.jl")
 # nothing there.
 include("RSVDCBEBondUpdate/RSVDCBEBondUpdate.jl")
 
-# ── PRECOMPILE WORKLOAD ───────────────────────────────────────────────────────────────────
-#
-# ⛔ WITHOUT THIS, EVERY `julia` INVOCATION PAID ~580 SECONDS OF JIT BEFORE IT COULD TIME
-# ANYTHING. MEASURED (L = 10, chi = 32, XX): `setup` 265 s and the FIRST `cbe_bug_step!` 313 s,
-# against 0.25 s for every step after it. Loading the package was never the problem -- that is
-# 7 s from the cache -- the cost was specialising Telum's generic block-sparse code at RUN time,
-# which a plain `using` does not cache because no method was ever called during precompilation.
-#
-# Running the real entry points here moves that work into the `.ji` cache, where it is paid ONCE
-# per source change instead of once per process. A benchmark sweep that launches several Julia
-# processes was spending the overwhelming majority of its wall clock compiling the same code over
-# and over.
-#
-# ⚠ KEEP THE WORKLOAD SMALL. Everything in here is paid on every `Pkg.precompile`, i.e. after
-# every edit to `src/`. `L = 6` at `maxdim = 8` is enough to specialise the whole chain -- the
-# types do not depend on the sizes -- and a bigger system would only make editing slower.
-#
-# ⚠ AND IT IS GUARDED. A workload that throws fails the PRECOMPILATION, which would turn a
-# performance optimisation into a package that does not load at all. A failure here must degrade
-# to "slow again", never to "broken".
+# ── PRECOMPILE WORKLOAD ──
+# Runs the real entry points so Telum's block-sparse specialisations land in the .ji cache;
+# otherwise every process pays minutes of JIT at run time. L = 6 at maxdim = 8 specialises the same
+# types as larger runs, keeping each `Pkg.precompile` cheap. It is guarded: a throw would fail
+# precompilation itself, so failure must degrade to slow.
 using PrecompileTools: @setup_workload, @compile_workload
 using Preferences: @load_preference
 
-# ⛔ WHICH WORKLOAD IS A PREFERENCE, NOT AN ENV VARIABLE: a preference is part of the cache key,
-# so changing it recompiles; an ENV switch would silently keep whichever image was built first.
-#
-#   "adaptive" (default)  the U(1) spin paths the current campaign runs -- CBE-BUG at
-#                         orders 1/2/4 and midpoint, adaptive + legacy CBE-DMRG, TDVP2, CBE-TDVP,
-#                         energy / variance / S^z. MEASURED 2026-10-16: the old "full" workload
-#                         cost 1802 s of precompilation on EVERY src edit (job 17208254) while
-#                         covering none of the adaptive entry points, so each process still paid
-#                         their JIT on top.
-#   "full"                adds the original blocks: `:none`, non-Hermitian branches, SU(2), fused
-#                         d = 4 Hubbard -- set it for those campaigns
-#                         (`Preferences.set_preferences!(BUGJulia, "workload" => "full")`).
-#   "none"                no workload (fastest edit cycle; every process pays its own JIT).
-#
-# THE TRADE, MEASURED on one node (jobs 17208934, 17230469; x86-64-v3, 2 threads):
-#                     precompile   `using`   first adaptive BUG step   first process total
-#   "adaptive"          565 s       96 s            2 s                      107 s
-#   "none"               32 s        3 s          218 s                      385 s
-# The `using` cost IS the cached specialisations (dependencies load in ~2 s), so it cannot be
-# had without them. Break-even is ~2 processes per edit: keep "adaptive" for jobs, and run many
-# test files in ONE process; "none" only for a single quick process.
-#
-# ⛔ A WORKLOAD FOR THE IMAGINARY-TIME / OPEN-SYSTEM PATHS DOES NOT HELP. MEASURED 2026-10-18 on the
-# same stages in ONE process (`run_stages.jl`, Intel E5-2680 v4): an "imagopen" workload
-# (`ite_step!`, MPDO Lindblad step, tdvp2 at -dbeta) cost 627 s of precompilation plus 126 s of
-# `using` (s43comp 17343333), while "none" cost 23 s plus 2.6 s and ran all four test files and
-# the IT-1/OS-1/2/3 smokes in 25.6 min total (s43none 17343409). Any workload over
-# `cbe_bug_step!`'s call graph is ~10 min, so for one-process jobs stage with "none".
+# ── WORKLOAD PREFERENCE ──
+# A preference rather than an ENV switch, since it is part of the cache key. `adaptive` (default)
+# covers the U(1) campaign paths; `full` adds :none, non-Hermitian, SU(2) and fused d = 4 Hubbard;
+# `none` skips the workload. It pays off for jobs (break-even at about two processes per edit); the
+# imaginary-time and open-system paths get no benefit from it, so stage those with `none`.
 const _WORKLOAD = @load_preference("workload", "adaptive")
 
 @setup_workload begin
@@ -131,18 +93,11 @@ const _WORKLOAD = @load_preference("workload", "adaptive")
                     BondUpdateBUG.sz_expectation(p, 3)
                     RSVDCBEBondUpdate.mpo_energy(copy(p), mpo)
                 end
-                # ⛔ THE TWO BASELINE SWEEPS BELONG IN THE WORKLOAD TOO, AND LEAVING THEM OUT
-                # CORRUPTED A MEASUREMENT RATHER THAN MERELY COSTING TIME. Any driver that ran
-                # `tdvp2` or `tdvp_cbe1s` first had that arm absorb its own specialisation:
-                # measured on an L=8 campaign smoke run, `tdvp2` 61.6 s against `cbe_bug` 2.7 s,
-                # where the true ratio is far smaller. A benchmark driver's own warmup loop fixes
-                # its numbers, but only if whoever wrote it remembered -- precompiling the arms
-                # removes the trap instead of documenting it.
-                #
-                # ⚠ BOTH `hermitian` BRANCHES ARE COMPILED. `hermitian = false` selects Arnoldi and
-                # a full Hessenberg projection -- a genuinely different code path, and the one every
-                # open-system run takes. Compiling only the Hermitian branch would leave the fused
-                # `d = 4` drivers paying full JIT while looking covered.
+                # ── BASELINE SWEEPS ──
+                # `tdvp2` and `tdvp_cbe1s` are in the workload too: otherwise the first arm to run
+                # absorbs its own JIT and skews the timing ratios. `hermitian = false` (Arnoldi) is
+                # a different code path, the one open-system runs take, so both `hermitian` branches
+                # are compiled.
                 for herm in (true, false)
                     p = copy(psi)
                     RSVDCBEBondUpdate.tdvp2_step!(p, mpo, ComplexF64(-0.05im);
@@ -171,29 +126,15 @@ const _WORKLOAD = @load_preference("workload", "adaptive")
                   (err, catch_backtrace())
         end
 
-        # ⛔ THE SU(2) BLOCK GETS ITS OWN try/catch/finally, AND THAT SEPARATION IS LOAD-BEARING.
-        # It used to share one `try` with the block above, with the `set_symmetry!(:U1)` restore as
-        # the LAST STATEMENT INSIDE it. MEASURED 2026-09-05 on the cluster: the SU(2) block throws
-        # (`ArgumentError: reducing over an empty collection`, raised inside LurCGT's SU(2) irrep
-        # generation, not in our code), and that had two consequences the single `try` hid:
-        #
-        #   1. THE RESTORE WAS SKIPPED, so precompilation ended with `_SYMMETRY[] == :SU2`. That Ref
-        #      is module state and is serialised into the `.ji`, so the package would LOAD in :SU2 —
-        #      a silent global-mode flip for any caller that does not set the symmetry itself.
-        #      `finally` now restores it on every path, thrown or not.
-        #   2. ONE WARNING FOR TWO VERY DIFFERENT FAILURES. "workload did not complete" read as
-        #      "nothing is cached", when in fact the U(1)/:none coverage above had already
-        #      succeeded — it runs first. The two messages now say which coverage was actually lost.
+        # ── SU(2) BLOCK ──
+        # Its own try/catch/finally, not the U(1) block's try: the restore to `:U1` must run on
+        # every path, because the `_SYMMETRY` Ref is serialised into the .ji and a skipped restore
+        # would make the package load in :SU2. The separate messages say which coverage was lost,
+        # since the U(1) coverage runs first and may already have succeeded.
         try
-            # ⛔ SU(2) IS A SEPARATE BLOCK BECAUSE IT IS A SEPARATE COMPILATION, and leaving it out
-            # meant the whole non-abelian campaign paid full JIT while the workload looked complete.
-            # MEASURED before this block existed: one `cbe_bug_step!` at L=12 SU(2) took 4314 s in a
-            # freshly precompiled process, against sub-second for the U(1) path the workload did
-            # cover. The fused/reduced-multiplet code is a different specialisation of Telum's
-            # block-sparse kernels, so compiling `:U1` teaches the cache nothing about it.
-            #
-            # ⚠ THE START STATE DIFFERS TOO: `neel_state` is not an SU(2) singlet, so the S = 0
-            # sector this campaign works in is reached with `dimer_state`.
+            # SU(2) is a separate compilation: the reduced-multiplet code is a different
+            # specialisation of Telum's kernels, so compiling `:U1` teaches the cache nothing about
+            # it. Its start state is `dimer_state`, since `neel_state` is not an SU(2) singlet.
             BondUpdateBUG.set_symmetry!(:SU2)
             let psi = BondUpdateBUG.dimer_state(6),
                 mpo = RSVDCBEBondUpdate.heisenberg_su2_mpo(6)
@@ -218,14 +159,9 @@ const _WORKLOAD = @load_preference("workload", "adaptive")
                 end
             end
         catch err
-            # A broken workload must not break the package; the cost is only that the first
-            # call in each process pays its own JIT again.
-            #
-            # ⛔ BUT IT MUST NOT BE SILENT EITHER. Swallowing this bare meant a workload that had
-            # stopped covering anything -- a renamed function, a changed keyword -- looked exactly
-            # like a working one, and the only symptom was runs mysteriously taking minutes again.
-            # Precompilation prints this, so the next `Pkg.precompile` says which entry point fell
-            # out of the cache.
+            # A broken workload must not break the package; the only cost is a JIT in each process.
+            # It must not be silent either, so that a renamed function or changed keyword that drops
+            # coverage shows up in the next `Pkg.precompile`.
             @warn "BUGJulia precompile workload: the SU(2) block did not complete; SU(2) runs " *
                   "will pay full JIT (~4300 s measured for one L=12 step). U(1)/:none coverage " *
                   "is unaffected — that block runs first and completes." exception = err
@@ -235,38 +171,10 @@ const _WORKLOAD = @load_preference("workload", "adaptive")
             BondUpdateBUG.set_symmetry!(:U1)     # leave the global where it started
         end
 
-        # ⛔⛔ THE FUSED d=4 BLOCK, AND IT IS HERE BECAUSE THE MISSING COVERAGE WAS MEASURED AT
-        # 334 SECONDS IN A SINGLE STEP. Job 16341790, `phase_hub4prod`, L=20, **chi = 32**:
-        #
-        #     step 1   0.8 s      (product state -> bd 32)
-        #     step 2   334.3 s    <- at bond dimension 32
-        #
-        # A bd=32 step is microseconds of arithmetic, so 334 s is compilation, and it matches the
-        # ~313 s this file already documents for an uncached first step. Two separate holes put it
-        # there and BOTH are closed below:
-        #
-        #   1. d=4 WAS NEVER IN THE WORKLOAD. Every entry point above runs the SPIN chain, whose
-        #      local space is a different type, and this file's own SU(2) note says it plainly --
-        #      "compiling `:U1` teaches the cache nothing about it". The fused Hubbard site is
-        #      another such type, so the whole spinful campaign ran uncached.
-        #
-        #   2. ⛔ ONE STEP FROM A PRODUCT STATE DOES NOT COMPILE THE TRUNCATION PATH, which is the
-        #      subtler half and it also invalidates the `warm!` docstring in `benchmarks/mbl_scars.jl`
-        #      ("one step is enough -- specialisation is per method, not per step"). Starting at
-        #      bd = 1, the augmented rank never reaches `maxdim`, so the truncate-to-cap branch is
-        #      never entered and its kernels are never specialised. Step 2 is the FIRST step that
-        #      has to truncate, and it pays for all of them at once. That is exactly why the cost
-        #      appeared at step 2 rather than step 1, and why it was identical at bd=32 and bd=43 --
-        #      a compile does not care how big the tensors are.
-        #
-        # ⇒ `maxdim = 4` WITH THREE STEPS IS THE LOAD-BEARING CHOICE, not an arbitrary size. The cap
-        # must BIND (a d=4 site reaches bd 4 after one step, so step 2 truncates) and there must be
-        # a step AFTER the first truncating one, or the branch stays cold. `L = 6` keeps the tensors
-        # tiny; the runtime here is negligible and the compile time is the entire point.
-        #
-        # ⚠ DOUBLONS ARE DELIBERATE (`doublon_frac = 0.5`). They are the physically relevant start
-        # state for arXiv:1501.05661 Figs. 4-5 and the cells where the integrators differ most, so
-        # the workload should exercise the same branches production does.
+        # ── FUSED d = 4 BLOCK ──
+        # A fused Hubbard site is another type. One step from a product state never truncates, so
+        # maxdim = 4 over three steps: the cap must bind, and a step must follow the first
+        # truncation.
         try
             BondUpdateBUG.set_symmetry!(:none)
             let occ = RSVDCBEBondUpdate.hub4_cdw_occupations(6; doublon_frac = 0.5, seed = 1),

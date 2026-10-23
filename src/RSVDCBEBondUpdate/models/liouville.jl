@@ -1,37 +1,8 @@
-# SYMMETRY-AWARE VECTORISED DENSITY MATRICES (imaginary-time / open-system plan, Task 2).
-#
-# `|rho>> = vec(rho)` as an MPS over LIOUVILLE SITES: one site per physical site, local dimension
-# `d^2`, basis `|a, b>> = |a><b|` with index `(a - 1) d + b` (the ket is the more significant
-# index), so a one-site superoperator `rho -> A rho B` is `kron(A, transpose(B))` and the
-# dissipator of a jump `J` is `kron(J, conj(J)) - kron(J'J, I)/2 - kron(I, transpose(J'J))/2`.
-#
-# THE CHARGE RULES ARE EXPLICIT, FOR KET AND BRA. A physical local space carries an integer charge
-# per state, `q[a]` (2 S^z, a particle number, ...). The Liouville basis state `|a,b>>` is labelled
-#
-#   :weak     q[a] - q[b]                   U(1)        the Liouvillian symmetry of any generator
-#                                                       whose H and jumps each shift the number by
-#                                                       a fixed amount (boundary drive, loss)
-#   :strong   (q[a], q[b])                  U(1)xU(1)   only when H and EVERY jump commute with the
-#                                                       number; rho then stays in one (N, N) block
-#   :none     0                             one dense sector, the same tensors without grading
-#
-# Every superoperator is built from its dense `d^2 x d^2` matrix, and the builder REFUSES one whose
-# nonzero entries do not all shift the label by the same amount (`liouville_op`): that is the
-# charge-covariance check the plan asks for before sectors are enabled, done per term.
-#
-# ⛔ THE STORED TENSOR IS THE TRANSPOSE OF THE APPLIED MATRIX. `pair_mpo` (and `site_apply!`-style
-# contraction of an operator's leg 1 with the site leg) applies the TRANSPOSE of a local operator's
-# matrix -- MEASURED on the fused d = 4 chain, where it swapped gain and loss and froze the
-# boundary-driven state into an exact fixed point (`benchmarks/fused_common.jl`, the
-# `jump_transpose` note). Here that is made a rule rather than a flag: `liouville_op(ls, M)` returns
-# the tensor that the MPO and `mpdo_apply!` apply AS `M`. Tests OS-U2/OS-U6 pin it against dense
-# `exp(t L)`.
-#
-# THE CONTRACTIONS (trace, local expectation values, reduced density matrices, the dense matrix of a
-# small state) WALK THE ABELIAN BLOCKS DIRECTLY (`_mpdo_walk`): an environment per link label,
-# extended site by site through each block's RMT. No identity superket MPS is needed -- under
-# `:strong` the trace functional `<<I|` spans every `(N, N)` block and is not a single-charge MPS,
-# but contracting it block by block is exact for any grading.
+# ── symmetry-aware vectorised density matrices (open-system plan, Task 2) ──
+# The stored tensor is the transpose of the applied matrix: `liouville_op(ls, M)` returns the tensor
+# that the MPO and `mpdo_apply!` apply as `M`.
+# Charges: `:weak` uses q[a] - q[b], `:strong` uses (q[a], q[b]) per (N, N) block, `:none` is one dense
+# sector. A superoperator whose entries do not shift the label uniformly is refused at build time.
 
 using LurCGT: U1
 using Telum: TLArray, TLIndex, _localspace_cgt_fields
@@ -186,20 +157,10 @@ end
 """
     lindblad_mpo(ls, L; pairs, onsite_h = nothing, jumps = []) -> MPO
 
-The Lindbladian `L rho = -i [H, rho] + sum_mu D[J_mu] rho` on `L` Liouville sites, EXACT, as a
-`pair_mpo` with the on-site terms in its `field` slot.
-
-  - `pairs`: `[(A, B, Jmat), ...]` with `H ⊃ sum_{i<j} Jmat[i,j] A_i B_j` (dense physical `d x d`
-    matrices; `Jmat` real or complex `L x L`, strict upper triangle). A hopping is two entries,
-    `(c', c, J)` and `(c, c', J)`; a charged pair must carry opposite shifts.
-  - `onsite_h`: one `d x d` Hermitian matrix for every site, or a vector of `L` of them.
-  - `jumps`: `[(Jop, rates), ...]`, `rates` a scalar (every site) or a length-`L` vector.
-  - `triples`: `[(A, B, C, w), ...]` with `H ⊃ sum_j w[j] A_j B_{j+1} C_{j+2}` (`w` length `L-2`,
-    `A` charge-neutral; [`TripleTerm`](@ref)) -- the facilitated hop `n_{j-1} c'_j c_{j+1}` of the
-    U(1) East model (plan OS-3) is `(n, c', c, J)` plus its conjugate `(n, c, c', J)`.
-
-Every superoperator passes `liouville_charge` under `ls`'s grading, so a model that breaks it is
-refused at build time with the offending entries named.
+The Lindbladian on `L` Liouville sites, exact, as a `pair_mpo` with the on-site terms in its field
+slot. `pairs` are `(A, B, Jmat)` terms of H, `jumps` are `(Jop, rates)`, and `triples` are the
+three-site terms of [`TripleTerm`](@ref). Every superoperator must pass `liouville_charge`, so a
+model that breaks the grading is refused at build time.
 """
 function lindblad_mpo(ls::LiouvilleSpace, L::Int; pairs = Any[], onsite_h = nothing,
                       jumps = Any[], triples = Any[])
@@ -359,19 +320,12 @@ end
 """
     mpdo_identity_sector(ls, L, like) -> SymMPS
 
-The trace superket of ONE `(N, N)` block under `:strong`: `|I_N>> = sum over configurations of total
-charge N of (x)_j |a_j><a_j|`. Unlike `|I>>` it IS a single-charge MPS, and an exact one at ONE
-dimension per link sector `(n, n)` (n = the charge to the left of the link), so it can be handed to
-`cbe_bug_step!(...; keep_states = [I_N])` and makes the Galerkin step trace-exact on a strong-U(1)
-MPDO (plan Task 2: keep the trace vector in the final trial space; plan OS-3: strong U(1)).
-`<<I_N|rho>> = Tr rho` for every `rho` in the block.
+The trace superket of one `(N, N)` block under `:strong`: the sum over configurations of total
+charge N of diagonal projectors. Unlike `|I>>` it is a single-charge MPS, so it can be passed as
+`keep_states` to `cbe_bug_step!` to keep the Galerkin step trace-exact. `<<I_N|rho>> = Tr rho`.
 
-Built by the fusion recursion of [`mpdo_product_state`](@ref), so every label and arrow is Telum's
-own: at each site the physical leg is restricted to the DIAGONAL states `|a><a|` (one per diagonal
-sector), and the fusion paths into each outgoing sector are MERGED into its single component --
-the sum over configurations -- keeping only charges from which `N` is still reachable. `like` is
-any MPDO in the target block: its last link names the block in Telum's sign convention. Needs
-non-negative local charges (a particle number).
+Built by the fusion recursion of [`mpdo_product_state`](@ref); `like` fixes the sign convention and
+needs non-negative local charges.
 """
 function mpdo_identity_sector(ls::LiouvilleSpace, L::Int, like::SymMPS)
     ls.sym === :strong || throw(ArgumentError(

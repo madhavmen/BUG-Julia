@@ -1,68 +1,8 @@
-# Matrix-free exp(tau*A)*x for Telum tensors.
-#
-# Ports Alice's two_site_bug/_kernel/krylov.py::tensor_lanczos_expv and its
-# hermitian_tridiagonal_exp_coeffs. Both paths are needed: the K and L
-# generators of the discarded-projector variant are NON-Hermitian, because the
-# projector P_perp = I - U0 U0^dagger is applied before the exponential, so
-# Lanczos is invalid there and Arnoldi must be used.
-#
-# PARITY NOTE. Alice uses the classic three-term Lanczos recurrence
-#
-#     w = A v_i - alpha_i v_i - beta_{i-1} v_{i-1}
-#
-# with `LanczosOptions(tol=1e-13, krylovdim=60)` and a breakdown-only exit
-# (`if norm(w) < tol: break`). This file reproduces that exactly, including the
-# defaults, because Task 16 compares the two implementations trace-by-trace. The
-# plan text asked for double-orthogonalisation against all previous vectors;
-# that spans the same Krylov space and yields the same tridiagonal in exact
-# arithmetic, but it is NOT what the verified kernel does, so it is offered as
-# opt-in `reorth=true` rather than imposed. Arnoldi always orthogonalises
-# against the full basis -- that is what makes it Arnoldi.
-#
-# ─────────────────────────────────────────────────────────────────────────────────────────────
-# ⛔ THE BREAKDOWN-ONLY EXIT IS NOT A CONVERGENCE TEST, AND ON A LARGE `tau` IT SILENTLY
-# TRUNCATES THE SERIES.
-#
-# `beta < tol` reports that the Krylov space has run out of independent DIRECTIONS. On a generic
-# `A` that essentially never happens, so every solve runs to `maxiter` and then returns whatever
-# the `maxiter`-dimensional projection gives -- CONVERGED OR NOT, with no diagnostic either way.
-# For small `tau` that is merely wasteful (measured elsewhere: `maxiter = 8` was 3.64x faster at
-# 2e-13 on a model where the default 30 was being burned in full). For LARGE `tau` it is wrong:
-# the depth a Krylov exponential needs grows with `tau*||A||`, so past some step size the fixed
-# cap stops being enough and the error appears with no warning.
-#
-# MEASURED, L=20 SU(2) Heisenberg, imaginary time, depth needed for ~1e-14 in the HALF-SWEEP
-# basis (`benchmarks/imaginary_time/krylov_depth_scan.jl`):
-#
-#     dt      0.1     1       5
-#     m       3       8       16
-#
-# against a default cap of 30 -- so the cap is comfortable at dt=1 and is being approached by
-# dt=5. A logarithmic time grid spans three orders of magnitude of `dt` WITHIN ONE RUN, which is
-# exactly the setting in which one fixed `m` cannot be right everywhere.
-#
-# TWO FIXES, and they compose:
-#
-#   `conv_tol`   Saad's a-posteriori estimate `beta_k * |[exp(tau*T_k)]_{k,1}|` -- the actual
-#                contribution the next basis vector would make. Stops when the answer has
-#                converged instead of when the basis degenerates.
-#   `substeps`   SPLIT `tau` ITSELF. `exp(tau*A) = exp(tau_s*A)^s`, so a step too large for
-#                `maxiter` vectors becomes `s` steps that each fit. Cost then grows LINEARLY in
-#                `tau` instead of demanding `m ~ tau*||A||`, and -- the point -- the caller never
-#                has to guess `m`. `substeps = 0` picks `s` adaptively from the Krylov spectrum
-#                that has already been built, so it costs no extra operator applications.
-#
-# ⛔ AND SUBSTEPPING IS WHAT MAKES THE EXPONENTIAL REPRESENTABLE AT ALL. In IMAGINARY time
-# `exp(tau*lambda)` with `tau = -50` and `lambda ~ -20` is `exp(1000)`, well past the Float64
-# ceiling of `exp(709)`: the small components of the coefficient vector are then annihilated by
-# the large ones long before anything reports an overflow. Bounding `|tau_s|*rho` per substep and
-# shifting the spectrum (below) keeps every exponent near zero. In REAL time `tau = -i*dt` makes
-# `exp(tau*lambda)` a pure PHASE, so this failure is imaginary-time-only -- which is why it went
-# unseen until the log-grid runs.
-#
-# DEFAULTS ARE THE OLD BEHAVIOUR (`conv_tol = 0.0`, `substeps = 1`) so nothing already measured
-# moves under this file; the shift likewise switches on only once an exponent is genuinely large.
-# ─────────────────────────────────────────────────────────────────────────────────────────────
+# Matrix-free exp(tau*A)*x for Telum tensors, ported from Alice's tensor_lanczos_expv for
+# trace-by-trace parity. Arnoldi serves the non-Hermitian K and L generators, where P_perp breaks
+# Hermiticity. The breakdown-only exit is not a convergence test: a generic A never breaks down, so
+# a large tau silently truncates the series at maxiter. `conv_tol` (Saad's estimate) and `substeps`
+# (split tau, which also keeps imaginary-time exponents finite) fix it.
 
 # Opt-in Krylov-depth instrumentation, mirroring krylov.py's KRYLOV_LOG /
 # enable_krylov_log / disable_krylov_log / get_krylov_log. Off by default, so
@@ -108,15 +48,9 @@ function tensor_inner(a, b)
     n = length(a.inds)
     legs = ntuple(identity, n)
     r = contract(a', legs, b, legs)
-    # ⛔ `to_concrete!`, NOT `to_concrete`. `_eager_tlarray(q::TLArray) = copy(q)`, so the
-    # copying form DEEP-COPIES the tensor just to read ONE SCALAR out of it. `r` is a fresh
-    # `contract` result aliasing neither argument, so nobody else can observe the mutation.
-    #
-    # This is the hottest allocation site in the whole package. Allocation attribution at
-    # chi=1024 (job 16333509) put it FIRST for every arm: 39.9% of tdvp2's sampled bytes and
-    # 20.1% of cbe1s's. That is because re-orthogonalised Lanczos calls it O(maxiter^2) times
-    # per solve -- two passes over the whole basis every iteration -- against ~4(L-1) solves
-    # per step, so it runs tens of thousands of times where a matvec runs hundreds.
+    # `to_concrete!`, not `to_concrete`: `r` is a fresh contract result nothing else sees, so a copy
+    # would be waste. This is the hottest allocation site, since re-orthogonalised Lanczos calls it
+    # O(maxiter^2) times per solve.
     rc = to_concrete!(r)
     length(rc) == 0 && return 0.0 + 0.0im   # `length` of a TLArray is its sector count
     return ComplexF64(rc[])

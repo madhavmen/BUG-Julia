@@ -1,28 +1,6 @@
-# NORMALISED IMAGINARY-TIME CBE-BUG (cbe_bug_imaginary_open_benchmark plan, Task 1).
-#
-# One step is `psi(beta + dbeta) ~ exp[-dbeta (H - Eshift)] psi(beta)` taken by ONE
-# `cbe_bug_step!` at `tau = -dbeta`: the augmented root space keeps the old state (`proj_err`), the
-# root integrator (`root_method`) evolves inside it, the state is renormalised, and the step's one
-# compression follows. Nothing here changes the validated CBE-RSVD / Krylov logic; this file is the
-# imaginary-time driver around it:
-#
-#   * the energy shift `Eshift` (default: the state's own energy), passed to the step's generators
-#     (`shift_h`) so the basis weights measure the change of the NORMALISED state;
-#   * the energies before the root, after the root / before truncation, and after truncation
-#     (`root_report`), so `Delta E_root` and `Delta E_compression` are separable;
-#   * the OUTSIDE-Galerkin defect of the step, `dbeta ||(I - P) H psi_1|| / ||psi_1||`, measured on
-#     the evolved state (`outside_residual`) and charged against `tol_basis` -- distinct from the
-#     root solver's own projected residual (`tol_root`) and from the discarded weight (`tol_trunc`);
-#   * reject / re-enrich / retry: a step whose ledger or outside test fails is redone from the saved
-#     state, first with the order-p closure run to closure (re-enrich), then as two half steps
-#     (reject), and is FLAGGED (or throws) if it still fails -- never a silent success (IT-U6);
-#   * the time grids: the logarithmic panels of arXiv:2606.02930 and the uniform control.
-#
-# The three solver tolerances keep the meanings they have in real time: `tol_basis` the basis
-# budget per step (Tests A-D and the outside defect), `tol_trunc` the cumulative discarded norm of
-# the one compression (same per-cut rule as 2-site TDVP, `_cut_divisor`), `tol_root` the root
-# solve's convergence (`tol_expv` of `cbe_bug_step!`; for an implicit root, the FOM residual of its
-# shifted solves). The ORDER and the GRID are method choices, not tolerances.
+# ── NORMALISED IMAGINARY-TIME CBE-BUG (imaginary-time plan, Task 1) ──
+# One step is `cbe_bug_step!` at `tau = -dbeta` plus renormalisation, with energy shift `Eshift`.
+# Outside defect `dbeta ||(I-P) H psi_1||` is charged to `tol_basis`; failures are never silent.
 
 """
     log_panel_steps(beta_max, P; per_panel = 4) -> Vector{Float64}
@@ -143,31 +121,11 @@ end
               outside_residual = true, retries = 2, on_fail = :flag, parallel = false,
               rng, kwargs...) -> NamedTuple
 
-ONE normalised imaginary-time step of CBE-BUG over `dbeta`, in place; `psi` is renormalised on
-entry and exit. `eshift = :energy` uses the state's own energy as `Eshift` (any number fixes it).
-`kwargs` reach [`cbe_bug_step!`](@ref) (e.g. `closure_probe`, `fold_omega`).
-
-VERDICT. The step is accepted when its ledger is `:met` and, with `outside_residual`, the
-outside-Galerkin defect `dbeta ||(I-P) H psi_1|| / ||psi_1||` is within `tol_basis`. A defect over
-it is first RE-ENRICHED inside the attempt: the frames grow by the evolved state's own outside
-directions and the root is re-solved (`cbe_bug_step!`; the record keeps `resid_initial`,
-`outside_passes`, `outside_added`). Otherwise the step is redone from the saved state:
-
-  1. `order > 1` and the closure failed: once more with the closure run to closure
-     (`closure_checks = true`) -- RE-ENRICH, same `dbeta`;
-  2. then, while `retries > 0`, as `n` sub-steps of `dbeta/n` (each with `retries - 1`) -- REJECT.
-     `n` comes from the measured outside defect and the order (`_ite_nsplit`: the defect is
-     `O(dbeta^(order+1))`), else 2.
-
-A failure caused by a RESOURCE cap (`maxdim` binding, or the work ceiling) is not split: a smaller
-step cannot widen either (`_ite_capped`). A step that still fails is `status = :failed` with its
-reasons in `unmet`, and `on_fail = :error` throws instead. Never a silent success.
-
-Returns `status` (`:met`, `:retried`, `:failed`), `unmet`, the energies `e_before`, `e_pre_root`,
-`e_root`, `e_after` and the split `de_root` (root solve) / `de_compression` (truncation), the
-outside defect `resid` (and the scale-free `outside`), `root_err`, `discarded`, `chi`, `nsub` (the
-substeps finally taken), `attempts` (every attempt's record, including the rejected ones) and
-`wall`.
+One normalised imaginary-time step over `dbeta`, in place. Accepted when the ledger is `:met` and
+the outside defect is within `tol_basis`. Otherwise the step is re-enriched, then redone from the
+saved state with order-p closure and, while `retries > 0`, as `n` substeps. Resource-capped failures
+are not split. A step still failing returns `status = :failed` (or throws with `on_fail = :error`).
+Returns `status`, `unmet`, the energies, `resid`, `nsub` and `attempts`.
 """
 function ite_step!(psi::SymMPS, mpo::MPO, dbeta::Real; order::Int = 2,
                    root_method::Symbol = :exp, tol_basis::Float64 = 1e-5,

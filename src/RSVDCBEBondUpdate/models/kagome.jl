@@ -1,50 +1,15 @@
-# ── the KAGOME lattice on a cylinder, as a coupling matrix ───────────────────
-#
-# Corner-sharing triangles: three sublattices A, B, C per unit cell, every site 4-coordinate,
-# and the frustration that makes the Heisenberg antiferromagnet here a spin-liquid candidate
-# rather than a Neel magnet. Like `square_cylinder.jl` this file builds ONLY the coupling matrix;
-# the operator is `pair_mpo`, which already handles arbitrary `J[i,j]` including the charged
-# rank-3 vertices SU(2) needs.
-#
-# GEOMETRY, and it is worth writing down because every kagome convention in the literature
-# differs by a relabelling. Lattice vectors `a1 = (2, 0)`, `a2 = (1, sqrt3)`, sublattices at
-#
-#     A = (0, 0)        B = (1, 0) = a1/2        C = (1/2, sqrt3/2) = a2/2
-#
-# so that all six neighbour bonds have length exactly 1:
-#
-#     within the cell (the UP triangle):   A-B,  B-C,  C-A
-#     to the next cells (DOWN triangle):   B(i,j)-A(i+1,j)
-#                                          C(i,j)-A(i,j+1)
-#                                          C(i,j)-B(i-1,j+1)
-#
-# Six bonds per unit cell over three sites is coordination 4, which is the check that the bond
-# list is complete -- `test_kagome.jl` asserts it rather than trusting this comment.
-#
-# ⛔ 3 SITES PER UNIT CELL MEANS THE SITE COUNT IS ALWAYS A MULTIPLE OF 3. There is no 16-site
-# kagome cluster with whole unit cells; 12, 18 and 24 are the reachable sizes near it. Asking for
-# an arbitrary count and getting silently rounded is how a "kagome" result ends up being measured
-# on a lattice nobody specified, so `kagome_cylinder_couplings` takes CELLS, never a site count.
-#
-# ⛔ AND THE WRAP DIRECTION IS THE SHORT ONE, for the same reason as the square cylinder: the MPS
-# cut severs O(Ly) bonds, so wrapping `a2` (circumference `Ly` cells) and leaving `a1` open keeps
-# the entanglement bounded by `Ly` and not by the total length.
+# ── the kagome lattice on a cylinder, as a coupling matrix ──
+# Three sites per unit cell, every site with coordination 4. The site count is always a multiple of 3,
+# so the builder takes unit cells, never a site count.
+# The short direction a2 is wrapped, which keeps the MPS cut at O(Ly) bonds.
 
 """
     kagome_cylinder_couplings(Lx, Ly; J=1.0, periodic_y=true) -> Matrix{Float64}
 
-`J[i,j]` for a kagome cylinder of `Lx x Ly` unit cells (`3*Lx*Ly` sites), open along `a1`,
-periodic along `a2` when `periodic_y`.
-
-Site index: `site(i, j, s) = 3*((i-1)*Ly + (j-1)) + s` with `s = 1, 2, 3` for `A, B, C` — i.e. the
-three sublattices of a cell are ADJACENT in the chain, and cells advance along the circumference
-first. That ordering is what keeps the longest-range coupling `O(Ly)` rather than `O(Lx)`.
-
-Returns the strictly upper triangle, which is what [`pair_mpo`](@ref) reads.
-
-⚠️ `periodic_y` needs `Ly >= 3`: at `Ly = 2` the wrap bonds coincide with the intra-cell ones and
-adding both DOUBLES those couplings — a factor of two in `H` that reads as a physics result. Pass
-`periodic_y = false` for a kagome strip.
+`J[i,j]` for a kagome cylinder of `Lx x Ly` unit cells (`3*Lx*Ly` sites), open along `a1` and
+periodic along `a2` when `periodic_y`. Site index `site(i, j, s) = 3*((i-1)*Ly + (j-1)) + s` with
+`s = 1, 2, 3` for A, B, C, so a cell's sublattices are adjacent and the longest coupling is O(Ly).
+`periodic_y` needs `Ly >= 3`: at `Ly = 2` the wrap bonds coincide with intra-cell bonds and double them.
 """
 function kagome_cylinder_couplings(Lx::Int, Ly::Int; J::Float64 = 1.0,
                                    periodic_y::Bool = true)
@@ -109,14 +74,8 @@ function kagome_triangles(Lx::Int, Ly::Int; periodic_y::Bool = true)
     out = NTuple{3, Int}[]
     for i in 1:Lx, j in 1:Ly
         push!(out, (site(i, j, 1), site(i, j, 2), site(i, j, 3)))          # UP triangle
-        # DOWN triangle: B(i,j) - A(i+1,j) - C(i+1,j-1).
-        #
-        # ⛔ DERIVED FROM THE NEIGHBOUR LISTS, NOT GUESSED. `B(i,j)` neighbours
-        # {A(i,j), C(i,j), A(i+1,j), C(i+1,j-1)} and `A(i+1,j)` neighbours
-        # {B(i+1,j), C(i+1,j), B(i,j), C(i+1,j-1)}; their ONLY common neighbour is C(i+1,j-1).
-        # A first version used `A(i,j+1)` here, which is not adjacent to `B(i,j)` at all -- the
-        # triangle test caught it by checking that all three pairs are real bonds, which is the
-        # whole reason that check exists.
+        # DOWN triangle B(i,j) - A(i+1,j) - C(i+1,j-1), derived from the neighbour lists. A version using
+        # A(i,j+1) is not adjacent to B(i,j); the triangle test (all three pairs must be bonds) caught it.
         if i < Lx && (periodic_y || j > 1)
             push!(out, (site(i, j, 2), site(i + 1, j, 1), site(i + 1, wrap(j - 1), 3)))
         end

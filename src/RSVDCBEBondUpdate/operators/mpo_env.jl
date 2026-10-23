@@ -183,15 +183,11 @@ end
 """
     _mpo2_left_step(E, A, W) -> TLArray
 
-[`_mpo_left_step`](@ref) with TWO copies of `W` between bra and ket: the left environment of
-`<psi|H H|psi>` on link `i+1`, legs `(bra, w_a, w_b, ket)` (`w_b` is the copy nearer the ket).
-`W` is `(w_l, s_in, s_out, w_r)`; at the left boundary both copies' trimmed dim-1 `w_l` legs are
-dropped exactly as the single-layer step drops one.
+[`_mpo_left_step`](@ref) with two copies of `W` between bra and ket: the left environment of
+`<psi|H H|psi>` on link `i+1`, legs `(bra, w_a, w_b, ket)`.
 
-⛔ THE OUTER COPY'S VIRTUAL LEGS ARE PRIMED (`_mpo_outer`). Two copies of one `W` carry identical
-leg tags, and Telum refuses a tensor holding two legs with the same tag ("Duplicate TLIndex ...
-W") -- MEASURED, jobs 17208864/17208865. Priming `w_l`, `w_r` of the `a` copy keeps the layers
-distinct; the physical legs need nothing, since the inner copy's `s_out` is contracted away.
+The outer copy's virtual legs are primed (`_mpo_outer`): two copies of one `W` carry identical tags,
+which Telum refuses as a duplicate index.
 """
 # `inc = 5`: far above any prime level the inner copy, the state or the bra carries, so the
 # outer layer's virtual legs cannot coincide with any other leg whatever their direction.

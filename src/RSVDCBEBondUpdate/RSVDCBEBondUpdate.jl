@@ -1,41 +1,14 @@
 """
     RSVDCBEBondUpdate
 
-Controlled bond expansion (CBE) as the basis update of the rank-adaptive BUG integrator, on
-MPO environments. Follows the von Delft group's QSMPSLib routines `RSVDpreBE0SiQS.m`,
-`CBE1SiQS.m` and `TDVPSweepCBE1Si.m`; the design is in `docs/cbe_bug.md`.
+Controlled bond expansion (CBE) as the basis update of the rank-adaptive BUG integrator, on MPO
+environments, following the QSMPSLib routines `RSVDpreBE0SiQS.m`, `CBE1SiQS.m` and
+`TDVPSweepCBE1Si.m` (design in `docs/cbe_bug.md`).
 
-A SEPARATE submodule on purpose: `BondUpdateBUG.bond_update_bug!` is the validated gate-based
-Trotter integrator, and nothing here mutates it. This module reuses its containers and
-primitives (`SymMPS`, `BondFrame`, `expv`, the sector tooling) by import only.
+A separate submodule: `BondUpdateBUG` is the validated gate-based integrator and is not mutated here.
 
-| entry point           | S-step reduction   | what it is                                   |
-|-----------------------|--------------------|----------------------------------------------|
-| `cbe_bug_step!`       | `exp(tau H)`       | DD-QR CBE + rank-adaptive BUG, orders 1-5    |
-| `tdvp_cbe1s_step!`    | `exp(tau H)`       | 1-site TDVP + CBE, the baseline              |
-| `tdvp2_step!`         | `exp(tau H)`       | 2-site TDVP, the reference                   |
-| `dmrg_cbe1s!`         | lowest eigenvector | 1-site CBE-DMRG                              |
-| `GroundState.solve!`  | lowest Ritz vector | 2-site DMRG on the expanding Krylov solve    |
-
-`tau = -im*dt` is real time and `tau = -dt` imaginary time; nothing in the S step cares which,
-and the caller renormalises.
-
-Layout, in include order (each directory depends only on the ones above it):
-
-  - `operators/` -- `H` and its environments: the channel form for nearest-neighbour XXZ
-    (`henv*.jl`, kept as the independent witness), the genuine MPO with its rank-3
-    environments and effective Hamiltonians (`mpo*.jl`, arXiv:2606.28169 Eqs. 1.3/1.7/1.8),
-    and the zero-site generator, frames and truncation sweeps (`zero_site_core.jl`).
-  - `budget/` -- the three-tolerance accuracy budget (`tol_basis`, `tol_trunc`, `tol_expv`),
-    its per-bond allocation and ledger, and multiplet-versus-state accounting.
-  - `expansion/` -- bond expansion: the RSVD CBE (`cbe_*.jl`) used by DMRG and TDVP-CBE, the
-    DD-projected QR-only CBE (`dd_cbe*.jl`) that `cbe_bug_step!` runs, and the per-bond
-    expansion at the reference's granularity (`bond_expansion.jl`).
-  - `models/` -- the benchmark Hamiltonians, initial states and observables.
-  - `baselines/` -- the integrators the BUG is measured against: 2-site TDVP, 1-site TDVP +
-    CBE on both environment paths, CBE-DMRG and the `GroundState` submodule.
-  - `bug/` -- THE SOLVER, `cbe_bug_step!`: the half-sweeps, the Krylov enrichment, the
-    order-p frontier closure, the parallel K/L/S step and normalised imaginary time.
+Entry points: `cbe_bug_step!`, `tdvp_cbe1s_step!`, `tdvp2_step!` (reference), `dmrg_cbe1s!` and
+`GroundState.solve!`. `tau = -im*dt` is real time and `tau = -dt` imaginary time.
 """
 module RSVDCBEBondUpdate
 

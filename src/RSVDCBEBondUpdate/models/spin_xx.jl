@@ -1,20 +1,7 @@
-# models/spin_xx.jl -- the two U(1) XX chains of updated_cbe_high_order_parallel.md, Task 7:
-#
-#     H_s = J sum_{i<L} (S^x_i S^x_{i+1} + S^y_i S^y_{i+1})
-#         = (J/2) sum_{i<L} (S^+_i S^-_{i+1} + S^-_i S^+_{i+1}),     open chain, s in {1/2, 3},
-#
-# from the domain wall |+s ... +s, -s ... -s>. The physical site is d = 2s + 1: d = 2 for s = 1/2,
-# d = 7 for s = 3 (not 3). Spins are passed as `twoS = 2s`, Telum's convention.
-#
-# ONE EXCHANGE CONVENTION FOR BOTH SPINS. Telum builds every spin-s space from the same
-# Clebsch-Gordan spherical components (`get_SU2_symmops`, scaled by sqrt(s(s+1))), so the U(1)
-# pairing `xxz_chain` uses at s = 1/2 -- `pair(Sp, Sp') + pair(Sm, Sm')`, which already carries
-# the 1/2 -- is `J (S^x S^x + S^y S^y)` at every s. `test_spin_xx.jl` pins it on product states
-# (`<H> = 0`, the exact variance) and against sector ED rather than trusting the library.
-#
-# ⛔ s = 3 IS NOT FREE-FERMIONIC. Only s = 1/2 has the Jordan-Wigner closed form
-# (`tests/common/free_fermion.jl`). The s = 3 references are sector ED at small L, the short-time
-# identities and converged MPS runs, and none of them is analytical.
+# ── the U(1) XX chain, H = J sum (S^x S^x + S^y S^y), from a domain wall ──
+# Spins are `twoS = 2s` (s = 1/2 or 3, d = 2s + 1). Telum's Clebsch-Gordan convention gives the same J
+# at every s, pinned by test_spin_xx.jl.
+# Only s = 1/2 has a free-fermion closed form; the s = 3 references are sector ED and converged MPS runs.
 
 const _SPIN_SPACES = Dict{Int, Any}()
 

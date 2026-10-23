@@ -1,29 +1,6 @@
-# MULTIPLETS VERSUS STATES, and why every rank number in this module needs a unit.
-#
-# MEASURED, and this is the one real semantic gap the non-abelian audit turned up:
-#
-#   * `leg_dim` sums the per-sector dimensions, so under SU(2) it counts MULTIPLETS.
-#   * Telum's `Nkeep` counts multiplets too -- `svd(T, (1,2); Nkeep = 2)` on a tensor whose bond
-#     carries `[(S=1/2, mult 2), (S=3/2, mult 1)]` returns a bond of `[(S=1/2, mult 2)]`, i.e.
-#     TWO multiplets and FOUR states.
-#   * Telum's singular-value weights, on the other hand, ARE physical: `kept_list` rows carry a
-#     `degeneracy` field and `sum(sigma^2 * degeneracy) == norm(T)^2` exactly (measured: 1.0
-#     against 0.4999 for the unweighted sum). So `_trunc_weight` -- which does multiply by
-#     `degeneracy` -- is correct, and the truncation ORDERING is correct too: keeping a multiplet
-#     costs `dim` states and gains `sigma^2 * dim` weight, so gain per state is `sigma^2` and
-#     ranking by `sigma` is exactly optimal.
-#
-# THE CONSEQUENCE, stated plainly because it is easy to get wrong in a benchmark: `maxdim = 16`
-# is NOT the same truncation under `:U1` and under `:SU2`. The physics agrees between symmetry
-# modes at FULL RANK to machine precision (measured: `tdvp2` 2.3e-14, `cbe_lubich_sweep`
-# 3.1e-15, `jan_bug_step!` 6.7e-15, and a variational ground energy agreeing to 8.9e-16 -- and
-# that last one matters most, because unlike a conserved energy it is a non-trivial number). But
-# a TRUNCATED comparison at equal `maxdim` compares two different truncations, and the SU(2) run
-# is the more generous one. Convert with `state_dim` before quoting an error-at-fixed-rank across
-# symmetries.
-#
-# Nothing here is a fix, because nothing here is broken. It is the accounting that makes a
-# cross-symmetry claim checkable.
+# ── MULTIPLETS VERSUS STATES ──
+# Under SU(2) `leg_dim` and `Nkeep` count multiplets, so `maxdim` cuts differently than under `:U1`.
+# Weights are physical (`sum sigma^2 * degeneracy == norm^2`); convert via `state_dim` to compare.
 
 """
     state_dim(t, leg) -> Int

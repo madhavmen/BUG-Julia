@@ -72,13 +72,8 @@ function env_energy(psi::SymMPS, h::XXZChain)
     return E
 end
 
-# ── one right step ───────────────────────────────────────────────────────────
-#
-# The mirror, with one asymmetry that is easy to get backwards: a right channel OPENS
-# with `term.right` (the right half of a term, sitting at site i and waiting for its
-# partner on its LEFT) and CLOSES with `term.left`. Under U(1) that also puts the op-leg
-# arrows the other way round -- `Sp'` dangles a '+' leg here and `Sp` closes it -- which
-# is exactly why the term list stores both halves instead of deriving one by transpose.
+# A right channel opens with `term.right` and closes with `term.left`, the mirror of the left step.
+# Under U(1) the op-leg arrows reverse, which is why the term list stores both halves.
 
 """
     _right_step(E, A, O, i) -> TLArray
@@ -195,29 +190,9 @@ function env_energy_right(psi::SymMPS, h::XXZChain)
     return E
 end
 
-# ── the two-site effective action ────────────────────────────────────────────
-#
-# `H` restricted to bond `(i, i+1)`, the object both halves of CBE-BUG consume: the
-# sketch applies it to a random block (`RSVDpreBE0SiQS.m:336`) and the Galerkin step
-# applies it to the centre core. Five contributions, and the two-channel structure is
-# what makes them exhaustive for a nearest-neighbour H:
-#
-#   (a) done_L ⊗ 1          terms entirely left of the block
-#   (b) 1 ⊗ done_R          terms entirely right of it
-#   (c) open_L[t] closed by term.right at site i      straddling link i
-#   (d) open_R[t] closed by term.left  at site i+1    straddling link i+2
-#   (e) the bond term itself
-#
-# (e) is delegated to `apply_gate` with the same gate the Trotter path uses, rather than
-# rebuilt from the term list: that code is pinned to the analytic Heisenberg block
-# element by element (`test_gates.jl`), and stage 1a establishes that the term list and
-# the gate are the same operator.
-#
-# CANONICALITY IS REQUIRED, NOT OPTIONAL. (a) and (b) each carry an implicit identity on
-# the far side, which is only what `id_L`/`id_R` are when sites `1…i-1` are left
-# isometries and `i+2…L` are right isometries -- i.e. when the centre is at `i` or `i+1`,
-# exactly what `bond_frame` already demands. `test_henv.jl` asserts the `id` channels are
-# identities in that gauge rather than trusting it.
+# The two-site effective action on bond (i, i+1): the done terms on either side, the two straddling
+# channels, and the bond term, delegated to `apply_gate` (pinned element by element to the gate path).
+# The far sides must be identities, i.e. the centre sits at i or i+1, which `bond_frame` already demands.
 
 """
     _apply_theta_op(Theta, O, leg, i) -> TLArray
@@ -284,21 +259,8 @@ not the bond's gate -- which is the point of the module.
 function apply_h_two_site(Theta, h::XXZChain, i::Int,
                           lch::ChannelSet, rch::ChannelSet)
     tl, tr = Theta.inds[2].itags, Theta.inds[3].itags
-    # ⛔ COLLECT, THEN SUM ONCE. This used to accumulate pairwise --
-    # `acc = to_concrete(acc + x)` -- which for a nearest-neighbour chain is 2 + 2*|terms| + 1
-    # ~ 9 separate `_sum_tlarrays` calls, each followed by its own `to_concrete`. Every
-    # `to_concrete` runs `materialize` + `_eager_tlarray` and rebuilds the qlabel / wmatinfo /
-    # RMT vectors from scratch, so the metadata churn was paid nine times per call.
-    #
-    # MEASURED COST OF THAT (`benchmarks/rsvd_probe_microbench.jl`): the CBE probe, which is one
-    # `apply_h_two_site` plus a projection and a sketch contraction, allocated 1.53 MB at chi=16
-    # on a two-site block holding 16 KB of data -- 96x the tensor's own size -- and 84% of that
-    # was this function. It is what makes the probe allocation-bound rather than flop-bound, and
-    # therefore what makes the randomised sketch unable to show a speedup: RSVD reduces flops,
-    # and flops were not the cost.
-    #
-    # Telum's `sum` over a tuple/vector aligns all summands ONCE and adds them in a single pass
-    # (`_sum_tlarrays`), so one materialisation replaces nine.
+    # Collect the terms and sum once: pairwise `to_concrete(acc + x)` rebuilt the metadata for each of the
+    # roughly nine summands, which made the probe allocation-bound. Telum's `sum` aligns all summands once.
     terms = AbstractTLArray[]
     add!(x) = push!(terms, x)
 

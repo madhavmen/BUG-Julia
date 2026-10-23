@@ -112,22 +112,11 @@ end
 """
     tdvp1_cbe_step!(psi, h, tau; exact=false, kwargs...) -> TDVP1CBEInfo
 
-One symmetric one-site-TDVP-with-CBE step of `tau`, in place. Second order.
+One symmetric second-order one-site TDVP-with-CBE step of `tau`, in place, with the time convention
+and renormalisation of [`tdvp_cbe1s_step!`](@ref).
 
-`tau = -im*dt` is real time and `tau = -dt` imaginary time; nothing here cares which, exactly
-as for the BUG path. The caller renormalises -- for imaginary time that is load-bearing.
-
-`exact = false` (default) is **1site_tdvp_cbe_rsvd**: the expansion is sketched, so the SELECTION
-costs `npre` columns rather than the full fused space. Since 2026-08-06 the sketch projects
-first, so the rank-4 two-site object IS formed once per bond; the sketch still controls how
-wide the candidate set is, not whether H*Theta exists.
-`exact = true` is **1site_tdvp_cbe**: the expansion uses the complete fused basis, which is
-the reference the sketch approximates and DOES form the rank-4 object.
-
-Environment work is `O(L)` per half-sweep, the same structure `tdvp2_step!` and
-`cbe_lubich_sweep` use: each half-sweep carries its own side bond to bond and reads the other
-from one stack built at the start. That stack survives the half-sweep because a rightward pass
-only rewrites sites at or behind the bond it is on.
+`exact = false` (default) is the RSVD selection: the sketch still forms the rank-4 two-site object,
+and controls only the width of the candidate set. `exact = true` uses the complete fused basis.
 """
 function tdvp1_cbe_step!(psi::SymMPS, h::XXZChain, tau::ComplexF64;
                          exact::Bool = false,
@@ -135,19 +124,9 @@ function tdvp1_cbe_step!(psi::SymMPS, h::XXZChain, tau::ComplexF64;
                          trunc_thresh::Float64 = 1e-12,
                          maxiter::Int = 30,
                          tol::Float64 = 1e-15,
-                         # REORTHOGONALISATION IS ON BY DEFAULT HERE, and it is a correctness
-                         # fix rather than a tuning choice. Without it the Lanczos does not
-                         # converge at `maxiter = 30` on the `exact = true` arm, and the failure
-                         # is silent in the worst way: MEASURED at L=8, XX, dt=0.02, 20 steps,
-                         # the state lost 4.6e-3 of its norm (real-time TDVP is unitary, so any
-                         # loss is error), the exact and sketched arms diverged by 2.03e-02
-                         # where they must agree, and the unconverged arm carried a SPURIOUS
-                         # extra bond -- maxbd 12 against the sketch's 10 -- so it looked like
-                         # richer physics rather than a broken solve. With `reorth = true`, at
-                         # the same `maxiter`: norm error 1.3e-13, arms agree to 1.06e-12, and
-                         # both sit at maxbd 10. `maxiter = 200` fixes it too, at ~6x the
-                         # matvecs; turning truncation off also masks it, which is why the
-                         # cause was initially mis-attributed to the SVD.
+                         # ── reorthogonalisation on by default: a correctness fix ──
+                         # Without it, Lanczos at maxiter = 30 loses norm and the exact and sketched arms diverge silently,
+                         # with a spurious extra bond. `maxiter = 200` fixes it at about 6x the matvecs.
                          reorth::Bool = true,
                          rng::AbstractRNG = MersenneTwister(0x5EED))
     L = length(psi)

@@ -1,45 +1,17 @@
-# ── the square lattice on a cylinder, as a coupling matrix ───────────────────
-#
-# An MPS is a 1D object, so a 2D lattice reaches it only through an ORDERING of its sites, and
-# every 2D result is a statement about that ordering as much as about the physics. This file
-# builds the coupling matrix and nothing else: the operator is then `pair_mpo`, which already
-# handles arbitrary `J[i,j]` including the charged rank-3 vertices SU(2) needs.
-#
-# ⛔ THE COLUMN-MAJOR SNAKE IS NOT A STYLE CHOICE. Wrapping the SHORT direction (the
-# circumference `Ly`) is what keeps the MPS bond cutting only `Ly` bonds instead of `Lx`, and it
-# is why cylinders are run with `Ly << Lx`. Numbering down each rung in turn puts the two
-# neighbours of a site at distance 1 (same rung) and `Ly` (next rung) -- so the longest-range
-# coupling in the chain is `Ly`, and the entanglement across a cut grows with `Ly`, not with the
-# total site count. Numbering along the LONG direction instead would put every rung neighbour at
-# distance `Lx`, and the bond dimension would blow up for the same physics.
-#
-# ⛔ AND THE WRAP IS A SEPARATE COUPLING, NOT A RE-INDEXING. On a cylinder rung `y = Ly` bonds
-# back to `y = 1`. That bond has chain distance `Ly - 1`, which is the LONGEST-range term in the
-# model and the one most easily dropped by an off-by-one. `Ly = 2` is the trap: there the wrap
-# bond `(1,2)` coincides with the rung bond `(1,2)` and adding both DOUBLES it, which is why
-# `periodic_y` is refused below for `Ly < 3`.
+# ── the square lattice on a cylinder, as a coupling matrix ──
+# The column-major snake wraps the short direction, so an MPS cut severs only Ly bonds and the
+# longest-range coupling is Ly, not Lx.
+# The periodic wrap is a separate coupling at chain distance Ly - 1; at Ly = 2 it coincides with the
+# rung bond, so periodic_y is refused below Ly = 3.
 
 """
     square_cylinder_couplings(Lx, Ly; J=1.0, J2=0.0, periodic_y=true) -> Matrix{Float64}
 
-`J[i,j]` for a `Lx x Ly` square lattice wrapped into a cylinder, under the column-major snake
-`site(x, y) = (x - 1) * Ly + y`.
-
-Bonds, all with the same `J`:
-
-  * **rung** `(x, y) - (x, y+1)`, chain distance 1
-  * **wrap** `(x, Ly) - (x, 1)` when `periodic_y`, chain distance `Ly - 1`
-  * **leg**  `(x, y) - (x+1, y)`, chain distance `Ly`
-  * **diagonal** (`J2`, only when `J2 != 0`) `(x, y) - (x+1, y+-1)`, wrapped in `y` when
-    `periodic_y`; chain distance `Ly +- 1` (up to `2Ly - 1` across the wrap). These are the
-    next-nearest neighbours of the square `J1-J2` model and set the MPO bond dimension.
-
-Open in `x`, periodic in `y` -- the standard cylinder. Returns the STRICTLY UPPER triangle, which
-is what [`pair_mpo`](@ref) reads; the lower triangle stays zero so no bond is counted twice.
-
-⚠️ `periodic_y` is refused for `Ly < 3`. At `Ly = 2` the wrap bond is the rung bond, and adding
-both silently doubles that coupling -- a factor of two in the Hamiltonian that looks like a
-physics result rather than a geometry bug.
+`J[i,j]` for an `Lx x Ly` square lattice on a cylinder, under the column-major snake
+`site(x, y) = (x - 1) * Ly + y`. Open in `x`, periodic in `y` when `periodic_y`.
+Bonds: rungs (distance 1), wrap (distance Ly - 1), legs (distance Ly) and, when `J2 != 0`, diagonals
+(next-nearest neighbours, which set the MPO bond dimension).
+Returns the strictly upper triangle, which [`pair_mpo`](@ref) reads.
 """
 function square_cylinder_couplings(Lx::Int, Ly::Int; J::Float64 = 1.0, J2::Float64 = 0.0,
                                    periodic_y::Bool = true)
@@ -86,16 +58,12 @@ end
 """
     square_cylinder_mpo(Lx, Ly; J=1.0, J2=0.0, periodic_y=true) -> MPO
 
-Heisenberg `H = J Σ_<ij> S_i · S_j + J2 Σ_<<ij>> S_i · S_j` on the cylinder, in whatever symmetry mode is active.
+Heisenberg `H = J sum S_i . S_j + J2 sum S_i . S_j` (second sum over next-nearest neighbours) on the
+cylinder, built through [`pair_mpo`](@ref) and [`spin_vertices`](@ref). All symmetry modes share this
+code path; under `:U1` the charged Sp/Sm vertices are used.
 
-Built through [`pair_mpo`](@ref) and [`spin_vertices`](@ref), so `:none`, `:U1` and `:SU2` all
-route through the same code -- under `:SU2` that is the single `S`/`S'` vertex, under `:U1` the
-`Sz Sz` diagonal plus the two CHARGED `Sp`/`Sm` vertices that `long_range_mpo` refuses.
-
-⚠️ THE MPO BOND DIMENSION GROWS WITH `Ly`, NOT WITH `Lx`. `pair_mpo` carries one transport channel
-per open bond, and under the column-major snake at most `Ly` bonds are open at any cut. That is
-the whole reason for wrapping the short direction, and it is worth checking with
-`mpo_virtual_dims` on any new geometry rather than assuming.
+The MPO bond dimension grows with `Ly`, not `Lx`, since at most `Ly` bonds are open at any cut.
+Check `mpo_virtual_dims` on a new geometry rather than assuming it.
 """
 square_cylinder_mpo(Lx::Int, Ly::Int; J::Float64 = 1.0, J2::Float64 = 0.0,
                     periodic_y::Bool = true) =

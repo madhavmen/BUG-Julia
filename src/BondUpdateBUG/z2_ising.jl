@@ -1,50 +1,6 @@
-# THE TRANSVERSE-FIELD ISING MODEL, WITH ITS Z2 SPIN-FLIP SYMMETRY MADE BLOCK-SPARSE.
-#
-#     H = -J Σ_i Z_i Z_{i+1} - h Σ_i X_i
-#
-# ── WHY THE SIGMA^X BASIS, AND NOT THE USUAL SIGMA^Z ONE ─────────────────────────────
-#
-# The symmetry of the TFIM is the GLOBAL SPIN FLIP `P = Π_i X_i`, which commutes with H. In
-# the conventional sigma^z basis P is entirely off-diagonal, so nothing is block-diagonal and
-# there are no sectors to exploit -- the symmetry is present but invisible to the tensors.
-#
-# Work in the sigma^x EIGENBASIS instead and the symmetry becomes a charge:
-#
-#     |+>  (X = +1)  ->  Z2 charge 0
-#     |->  (X = -1)  ->  Z2 charge 1
-#
-# Now `X = diag(+1,-1)` is DIAGONAL, hence charge-preserving, and `Z = [0 1; 1 0]` FLIPS the
-# charge by 1. The bond term `Z_i Z_{i+1}` changes the total charge by `1 + 1 = 0 (mod 2)` and
-# the field term by 0, so H conserves Z2 charge exactly and every tensor is block-sparse in it.
-#
-# The price is that the basis is rotated relative to the textbook one: what is called `X` here
-# is diagonal and what is called `Z` is the flip. The names refer to the OPERATORS, which are
-# basis-independent, so `<X_j>` below is the genuine transverse magnetisation and `<Z_i Z_j>`
-# the genuine order-parameter correlator -- only their matrix representations are rotated.
-#
-# ── WHY THIS FILE TOUCHES TELUM PRIVATES, WHICH IS DELIBERATE AND CONTAINED ──────────
-#
-# `getLocalSpace` CANNOT build a Z2 space, and not for want of an options type. LurCGT derives
-# an operator's charge from the Lie-algebra commutator `[Q, O] = q*O` (`getweight_irop`), and
-# the Z2 flip admits no such `q`: it raises 0->1 and lowers 1->0, which are THE SAME charge mod
-# 2 but `+1` and `-1` as integers, so the assertion `comm_result ≈ zvals * mwirop` cannot hold.
-# No choice of additive weights repairs it -- weights `±1` demand `q = +2` and `q = -2` at once.
-# That is intrinsic to mod-N charges, not a bug.
-#
-# The representation is fine; only the DERIVATION is impossible. With an op leg of charge 1
-# both matrix elements of the flip conserve charge,
-#
-#     <1|Z|0>:  1 = 0 + 1 (mod 2)        <0|Z|1>:  0 = 1 + 1 (mod 2)
-#
-# which is exactly what the commutator cannot see and the sector bookkeeping can. So the blocks
-# are built directly, below the IROP layer, via `Telum._localspace_cgt_fields`.
-#
-# THAT FUNCTION IS PRIVATE (underscore, no stability guarantee). Every such call in this package
-# lives in THIS FILE and nowhere else, so a Telum upgrade breaks one file rather than the code
-# base, and `tests/BondUpdateBUG/test_z2_ising.jl` fails loudly if it does: it checks the Pauli
-# algebra, charge conservation, and the L=8 ground energy against exact diagonalisation. If
-# LurCGT ever grows a Z{N}-aware `getweight_irop`, delete `_z2_local_space` and call
-# `getLocalSpace` -- nothing else here changes.
+# H = -J Σ Z Z - h Σ X made block-sparse in the sigma^x basis: |+> is Z2 charge 0, |-> charge 1.
+# Telum cannot derive Z2 operators, so blocks come from private `Telum._localspace_cgt_fields`,
+# used only in this file; test_z2_ising.jl checks the algebra and the L=8 ground energy.
 
 using Telum: TLArray, TLIndex, _localspace_cgt_fields, _getLocalSpace_no_symmetry
 using LurCGT: Z
@@ -130,15 +86,11 @@ end
 """
     ising_bond_gates(psi; J=1.0, h=1.0) -> Vector
 
-One gate per bond for `H = -J Σ Z_i Z_{i+1} - h Σ X_i`, with the ON-SITE FIELD DISTRIBUTED
-over the bonds that touch each site.
-
-THE DISTRIBUTION IS NOT UNIFORM, AND GETTING IT WRONG IS A SILENT ERROR. A bond gate can only
-carry two-site operators, so each site's field is split across the bonds it belongs to:
-interior site `j` touches bonds `j-1` and `j` and takes `h/2` from each, while sites `1` and
-`L` touch ONE bond apiece and must take the FULL `h` there. Splitting every site's field in
-half would quietly evolve a chain with weakened boundary fields -- a different Hamiltonian that
-still looks entirely plausible, and whose error shrinks with `L` so small-size tests miss it.
+One gate per bond for `H = -J Σ Z_i Z_{i+1} - h Σ X_i`, with the on-site field distributed over the
+bonds touching each site. The split is not uniform: an interior site takes `h/2` from each of its
+two bonds, while the end sites (one bond each) take the full `h`. Halving every site's field would
+silently evolve a chain with weakened boundary fields, a plausible wrong Hamiltonian whose error
+shrinks with L.
 """
 function ising_bond_gates(psi::SymMPS; J::Float64 = 1.0, h::Float64 = 1.0)
     L = length(psi)

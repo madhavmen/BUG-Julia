@@ -1,80 +1,18 @@
-# The Hamiltonian as a genuine MPO, and its environments, in the form the parallel-BUG
-# sweep of arXiv:2606.28169 §1--2 is written in.
-#
-# WHY THIS EXISTS ALONGSIDE `henv.jl`. The channel recursion in `henv.jl` is an MPO
-# contraction with the virtual index NAMED rather than fused: `id`, `open[t]`, `done` are
-# the three rows of
-#
-#          ( I  O_1^L ... O_n^L   0  )
-#      W = ( 0   0          0   c_1 O_1^R )
-#          ( ...                  ...  )
-#          ( 0   0          0     I  )
-#
-# stored as separate tensors. That is the same operator, but it is NOT the object the
-# paper's equations name, and it hard-codes the automaton for a nearest-neighbour uniform
-# term list -- the cost `docs/cbe_lubich_sweep.tex` §"What the factored form costs" records.
-#
-# This file fuses that virtual index into a real leg, so the sweep runs on
-#
-#   Eq. (1.3)   H = sum_w W^[1]_{w_0 s_1 z_1 w_1} ... W^[L]_{w_{L-1} s_L z_L w_L}
-#   Eq. (1.8)   L^[i]_{v_i w_i v'_i} = sum L^[i-1] T^[i] W^[i] conj(T^[i]),   L^[0] = 1
-#   Eq. (1.7)   H_eff^[i] = L^[i-1] W^[i] R^[i+1]
-#
-# with `L^[i]`/`R^[i]` rank-3 (bra, mpo, ket) tensors -- one environment per link, not
-# `2 + |terms|` of them -- and the effective Hamiltonian a plain contraction with no case
-# analysis over channel kinds.
-#
-# THE TWO PATHS ARE THE SAME OPERATOR AND MUST STAY THAT WAY. `test_mpo.jl` pins
-# `apply_h_two_site` element by element against the channel version at every bond, and
-# `mpo_energy` against `env_energy` and the dense reference. The channel path is kept
-# precisely to be that independent witness: a leg/arrow/prime slip here cannot cancel
-# against code that shares none of these contractions.
-#
-# WHAT IS GAINED, beyond matching the paper's notation:
-#
-#   * a site-dependent `W^[i]`, so anything expressible as an MPO can be run -- the
-#     factored form could only ever express one uniform nearest-neighbour term list;
-#   * one environment tensor per link instead of `2 + |terms|`, and one contraction per
-#     application instead of the five-case split (a)--(e);
-#   * `zero_site_h` becomes `L` and `R` joined over the MPO leg, which is Eq. (1.7) at a
-#     bond rather than a hand-derived three-way sum.
-#
-# LEG CONVENTIONS, and every one of them is load-bearing.
-#
-#   MPO site tensor   `(w_l '+', s_ket '+', s_bra '-', w_r '-')`
-#                     `s_ket` contracts the ket state tensor's physical leg (dir '-'),
-#                     `s_bra` the bra's (dir '+' after the adjoint). That is exactly a
-#                     local operator's own `(site '+', site '-')` layout with a virtual
-#                     leg glued to each side, which is why the blocks below need no
-#                     arrow surgery: the op-leg of `Sp` is already '-' (it becomes a
-#                     `w_r`) and the op-leg of `Sp'` is already '+' (it becomes a `w_l`).
-#
-#   environment       `(bra, mpo, ket)` with the BRA leg PRIMED, the same convention
-#                     `henv.jl` uses, so the ket leg pairs with the next site tensor's
-#                     link leg and the bra leg with the bra tensor's. A wrong prime level
-#                     does not throw -- it silently traces the wrong pair.
-#
-#   boundaries        `nothing`, NOT a materialised tensor, again as in `henv.jl`: at link
-#                     1 the environment is the identity on a dim-1 vacuum leg, and the
-#                     MPO's own boundary leg is the dim-1 leg left by trimming `W^[1]` to
-#                     its `id` row. Both are handled by branch, and the singleton is
-#                     dropped with `deleteSingleton` rather than contracted.
+# The Hamiltonian as an MPO with fused virtual legs, the form of the parallel-BUG sweep
+# (arXiv:2606.28169 §1-2). `henv.jl` is the same operator with the virtual index named, kept as an
+# independent witness: `test_mpo.jl` pins `apply_h_two_site` and `mpo_energy` against it.
+# The leg and prime conventions are load-bearing: a wrong prime does not throw, it traces the wrong pair.
 
 # ── the MPO ──────────────────────────────────────────────────────────────────
 
 """
     MPO(W)
 
-`H` as a matrix product operator: one rank-4 tensor per site with legs
-`(w_l, s_ket, s_bra, w_r)`, Eq. (1.3) of arXiv:2606.28169.
+`H` as a matrix product operator, one rank-4 tensor per site with legs `(w_l, s_ket, s_bra, w_r)`
+(Eq. (1.3) of arXiv:2606.28169). The boundary virtual legs of `W[1]` and `W[end]` are dim 1, from
+trimming, so no separate boundary vector is carried.
 
-`W[1]`'s left virtual leg and `W[end]`'s right virtual leg are dim-1 -- the boundary
-vectors are built in by trimming, so no separate boundary vector has to be carried.
-
-Built by [`mpo_from_terms`](@ref). Interchangeable with [`XXZChain`](@ref) everywhere the
-CBE-BUG sweep takes a Hamiltonian: `boundary_channels`, `left_env_stack`,
-`right_env_stack`, `push_left_channels`, `push_right_channels`, `apply_h_two_site`,
-`sketch_h_left`, `sketch_h_right`, `cbe_expand` and `zero_site_h` all have a method for it.
+Built by [`mpo_from_terms`](@ref); interchangeable with [`XXZChain`](@ref) in the CBE-BUG sweep.
 """
 struct MPO
     W::Vector{Any}
@@ -88,25 +26,10 @@ mpo_virtual_dims(mpo::MPO) =
     vcat([sum(d for (_, d) in mpo[1].spaces[1]; init = 0)],
          [sum(d for (_, d) in mpo[i].spaces[4]; init = 0) for i in 1:length(mpo)])
 
-# ── building the site tensors from the term list ──────────────────────────────
-#
-# The automaton matrix is written out literally, one entry per non-zero block, and
-# `oplus(mat, (1, 4))` direct-sums the rows on leg 1 and the columns on leg 4 -- Telum
-# infers the zero blocks from the row/column spaces. Row/column order is
-#
-#   1        the `id` channel   (nothing has happened yet)
-#   1+t      term `t` half-open (its left operator has been placed)
-#   n+2      the `done` channel (a complete term lies behind us)
-#
-# so a path through the chain that opens at site `i` and closes at site `i+1` is exactly
-# one nearest-neighbour term, and `W^[1]` keeping only row 1 while `W^[L]` keeps only
-# column `n+2` is what forbids terms running off either end.
-#
-# The op-leg carries the charge. Under `:U1` the leg of `Sp` is a single `((2,),)` sector
-# and that IS the virtual sector of its channel; under `:SU2` it is the `S=1` irrep of the
-# one `S·S` term. Nothing here is symmetry-specific -- the virtual space is assembled out
-# of the operators' own legs, so whatever charge makes the pair allowed is what the MPO
-# bond carries.
+# Each automaton row is written out literally and `oplus` direct-sums them, inferring the zero blocks
+# from the row and column spaces. Rows: 1 = id, 1+t = half-open term t, n+2 = done.
+# The op-leg carries the charge (under `:U1` the `Sp` leg is its channel's sector; under `:SU2` the S=1
+# irrep), so nothing here is symmetry-specific.
 
 "Retag an operator's two site legs onto site `i`, leaving any op-leg alone."
 _mpo_retag(O, i::Int) = to_concrete(setitag(setitag(O, 1, "S,$i"), 2, "S,$i"))
@@ -214,37 +137,10 @@ so the virtual dimension is 3 multiplets rather than U(1)'s 5.
 heisenberg_su2_mpo(L::Int; J::Float64 = 1.0) =
     mpo_from_terms(heisenberg_su2_chain(L; J = J))
 
-# ── LONG RANGE: one self-loop channel per exponentially decaying term ─────────
-#
-# THE POINT OF THE MPO LAYER, and the one thing the factored channel form in `henv.jl`
-# cannot express at all. An interaction that decays geometrically,
-#
-#     H_lr = sum_{i<j} c * lambda^(j-i-1) * A_i B_j
-#
-# needs no extra channel per distance: give the half-open channel a SELF-LOOP block
-# `lambda * I` and a path that opens at `i`, loops over `i+1 … j-1` and closes at `j`
-# picks up exactly `lambda^(j-i-1)`. So the virtual dimension is CONSTANT in `L` and in
-# the interaction range -- `w = 2 + |nn terms| + |lr terms|` -- and everything downstream
-# (the environments of Eq. 1.8, `apply_h_two_site`, `zero_site_h`, the CBE sketches) is
-# untouched, because none of it ever inspects `W`'s shape.
-#
-#   row/col 1              `id`
-#   row/col 1+t            nearest-neighbour term `t`, half-open
-#   row/col 1+n+k          long-range term `k`, half-open AND self-looping
-#   row/col n+m+2          `done`
-#
-# `lambda = 0` collapses the self-loop and reproduces the nearest-neighbour MPO exactly,
-# which is how `test_mpo.jl` pins the construction against the already-validated one.
-#
-# RESTRICTED TO CHARGE-NEUTRAL OPERATORS, deliberately and with the reason stated rather
-# than the case silently mishandled. A rank-3 operator (`Sp` under U(1), `S` under SU(2))
-# puts its op-leg ON the virtual leg, so that channel's virtual space is CHARGED, and its
-# self-loop would have to be the identity on that charged space rather than the trivial
-# `lambda * Iid` built here. Telum's `getIdentity` flips input arrows and reports dual
-# labels (`sectors.jl:77`), so that block needs real care and is not written until there
-# is a model that wants it. `Sz Sz` -- rank 2, `_side` returns `:none`, virtual space
-# trivial -- covers the long-range Ising/XXZ family and is what this builds. The
-# constructor THROWS on a rank-3 operator rather than emitting a wrong self-loop.
+# Long range: a geometric tail lambda^(j-i-1) needs one self-loop channel, lambda * I, so the virtual
+# dimension stays constant in L and in the range. Restricted to rank-2 operators, since a rank-3
+# self-loop would need a charged identity; the constructor throws on a rank-3 operator.
+# lambda = 0 reproduces the nearest-neighbour MPO exactly, which `test_mpo.jl` uses as its check.
 
 """
     LongRangeTerm(left, right, coeff, decay)
@@ -341,30 +237,10 @@ function long_range_zz_mpo(L::Int; J::Float64 = 1.0, Jz::Float64 = 1.0,
                           [LongRangeTerm(q.Sz, q.Sz, Jz, lambda)])
 end
 
-# ── an ARBITRARY coupling: n channels, and a fit error that must be reported ──
-#
-# A geometric tail is carried EXACTLY by one self-loop, so there is nothing to measure
-# there -- `long_range_zz_mpo` is not an approximation of anything. Any other decay is a
-# different matter: a power law `J(r) = J r^-alpha` has no finite-dimensional MPO, and the
-# standard construction fits it by a sum of `n` geometrics,
-#
-#     J(r)  ~=  sum_{k=1}^{n} c_k lambda_k^(r-1),
-#
-# one self-loop channel per `k`, so `w = 2 + |nn| + n` -- still independent of `L`, but now
-# carrying a REAL error that grows at the tail and shrinks with `n`. That error is a
-# property of the Hamiltonian being simulated, not of the integrator, and it is not
-# separable from the result afterwards: it must be reported with the MPO, which is why
-# [`fit_long_range`](@ref) returns it and `power_law_zz_mpo` hands it back alongside the
-# operator rather than discarding it.
-#
-# THE DECAY RATES ARE PRESCRIBED, NOT FITTED, and that is a deliberate robustness choice.
-# Solving for `lambda_k` too (Prony, matrix pencil) is the sharper fit at a given `n`, but
-# it is a nonlinear problem on a Hankel matrix whose conditioning collapses as `n` grows,
-# and it happily returns complex or negative rates -- which are legitimate mathematically
-# (they cancel in conjugate pairs) but make every MPO tensor complex for a real, Hermitian
-# `H`. With the rates FIXED on a log-spaced grid the fit is one linear least-squares solve,
-# always real, monotone in `n` in practice, and reproducible. The rates can be overridden
-# if a sharper fit is wanted.
+# A power-law tail has no finite MPO: it is fitted by n geometric self-loops, and that fit error
+# belongs to the Hamiltonian, not the integrator, so `fit_long_range` returns it with the MPO.
+# The decay rates are prescribed on a log-spaced grid, not fitted: a Prony fit can return complex
+# rates, which would make every tensor complex for a real H. They can be overridden.
 
 """
     LongRangeFit

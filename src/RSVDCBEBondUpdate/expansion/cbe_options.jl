@@ -27,39 +27,14 @@ cbe_expand(f::BondFrame, h::XXZChain, i::Int,
 """
     CBEBugOptions
 
-Controls for one run of ANY of the three modes, on either path. Mirrors `BondUpdateOptions`
-where the meaning is the same, so the integrators can be driven from the same campaign code.
+Controls for one run of any of the three modes, mirroring `BondUpdateOptions`. `dt` is a real step
+(`tau = -im*dt`) in real time and an inverse-temperature step (`tau = -dt`) in imaginary time.
+`maxdim`/`trunc_thresh` set the truncation; `normalize` rescales after each step (the norm is
+recorded first). `maxiter`/`tol` budget the Krylov exponential; `seed` is one RNG per run.
 
-  - `dt`, `n_steps` -- step size and how many to take. `dt` is a REAL time step in
-    real time (`tau = -im*dt`) and an INVERSE-TEMPERATURE step in imaginary time
-    (`tau = -dt`); the mode
-    forms `tau` from it. [`GroundState`](@ref) ignores both and uses `n_sweeps`/`etol`.
-  - `maxdim`, `trunc_thresh` -- truncation, applied at the centre and in the final sweep.
-  - `normalize` -- rescale after each step; the norm is recorded BEFORE rescaling.
-  - `maxiter`, `tol` -- Krylov budget for the single 0-site exponential.
-  - `seed` -- one RNG for the whole run, so a run is reproducible while consecutive steps
-    still draw different sketches.
-
-NO `order` FIELD on the MPO path. `bond_update_bug!` offers `:lie` / `:strang` because it
-Trotterises the even and odd bond groups and has a splitting error to compose away. The
-MPO-path CBE-BUG takes one projected exponential per step over a globally expanded subspace
--- there is no operator splitting to symmetrise, so a composition parameter would be
-meaningless there. The gate path is always Strang.
-
-WHY THE GATE PATH STORES NO ENVIRONMENTS. Its environments are the IDENTITY, and that is a
-property of the splitting rather than an omission. `H = H_odd + H_even` and each group is a
-sum of two-site terms on disjoint pairs, so `exp(tau*H_odd)` factorises exactly into one
-`exp(tau*h_i)` per bond: the operator at a bond IS the bare gate, and the rest of the chain
-is not neglected, it is a different factor of the same product applied at its own bond. The
-sweep calls `canonical!(psi, i)` before each bond, which makes everything to the left a left
-isometry and everything to the right a right isometry, so `L = R = I` exactly. The MPO path
-cannot do this because the full `H` does not factorise, which is what `henv.jl` is for.
-
-The consequence, and it is what fixes the mode/path matrix: the gate path's local operator
-has no knowledge of the chain, so a local EIGENSOLVE there would return the ground state of
-one two-site term with frozen neighbours -- a different quantity, not an approximation to
-the global ground state. Ground state therefore runs on the MPO path only. Imaginary time
-runs on both, because `exp(-dt*H)` Trotterises exactly as `exp(-im*dt*H)` does.
+There is no `order` field: the MPO path takes one projected exponential per step, so there is no
+splitting to symmetrise. Ground state runs on the MPO path only, since a local eigensolve on a bare
+gate would minimise a single term with frozen neighbours.
 """
 Base.@kwdef struct CBEBugOptions
     dt::Float64 = 0.05
@@ -91,18 +66,10 @@ end
 """
     CBEBugRunInfo
 
-Per-step record of a `cbe_lubich_bug!` run; every field has length `n_steps`.
-
-`max_expanded` is the headline rank diagnostic and the one to compare against
-`BondUpdateInfo.aug_k_dims`: it is the largest bond the basis sweep proposed BEFORE the
-truncation, i.e. `r + Dex`, against the K/L augmentation's `2r`.
-
-`krylov_dims` and `mean_aug` are the COST pair, and they are only useful together:
-`krylov_dims` counts operator applications in the step's exponential(s) (summed over bonds in
-the gate path, the single centre solve in the MPO path) and `mean_aug` is the size those
-applications acted on. Wall time is roughly their product, so a setting can be slower either
-by doing more iterations or by doing them on bigger objects -- and the budget A/B in
-`benchmarks/cbe_budget_cost.jl` turns on telling those two apart.
+Per-step record of a CBE-BUG run; every field has length `n_steps`. `max_expanded` is the
+headline rank diagnostic: the largest bond proposed before truncation (`r + Dex`). `krylov_dims` and
+`mean_aug` form the cost pair, operator applications and the size they act on; wall time is roughly
+their product.
 """
 struct CBEBugRunInfo
     times::Vector{Float64}
@@ -131,24 +98,9 @@ CBEBugRunInfo(times, norms, bds, maxbd, expanded, maxexp, centres,
                   epre, efnl, disc, mags, obs, kdim, maug, Float64[])
 
 Base.length(info::CBEBugRunInfo) = length(info.times)
-# ══════════════════════════════════════════════════════════════════════════════════════
-# PART II -- CBE AS THE BASIS UPDATE OF THE GATE-BASED bond_update_bug.
-#
-# Everything above is the SELECTION: sketch, preselect, rank, direct-sum. Everything below
-# drives it from a bond frame and a gate, and solves the local problem in the expanded
-# basis. The two were separate files until the three modes (real time, imaginary time,
-# ground state) were split out into submodules; this file is what all three share.
-#
-# THE THREE MODES DIFFER IN EXACTLY TWO PLACES, and nowhere else:
-#
-#   1. WHICH OPERATOR the local problem is posed with -- `_expanding_krylov`'s `applyH`.
-#   2. HOW THE TRIDIAGONAL IS REDUCED to an answer -- the `SStepSolver` below.
-#
-# Everything in between (the growth passes, the sketch, the P_perp projection, the ranking,
-# the direct sum, the embedding of stored Krylov vectors into the grown basis, the full
-# reorthogonalisation) is byte-for-byte the same code in all three. That is the point: the
-# ground-state solver is a DROP-IN REPLACEMENT FOR THE S STEP, sharing the identical Krylov
-# basis, not a second algorithm that happens to look similar.
+# ── PART II: CBE as the basis update of the gate-based bond_update_bug ──
+# The three modes differ only in the operator posed to `_expanding_krylov` and in the S-step solver;
+# the growth, sketch, projection, ranking and reorthogonalisation are shared code.
 
 # ── the S step: what to do with the Krylov space once it is built ─────────────
 
@@ -176,19 +128,12 @@ end
 """
     LowestEigen()
 
-The lowest Ritz vector of `H_eff` in the accumulated Krylov space -- a DMRG local solve.
-
-REPLACES the exponential, keeps the basis. Returns a NORMALISED vector: unlike the
-propagator, which scales the core by `beta0` to carry the state's weight, an eigenvector
-carries no scale and the surrounding sweep is a variational minimisation of a unit-norm
+The lowest Ritz vector of `H_eff` in the accumulated Krylov space: a DMRG local solve that replaces
+the exponential and keeps the basis. The result is normalised, since the sweep minimises a unit-norm
 state.
 
-THE OPERATOR THIS IS GIVEN MUST INCLUDE THE ENVIRONMENTS. Handed the bare two-site gate it
-would minimise `<h_{i,i+1}>` at each bond independently, whose fixed point is not the global
-ground state -- each bond drives its own pair toward a local singlet and the next bond in
-the sweep undoes it. DMRG converges because its local operator is `L + h + R`, so a local
-minimisation lowers the TOTAL energy. See `apply_h_two_site` in `henv.jl`, and the header of
-`CBEBugOptions` for why the gate path cannot supply this.
+The operator must include the environments (`L + h + R`). Given the bare two-site gate, each bond
+would minimise its own pair and the next bond would undo it; see `apply_h_two_site` in `henv.jl`.
 """
 struct LowestEigen <: SStepSolver end
 
@@ -212,58 +157,14 @@ function _reduce_krylov(::LowestEigen, alpha, betas, beta0)
 end
 # ══════════════════════════════════════════════════════════════════════════════════════
 
-# CBE as the basis update of the GATE-BASED bond_update_bug -- the validated path.
-#
-# WHY THIS FILE EXISTS, AND WHY IT COMES FIRST.
-#
-# `cbe_lubich.jl` puts CBE inside the Lubich/Sulz basis sweep: K-sweep, L-sweep, one centre
-# Galerkin, an environment-dressed effective H. That sweep is the eventual target, but it means a failure has four
-# possible homes -- the sweep, the channel environments, the CBE selection, or the placement
-# of the single Galerkin step. The rank stall could not be pinned to any of them.
-#
-# `BondUpdateBUG.parity_sweep!` + `kls_bond_update` is the OTHER integrator, and it is
-# validated: odd/even Trotter, one commuting bond group at a time, exact within a group,
-# full-rank-exact, unitarity-locked. Dropping CBE into THAT removes three of the four
-# suspects at once:
-#
-#   * no environments at all -- the Hamiltonian at a bond IS the gate, purely local, so
-#     `henv.jl` and the whole stale/fresh-channel question is out of the picture;
-#   * no sweep to get wrong -- `canonical!(psi, i)` before each bond, exactly as the
-#     validated sweep does, so every frame is a true canonical snapshot;
-#   * no Galerkin-placement question -- there is one Galerkin step per bond and it is the
-#     step the validated integrator already takes.
-#
-# What is left is precisely the piece under suspicion: does the CBE selection admit the
-# directions the dynamics needs? If rank grows here, the selection is sound and the fault in
-# `cbe_lubich.jl` is in the sweep. If it stalls here too, the selection is the fault, and it is
-# now isolated with nothing else to blame.
-#
-# The selection code is SHARED, not reimplemented: `cbe_expand_bond` calls the same
-# `cbe_expand(f, skl, skr; ...)` core as the MPO path, differing only in the two sketch
-# closures. So this file is a genuine test of the selection the Lubich sweep depends on.
-#
-# WHAT IT REPLACES IN `kls_bond_update`. Both of that kernel's basis mechanisms, together:
-#
-#   * the two K/L ODE solves (`expv` on `P_perp H_K`, non-Hermitian, Arnoldi). CBE supplies
-#     the same DIRECTIONS from one sketched application of the gate, with no exponential;
-#   * `missing_fill`, the per-sector random seed. The sector-graded sketch reaches an
-#     empty-but-reachable sector THROUGH the gate, so what comes back is the direction the
-#     dynamics wants rather than a random column the S-step SVD then discards.
-#
-# The S-step is unchanged and deliberately so -- it is the Galerkin step of the validated
-# integrator, `S_hat0 = U_hat' Theta0 V_hat'` with no overlap matrices, Hermitian, Lanczos.
+# ── CBE as the basis update of the validated gate-based integrator ──
+# A gate-only path has no environments, so a rank stall here isolates the CBE selection itself, which
+# is shared with the MPO path. It replaces the K/L ODE solves and the random sector fill of
+# `kls_bond_update`.
 
-# ── the sketched gate action ──────────────────────────────────────────────────
-#
-# NEVER FORMS `H Theta`. The rank-4 two-site object is what 2-site TDVP builds and what this
-# method promises not to allocate, and `cbe.jl`'s header spells out why sketching after the
-# fact would be a strawman: with `H Theta` in hand its exact left SVD beats any sketch of
-# it. So `Om` is folded into the gate FIRST -- `gate` is `d^4`, `Om` is thin, and the
-# largest intermediate is `O(d^2 * g * r)`.
-#
-# The guard is `sketch_bond_left(f, gate, Om) == P_perp(contract(apply_gate(gate, Theta), Om'))` for
-# arbitrary `Om`, against `apply_gate`, which is itself pinned to the analytic Heisenberg
-# block element-for-element (`tests/BondUpdateBUG/test_gates.jl`).
+# ── the sketched gate action ──
+# Never forms H*Theta: `Om` is folded into the gate first, so the largest intermediate is O(d^2 g r).
+# Checked against `P_perp` of `apply_gate` on Theta, for arbitrary `Om`.
 
 "Check `gate` is tagged for the bond `f` describes, as `apply_gate` does for `theta`."
 function _check_gate(f::BondFrame, gate)

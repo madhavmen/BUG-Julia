@@ -1,30 +1,8 @@
-# THE BENCHMARK MODELS: SU(2) HALDANE-SHASTRY ON A RING, AND HEISENBERG.
-#
-# Both are built from ONE coupling matrix handed to `pair_mpo`, and the SPIN VERTICES are read
-# off the symmetry mode in force. That is the whole point of the arrangement: the operator is
-# specified once, as `Σ_{i<j} J[i,j] S_i . S_j`, and `:none`, `:U1` and `:SU2` differ only in
-# how many vertices the algebra needs to express `S . S` -- three (`Sp Sm`, `Sm Sp`, `Sz Sz`)
-# for the abelian modes, ONE irreducible vertex for SU(2). Same operator, same physics,
-# different virtual dimension. Nothing else about the models is symmetry dependent.
-#
-# HALDANE-SHASTRY, as written in arXiv:2208.10972 (the CBE-TDVP paper, which is where this
-# benchmark comes from):
-#
-#     H_HS = J Σ_{l<l'} [ pi^2 / ( L^2 sin^2( pi (l - l') / L ) ) ] S_l . S_l'
-#
-# THE RING IS ALREADY IN THE COUPLING, and this is worth being explicit about because it looks
-# like something is missing. There is no wrap-around term to add on top: `sin^2` is periodic,
-# so the pair `(1, L)` -- nominally the most distant pair on an open chain -- has
-# `sin^2(pi (L-1)/L) = sin^2(pi/L)`, i.e. it is as STRONG as a nearest-neighbour pair. The
-# chord-distance geometry of the ring is what the coupling matrix says. The MPS itself stays
-# an open chain; it is the Hamiltonian that closes the ring, which is exactly why an exact
-# all-pairs MPO is needed rather than a nearest-neighbour one.
-#
-# WHY `pair_mpo` AND NOT AN EXPONENTIAL FIT. `1/sin^2` has no finite-dimensional MPO, so a
-# self-loop construction would have to fit it, and the fit error is a property of the
-# HAMILTONIAN being simulated -- it is not separable from a result afterwards, and quoting an
-# integrator error against a fitted `H` quotes an unstated model. `pair_mpo` spends `O(L)`
-# virtual dimension and is EXACT, so every number measured against it is an integrator number.
+# ── benchmark models: SU(2) Haldane-Shastry on a ring, and Heisenberg ──
+# The ring is in the coupling itself (1/sin^2 is periodic), so the pair (1, L) is as strong as a
+# neighbour pair. The symmetry mode only changes the number of spin vertices.
+# `pair_mpo` is exact at O(L) virtual dimension, unlike a fitted exponential, so measured errors are
+# integrator errors.
 
 # ── the spin vertices of the mode in force ───────────────────────────────────
 

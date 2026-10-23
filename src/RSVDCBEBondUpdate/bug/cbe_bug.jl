@@ -1,52 +1,12 @@
 """
     cbe_bug_step!(psi, mpo, tau; kwargs...) -> CBEBugSweepInfo
 
-ONE step of the CBE-BUG sweep, in place. `tau = -im*dt` is real time and `tau = -dt` imaginary
-time; nothing here cares which, and the caller renormalises.
+One step of the CBE-BUG sweep, in place. `tau = -im*dt` is real time, `tau = -dt` imaginary; the
+caller renormalises. Only the root bond evolves; both half-sweeps just generate bases.
 
-THERE IS ONE SWEEP. Both half-sweeps are BASIS GENERATORS -- CBE widens each bond, the frame is
-built from that bond's Krylov space, the environment is pushed through it, and no site tensor is
-ever evolved. The single Galerkin solve at the root bond is the only evolution in the step.
-
-  left -> root   `U_ex` becomes `W[i]`;  right -> root   `V_ex` becomes `Z[j]`
-
-so every bond is widened from BOTH sides before the root sees it.
-
-⛔ THE K-STEP, `kaug` AND `rexpand` ARE GONE (2026-08-24): they evolved a one-site tensor per
-bond and then restored the width the split cost; this sweep was measured cheaper and as accurate
-or better on every model tested (`docs/PLAN-tolerance-control.md`, `git log`).
-
-Keywords:
-
-  - `tol_basis`, `tol_trunc`, `tol_expv` (alias `tol_root`), `maxdim` -- the three tolerances and
-    the one resource limit (`adaptive_budget.jl`). `tol_basis` drives the DD-QR CBE
-    ([`dd_cbe_expand`](@ref)) and the local Krylov stage, `tol_trunc` the one closing compression,
-    `tol_expv` the root solve.
-  - `order` -- the temporal order `p` (default `1`, the ordinary step). For `p > 1` the frames
-    the half-sweeps built are grown until the root generator `B = P(tau H)P` reproduces the
-    global Krylov moments `B^j psi = (tau H)^j psi`, `j <= p`: each projected frontier
-    `F_j = (tau^j/j!) B^j S0`, `j = 1..p-1`, is embedded as an MPS and swept ONCE with the same
-    CBE / Tests C/D kernels, which enrich every bond whose outside-space action exceeds its share
-    of `tol_basis` (`krylov_closure.jl`). `closure_checks = true` adds the validation measurements
-    (check first, repeat until a pass adds nothing, final `j = 0`). One root `expv`, one
-    compression, as always. `ledger.leak`,
-    `ledger.defect`, `ledger.n_passes` and `ledger.closure_log` report it; failing to close is
-    `:budget_unmet` (`:closure`). An order is a CLAIM TO BE MEASURED, not a guarantee: finite
-    tolerances, the rank cap and the final compression set an error floor.
-
-  The half-sweep frame is built by [`_krylov_enrich`](@ref): it starts from the CBE frame `U_ex`
-  and appends Krylov directions only when Tests C/D (plan §4) find their weighted residual outside
-  the frame above `tol_basis`'s allowance; the depth follows from that, not from a count.
-
-  - `root` -- which bond takes the Galerkin step. Default `L/2`, a fixed point of the reflection
-    `b -> L - b` on an even chain, so the sweep is already spatially symmetric there.
-  - The root core split is LOSSLESS (plan §5): it keeps every nonzero singular value, so the
-    closing [`truncate_recursive!`](@ref) is the step's one compression. `maxdim` defaults to 128
-    (plan §1); `tol_trunc` is a budget on the CUMULATIVE relative discarded norm (`weight_tol`),
-    and exceeding it, e.g. because `maxdim` binds, makes the step `:budget_unmet` rather than
-    silently accepted. `truncate = false` disables it, a study configuration.
-  - `reorth` -- re-orthogonalisation in the root solve. `tol_expv` is its convergence test (Saad's
-    estimate) and drives its adaptive substep split (`ledger.expv_err`, `expv_iters`).
+Keywords: `tol_basis`, `tol_trunc`, `tol_expv` (alias `tol_root`) and `maxdim` (the resource limit,
+`adaptive_budget.jl`); `order` (temporal order `p`, see `krylov_closure.jl`); `root` (the Galerkin
+bond, default `L/2`); `reorth` (re-orthogonalisation in the root solve).
 """
 function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # ── THE API: three tolerances and one resource limit ──────────────
@@ -100,13 +60,11 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # (`KLFrames`), for small-system diagnostics of the product space the step
                        # integrated in (plan T3.5 Taylor leak). Never read by the step.
                        frames_report::Union{Nothing, Base.RefValue} = nothing,
-                       # ── THE TRIAL SPACE IS CONSTRAINED TO CONTAIN THESE STATES (plan Task 2) ──
-                       # Each half-sweep carries every `keep_states` MPS through the new frames, as
-                       # it carries `psi`, and unions its local part into the frame, so the root
-                       # space contains each of them exactly. For an MPDO, keeping `|I>>` makes the
-                       # Galerkin step TRACE-PRESERVING before the compression: `<<I|P = <<I|` and
-                       # `<<I|L = 0` give `d/dt <<I|rho>> = <<I|P L P rho>> = 0`. The states must
-                       # share `psi`'s site legs; `[]` is the ordinary step, bit for bit.
+                       # ── TRIAL SPACE CONTAINS `keep_states` (plan Task 2) ──
+                       # Each half-sweep carries these MPS through the new frames, so the root space
+                       # contains each one exactly. Keeping `|I>>` makes an MPDO step
+                       # trace-preserving before the compression. The states must share `psi`'s site
+                       # legs; `[]` is the ordinary step.
                        keep_states::AbstractVector = Any[],
                        # ⚠ DEBUG REFERENCE (plan: exact DD references debug-only). `true` draws the
                        # complete DD-projected probe instead of the randomised one.
@@ -125,23 +83,10 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # The half-sweep basis needs no flag: it already builds the full
                        # upper-Hessenberg projection, which is the tridiagonal when H = H'.
                        hermitian::Bool = true,
-                       # ⛔ RUN THE TWO HALF-SWEEPS CONCURRENTLY. They share no data: the left
-                       # reads the state canonical at 1 and writes `W`, the right reads it
-                       # canonical at `L` and writes `Z`, and neither reads the other's output.
-                       # The single Galerkin solve that needs both runs after both.
-                       #
-                       # ⚠ NEEDS `julia -t 2`. On one thread the tasks interleave on one worker
-                       # and this is the sequential step plus scheduling overhead -- a small
-                       # pessimisation, not a no-op, which is why it is off by default.
-                       #
-                       # ⚠ THE RESULT IS NOT BIT-IDENTICAL TO THE SEQUENTIAL ARM, and that is
-                       # expected rather than a defect: each sweep now re-gauges its OWN copy of
-                       # the state, so `canonical!(psiL, 1)` runs from the incoming centre instead
-                       # of from wherever the other sweep left it. Same spaces, different
-                       # floating-point path. `tests/rsvd_cbe/` pins the agreement at 1e-10.
-                       # The plan's spelling is accepted too: `:serial` / `:half_sweeps`
-                       # (`:full` is the Task 6 K/L/S integrator, schedule `:concurrent` unless
-                       # `kls` names one; `_resolve_parallel`).
+                       # ── `parallel`: the two half-sweeps run concurrently ──
+                       # They share no data; only the root solve needs both. Needs `julia -t 2` or
+                       # more, off by default. Roundoff-level differences from serial. `:full`
+                       # selects the K/L/S integrator.
                        parallel::Union{Bool, Symbol} = false,
                        # ⚠ A DIFFERENT INTEGRATOR, set by `parallel_kls_step!` (plan Task 6): the
                        # parallel K/L/S step in the preliminary frames, with this K/L/S schedule
@@ -182,12 +127,10 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     # Plan §1 signature: `maxdim = 128`.
     maxdim = something(maxdim, 128)
 
-    # The per-bond, per-test allowances `tol_basis` buys, plus the `|tau|/||psi||` scale every
-    # residual is measured in.
-    # ⚠ THE NORM COMES FROM THE CENTRE TENSOR, which carries the state's whole norm only while
-    # the state is canonical -- true on entry for every caller here, since the sweeps gauge
-    # before they read. Guarded anyway: an out-of-range `center` gives 1.0 (an unnormalised
-    # relative scale) rather than a bounds error from a diagnostic.
+    # The per-bond, per-test allowances `tol_basis` buys, and the `|tau|/||psi||` scale every
+    # residual is measured in. The norm comes from the centre tensor, which carries the whole norm
+    # only while the state is canonical (the sweeps gauge before reading). An out-of-range `center`
+    # falls back to 1.0 rather than erroring in a diagnostic.
     _nrm = (1 <= psi.center <= L) ? norm(psi[psi.center]) : 1.0
     # Plan T3.2: DD-QR spends `tol_basis` as a linear sum of shares.
     alloc  = basis_allocation(budget, L - 1; tau = tau, nrm = _nrm, nfront = order,
@@ -230,21 +173,11 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     W = Vector{Any}(undef, c)          # augmented LEFT frames,  sites 1 … c
     Z = Vector{Any}(undef, L - 1)      # augmented RIGHT frames, Z[j] absorbs site j+1
 
-    # The half-sweeps are independent (`half_sweeps.jl`): the left one runs on its own copy
-    # of the state, `psi` itself stays the `L`-canonical one every assembly below reads.
-    # ⛔ `frame_state` DECOUPLES *WHERE THE BASES COME FROM* FROM *WHAT IS BEING EVOLVED*, which
-    # is the one structural thing the midpoint BUG integrator (arXiv:2402.08607) needs and the
-    # standard step does not. There the bases come from a HALF-STEP state `Y_{1/2}` while the
-    # Galerkin ODE is still integrated over the FULL step starting from the ORIGINAL `Y_0`.
-    #
-    # ⛔ AND THE START VECTOR IS THE TRAP. `S0` is `<frames | state>`; feeding the half-step state
-    # into BOTH would integrate the second half twice and quietly produce a first-order scheme
-    # that still looks convergent. `AL` is already recomputed against `psi` below, but `AR` is
-    # taken from the right sweep's CARRY -- so with a separate frame state that carry projects the
-    # WRONG state, and `AR` has to be rebuilt against `psi` too. See the `AR` block below.
-    #
-    # When `frame_state === nothing`, `psiR` IS `psi` (aliased, not copied) and every line below is
-    # the historical one.
+    # ── `frame_state`: bases from one state, evolution from another ──
+    # The midpoint BUG integrator (arXiv:2402.08607) takes its bases from `Y_{1/2}` but integrates
+    # the Galerkin ODE over the full step from `Y_0`. The start vector `S0 = <frames|Y_0>` must not
+    # come from the half-step state, or the second half would be integrated twice. `psi` stays
+    # L-canonical so that all assembly reads one gauge; with no `frame_state`, `psiR` aliases `psi`.
     psiL = copy(frame_state === nothing ? psi : frame_state)
     psiR = frame_state === nothing ? psi : copy(frame_state)
 
@@ -270,17 +203,11 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     epre = max(accL.epre, accR.epre)
     efnl = max(accL.efnl, accR.efnl)
 
-    # ⛔ A SEPARATE `frame_state` MEANS THE RIGHT SWEEP NEVER TOUCHED `psi`, and two things the
-    # default path got for free now have to be done explicitly:
-    #
-    #   1. GAUGE. `_half_right!` used to leave `psi` L-canonical, and `AL`/`AR` below must both be
-    #      contracted in ONE gauge -- the file's own warning at the sweep is that mixing two is
-    #      "silently wrong rather than an error".
-    #   2. `AR`. The default path takes it from the right sweep's carry `D`, which is
-    #      `<Z | frame_state>`. For the midpoint scheme the Galerkin step must START FROM `Y_0`,
-    #      so it needs `<Z | psi>`. Reusing the carry would integrate the first half-step twice
-    #      and quietly reduce the method to first order while still converging -- the failure
-    #      that would be hardest to spot afterwards.
+    # ── with a separate `frame_state`, the right sweep no longer touches `psi` ──
+    # Gauge: `AL` and `AR` must be contracted in one gauge, since mixing them is silently wrong
+    # rather than an error. `AR` must be `<Z|psi>`, not the right carry `<Z|frame_state>`: the
+    # midpoint's Galerkin step starts from `Y_0`, and reusing the carry integrates the first
+    # half-step twice, quietly making the method first order.
     if frame_state !== nothing
         canonical!(psi, L)
         AR = _overlap_right(psi, Z, c)           # mirrors `_half_right!`'s `D` recursion on `psi`
@@ -318,13 +245,11 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                                 parallel = parallel, rng = copy(rng), fold = fold_omega)
         merge_ledger!(ledger, pr.ledger)
     end
-    # PLAN §5 `state_projection_error`: how much of `psi` the frames miss. `psi` is canonical at
-    # `L` here (`_half_right!` or the `frame_state` re-gauge above). On the ordinary
-    # step the frames CONTAIN `psi` and this is roundoff -- a K/L cut of a physical direction
-    # would show up here; on the midpoint's second stage it is the genuine error of projecting
-    # `Y_0` onto frames built from `Y_{1/2}`, charged against `tol_basis`. Measured directly:
-    # `sqrt(||psi||^2 - ||S0||^2)` read ~1e-8 of pure cancellation and flagged steps at
-    # `tol_basis` 1e-7 (s40, IT-1 L=16).
+    # PLAN §5 `state_projection_error`: how much of `psi` the frames miss. On the ordinary step the
+    # frames contain `psi`, so this is roundoff; on the midpoint's second stage it is the genuine
+    # error of projecting `Y_0` onto frames built from `Y_{1/2}`, charged against `tol_basis`. The
+    # norm is taken from the state, not from `sqrt(||psi||^2 - ||S0||^2)`, which is pure
+    # cancellation at ~1e-8 and would flag steps spuriously.
     npsi = norm(psi[psi.center])
     ledger.r_aug = max(maximum(expanded; init = 0), leg_dim(Z[c], 1))
     ledger.proj_err = npsi > 0 ? _projection_miss(psi, W, Z, c) / npsi : 0.0
@@ -332,12 +257,10 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     peak = accL.peak + accR.peak +
            sum(tensor_elements(t) for t in (W[c], Z[c], S0); init = 0)
 
-    # Plan Task 6: the parallel K/L/S step's K and L stages start from `psi` in these frames
-    # before the root solve, so `:concurrent` overlaps them with it; the root solve below is its
-    # S stage, and `_kls_finish` merges the three after it. Same integrator settings as the root.
-    # Plan §1/§4 (Stage 5): `tol_expv` IS the root solve's convergence test (Saad's estimate) and
-    # drives its substep split (`substeps = 0`), so the iteration count follows from it. The
-    # per-substep basis cap and the breakdown threshold are numerical, not accuracy, settings.
+    # Plan Task 6: the K and L stages of the parallel K/L/S step start from `psi` in these frames
+    # and run beside the root solve (the S stage), and `_kls_finish` merges the three. `tol_expv`
+    # drives the root solve's substep split (`substeps = 0`), so the iteration count follows from
+    # it; the basis cap and breakdown threshold are numerical settings only.
     kls_stage(apply, x, rep) = expv(apply, tau, x; hermitian = hermitian,
                                     maxiter = _ROOT_MAXITER, tol = 1e-15, reorth = reorth,
                                     conv_tol = budget.expv, substeps = 0, report = rep,
@@ -366,15 +289,9 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         out = outside_residual ? outside_of(S1) : nothing
         resid_of(o, S) = o === nothing ? NaN : abs(tau) * o.bound / max(norm(S), eps())
         resid0 = resid_of(out, S1)
-        # RE-ENRICH / RE-SOLVE ON THE FAILING RESIDUAL (plan Task 1: "re-enrich/re-solve or reject
-        # if the basis is insufficient"; USER 2026-10-18). The closure's shares can all be met while
-        # the evolved state's own outside action is not: its higher Krylov frontiers are unclosed,
-        # and re-running the closure (`closure_checks`) then adds nothing -- MEASURED d51 17346845,
-        # IT-1 L=16 Neel bug2 tb 1e-7: resid 2.44 tb before and after that retry. So the frames are
-        # grown by the enriching sweep of `S1` ITSELF -- the sweep `outside_of` runs measuring-only,
-        # with the same per-bond shares -- and the root is re-solved in them, until the defect fits,
-        # nothing is added, or the work ceiling binds. The frames only grow (old directions kept
-        # verbatim), so `psi` stays in their span and `S0` is its exact projection.
+        # ── re-enrich and re-solve on the failing residual (plan Task 1) ──
+        # The closure can meet its shares while the outside action fails: grow frames by S1's own
+        # sweep, re-solve the root until the defect fits, nothing is added, or the ceiling binds.
         npass, nadded = 0, 0
         if outside_residual
             while !(resid_of(out, S1) <= budget.basis) && npass < _closure_maxpass(order)
@@ -415,7 +332,8 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                          outside = out === nothing ? NaN : out.bound / n1,
                          outside_left = out === nothing ? NaN : out.left / n1,
                          outside_right = out === nothing ? NaN : out.right / n1,
-                         # per bond (left frames 1..c, right frames c..L-1), scale-free like the above
+                         # per bond (left frames 1..c, right frames c..L-1), scale-free like the
+                         # above
                          per_left = out === nothing ? Float64[] : out.per_left ./ n1,
                          per_right = out === nothing ? Float64[] : out.per_right ./ n1,
                          # the step's outside-Galerkin defect, `|tau| ||(I-P) H psi_1|| / ||psi_1||`

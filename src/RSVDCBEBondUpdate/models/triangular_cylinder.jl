@@ -1,79 +1,8 @@
-# ── the triangular lattice on a cylinder, as a coupling matrix ───────────────
-#
-# TWO INEQUIVALENT WRAPPINGS, and arXiv:2209.00739 uses the second one. This file builds the
-# coupling matrix and nothing else; `pair_mpo` turns it into the operator.
-#
-# ⛔ `XC` AND `YC` ARE DIFFERENT HAMILTONIANS, NOT DIFFERENT LABELS FOR ONE. A cylinder is the
-# quotient of the plane by ONE lattice translation `T`, and the two conventions choose different
-# `T`. Sec. IIB of arXiv:2209.00739: "The boundary conditions in Fig. 1 is the XC boundary
-# condition, and the YC boundary condition would be if we identified the left and right edges
-# rather than the top and bottom."
-#
-#     YC   T = C*a2                 a straight row of C nearest-neighbour bonds,  |T| = C
-#     XC   T = C*a1 - (C/2)*a2      a ZIGZAG of C bonds, vertical,  |T| = sqrt(3)*C/2
-#
-# with the paper's `a1 = (1/2, sqrt3/2)`, `a2 = (1, 0)`. They are not related by any lattice
-# symmetry -- the lengths differ by `sqrt(3)/2` -- so a run cannot be relabelled from one to the
-# other after the fact. **`geometry = :xc` REQUIRES AN EVEN `C`**, because `T` is not a lattice
-# vector otherwise; the zigzag has a two-site period and cannot close on an odd ring.
-#
-# ⛔⛔ THE WRAPPING DECIDES WHICH MOMENTA EXIST, AND THAT IS WHY THE PAPER PICKED XC. Allowed `q`
-# satisfy `q.T in 2*pi*Z`. For XC, `T` is vertical, so the condition constrains ONLY `q_y`
-# (Eq. 8), and `q_x` is set by the open direction alone (Eq. 9):
-#
-#     XC:   q_y = 4*pi*n/(sqrt3*C)          q_x = 2*pi*n/L
-#     YC:   q.(C*a2) in 2*pi*Z              -- lines TILTED at 120 deg, mixing q_x and q_y
-#
-# The ordering wavevector `K = (4*pi/3, 0)` has `q_y = 0`, so **XC admits `K` at every even `C`,
-# and the whole `K -> Gamma` segment lies on the `n = 0` line** -- which is what makes Fig. 5 c)
-# (the dispersion measured from `K` towards `Gamma`) an exact cut rather than an interpolation.
-# Under YC, `K` is allowed only when `3 | C`, and `K -> Gamma` crosses the allowed tilted lines at
-# isolated points only. Paper, Sec. IIB: "Since most of the high symmetry q values are permitted
-# by the XC geometry, we use the XC geometry throughout this work."
-#
-# ⚠ THE REVERSE TRAP AT THE PAPER'S OWN `C = 6`: XC admits `M = (pi, pi/sqrt3)` only when `4 | C`,
-# so at `C = 6` only the image `M = (0, 2*pi/sqrt3)` is exact. The paper covers this by restoring
-# the `C6` symmetry (Eq. 10) rather than by measuring every image directly -- see the Fig. 2
-# caption, "the orange lines ... are the q values that are rotations of the allowed q values".
-#
-# ── INDEXING ─────────────────────────────────────────────────────────────────────────────────
-#
-# Both geometries use the same column-major snake `site(u, v) = (u - 1) * Ly + v`, `v` running
-# around the circumference, so `Lx` is always the LENGTH `L` in columns and `Ly` the
-# CIRCUMFERENCE `C`, and `N = Lx*Ly` either way.
-#
-# YC steps in the 120-degree integer basis `(dx, dy)`, where `|n e_x + m e_y|^2 = n^2 + m^2 - n m`
-# gives the NN shell `+-(1,0), +-(0,1), +-(1,1)` and the NNN shell `+-(1,-1), +-(2,1), +-(1,2)`.
-#
-# XC steps in HALF-INTEGER CARTESIAN coordinates scaled to integers,
-#
-#     X = 2*x_cartesian     Y = y_cartesian / (sqrt3/2)
-#
-# in which a site `(m, c)` sits at `Y = c - 1`, `X = 2*(m - 1) + ((c - 1) mod 2)` -- the odd rings
-# offset by half a lattice spacing, which IS the zigzag. In these coordinates the wrap is simply
-# `Y -> Y + C` with `X` unchanged, so **the ring bonds stay at chain distance ~C exactly as in YC**
-# and the MPO bond dimension does not blow up. Writing XC instead as a screw shift on the
-# 120-degree basis, `(x,y) == (x + C/2, y + C)`, is the SAME lattice but puts the wrap bond at
-# chain distance `C^2/2 - C + 1` (13 instead of 5 at `C = 6`) and inflates the MPO for nothing.
-#
-# ⚠ EVERY LATTICE SITE SATISFIES `X == Y (mod 2)`. Every NN/NNN step preserves that parity, and so
-# does the wrap `dY = C` ONLY BECAUSE `C` IS EVEN. `_tri_site_xc` asserts it rather than rounding,
-# so an odd `C` fails loudly instead of silently landing between sites.
-#
-# ⛔ EVERY BULK SITE MUST END WITH SIX NEIGHBOURS. That is the definition of the triangular
-# lattice, and it is the single cheapest thing to assert. A diagonal put on the WRONG corner still
-# gives six neighbours and still runs; it just builds the mirror lattice, which on an isotropic
-# Heisenberg model has the SAME energy -- invisible in the one number most likely to be checked.
-# `triangular_cylinder_bonds` exists so the geometry can be inspected directly instead.
-#
-# ⚠ AT SMALL CIRCUMFERENCE TWO DISTINCT NEIGHBOUR VECTORS CAN LAND ON THE SAME PAIR, and then that
-# pair genuinely carries twice the coupling -- both vectors exist in the infinite lattice and
-# wrapping does not remove one. `put!` uses `+=` precisely so this ACCUMULATES and is visible,
-# instead of one vector silently overwriting the other. It is a property of the geometry, not a
-# bug -- but it does mean a small-`C` cylinder is not a small version of a large-`C` one.
-#
-# ⚠ `J2` OPENS THE LONGEST CHANNEL and is what sets the MPO bond dimension once `J2 != 0`. Read it
-# off `mpo_virtual_dims`; do not assume it is the `J1` value plus a constant.
+# ── the triangular lattice on a cylinder, as a coupling matrix ──
+# `:yc` and `:xc` are different Hamiltonians, not relabellings; `:xc` (arXiv:2209.00739) needs an even
+# circumference and admits K = (4pi/3, 0) at every even C.
+# Check the geometry with `triangular_coordination`: a diagonal on the wrong corner still runs, but it
+# builds the mirror lattice with the same isotropic energy.
 
 """
 The three NEAREST-neighbour steps of the YC wrapping, as `(dx, dy)` in the 120-degree integer
@@ -163,12 +92,10 @@ end
 "Reject an offset that reaches the same site by `+d` and `-d`, which would double-count the bond."
 function _tri_check_alias(Lx::Int, Ly::Int, offsets, geometry::Symbol,
                           periodic_x::Bool, periodic_y::Bool)
-    # ⛔ THE ALIAS TEST IS JOINT ACROSS THE TWO DIRECTIONS, NOT ONE RULE PER DIRECTION. Walking
-    # `+delta` from every site double-counts a bond only when `+delta` and `-delta` reach the SAME
-    # site, and the OPEN direction alone is enough to keep them apart: `(1,2)` at `Ly = 4` is a
-    # perfectly good YC bond because the `x` index still distinguishes the two ends, even though
-    # `+2 == -2` around a ring of 4. A naive per-direction bound (`Ly >= 2|dy|+1`) would refuse it
-    # -- and that is exactly the `C = 4` column of Fig. 3 in arXiv:2209.00739.
+    # The alias test is joint across both directions, not one rule per direction. Walking +delta from
+    # every site double-counts a bond only when +delta and -delta reach the same site. The open direction
+    # alone keeps the two ends apart (e.g. (1,2) at Ly = 4), so a per-direction bound would wrongly refuse
+    # valid bonds.
     xper = geometry === :yc ? Lx : 2 * Lx
     for (da, db) in offsets
         ax = periodic_x ? mod(2 * da, xper) == 0 : da == 0
@@ -201,26 +128,13 @@ end
     triangular_cylinder_couplings(Lx, Ly; J=1.0, J2=0.0, geometry=:yc,
                                   periodic_y=true, periodic_x=false) -> Matrix{Float64}
 
-`J[i,j]` for the `J1-J2` triangular lattice on `Lx x Ly` sites under the column-major snake
-`site(u, v) = (u - 1) * Ly + v`, with `Lx` the LENGTH in columns and `Ly` the CIRCUMFERENCE.
-This is Eq. (1) of arXiv:2209.00739 with `J1 = J`.
+`J[i,j]` for the J1-J2 triangular lattice, column-major snake `site(u, v) = (u - 1) * Ly + v`, with
+`Lx` the length and `Ly` the circumference (Eq. (1) of arXiv:2209.00739, `J1 = J`).
 
-`geometry` picks the wrapping, and the two are DIFFERENT HAMILTONIANS -- see the file header.
+`geometry = :yc` (default) closes left-right; `:xc` (the paper's, `Ly` even) closes top-bottom.
 
-  - `:yc` (default, backwards-compatible) identifies the left and right edges: the circumference
-    is a straight row of `Ly` nearest-neighbour bonds.
-  - `:xc` is **the paper's choice throughout**: it identifies top and bottom, the circumference is
-    a zigzag, and `Ly` must be EVEN. Use this for anything reproducing Figs. 3-8, because it is
-    what makes `K = (4*pi/3, 0)` an exact momentum.
-
-`periodic_x = true` closes the cylinder into a **torus**, the geometry the exact-diagonalisation
-anchors are quoted on -- see `benchmarks/ground_state/`. `periodic_y = false` is meaningful only
-for `:yc`.
-
-Returns the STRICTLY UPPER triangle, which is what [`pair_mpo`](@ref) reads.
-
-⚠️ A periodic direction is refused when a step of `+d` and one of `-d` land on the same site, since
-the ring would then double-count the bond rather than wrap it.
+Returns the strictly upper triangle that [`pair_mpo`](@ref) reads. `periodic_x = true` closes a torus;
+a periodic direction is refused when +d and -d land on the same site.
 """
 function triangular_cylinder_couplings(Lx::Int, Ly::Int; J::Float64 = 1.0, J2::Float64 = 0.0,
                                        geometry::Symbol = :yc,
@@ -252,15 +166,12 @@ end
     triangular_cylinder_mpo(Lx, Ly; J=1.0, J2=0.0, geometry=:yc, periodic_y=true,
                             periodic_x=false) -> MPO
 
-Heisenberg `H = J Σ_<ij> S_i · S_j` on the triangular cylinder, in whatever symmetry mode is
-active. Built through [`pair_mpo`](@ref) and [`spin_vertices`](@ref), so `:none`, `:U1` and `:SU2`
-all route through the same code. `geometry` is as in
-[`triangular_cylinder_couplings`](@ref) -- pass `:xc` to match arXiv:2209.00739.
+Heisenberg `H = J sum_<ij> S_i . S_j` on the triangular cylinder in the active symmetry mode, built
+through [`pair_mpo`](@ref) and [`spin_vertices`](@ref). `geometry` is as in
+[`triangular_cylinder_couplings`](@ref); pass `:xc` to match arXiv:2209.00739.
 
-⚠️ THIS LATTICE IS FRUSTRATED. Nearest-neighbour antiferromagnetic Heisenberg on a triangle has no
-classical Néel ground state, so a `neel_state` start is a poor guess and the bond dimension needed
-for a given accuracy is markedly higher than on the square cylinder at the same site count. That is
-physics, not an integrator problem -- do not read it as one.
+The lattice is frustrated: a Neel start is a poor guess and the bond dimension needed is markedly
+higher than on the square cylinder at the same site count. That is physics, not an integrator bug.
 """
 triangular_cylinder_mpo(Lx::Int, Ly::Int; J::Float64 = 1.0, J2::Float64 = 0.0,
                         geometry::Symbol = :yc,
@@ -295,15 +206,12 @@ end
     triangular_coordination(Lx, Ly; geometry=:yc, periodic_y=true, periodic_x=false,
                             nnn=false) -> Vector{Int}
 
-Neighbour count per site. **Every site of a wrapped cylinder away from the two open ends must have
-six** -- this is the assertion that separates a triangular lattice from a square one with a stray
-bond, and it is cheap enough to run in any test that builds the geometry. On a torus
-(`periodic_x = true`) EVERY site must have six, with no ends to exclude. `nnn = true` counts the
-`J2` shell instead, which must also be six in the bulk.
+Neighbour count per site. Every bulk site of a wrapped cylinder must have six (on a torus, every
+site), which separates a triangular lattice from a square one with a stray bond. `nnn = true` counts
+the J2 shell, which must also be six in the bulk.
 
-⚠️ Under `:xc` the two open ends are RAGGED, not flat: the zigzag means the odd rings of the end
-column stick out half a lattice spacing, so the under-coordinated set is not simply "column 1 and
-column Lx". Select bulk sites by coordination, not by column index.
+Under `:xc` the open ends are ragged, since the odd rings of the end column stick out half a spacing.
+Select bulk sites by coordination, not by column index.
 """
 function triangular_coordination(Lx::Int, Ly::Int; geometry::Symbol = :yc,
                                  periodic_y::Bool = true,

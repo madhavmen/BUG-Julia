@@ -9,31 +9,12 @@ const _DD_HOLDOUT = 4
     _dd_controller(frame, side, draw, sketch, project, w0, wcap, ncap, alloc, ledger;
                    kc, s, audit, holdout, trace) -> (Q, status)
 
-Plan T3.1-T3.4: grow the DD basis `Q` of one side BLOCK BY BLOCK until an independent DD holdout
-says the rest of `G = P^D X P^D` fits this side's share, `alloc.sample`.
+Grows the DD basis `Q` of one side block by block until an independent holdout says the rest of
+`G = P^D X P^D` fits this side's share `alloc.sample`. Each probe block is streamed through the MPO
+once and its action cached; a failed check draws a fresh holdout before promoting the old one.
 
-Every probe block is streamed through the MPO ONCE and its action cached: a candidate block's
-action is QR-appended against `[frame, Q]` (`_dd_select` on the grown frame, so the old
-directions stay verbatim and the two-pass floor of T2.4 applies per block), and a holdout's
-action is kept for its residual `rho^2 = sum_q ||(I - QQ') Z_q||^2 / n_q` (the per-sector
-normalisation of [`_sample_residual`](@ref)), re-measured against each larger `Q` by thin
-projections only. On a failed check a NEW independent holdout is drawn first, and only then is
-the old holdout's cached action promoted into `Q`, together with one new candidate block (the
-sectors the holdout named doubled, [`_target_sectors!`](@ref), else the base width doubled).
-
-ESCALATION (T3.3). A passing check is re-checked ONCE with a fresh holdout of width `2s` when it
-is borderline (`ind > alloc.sample / 2`), when `Q` holds a sector the frame did not (a newly
-reachable DD sector), or in `audit` mode; the re-check's verdict stands.
-
-TERMINATION (T3.4). Statuses: `:met`; `:work_limited` when the streamed columns reached `wcap`
-or the rank reached the admission limit `ncap` (`ledger.workcap_reached`); `:basis_limited`
-when a whole failed pass added no direction (numerical rank exhausted, an unchanged residual);
-`:empty` when no probe exists (no discarded space). Every continuing pass streams at least the
-`s` columns of its new holdout and adds at least one direction, so the loop ends after at most
-`min(ncap, wcap / s)` passes, whatever the spectrum. Both failures record `:sample` in the
-ledger. `holdout(w)` defaults to `draw(w, nothing)`; a separate distribution only in tests.
-`trace`, when given, receives `(rank, ind, ind_first)` per check, `ind_first` the FIRST
-holdout's cached residual re-measured against the current `Q` (T3 acceptance: nonincreasing).
+Statuses: `:met`; `:work_limited` (`wcap` or `ncap` reached); `:basis_limited` (a pass added no
+direction); `:empty` (no discarded space). Every continuing pass adds a direction, so the loop ends.
 """
 function _dd_controller(frame, side::Symbol, draw, sketch, project, w0::Int, wcap::Int,
                         ncap::Int, alloc::BasisAllocation, ledger::Union{Nothing, AdaptiveLedger};
@@ -120,14 +101,10 @@ end
     dd_cbe_expand(f, mpo, i, lenv, renv, side; alloc, ledger, workcap, growth,
                   exact, rng, kc) -> CBEExpansion
 
-Grow ONE frame at bond `(i, i+1)` -- `U0` for `side = :left` (the K-sweep), `V0` for
-`:right` (the L-sweep) -- by DD-projected, MPO-streamed, QR-only CBE; the other frame is
-returned unchanged. Rank comes from the numerical rank of the QR; the probe width from the
-incremental DD holdout controller [`_dd_controller`](@ref) (plan T3.1; holdout width
-`holdout_width`, `audit` forces the escalated re-check), or with `alloc === nothing` / `exact`
-from the numerical-rank stop alone.
-The retained directions are bounded by the local room and the work ceiling (a resource bound,
-reported as `workcap_reached`).
+Grows ONE frame at bond `(i, i+1)`: `U0` for `side = :left` (K-sweep), `V0` for `:right` (L-sweep).
+The other frame is returned unchanged. Rank comes from the QR; the probe width from
+[`_dd_controller`](@ref), or from the numerical rank alone when `alloc === nothing` or `exact`.
+Retained directions are bounded by the local room and the work ceiling.
 """
 function dd_cbe_expand(f::BondFrame, mpo::MPO, i::Int, lenv::MPOLink, renv::MPOLink,
                        side::Symbol; alloc::Union{Nothing, BasisAllocation} = nothing,

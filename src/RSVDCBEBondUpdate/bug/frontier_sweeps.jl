@@ -1,21 +1,15 @@
-# frontier_sweeps.jl: the frontier half-sweeps and their measurements (from `krylov_closure.jl`, included right after it).
+# frontier_sweeps.jl: the frontier half-sweeps and their measurements (from `krylov_closure.jl`,
+# included right after it).
 
 """
     _frontier_left(Fm, mpo, fr, tau, alloc, ckw; enrich, gen, workcap, amp, rng, nsample)
 
-The left half-sweep of one frontier MPS `Fm` (centre at the root, built from `fr`): bond by bond
-the current frame `fr.W[i]` is embedded into the grown basis of bond `i-1` (`U0 = Pm W[i]`, an
-overlap, not an assumption), the exact outside-space action of the frontier's two-site block is
-measured, and -- if it exceeds the bond's share and `enrich` -- the step's CBE
-([`_frontier_expand`](@ref)) and `_krylov_enrich` append validated directions to `U0`, which is
-kept verbatim. Returns the new frames (re-tagged to generation `gen`), the root environment, the
-bond ledger and the per-bond misses.
-
-A MEASURING sweep (`enrich = false`) grows nothing, so it runs in the frames themselves: `U0 =
-fr.W[i]` with no overlap `Pm` (identity there) and the generation's cached frame chain for `lch`
-([`_side_cache!`](@ref)). `chain` returns the `lch` an enriching sweep built from the new frames,
-which is the next generation's chain. With `bonds` its bonds are measured concurrently
-([`_bond_measurements`](@ref)) and the loop only logs them.
+The left half-sweep of one frontier MPS `Fm` (centre at the root). Bond by bond the frame
+`fr.W[i]` is embedded into the grown basis of bond `i-1`, and the frontier's two-site outside
+action is measured. If it exceeds the bond's share and `enrich` is set, [`_frontier_expand`](@ref)
+and `_krylov_enrich` append validated directions. Returns the new frames (generation `gen`), the
+root environment, the bond ledger and the per-bond misses. A measuring sweep (`enrich = false`)
+grows nothing and uses the cached frame chain ([`_side_cache!`](@ref)).
 """
 function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
                         alloc::BasisAllocation, ckw::NamedTuple; enrich::Bool, gen::Int,
@@ -272,22 +266,14 @@ end
 """
     estimate_global_complement_action(psi, mpo, fr, core; nsample = 0, rng) -> NamedTuple
 
-The outside-space action `(I - P) H v` of the Galerkin vector `v = (W ⊗ Z) core`, matrix-free,
-from the per-bond two-site misses of a non-enriching frontier sweep (no time weight).
+The outside-space action `(I - P) H v` of the Galerkin vector `v = (W ⊗ Z) core`, from the per-bond
+two-site misses of a non-enriching frontier sweep. For a nearest-neighbour `H` the per-bond pieces
+are orthogonal, so
 
-Writing `P^(i)` for the projector onto the left frame chain up to bond `i`, `I - P_L =
-sum_i (P^(i-1) - P^(i))` is a sum of ORTHOGONAL pieces, and bond `i`'s miss
-`||(I - U0 U0') H Theta||` is exactly the norm of piece `i` whenever every term of `H` that acts
-left of the cut also stops at site `i+1` (nearest neighbour): the right environment then spans
-everything the term leaves on the right. So, for a nearest-neighbour `H`,
+    max(left, right) <= ||(I - P) H v|| <= sqrt(left^2 + right^2)
 
-    left  = ||(I - P_L ⊗ 1) H v||,     right = ||(1 ⊗ (I - P_R)) H v||   (exactly)
-    max(left, right) <= ||(I - P) H v|| <= bound = sqrt(left^2 + right^2)
-
-For longer-range terms the per-bond numbers miss what a term leaves outside the right
-environment's span, i.e. they become an estimate. `nsample > 0` adds the randomised per-bond
-estimates (`sampled_*`). Returns `left`, `right`, `bound`, `per_left[1..c]`, `per_right[c..L-1]`
-and, if sampled, `sampled_left`, `sampled_right`, `per_sampled_left`, `per_sampled_right`.
+with `left = ||(I - P_L ⊗ 1) H v||` and `right = ||(1 ⊗ (I - P_R)) H v||`. Longer-range terms make
+these an estimate; `nsample > 0` adds randomised per-bond estimates (`sampled_*`).
 """
 function estimate_global_complement_action(psi::SymMPS, mpo, fr::KLFrames, core;
                                            nsample::Int = 0,
@@ -310,18 +296,11 @@ end
     _measure_frontiers(fr, psi, mpo, S0, tau, alloc, ckw, m; nrm, parallel, rng, pass = 0)
         -> NamedTuple
 
-Measure -- never enrich -- the frontiers `j = 0..m-1` of `S0` on the frames `fr` as they stand:
-what the frames already capture of the global Krylov sequence. On the half-sweep frames this is
-the ordinary step's own closure, `rho_j = ||(I - P) A F_j|| / ||F_j||` (the bound
-`sqrt(left^2 + right^2)`), with no closure sweep involved. `fr` is untouched. Returns the
-time-weighted `leak[j+1]`, the scale-free `rho[j+1]`, `met` (every bond of every frontier
-`j >= 1` within its share -- `j = 0` is the half-sweeps' own test), the merged `ledger` and
-`n_root` zero-site applications; `met0` is the `j = 0` verdict.
-
-The frontiers are independent measurements on one set of frames, so with `parallel` and at
-least [`_FRONTIER_THREADS`](@ref) threads they run CONCURRENTLY (each with its own RNG stream
-drawn from `rng`, after the shared environments are built once by [`_prime_caches!`](@ref));
-otherwise in order, exactly as before. The results are merged in `j` order either way.
+Measure, never enrich, the frontiers `j = 0..m-1` of `S0` on the frames `fr` (left untouched): what
+the frames already capture, `rho_j = ||(I - P) A F_j|| / ||F_j||`. Returns the time-weighted
+`leak[j+1]`, scale-free `rho[j+1]`, `met` (all bonds of frontiers `j >= 1` within share), the merged
+`ledger`, `n_root`, and `met0` (the `j = 0` verdict). With `parallel` the frontiers run
+concurrently, each on its own RNG stream from `rng`; results merge in `j` order.
 """
 function _measure_frontiers(fr::KLFrames, psi::SymMPS, mpo, S0, tau::ComplexF64,
                             alloc::BasisAllocation, ckw::NamedTuple, m::Int;
@@ -362,26 +341,12 @@ end
 """
     _closure_loop!(frontier, sweep!, order; maxpass, include_zero = true) -> NamedTuple
 
-The termination logic of the order-`p` closure, independent of how a space is stored.
-`frontier(j)` builds frontier `j` in the CURRENT space; `sweep!(F, j, pass)` tests it and
-enriches, returning at least `(added, leak, met)`.
-
-Pass 1 sweeps `j = 0..p-1` (`j = 1..p-1` when the caller already closed `j = 0`); later passes
-sweep `j = 1..p-1` only -- the spaces are nested, so a closed `j = 0` (whose frontier is `psi`
-itself and does not depend on `B`) stays closed. Each frontier is rebuilt immediately before its
-sweep, so it reflects every enrichment before it. The loop is CONVERGED after a pass in which
-nothing was added and every sweep met its share: every frontier was then built from the final
-`B` and tested against the final frames. A pass that adds nothing but fails a share stops too
-(not converged), so every non-final pass grows the space by at least one direction: termination
-is guaranteed by the work ceiling, and `maxpass` is a safety bound whose hit is reported.
-
-THE WORKING-RANK LIMIT ENDS THE LOOP TOO (plan step 3: "until every ... estimate fits the
-internally allocated `tol_basis` budget OR A DERIVED WORKING-RANK LIMIT IS REACHED"). A pass in
-which some enriching sweep hit the work ceiling (`r.capped`) and a share was still unmet stops
-the loop, not converged (`capped = true`): the bonds that leak cannot widen, so another pass
-re-measures the same leak (10x4 D=256/512 order 2 and 4, jobs 17284922/17285201: every pass
-after the first added nothing and left the leak unchanged). The final `j = 0` measurement still
-runs; the `j >= 1` leaks are the last measured, before that pass's enrichment.
+Termination logic of the order-`p` closure, independent of storage. `frontier(j)` builds frontier
+`j` in the current space; `sweep!(F, j, pass)` tests and enriches, returning `(added, leak, met)`.
+Pass 1 sweeps `j = 0..p-1` (`j = 1..p-1` if `j = 0` is closed); later passes sweep `j = 1..p-1`.
+Converged means a pass added nothing and met every share. A pass with a share unmet and a sweep at
+the work ceiling stops with `capped = true`, since those bonds cannot widen. `maxpass` is a safety
+bound whose hit is reported.
 """
 function _closure_loop!(frontier, sweep!, order::Int; maxpass::Int,
                         include_zero::Bool = true)

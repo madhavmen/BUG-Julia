@@ -1,18 +1,6 @@
-# Reachable-sector enumeration and missing-quantum-number detection.
-#
-# This is the heart of the fix committed to Alice as 1f2de1b. Ports the sector
-# bookkeeping of _kernel/kls/frame.py::_left_row_indices_by_flux and the
-# missing-sector branch of _kernel/kls/symmetric_completion.py.
-#
-# WHY A SECTOR CAN BE MISSING. Under U(1) with the opposite frame frozen,
-# charge conservation keeps K1 inside U0's charge sector, so orth([U0 | K1])
-# can never OPEN a sector the way the dense Sulz BUG's K1 does. A charge that
-# is locally reachable on (link (x) site) but populated by neither U0 nor K1 is
-# therefore invisible to the augmentation, and the evolution can never rotate
-# weight into it. Alice used to fix this with `complete_column_basis`, which
-# filled every partially-populated sector to its FULL local dimension -- the
-# d*r augmented-rank blow-up. Detecting the genuinely EMPTY sectors is what
-# lets the fill stay minimal (Task 9) instead of padding everything.
+# Reachable-sector enumeration and missing-quantum-number detection. Under U(1) with the opposite
+# frame frozen, `orth([U0 | K1])` cannot open a new charge sector, so empty reachable sectors are
+# detected explicitly instead of padding every sector to full dimension.
 
 # ── charge arithmetic ───────────────────────────────────────────────────────
 
@@ -39,20 +27,9 @@ end
 """
     fuse_spaces(syms, space_a, dir_a, space_b, dir_b) -> Vector{Tuple{QLabel,Int}}
 
-Charges reachable on the fused leg `a (x) b`, with their dimensions, computed
-by explicit charge arithmetic.
-
-Convention (measured, jobs 93413/93458/93480): each input leg that is incoming
-(`'+'`) is dualised so the fusion rule sees every leg as outgoing; the labels
-are summed; and the result is dualised once more to land in the **frame**
-convention -- the one [`fusion_basis`](@ref) and every `svd`-produced bond leg
-in this package use. (Raw `getIdentity` reports the dual of this, because it
-flips its input arrows.)
-
-Getting this wrong is easy to miss: with a vacuum link the reachable set is
-`{+q, -q}`, which is its own dual, so a wrong number of duals still "passes".
-It only shows up once the link carries a non-zero charge. Abelian only;
-cross-checked against [`reachable_sectors`](@ref) on charged links in the tests.
+Charges reachable on the fused leg `a (x) b`, with dimensions, by explicit charge arithmetic in
+the frame convention (incoming legs dualised, sum, dualise once more). Abelian only. A vacuum
+link cannot tell the sign convention apart, so test on charged links.
 """
 function fuse_spaces(syms, space_a, dir_a::Char, space_b, dir_b::Char)
     acc = Dict{Any, Int}()
@@ -68,50 +45,9 @@ function fuse_spaces(syms, space_a, dir_a::Char, space_b, dir_b::Char)
 end
 
 """
-Memo for [`fusion_basis`](@ref), plus the counters that justify it.
-
-⛔⛔ **THIS IS THE #1 COST OF A FUSED d=4 STEP AND IT IS RECOMPUTED WORK, NOT PHYSICS.** Flat
-profile of one truncating step (job 16342051 stage 3, L=20, **chi=32**, `bug`, d=4), 57598
-samples in the step:
-
-    svd_std (all SVD)              39535   68.6%
-    cbe_expand                     28858   50.1%
-    sector_graded_sketch           27697   48.1%
-    fusion_basis                   25798   44.8%
-    gesdd!  (LAPACK, SELF time)    23448   40.7%
-    getIdentity                       27    0.05%   <-- building the isometry is FREE
-
-⇒ `getIdentity` costs nothing and the **SVD of its output is 45% of the entire step**.
-
-**AND THE RESULT DEPENDS ONLY ON THE LEG SPACES, NEVER ON `t`'s DATA.** `getIdentity` is a
-reshaping isometry: it is a function of the two legs' sector lists, arrows, tags and prime
-levels, and of `tag`. Two calls with matching legs MUST return the identical tensor. So this is
-memoisation of a pure function — it needs no argument about whether the SVD is skippable, which
-is the safer position given that `svd(F,(1,2)).U` for a unitary `F` has all singular values equal
-to 1 and is therefore basis-degenerate. ⚠ Do NOT "optimise" this by deleting the SVD without a
-measured equivalence test: the docstring below records a silent-corruption trap on charged links
-that a vacuum-link test cannot see.
-
-⚠ **THE KEY MUST CARRY THE ITAGS AND THE ARROWS.** The returned tensor inherits legs 1 and 2 from
-the inputs, so two frames that differ only by an itag are NOT interchangeable — keying on the
-sector lists alone would hand back a tensor whose legs are labelled for a different bond, which
-Telum would either refuse ("Duplicate TLIndex with non-empty itag") or, worse, silently contract
-wrongly. `string(...)` on the itag is used rather than the struct because `Itag` is not `isbits`,
-so the default `objectid` hash would key on IDENTITY and never hit.
-
-⚠ **A COPY IS RETURNED.** Callers own their result and some go on to `permutedims`/`setitag` it;
-handing out the cached object would let one caller corrupt every later one. The copy is ~65 KB
-against a 128x128 LAPACK SVD, so it is free by comparison.
-
-⛔⛔ **AND IT IS LOCKED, BECAUSE `cbe_bug_step!(parallel = true)` RUNS THE TWO HALF-SWEEPS
-CONCURRENTLY.** `cbe_bug.jl`'s own thread-safety note clears `_LOCAL_SPACES` as safe only because
-"the sweeps only read it" — this memo is WRITTEN on the hot path, so it does not inherit that
-argument. An unsynchronised `Dict` under two tasks can corrupt during a rehash, which would show
-up as a wrong answer, not a crash.
-
-⚠ The lock is held only around the two `Dict` touches, never across `getIdentity`/`svd`. A race
-therefore costs at worst a duplicated computation of a pure function, which is harmless, instead
-of serialising the two half-sweeps against each other.
+Memo for [`fusion_basis`](@ref) and its hit/miss counters. The result depends only on the legs'
+spaces, arrows, tags and prime levels, so it is memoised; the key carries itags and arrows, a copy
+is returned, and the lock (held only around the Dict) makes it safe under the parallel half-sweeps.
 """
 const _FUSION_CACHE = Dict{Any, Any}()
 const _FUSION_LOCK = ReentrantLock()
@@ -142,25 +78,9 @@ _leg_key(t, l::Int) = (t.spaces[l], t.inds[l].dir, string(t.inds[l].itags),
 """
     fusion_basis(t, leg_a=1, leg_b=2; tag="fused") -> TLArray
 
-Orthonormal basis of the fused `leg_a (x) leg_b` space, **in `t`'s own leg
-convention**: legs `(leg_a, leg_b, bond)` with the same arrows `t` has and a
-bond leg labelled the way `svd(t, (leg_a, leg_b)).U` labels its bond.
-
-`getIdentity` alone is NOT usable for this. It flips the input arrows in its
-output, so its fused leg carries the **dual** of the labels a frame built from
-`t` carries, and its `(link, site)` legs point the wrong way to be `oplus`ed
-with such a frame. Taking the adjoint restores the input arrows, and the
-subsequent SVD relabels the bond exactly as every other frame in this package
-is labelled.
-
-Getting this wrong is a silent corruption: with a vacuum link the reachable set
-is `{+q,-q}`, its own dual, so the mislabelled version still agrees. It only
-surfaces once the link carries a non-zero charge -- the same false-pass trap as
-the fusion-sign bug (jobs 93413, 93458).
-
-⚠ MEMOISED -- see `_FUSION_CACHE` above for why, and for the ownership and
-locking rules. The mathematics below is unchanged; it simply runs once per
-distinct pair of legs instead of once per call.
+Orthonormal basis of the fused `leg_a (x) leg_b` space in `t`'s own leg convention: legs
+`(leg_a, leg_b, bond)` with `t`'s arrows and the bond labelled as `svd(t, (leg_a, leg_b)).U`
+labels it. `getIdentity` alone has flipped arrows and dual labels. Memoised (`_FUSION_CACHE`).
 """
 function fusion_basis(t, leg_a::Int = 1, leg_b::Int = 2; tag::AbstractString = "fused")
     key = (_leg_key(t, leg_a), _leg_key(t, leg_b), String(tag), symmetry_mode())
@@ -176,22 +96,8 @@ function fusion_basis(t, leg_a::Int = 1, leg_b::Int = 2; tag::AbstractString = "
     # getIdentity's output is always (input_a, input_b, fused), whatever
     # leg numbers the inputs had, so the split is on (1,2) -- NOT (leg_a, leg_b).
     U = to_concrete(svd(F, (1, 2); cutoff = 0.0).U)
-    # ⛔ THE SVD RELABELS THE BOND, SO `tag` MUST BE REAPPLIED -- WITHOUT THIS THE KEYWORD IS INERT.
-    # `itag` reaches `getIdentity`, and then `svd(...).U` overwrites the bond with Telum's DEFAULT
-    # (`svdL`), so every caller's tag was silently discarded. MEASURED:
-    # `fusion_basis(t, 1, 2; tag = "cbeG")` returned legs `3,L | 3,S | svdL`.
-    #
-    # ⛔ AND THAT BROKE `cbe_bug` UNDER U(1) ENTIRELY -- chain AND cylinder, every BUG arm, while
-    # `tdvp2` (which never calls `cbe_expand`) was fine. Both CBE probes ask for a DISTINCT tag
-    # (`full_local_basis` "cbeF", `sector_graded_sketch` "cbeG") precisely so the probe's fused leg
-    # cannot collide with a frame's bond leg -- which is ALSO `svdL`, because the BUG frame splits
-    # take default tags too. `cbe_core.jl:130` then contracts the two into one TLArray and Telum
-    # refuses it: "Duplicate TLIndex with non-empty itag: TLIndex(svdL, '+', 0, 0, false)".
-    #
-    # ⚠ SAFE FOR EVERY EXISTING CALLER, audited: `reachable_sectors` and `sectors.jl`'s reach
-    # computation read only `.spaces[end]` and never look at tags; the two CBE probes WANT the
-    # distinct tag; and the probe's tag never reaches an `oplus`, because the preselection SVDs
-    # create their own bond legs (`_TAG_L`/`_TAG_R`) afterwards.
+    # The SVD relabels the bond to Telum's default, so `tag` is reapplied; the CBE probes need their
+    # distinct tags to avoid colliding with a frame's `svdL` bond leg.
     out = to_concrete(setitag(U, 3, tag))
     # Store, then hand out a copy -- see the memo's note on caller ownership.
     lock(_FUSION_LOCK) do
@@ -262,17 +168,8 @@ align_charge(syms, q, from_dir::Char, to_dir::Char) =
 """
     perp_component(U0, K1) -> TLArray
 
-`P_perp K1 = K1 - U0 (U0' K1)`, the part of `K1` outside `U0`'s range,
-contracting over the `(link, site)` legs.
-
-This is the discarded projector of the variant this plan implements. Note it is
-applied BEFORE the exponential in the K/L generators, which is what makes them
-non-Hermitian and forces the Arnoldi path in `expv`.
-
-It also sidesteps a leg-compatibility problem: `U0`'s bond leg and `K1`'s bond
-leg generally differ in tag AND arrow (`U0`'s comes from `svd`'s `U`, `K1`'s
-from `S0`'s right leg), so they cannot simply be `oplus`ed to measure the
-combined rank. Contracting over legs 1 and 2 never touches either bond leg.
+`P_perp K1 = K1 - U0 (U0' K1)`, contracting over the `(link, site)` legs, so the two bond legs
+(different tags and arrows) never need to match.
 """
 function perp_component(U0, K1)
     ov = contract(U0', (1, 2), K1, (1, 2))     # (U0 bond, K1 bond)
@@ -286,16 +183,8 @@ end
 """
     sector_report(U0, K1) -> Vector{SectorReport}
 
-The missing-quantum-number table for the bond whose left frame is `U0`.
-
-Both tensors carry `(link, site, bond)`. Walks the union of the charges
-appearing on the fused `(link (x) site)` leg and on either bond leg, so a
-sector reachable but empty is reported rather than silently dropped -- that
-omission is exactly the bug this table exists to catch.
-
-`range_cols = u0_cols + rank(P_perp K1)` in that sector, with the rank taken
-from the same complement basis the augmentation uses. Nothing is densified: densifying a
-block-sparse state reintroduces the forbidden amplitudes the symmetry forbids.
+The missing-quantum-number table for the bond whose left frame is `U0`: every charge on the fused
+`(link (x) site)` leg or either bond leg, with `range_cols = u0_cols + rank(P_perp K1)`.
 """
 function sector_report(U0, K1)
     syms = symm(U0)
@@ -303,12 +192,8 @@ function sector_report(U0, K1)
     k_dir = K1.inds[3].dir
     reach = reachable_sectors(U0, 1, 2)
     perp = perp_component(U0, K1)
-    # MUST be the very basis the augmentation will use. Computing the range
-    # here with any other rule risks calling a sector empty while the complement
-    # actually fills it -- the fill would then seed a direction the complement
-    # already supplies, `oplus` would concatenate both, and the frame would stop
-    # being an isometry. Same failure mode as the roundoff duplicates in
-    # `_complement_basis`.
+    # The range must use the same complement basis the augmentation uses, or a sector could be called
+    # empty while the complement fills it.
     Q = _complement_basis(U0, K1; leg = 3)
     new_space = Q === nothing ? Tuple[] : Q.spaces[3]
 

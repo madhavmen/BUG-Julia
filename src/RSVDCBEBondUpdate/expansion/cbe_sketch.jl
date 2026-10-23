@@ -3,25 +3,10 @@
 """
     sector_graded_sketch(frame, side, npre; comp_ratio=0.5, rng, tag) -> TLArray or nothing
 
-The CBE sketch block for one side of a bond, in the frame's own layout:
-`side = :left` gives `(link_l, site_l, g)` like `U0`, `side = :right` gives
-`(g, site_r, link_r)` like `V0`.
-
-`npre` is the total column budget `Dpre`. Returns `nothing` only when neither half can be
-built at all.
-
-`boost` (sector => extra columns) is Test B's lever: it widens the probe only where the
-holdout found range missing (see [`_certified_range`](@ref)). Extra columns go to the
-complement half first, then to the isometry half of the same sector; neither ever exceeds the
-sector's dimension.
-
-NOTE ON A SATURATED FRAME. If the frame already spans its whole local space there is no
-complement, and this returns the isometry half alone -- it does NOT decline. The sketch is
-a PROBE applied to the frame on the *opposite* side of the bond, so a saturated right
-frame is still a perfectly good probe for expanding the left one. Whether a given side has
-room to expand is a separate question, decided by `cbe_expand` from `Dfull - r`; folding
-that decision in here would silently refuse to expand one side of the bond because the
-other was full.
+The CBE probe for one side of a bond, in the frame's layout (`:left` like `U0`, `:right` like
+`V0`), `npre` columns split between the frame's complement and the frame itself (`comp_ratio`;
+`nothing` = an unprojected Gaussian). `boost` (sector => extra columns) is Test B's targeted
+widening. A saturated frame still returns its isometry half: it probes the opposite side.
 """
 function sector_graded_sketch(frame, side::Symbol, npre::Int;
                               comp_ratio::Union{Float64, Nothing} = 0.5,
@@ -48,25 +33,8 @@ function sector_graded_sketch(frame, side::Symbol, npre::Int;
     dfull, dT = _frame_sector_dims(frame, side, F, "sector_graded_sketch")
     dC    = Dict(q => max(dfull[q] - dT[q], 0) for q in keys(dfull))
 
-    # ── comp_ratio = nothing: NO PROJECTOR IN THE PROBE AT ALL ─────────────────────────
-    #
-    # A plain sector-graded Gaussian on the full local space: columns allocated across charge
-    # sectors as usual, but neither projected out of the frame nor into it. The complement is
-    # then reached by SAMPLING rather than by construction.
-    #
-    # WHY THIS IS WORTH HAVING. `comp_ratio` is one of the two hyperparameters the iterative
-    # scheme was meant to remove: a fixed split is a GUESS at how much of the probe should look
-    # for new directions versus refine old ones, made once, before anything is known. With the
-    # expanding-basis solver the probe is REDRAWN at every growth pass from an advancing RNG
-    # stream, so successive passes explore different directions in every sector and the
-    # coverage accumulates. Sampling over passes replaces guessing once.
-    #
-    # ORTHOGONALITY IS NOT AT RISK. The probe only decides which directions get LOOKED AT; the
-    # preselection still applies the exact `P_perp = I - U0 U0'` to what comes back, and the
-    # guard before the direct sum re-establishes orthonormality. So dropping the projection
-    # here cannot admit a direction that overlaps the frame.
-    #
-    # It is also strictly cheaper: two `perp_component` calls per side per pass disappear.
+    # ── comp_ratio = nothing: a plain sector-graded Gaussian, no projector in the probe ──
+    # The preselection still applies the exact `P_perp`, so orthogonality is unaffected.
     if comp_ratio === nothing
         cols = _alloc_columns(dfull, npre)
         boost === nothing || _boost!(cols, boost, dfull)
@@ -81,18 +49,8 @@ function sector_graded_sketch(frame, side::Symbol, npre::Int;
     n_c = clamp(round(Int, npre * comp_ratio), 0, npre)
     n_t = npre - n_c
 
-    # THE SHORTFALL IS REDISTRIBUTED, NOT DROPPED -- MEASURED. `_alloc_columns` caps every
-    # sector at its own dimension, so a half whose subspace is small delivers fewer columns
-    # than asked. `npre` is the probe's WIDTH, and the expansion can admit at most that many
-    # directions however large `dex` is -- they ARE the sketch's columns. Near a chain edge the
-    # opposite frame's complement is 0- or 1-dimensional, so a complement-weighted split
-    # collapsed the probe to 0-1 columns and the expansion silently declined WITH ROOM TO
-    # SPARE: at `comp_ratio = 1.0`, `dex = 64`, an L=8 warm state gave bond 1 `rank 2 -> (2,2)`
-    # and bond 3 `6 -> (6,6)`, leaving right residuals of 3.1e-4 and 0.19 untouched. One
-    # blocked narrow bond then caps every bond inward -- the staircase profile the MPO sweep
-    # froze into. Handing the shortfall to the other half keeps the probe `npre` wide whenever
-    # the fused space has the dimensions for it, which is what the RSVD oversampling guarantee
-    # assumes in the first place.
+    # A half that cannot fill its columns hands the shortfall to the other half, so the probe stays
+    # `npre` wide near a chain edge instead of collapsing.
     cc = _alloc_columns(dC, n_c)
     n_t += n_c - sum(values(cc); init = 0)        # complement short -> widen the isometry half
     ct = _alloc_columns(dT, n_t)
@@ -137,25 +95,9 @@ function sector_graded_sketch(frame, side::Symbol, npre::Int;
     return to_concrete(oplus(blocks, (sk,)))
 end
 
-# ── preselection and final selection ─────────────────────────────────────────
-#
-# `RSVDpreBE0SiQS.m` in two stages, and the division of labour matters:
-#
-#   PRESELECT  sketch H, project off the frame, orthonormalise -> Dpre candidates.
-#              Cheap and generous; `Dover` (default 20% of Dex) is the oversampling that
-#              makes the randomized range finder reliable.
-#   FINAL      SVD the small Dpre x Dpre matrix `U0L' (H Theta) V0R'` and keep Dex.
-#              This is the step that RANKS candidates by their weight in the two-site
-#              action -- the thing the K/L augmentation cannot do, since it admits every
-#              direction it finds regardless of weight and leaves the ranking to the
-#              S-step SVD.
-#
-# `RepairOrtho` (`RSVDpreBE0SiQS.m:743`) is folded into `_preselect_*` as a second
-# projection pass. It is not optional bookkeeping: `oplus` concatenates blocks without
-# orthogonalising them, so `[U0 | Q]` is an isometry only if `Q` is exactly orthogonal to
-# `U0`, and a direction surviving the SVD cutoff can still carry a `U0` component of order
-# eps/cutoff. The same omission in `augment.jl::_complement_basis` duplicated a column and
-# grew the norm by 128x over five steps.
+# ── preselection and final selection (`RSVDpreBE0SiQS.m`) ──
+# Preselect: sketch, project off the frame (twice, the reference's `RepairOrtho`), orthonormalise.
+# Final: rank the candidates by their weight in the small `U0L' (H Theta) V0R'`.
 
 "Degeneracy-weighted squared singular weight of a Telum SVD list, `Σ σ² · deg`."
 _sq_weight(list) = sum(Float64(s)^2 * Float64(deg) for (s, deg, _, _) in list; init = 0.0)
@@ -169,12 +111,8 @@ end
 
 const _CBE_EPS = 100 * eps(Float64)
 
-# DISTINCT BOND TAGS FOR THE TWO PRESELECTIONS. The final-selection matrix is
-# `U0L† (HΘ) V0R†`, whose two legs are the bond legs the two preselection SVDs created. On
-# Telum's default tags both would be `svdL` with the same arrow, and a TLArray may not
-# carry two identical indices -- MEASURED: "Duplicate TLIndex with non-empty itag in
-# TLArray.inds: TLIndex(svdL, '+', 0, 0, false)" (job 94959). Exactly the collision
-# `bond_frame` avoids by giving its two SVDs distinct tag pairs.
+# Distinct bond tags for the two preselections: the final-selection matrix carries both bond legs,
+# and a TLArray may not hold two identical indices.
 const _TAG_L, _TAG_LR = "cbeL,L", "cbeL,R"
 const _TAG_R, _TAG_RR = "cbeR,L", "cbeR,R"
 # Distinct again for the final orthonormality guard, for the same reason: its output is a
@@ -185,16 +123,8 @@ const _TAG_OR, _TAG_ORR = "cbeP,L", "cbeP,R"
 """
     _rank_cut(stol, Y, n) -> Float64
 
-The preselection SVD's relative cutoff. `stol > 0` is the legacy absolute-on-normalised cut
-(`stol_pre`). `stol <= 0` is the adaptive path's NUMERICAL RANK test (plan §1: `stol_pre` is
-replaced by machine-precision rank detection; physical importance is Tests A/B's job).
-
-THE FLOOR IS MEASURED AGAINST `Y`, NOT `R`. `R = P_perp Y` is a difference, and when most of
-`Y` lies in the frame the subtraction cancels: rounding of order `eps * ||Y||` survives in an `R`
-of size `n`, i.e. relative noise `eps * ||Y|| / n` after normalising. A cut fixed at a few `eps`
-would admit that noise as directions whenever `n << ||Y||`; one fixed at 1e-10 drops real
-directions whenever `n ~ ||Y||`. `_CBE_EPS` (100 eps) is the same margin the empty-residual test
-above already uses.
+The preselection SVD's relative cutoff: `stol > 0` cuts at `stol`; `stol <= 0` is the numerical
+rank test, with the floor `_CBE_EPS` measured against `||Y||` (not `||P_perp Y||`, which cancels).
 """
 _rank_cut(stol::Float64, Y, n::Real) =
     stol > 0 ? stol : _CBE_EPS * max(norm(Y), n) / n
@@ -245,34 +175,9 @@ end
 """
     _range_find(draw, wleg, select, qleg, w0, wcap, ncap) -> (Q, err, n)
 
-Randomised range finder for one side of the preselection: widen the probe until the
-preselection SVD CUTS something, then hand back its orthonormal basis `Q`, the weight it
-discarded, and `n = leg_dim(Q, qleg)` -- the number of directions that cleared the
-tolerance.
-
-`draw(w)` returns a probe of requested width `w` (or `nothing`), with the probe's own width
-on leg `wleg`; `select(Y)` is the preselection, returning `(Q, err)`.
-
-WHAT THE STOPPING TEST MEANS, AND WHY IT NEEDS NO TOLERANCE OF ITS OWN. `select` cuts at
-`stol_pre`, so a returned `n` STRICTLY BELOW the delivered width is the sketched range
-having run past the decay of `P_perp (H Theta)` -- there were directions to rank and the
-tolerance ranked some of them out. `n == w` is the opposite reading: the probe is saturated,
-every direction it drew still carried weight, so the range was CLIPPED by the width and a
-wider probe would find more. That is exactly the question a fixed oversample answers by
-guessing, and it is answered here by looking.
-
-⚠️ `ncap` IS WHAT KEEPS THIS AN RSVD. Without it a probe whose spectrum never decays --
-a bond near full rank, where every drawn direction carries weight -- would double all the way
-to `wcap`, i.e. to the complete fused basis, which is precisely the cost the sketch exists to
-avoid. `ncap` is the side's ADMISSION limit (`room`, or an explicit `dex`), and once `n`
-reaches it a wider probe cannot admit one further direction: the surplus is trimmed by
-`_trim_total` either way. So it is a bound on pointless work, not a tolerance.
-
-The loop only ever widens, by doubling, and also stops at `wcap` (the opposite frame's fused
-dimension -- see the call site) or as soon as the probe delivers fewer columns than asked,
-which means the local space is exhausted and there is nothing left to widen into. So it
-terminates in at most `log2(wcap)` passes, and at an explicit `dover` (`wcap == w0`) it is
-one pass and the old behaviour exactly.
+Randomised range finder for one side: double the probe width until the preselection SVD cuts
+something (`n < w`), the admitted count reaches `ncap`, the width reaches `wcap`, or the probe
+runs out of columns. Returns the basis, the discarded weight and `n`. At most `log2(wcap)` passes.
 """
 function _range_find(draw, wleg::Int, select, qleg::Int, w0::Int, wcap::Int, ncap::Int)
     w = clamp(w0, 1, max(wcap, 1))
@@ -291,28 +196,10 @@ end
 """
     _tail_rank(list, scale, allowance, kmax; base = 0.0) -> (k, tail)
 
-TEST A, the tail test: the SMALLEST `k <= kmax` whose discarded tail
-`scale * sqrt(base + sum_{j>k} sigma_j^2 * deg_j)` still fits inside `allowance`, together
-with the indicator that tail achieves.
-
-`list` is a Telum `kept_list`, `(sigma, degeneracy, ...)` sorted descending. The DEGENERACY
-FACTOR IS NOT COSMETIC: under SU(2) one entry stands for `deg` states, and ranking on
-`sigma` alone would under-count a multiplet's weight by exactly that factor.
-
-`base` is squared weight the SVD ALREADY discarded (its `trunc_list`). Omitting it would
-measure the tail of the surviving list against an allowance meant for the whole spectrum,
-and so report a rank as certified when the weight below the SVD's own cut already breached
-the budget.
-
-The tail is ABSOLUTE, not relative to the leading singular value. `scale` has already
-divided by the state norm (see `basis_allocation`), so the comparison is against a
-tolerance on the step's error, which is the quantity the caller actually budgeted. A
-relative cut cannot do this: it answers "is this direction small compared to its loudest
-neighbour", which at a bond whose whole spectrum is tiny keeps rank that buys no accuracy,
-and at a bond with one dominant direction throws away rank that does.
-
-Returns `kmax` when even the full tail does not fit -- the allowance is then unmeetable at
-this width, and the caller records `tolerance_met = false` rather than silently believing it.
+Test A: the smallest `k <= kmax` whose discarded tail
+`scale * sqrt(base + sum_{j>k} sigma_j^2 * deg_j)` fits inside `allowance`, and that tail.
+Degeneracies count (SU(2)); `base` is weight the SVD already dropped. Returns `kmax` when nothing
+fits, and the caller records the budget as unmet.
 """
 function _tail_rank(list, scale::Float64, allowance::Float64, kmax::Int; base::Float64 = 0.0)
     n = length(list)
@@ -334,30 +221,9 @@ end
 """
     _sample_residual(Q, project, sketch, draw, nh, wleg, side) -> (est, per_sector, cols)
 
-TEST B, the sampling test: a matrix-free estimate of `||(I - QQ†) P_perp (H Theta)||_F`
-from HOLDOUT probes that took no part in building `Q`.
-
-The independence is the whole content of the test. The probe that built `Q` is, by
-construction, inside its range -- re-measuring with it reports zero residual no matter how
-much range was missed, which is why a range finder cannot certify itself from its own
-sketch.
-
-⛔ THE NORMALISATION IS PER SECTOR, because the holdout is sector-graded. A column drawn in
-sector `q` is Gaussian on that sector alone, so `E||A Om_q||_F^2 = n_q ||A_q||_F^2` and the
-unbiased estimate of `||A||_F^2` is `sum_q ||A Om_q||_F^2 / n_q`. Dividing the pooled sum by the
-total width instead weights every sector by its SHARE OF THE COLUMNS, and the `ceil`
-allocation hands a one-dimensional empty-but-reachable sector one column out of `w` -- so a
-range missed there was reported `sqrt(w)` times too small, in exactly the sector the
-expansion exists to find.
-
-`project` applies the frame projector `P_perp` (the closure the preselection used), `sketch`
-applies `H Theta` to a probe, `draw(w)` returns a probe of width `w` or `nothing`, `wleg` is
-the probe's width leg, and `side` (`:left`/`:right`) fixes the frame layout and so which
-projector removes `Q`.
-
-Returns the estimate, each sector's SQUARED contribution (they sum to `est^2`; this is what
-[`_certified_range`](@ref) targets), and the holdout columns per sector. A zero estimate means
-no probe could be drawn or the sketched action vanished: no range left to miss.
+Test B: estimate `||(I - QQ†) P_perp (H Theta)||_F` from independent holdout probes, normalised
+per sector (`sum_q ||A Om_q||^2 / n_q`). Returns the estimate, each sector's squared share and the
+holdout columns per sector.
 """
 function _sample_residual(Q, project, sketch, draw, nh::Int, wleg::Int, side::Symbol)
     side in (:left, :right) || throw(ArgumentError("side must be :left or :right"))
@@ -398,15 +264,8 @@ end
 """
     _target_sectors!(boost, per, Om, wleg, alloc) -> Int
 
-Decide where Test B widens next: every sector whose own share of the missed residual exceeds
-a fair `1/S` split of the allowance (`S` = sectors the holdout probed) gets its sketch columns
-doubled in `boost`. Returns how many sectors were targeted.
-
-THE PLAN'S `dover`/`comp_ratio` ROLE, MADE SPECIFIC. A uniform doubling spends its new
-columns in proportion to sector size, i.e. mostly where the range was ALREADY found; the
-holdout says which sector is short, so that is where the columns go. Whenever the total
-fails, at least one sector is over its fair share, so a failing test always targets
-something.
+Where Test B widens next: double the columns of every sector whose share of the missed residual
+exceeds a fair `1/S` split of the allowance. Returns the number of sectors targeted.
 """
 function _target_sectors!(boost::Dict, per::Dict, Om, wleg::Int, alloc::BasisAllocation)
     isempty(per) && return 0

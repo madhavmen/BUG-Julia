@@ -48,20 +48,11 @@ end
 """
     dmrg_cbe1s!(psi, h; n_sweeps=20, etol=nothing, kwargs...) -> DMRGCBERun
 
-Ground state of `h` by CBE-DMRG sweeps, in place. `h` may be an `MPO` or an `XXZChain`.
+Ground state of `h` (an `MPO` or `XXZChain`) by CBE-DMRG sweeps, in place. Convergence is tested on
+the sweep-best energy, not bond to bond, since within a sweep the energy falls by construction.
 
-Convergence is tested on the SWEEP-BEST energy against the previous sweep, not bond to bond:
-within a sweep the energy falls by construction, so a per-bond test stops early on any flat
-stretch.
-
-`maxdim` may be raised between sweeps by passing a schedule -- see the reference's `DList`
-(`mainDMRG_CBE.m:81`), which ramps the bond dimension over sweeps and only switches CBE on
-once `Nkeep > D_CBE`. Here the schedule is the caller's business; this function runs one
-`maxdim`.
-
-**Under U(1) the particle-number sector is pinned by the initial state**, and under SU(2) the
-total spin is, so this finds the ground state OF THAT SECTOR. `dimer_state` is the `S = 0`
-sector, which is where the Heisenberg and Haldane-Shastry ground states live.
+`maxdim` is one value per call; a schedule is the caller's business. The particle number (U(1)) or
+total spin (SU(2)) is pinned by the initial state, so this finds the ground state of that sector.
 """
 function dmrg_cbe1s!(psi::SymMPS, h::Union{XXZChain, MPO};
                      n_sweeps::Int = 20, etol::Union{Nothing, Float64} = nothing, kwargs...)
@@ -126,20 +117,12 @@ exact_cbe_dmrg1s!(psi::SymMPS, h::Union{XXZChain, MPO}; kwargs...) =
 """
     rsvd_cbe_dmrg1s_seeded!(psi, h; kwargs...) -> DMRGCBERun
 
-CBE-DMRG with the RSVD selection **and the local eigensolve started from the EXPANDED basis**
-rather than from the zero-padded current tensor (`seed_expanded = true`).
+CBE-DMRG with the RSVD selection and the local eigensolve started from the expanded basis
+(`seed_expanded = true`). Everything else matches [`rsvd_cbe_dmrg1s!`](@ref), so a difference is
+attributable to the start vector alone.
 
-The distinction it isolates: `expand_bond!` widens the bond leaving the state unchanged, so the
-admitted directions arrive with zero amplitude and the default Lanczos start cannot see them
-until the operator has been applied once. This arm gives the start a small component along them
-up front. Everything else -- the selection, the operator, the truncation, the sweep order -- is
-identical to [`rsvd_cbe_dmrg1s!`](@ref), so a difference between the two is attributable to the
-start vector alone.
-
-⚠ It buys the earlier basis at the price of ONE extra operator application per local solve, and
-that application is counted in `krylov_dims` like any other. Read the comparison as
-applications-to-accuracy, not sweeps-to-accuracy: fewer sweeps at a higher per-sweep cost is not
-automatically a win, and which way it lands is a measurement, not a prediction.
+The seed costs one extra operator application per local solve, counted in `krylov_dims`; compare
+applications-to-accuracy, not sweeps.
 """
 rsvd_cbe_dmrg1s_seeded!(psi::SymMPS, h::Union{XXZChain, MPO}; kwargs...) =
     dmrg_cbe1s!(psi, h; exact = false, seed_expanded = true, kwargs...)

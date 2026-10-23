@@ -1,43 +1,5 @@
-# AN EXACT MPO FOR AN ARBITRARY TWO-BODY COUPLING MATRIX, INCLUDING CHARGED OPERATORS.
-#
-# WHY THIS FILE EXISTS. `long_range_mpo` in `mpo.jl` carries a long-range interaction with ONE
-# self-loop channel per exponentially decaying term, which is exact for a geometric tail and
-# has a virtual dimension independent of `L`. It cannot do Haldane-Shastry, for two separate
-# reasons, and both are recorded there:
-#
-#   1. `J(r) = pi^2 / (L^2 sin^2(pi r / L))` is not a geometric decay, so it would have to be
-#      FITTED by a sum of exponentials -- introducing an error that belongs to the Hamiltonian
-#      rather than to the integrator, and that cannot be separated from a result afterwards.
-#   2. `S . S` is a RANK-3 operator: its op-leg becomes the channel's virtual leg, so that
-#      channel's virtual space is CHARGED, and a self-loop on it needs the identity on a
-#      charged space rather than `lambda * Iid`. `long_range_mpo` THROWS on rank-3 operators
-#      rather than emit a wrong block (`mpo.jl:279-282`).
-#
-# This file lifts both restrictions the exact way. It spends virtual dimension instead of
-# accuracy: ONE CHANNEL PER OPENING SITE, so the coupling `J[i,j]` is applied at the closing
-# site and any coupling matrix whatsoever is represented EXACTLY.
-#
-#     w = 2 + n * (number of live openings),   n = number of two-body vertices
-#
-# For Haldane-Shastry that is `n = 1` under SU(2) -- one irreducible `S . S` -- against `n = 3`
-# under U(1) (`Sp Sm`, `Sm Sp`, `Sz Sz`). So `w ~ L` versus `w ~ 3L`. THAT IS THE ONLY PLACE
-# THE TWO SYMMETRIES ARE ALLOWED TO DIFFER: same operator, same physics, different virtual
-# dimension and therefore different cost. Nothing downstream inspects `W`'s shape, so the
-# environments of Eq. (1.8), `apply_h_two_site`, `zero_site_h` and the CBE sketches are
-# untouched.
-#
-# WHY `O(L)` IS NOT A DEFECT HERE. A coupling with no exponential structure has no
-# finite-dimensional MPO; the bond dimension of the exact MPO is the rank of the coupling's
-# Hankel matrix, which for `1/sin^2` is full. So `O(L)` is not a wasteful encoding of
-# something cheaper -- it is what exactness costs, and at the sizes an exact reference is
-# wanted for (`L <= ~24`) it is affordable. `long_range_mpo` remains the right tool when a
-# geometric tail really is the model.
-#
-# THE ONE GENUINELY NEW TENSOR is the CHARGED TRANSPORT BLOCK: `delta_{w_l w_r} (x) I_site`,
-# with the virtual legs carrying the operator's op-leg space instead of a dim-1 vacuum. See
-# `_charged_transport`, which builds it and then PROVES the arrows are right by the only test
-# that cannot lie -- that it contracts against the opening and closing blocks the way the MPO
-# will contract it.
+# An exact MPO for an arbitrary two-body coupling matrix `J[i,j]`, charged (rank-3) operators
+# included: one channel per opening site, virtual dimension `2 + n * (live openings)`.
 
 # ── the vertices ─────────────────────────────────────────────────────────────
 
@@ -102,43 +64,10 @@ end
 """
     _charged_transport(opening, closing, Iloc, i, tl, tr) -> TLArray
 
-The automaton's diagonal entry for a channel that is OPEN across site `i`:
-`delta_{w_l w_r} (x) I_site`, as a rank-4 `(w_l '+', s_ket '+', s_bra '-', w_r '-')` block
-whose virtual legs carry the channel's own (possibly charged) space.
-
-`opening` is the block that opens the channel (its leg 4 IS the channel's right-facing
-virtual leg) and `closing` the one that closes it (its leg 1 is the left-facing one). Both
-are passed because the block has to contract against BOTH, and that pair of contractions is
-what the construction is verified by.
-
-WHY IT IS VERIFIED RATHER THAN DERIVED. Telum's `getIdentity` flips its input arrows and
-reports dual labels (`sectors.jl:77`, and `mpo.jl:243` names this as the reason charged
-channels were left unwritten). Reasoning about which of the two legs ends up `'+'` and whether
-the labels come back dualised is exactly the kind of step that produces a confident wrong
-answer, and the failure is silent: a mislabelled virtual leg does not throw, it traces the
-wrong pair. So every candidate leg assignment is built and the one that CONTRACTS CORRECTLY is
-returned.
-
-THREE REQUIREMENTS, AND ALL THREE ARE NEEDED. Measured: of the six candidates for a U(1) `Sp`
-channel, one satisfies all three, one satisfies only `T -> T`, and one satisfies only
-`open -> T`. So testing a subset picks a wrong block that then fails deep inside
-`_mpo_left_step` with a space mismatch:
-
-    open -> T      `W^[i]`'s channel column against `W^[i+1]`'s transport row
-    T -> T         transport at `i` against transport at `i+1` -- what a distance >= 3 path
-                   needs, and the one an earlier version omitted
-    T -> close     transport at `i` against the closing block at `i+1`
-
-These ARE the contractions the MPO performs, so passing them is not a proxy for correctness.
-
-THE UNCHARGED SHORT-CIRCUIT TESTS THE SPACE, NOT THE DIMENSION, and that distinction is the
-bug this comment exists to prevent recurring. A U(1) op-leg carries ONE sector of dimension
-ONE -- `Sp`'s leg is `[((2,), 1)]` -- so `leg_dim(opening, 4) == 1` is true for a CHARGED
-channel just as it is for the vacuum, and short-circuiting on it silently returned the vacuum
-identity for every charged channel. Distance 1 still passed (no transport happens there) and
-`:none` still passed (no charged channel exists there), which is exactly how it survived the
-first two validation stages. Comparing against the identity block's own leg-4 space is exact
-and symmetry-agnostic.
+The diagonal entry `delta_{w_l w_r} (x) I_site` of a channel open across site `i`, with the
+channel's (possibly charged) virtual space. Every leg assignment is built and the one that
+contracts correctly against opening -> transport, transport -> transport and transport -> closing
+is returned. Uncharged channels are detected by comparing spaces, not dimensions.
 """
 function _charged_transport(v::PairVertex, Iloc, i::Int,
                             tl::AbstractString, tr::AbstractString)
@@ -157,12 +86,8 @@ function _charged_transport(v::PairVertex, Iloc, i::Int,
     cl_n    = _mpo_block(v.right, i + 1, tr, tnext, _side(v.right, :right))
     Isite_i = _mpo_retag(Iloc, i)
     Isite_n = _mpo_retag(Iloc, i + 1)
-    # PLACEHOLDER TAGS, and they are not cosmetic either. `getIdentity(ref, l)` gives BOTH of its
-    # legs the source leg's tag -- and from the `closing` source it gives them the same ARROW as
-    # well (measured: `[1 '-' (2,)] [2 '-' (-2,)]`). The raw tensor product of that with the site
-    # identity therefore carries two identical `TLIndex`es and is an ILLEGAL `TLArray`, throwing
-    # inside the constructor rather than at the point of use. Naming the two virtual legs apart
-    # before combining removes that whole failure class.
+    # Placeholder tags: `getIdentity` gives both legs the same tag and arrow, which would make an
+    # illegal TLArray once combined with the site identity.
     tA, tB = "pmA,$i", "pmB,$i"
 
     for (ref, l) in ((op_i, 4), (cl_n, 1))
@@ -204,38 +129,11 @@ end
 
 """
     pair_mpo(L, J, vertices) -> MPO
+    pair_mpo(L, Js::Vector, vertices) -> MPO
 
-`H = Σ_{i<j} J[i,j] Σ_t coeff_t * left_t(i) * right_t(j)` as an EXACT MPO.
-
-`J` is any `L x L` matrix; only its strict upper triangle is read, so a symmetric matrix and
-its upper triangle give the same operator and a pair is never counted twice. `vertices` is a
-vector of [`PairVertex`](@ref); `pair_vertices(h::XXZChain)` produces them from a term list.
-
-The channel a pair travels on remembers WHERE IT OPENED -- that is what lets `J[i,j]` depend
-on both ends and is why the virtual dimension grows with `L`. Channels are trimmed per link
-to those that are both already open and still able to close, so `w` is `2 + n*(live openings)`
-rather than `2 + n*(L-1)` everywhere: at link 1 nothing is open yet and at link `L-1` a
-channel that no surviving `J` can close is dropped.
-
-`J[i,i+1]`-only reproduces [`mpo_from_terms`](@ref) elementwise, which is how the
-construction is pinned against the already-validated nearest-neighbour MPO.
-
-# One coupling matrix per vertex
-
-`pair_mpo(L, Js::Vector, vertices)` takes ONE MATRIX PER VERTEX, for models whose operator types
-have DIFFERENT ranges. The single-matrix form applies the same `J[i,j]` to every vertex scaled by
-`vertex.coeff`, which cannot express a Hamiltonian like the lattice Schwinger model, whose hopping
-is NEAREST-NEIGHBOUR while its Coulomb term is ALL-TO-ALL:
-
-    aH = x * sum_n (S+_n S-_{n+1} + h.c.)  +  (1/2) sum_{k>n} (N-k-1) Z_n Z_k
-
--- two different supports, so no single `J` with per-vertex scalars reproduces both. One matrix
-per vertex does, at no extra bond dimension: the channel count is set by how many OPENINGS are
-still closable, and a vertex whose coupling vanishes past its range stops contributing channels.
-
-⚠️ `Js[t]` PAIRS WITH `vertices[t]` BY POSITION. A permuted list silently builds a different
-Hamiltonian -- still Hermitian, still conserving the same charges, so nothing downstream
-complains.
+`H = Σ_{i<j} J[i,j] Σ_t coeff_t * left_t(i) * right_t(j)` as an exact MPO. Only the strict upper
+triangle of `J` is read; `vertices` come from [`pair_vertices`](@ref). The vector form takes one
+coupling matrix per vertex (paired by position), for vertices with different ranges.
 """
 function pair_mpo(L::Int, Js::Vector{<:AbstractMatrix}, vertices::Vector{PairVertex};
                   Iloc = nothing, Itrans = nothing, field = nothing, triples = TripleTerm[])
@@ -301,30 +199,13 @@ function _pair_mpo(L::Int, Js::Vector, vertices::Vector{PairVertex}; Iloc = noth
             "pair_mpo: vertex $k joins a rank-$nl to a rank-$nr operator -- the two halves " *
             "must both carry an op-leg or neither"))
     end
-    # The transported identity has to come from the mode's OWN local space. `local_space()`
-    # deliberately refuses `:Z2` -- LurCGT cannot derive a mod-2 charge from a commutator, so the
-    # Ising space is built below the IROP layer instead (see `z2_ising.jl`) -- and hard-coding
-    # `local_space()` here is what previously made every Z2 model unreachable through `pair_mpo`
-    # even though `_charged_transport` handles charged channels perfectly well.
-    #
-    # ⛔ AND IT CAN BE OVERRIDDEN, because the mode does not always determine the SITE. The
-    # vectorised Lindbladian fuses each (ket, bra) pair into one d = 4 site -- the layout that
-    # makes `H` range 1 (so a two-site update can actually start the dynamics), the jump term
-    # on-site, and `|I>>` a product state. That chain runs under `:none` but its identity is 4x4,
-    # and defaulting to the spin-1/2 one builds an MPO whose transport block has the wrong
-    # dimension. `Iloc` is a tensor, not a mode, so passing it keeps `pair_mpo` agnostic.
+    # The transported identity comes from the mode's own local space, or `Iloc` when the site is not the
+    # mode's default (e.g. a fused d = 4 Liouville site).
     Iloc = Iloc !== nothing ? Iloc :
            symmetry_mode() === :SU2 ? local_space(:SU2).I :
            symmetry_mode() === :Z2  ? ising_local_space(:Z2).I : local_space().I
-    # ⛔ THE TRANSPORTED OPERATOR IS NOT ALWAYS THE IDENTITY, and before `Itrans` existed the two
-    # were the same tensor -- so threading a Jordan-Wigner string was impossible: passing `σ^z` as
-    # `Iloc` would also have replaced the `id -> id` and `done -> done` blocks, applying `σ^z` on
-    # every site OUTSIDE the pair.
-    #
-    # A fermionic hop on an interleaved spinful chain is `S^+_{m+2} σ^z_{m+1} S^-_m`: the string
-    # sits on the sites the channel CROSSES, which is exactly what the transport block is. Setting
-    # `Itrans = σ^z` and a coupling matrix supported on `|i-j| = 2` therefore gives the correct
-    # fermionic hopping, with the identity channels left alone.
+    # `Itrans` is the operator carried across open channels; `σ^z` with a range-2 coupling gives the
+    # interleaved fermionic hop. The identity channels keep `Iloc`.
     Itrans = Itrans !== nothing ? Itrans : Iloc
 
     # `coupling(o, j, t)` is the weight of the pair FOR VERTEX `t`, strict upper triangle only.
@@ -367,21 +248,8 @@ function _pair_mpo(L::Int, Js::Vector, vertices::Vector{PairVertex}; Iloc = noth
         nrow, ncol = 2 + n * length(prev) + length(tprev), 2 + n * length(cur) + length(tcur)
         mat = Matrix{Any}(nothing, nrow, ncol)
 
-        # `id -> id`: nothing has opened yet. The guard is `i < L` -- exactly `mpo_from_terms`'s
-        # -- and NOT `!isempty(cur)`.
-        #
-        # ⛔ Guarding on `cur` looks right (why carry `id` across a link where nothing is open?)
-        # and is wrong twice over. `cur` is the set of channels open ON THIS LINK; a term that
-        # opens at a LATER site still needs `id` to reach it, so dropping the block SEVERS the
-        # automaton. And because column 1 is then entirely `nothing`, `oplus` has no source for
-        # the outgoing space of that column's zero blocks and throws
-        #   "cannot infer zero TLArray at (1, 1): missing space information on leg 4"
-        # (or leg 1, when row 1 empties too -- same cause, whichever leg Telum checks first).
-        #
-        # `alive(i)` is empty at an interior link exactly when the coupling graph is DISCONNECTED
-        # across that bond. Nearest-neighbour and Haldane-Shastry are connected everywhere, which
-        # is why nothing in the suite reached it. Carrying `id` where no term follows costs one
-        # virtual dimension and changes no matrix element: `id` can only leave via an opening.
+        # `id -> id` on every link but the last (as `mpo_from_terms`): a term opening later still needs it,
+        # and an empty column would leave `oplus` without spaces.
         i < L && (mat[1, 1] = Iid)
         # `done -> done`: a complete pair already lies behind us.
         i > 1 && (mat[nrow, ncol] = Iid)
@@ -396,13 +264,8 @@ function _pair_mpo(L::Int, Js::Vector, vertices::Vector{PairVertex}; Iloc = noth
         # `(o,t) -> done`: CLOSE at site `i`, weighted by `J[o,i]` and the vertex coefficient.
         for o in prev, t in 1:n
             c = coupling(o, i, t) * vertices[t].coeff
-            # ⛔ AN EXPLICIT ZERO, NOT A GAP. With ONE matrix per vertex a channel can be alive
-            # (some vertex still has a partner ahead) while THIS vertex's coupling vanishes here
-            # -- the mixed-range case the per-vertex form exists for. Leaving that entry unset
-            # gives `oplus` a hole it cannot infer spaces for:
-            #     ArgumentError: cannot infer zero TLArray at (3,1): missing space information
-            # Under a SHARED matrix the situation never arose: `J[o,i] == 0` killed every vertex
-            # at once, so whole rows were skipped consistently.
+            # An explicit zero, not a gap: with one matrix per vertex a channel can be alive while this
+            # vertex's coupling vanishes, and `oplus` cannot infer a hole.
             mat[rowof[(o, t)], ncol] = to_concrete((c == 0.0 ? zero(c) : c) * closes[t])
         end
         # Triples: `id -(A)-> pre`, `pre -(B)-> mid`, `mid -(w C)-> done` -- the same opening and

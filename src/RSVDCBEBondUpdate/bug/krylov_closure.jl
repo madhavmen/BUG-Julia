@@ -1,36 +1,6 @@
-# ── GENERAL-ORDER KRYLOV CLOSURE (krylov_closure_cbe_bug_realtime_L16_plan.md) ──────────────
-#
-# THE ORDER CONDITION. With `A = tau*H`, `P = P(W, Z)` the Galerkin projector of the K/L frames
-# and `B = P A P` the root generator, ONE root exponential has local error O(|tau|^(p+1)) once
-#
-#     (P A P)^j psi = A^j psi   (j = 1..p)     <=>     (I - P) A B^j psi = 0   (j = 0..p-1)
-#
-# (induction: given B^j psi = A^j psi, B^(j+1) psi = P A (A^j psi) equals A^(j+1) psi iff the j-th
-# frontier action leaves nothing outside P). The ordinary half-sweeps of `cbe_bug_step!` close
-# j = 0 -- CBE and Tests C/D on psi itself. This file closes j = 1..p-1.
-#
-# ⛔ REPEATED LOCAL H1 ACTIONS DO NOT CERTIFY ORDER. Tests C/D close the ONE-SITE Krylov space of
-# each bond, a property of `H1` with the far environment frozen; the order condition is about the
-# GLOBAL operator. So a frontier is judged by its outside-space action `(I - P) A F_j`, never by a
-# root Krylov residual: a root space invariant under `B` (projected breakdown) says nothing about
-# `A` (UT4).
-#
-# THE FRONTIER. `F_j = (tau^j / j!) B^j S0`, built at the root by zero-site applications and
-# embedded as an MPS in the CURRENT frames (`_frontier_mps`). The time weight lives in the vector:
-# variation of constants gives the local error as `sum_j (tau/(j+1)) (I - P) A F_j + ...`, so
-# measuring `F_j` with the step's own `|tau|/||psi||` scale reads off each frontier's contribution
-# (the `1/(j+1)` is slack).
-#
-# THE SWEEP. A frontier is swept with the SAME kernels as psi -- `cbe_expand` (RSVD Tests A/B) and
-# `_krylov_enrich` (Tests C/D) -- with the current frame, embedded into the already-grown basis of
-# the bond before it, as the old subspace kept VERBATIM (`U_ex = [U0 | new]`). Before any
-# selection the bond's exact outside-space action `||(I - U0 U0') H Theta_F||` is read off the
-# two-site action CBE builds anyway; a bond within its share of `tol_basis` is skipped. For a
-# nearest-neighbour H these per-bond numbers are exactly the telescoping pieces of the global
-# complement action (`estimate_global_complement_action`).
-#
-# ⚠ THE ORDINARY HALF-SWEEP IS NOT RE-ROUTED THROUGH THIS CODE: `order = 1` keeps `cbe_bug_step!`
-# bit for bit (UT9), and the closure starts from the frames it built.
+# ── GENERAL-ORDER KRYLOV CLOSURE (order-p condition) ──
+# The order-p error is O(|tau|^(p+1)) once `(I - P) A B^j psi = 0` for j < p, with B = P A P.
+# Frontiers are judged by `(I - P) A F_j`, not by a root residual (which concerns B, not A).
 
 "A frontier below this fraction of the state norm is the zero vector (e.g. `H psi = 0`)."
 const _FRONTIER_FLOOR = 1e-14
@@ -378,15 +348,12 @@ end
 """
     _bond_action(f, mpo, i, lch, rch, U0, V0, side, fold, rng) -> (skl, skr, leak, nh2)
 
-One frontier bond's sketch closures and outside-space action on `side`.
-
-`fold = false`: the exact two-site action `X = H Theta_F` is formed once, the leak is exact and the
-closures share `X` (`nh2 = 1`). `fold = true` (`cbe_bug_step!(...; fold_omega = true)`): `X` is
-NEVER formed -- the probe is folded into the environment contractions (`_fold_sketch_closures`)
-and the leak is Test B's holdout estimate at a quarter of the frame width, the same convention
-`_certified_range` uses. ⛔ This is the large-chi path: `X` lives on the frame width ~2chi, so the
-exact action costs `O((2chi)^3 d^2 D_w)` per bond per frontier sweep, the dominant cost of an
-order-p step at large chi, while the folded probe costs `O((2chi)^2 d n D_w)`.
+One frontier bond's sketch closures and outside-space action on `side`. With `fold = false` the
+exact two-site action `X = H Theta_F` is formed once, the leak is exact, and the closures share `X`
+(`nh2 = 1`). With `fold = true` (`fold_omega = true` in `cbe_bug_step!`) `X` is never formed: the
+probe is folded into the environment contractions, and the leak is Test B's holdout estimate at a
+quarter of the frame width. This is the large-chi path, since `X` lives on the frame width (~2chi)
+and the exact action costs far more than the folded probe.
 """
 function _bond_action(f::BondFrame, mpo, i::Int, lch, rch, U0, V0, side::Symbol, fold::Bool,
                       rng::AbstractRNG)

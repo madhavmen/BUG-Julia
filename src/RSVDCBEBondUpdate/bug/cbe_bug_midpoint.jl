@@ -2,33 +2,12 @@
 """
     cbe_bug_midpoint_step!(psi, mpo, tau; kwargs...) -> CBEBugSweepInfo
 
-One MIDPOINT BUG step (Ceruti-Kusch-Lubich, arXiv:2402.08607), in place.
-
-TWO STAGES, and the second is an ordinary [`cbe_bug_step!`](@ref) with its bases taken from the
-first:
-
-  1. a HALF STEP, `tau/2`, whose only product is a midpoint state `Y_{1/2}`;
-  2. a FULL step over `tau` whose frames are built from `Y_{1/2}` but which integrates the
-     Galerkin ODE from the ORIGINAL `Y_0`, then truncates once.
-
-⛔ IT IS EXPLICIT, DESPITE THE NAME. The midpoint *rule* is an implicit ODE method; this
-integrator approximates the midpoint with a half-step of the augmented BUG integrator instead of
-solving for it, so no linear system is ever formed. It is a two-stage EXPLICIT scheme, and it
-does NOT remove the Krylov exponential -- stage 2's Galerkin ODE over the full step IS
-`exp(tau*H_0)` on the core, i.e. the same `expv` root solve the ordinary step makes. What it buys
-is Theorem 4.2: a robust SECOND-ORDER global error bound whose constants are INDEPENDENT OF THE
-SINGULAR VALUES, with improved dependence on the normal component of the vector field.
-
-⛔ STAGE 1 MUST NOT TRUNCATE. Its job is to supply DIRECTIONS, and the paper's midpoint state is
-the rank-2r augmented one; cutting it back to rank r here would discard exactly what the
-augmented basis of stage 2 is supposed to contain. `truncate = false` is therefore forced, not a
-default, and rank control happens once at the end of stage 2.
-
-⚠ COST IS ~2x THE ORDINARY STEP -- two sweeps and two root solves. Whether that pays has to be
-MEASURED against simply halving `dt` on the ordinary sweep, which buys second-order accuracy at
-the same 2x. This sweep is already measured at `O(dt^2)`, so what is on offer here is the error
-CONSTANT and the proven bound, not an extra order; `benchmarks/midpoint_bug.jl` is where that
-comparison lives.
+One midpoint BUG step (Ceruti-Kusch-Lubich, arXiv:2402.08607), in place. A half step `tau/2` with
+`truncate = false` supplies the midpoint bases; an ordinary [`cbe_bug_step!`](@ref) then builds its
+frames from `Y_{1/2}`, integrates the Galerkin ODE from `Y_0`, and truncates once. It is explicit
+(no linear solve), still needs one exponential root solve, and costs about twice the ordinary step.
+Its gain is the second-order bound of Theorem 4.2, with constants independent of the singular
+values; weigh it against halving `dt` (`benchmarks/midpoint_bug.jl`).
 """
 function cbe_bug_midpoint_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64; kwargs...)
     get(kwargs, :order, 1) == 1 || throw(ArgumentError(

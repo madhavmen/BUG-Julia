@@ -1,46 +1,9 @@
 # mpo_fold.jl: fold-omega-first: the sketch that never forms `H*Theta` (from `mpo.jl`, included right after it).
 
-# ⛔ ONE `H*Theta` PER EXPANSION, SHARED BY ALL THREE SKETCH CALLS -- see `_sketch_closures`.
-# The MPO path is where this costs most: `apply_h_two_site` scales with the MPO's virtual
-# dimension, so the old triple build taxed the WIDE generators (square, kagome, Schwinger)
-# hardest, which are exactly the models the rSVD study needed to win on.
-# ══ FOLD-OMEGA-FIRST: the sketch that never forms `H*Theta` ═══════════════════════════════
-#
-# ⛔ THE POINT OF A RANDOMISED SKETCH IS TO MAKE `H` ACT ON `Dpre` COLUMNS INSTEAD OF `d*chi_r`,
-# AND THE PROJECT-FIRST PATH ABOVE CANNOT DO THAT. `_sketch_closures` builds the full
-# `H*Theta` and contracts `Om` into the RESULT, so the sketch shrinks only the SVD and the final
-# contraction -- never the object that dominates. That is why turning the sketch on has been
-# measured SLOWER than the exact expansion at chi <= 64 (L=18 XX: `t_cbe` 94.4 s -> 123.2 s over a
-# trajectory, and 1.750 -> 2.115 on a single pinned step), and why narrowing `Dpre` from 61% of
-# full width to 9.4% did not change that: both arms built the same `H*Theta`.
-#
-# ⚠ THE SAVING IS ASYMPTOTIC IN `chi`, NOT THE `Dpre/(d*chi)` RATIO USUALLY QUOTED. In
-# `apply_h_two_site` the two ENVIRONMENT contractions dominate and cost `O(chi^3 d^2 D)` -- the
-# left one contracts `(chi,D,chi)` against `(chi,d,d,chi)`, the right one likewise. Folding `Om`
-# in first replaces `chi_r`'s `d*chi_r` columns with `g = Dpre` BEFORE those contractions, so
-# every step of the chain is `O(chi^2 d g D)` or smaller. A factor `chi/g`, growing with the
-# bond dimension -- which is why this matters more at chi = 128/256 than at the chi = 41 the
-# campaign has been running at.
-#
-# ⛔ THE TRADE, AND IT IS A REAL ONE: FOLD-FIRST CANNOT SHARE. `cbe_expand` calls the sketch
-# THREE times with DIFFERENT `Om` (`skl(OmR)`, `skr(OmL)`, `skl(QR)`), and a folded chain is
-# specific to its `Om`, so it pays three chains where project-first pays ONE build plus three
-# cheap contractions. Fold-first wins when `3g < chi` -- comfortably at `dex = 8` (`g = 12`) for
-# `chi >= 64`, marginally at `chi = 41`, and NEVER at the `growth = 2.0` width of `g ~ 50`.
-# ⇒ THIS FLAG IS ONLY WORTH SETTING TOGETHER WITH A SMALL `dex`. On its own it can lose.
-#
-# ⚠ THE ORDERINGS AGREE EXACTLY, so this is a cost switch and nothing else. `P_perp` acts on
-# `(link_l, site_l)` and `Om` on `(site_r, link_r)` -- disjoint legs, so they commute:
-# `P_perp((H Theta) Om') == (P_perp (H Theta)) Om'`. `P_perp` is applied HERE, after the fold, so
-# each closure returns exactly what the project-first closure returns. Any difference beyond
-# roundoff is a bug in this code, and `tests/rsvd_cbe/` pins it against the other path.
-#
-# ⛔ A HISTORICAL NOTE THAT MATTERS FOR ANY COMPARISON WITH OLD NUMBERS. A fold-Omega-first path
-# existed for the TERM-LIST Hamiltonian (`sketch_h_left(f, h::XXZChain, ...)`) and was deleted in
-# 95263fb (2026-08-06, "sketch the projector, and remove the alternative"). The MPO layer arrived
-# in 3452a51 (2026-08-17), ELEVEN DAYS LATER -- so the MPO path has NEVER had a fold-first
-# variant, and rSVD cost numbers measured through the MPO cannot be compared with the term-list
-# ones from before that deletion. This function is new code, not a revert.
+# ── fold-omega-first: the sketch that never forms H*Theta ──
+# Contracting `Om` in first makes the cost scale with the sketch width g, not d*chi. It is exact, since
+# P_perp and Om act on disjoint legs and commute.
+# The three sketches use different Om and cannot share one folded chain, so it wins only for small dex (3g < chi).
 
 """
     _fold_sketch_closures(f, mpo, i, lenv, renv) -> (skl, skr)
@@ -198,18 +161,9 @@ one_site_h(mpo::MPO, j::Int, lenv::MPOLeftEnvStack, renv::MPORightEnvStack) =
 `H_eff A` for a site tensor `A` with legs `(link_l, site, link_r)`, in and out.
 """
 function apply_one_site(H1::MPOOneSiteH, A)
-    # ⛔ `to_concrete!` ON THE CONTRACTION RESULTS, NOT `to_concrete`. This is THE hot path —
-    # one call per Krylov vector per bond per half-sweep, several hundred per step — and
-    # `_eager_tlarray(q::TLArray) = copy(q)`, so `to_concrete` on an already-concrete tensor
-    # deep-copies every block. `contract` builds its result from freshly allocated RMTs and
-    # w-matrix storage that alias neither input, so that copy duplicates a tensor nobody else
-    # can see. Measured context: a chi=1024 TDVP2 step allocated ~142 GB against a 0.08 GB
-    # state, with GC/allocation ~67% of active profile samples and BLAS gemm ~12%.
-    #
-    # ⚠ SAFE HERE BECAUSE EVERY ARGUMENT IS A FRESH `contract` RESULT. `H1.l`, `H1.w`, `H1.r`
-    # and `A` are all still owned by their callers and are never passed to `to_concrete!` —
-    # only the intermediates. `deleteSingleton` and `permutedims` return views, so those keep
-    # the copying `to_concrete`.
+    # `to_concrete!` on the contraction results: this is the hot path, and `to_concrete` on an already
+    # concrete tensor would deep-copy every block.
+    # Safe only because every argument is a fresh `contract` result; the inputs belong to callers and keep `to_concrete`.
     T = if H1.l === nothing
         X = to_concrete!(contract(A, (2,), H1.w, (2,)))     # (ℓ_l, ℓ_r, w_l, s_bra, w_r)
         to_concrete(deleteSingleton(X, 3))                  # (ℓ_l, ℓ_r, s_bra, w_r)
@@ -276,15 +230,11 @@ end
 """
     shift_h(H, s) -> H or ShiftedH
 
-The effective Hamiltonian `H - s` (one-site or zero-site), for the GENERATORS of a step whose
-operator is `H - Eshift` (imaginary time: `exp[-dbeta (H - Eshift)]`). `s = 0` returns `H` itself,
-so an unshifted step is bit-identical.
+The effective Hamiltonian `H - s` for the generators of an imaginary-time step. `s = 0` returns `H`
+itself, so an unshifted step is bit-identical.
 
-⚠ ONLY THE GENERATORS ARE SHIFTED, and nothing else needs to be. A shift by a multiple of the
-identity leaves every Krylov SPACE unchanged and changes only the WEIGHTS the tests read off them
-(`_kry_weight`, the closure frontiers `(tau^j/j!)(B - s)^j S0`, the root). The CBE sketches see
-`P_perp (H - s) Theta = P_perp H Theta` because `Theta` lies in the frame, so they are exact as
-they stand.
+A shift by the identity leaves every Krylov space unchanged and only changes the weights read off
+them. The CBE sketches are exact as they stand, since `P_perp (H - s) Theta = P_perp H Theta`.
 """
 struct ShiftedH{T}
     h::T

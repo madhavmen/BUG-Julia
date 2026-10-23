@@ -1,32 +1,17 @@
-# Canonical two-site bond snapshot -- the input the KLS kernel consumes.
-#
-# Mirrors Alice's two_site_bug/scheme.py::bond_snapshot:
-#
-#     U0_tens, s_left,  canon_u0 = qr(left,  [link_l, site_l], tag=link_mid.itag)
-#     s_right, V0_tens, canon_v0 = lq(right, [site_r, link_r], tag=link_mid.itag)
-#     S0_tens = tcontract(s_left, s_right)
-#
-# Telum has no QR, so SVD stands in (docs/telum_api_contract.md section 4): the
-# `U` of `svd(A, left_legs)` is exactly the left isometry a QR would give, and
-# `S*Vd` is the R factor. Likewise `Vd` of `svd(B, (1,))` is the right isometry
-# an LQ gives, with `U*S` as the L factor. These are exact, truncation-free
-# moves -- all rank adaptation belongs to the KLS step and only to it, which is
-# why `cutoff=0.0` is passed rather than relying on the 1e-12 default.
+# Canonical two-site bond snapshot, the input to the KLS kernel; mirrors Alice's bond_snapshot.
+# Telum has no QR or LQ, so SVD stands in: the U of svd(A) is the QR's left isometry, and S*Vd its R
+# factor (docs/telum_api_contract.md, section 4). These are exact, truncation-free moves, so
+# `cutoff=0.0` is passed explicitly; all rank adaptation belongs to the KLS step.
 
 """
     BondFrame
 
-The canonical snapshot at bond `(i, i+1)`:
+The canonical snapshot at bond `(i, i+1)`, with `theta == U0 * S0 * V0` exactly (no truncation).
+`U0` is a left isometry with legs `(link_l, site_l, bond_u)`, `V0` a right isometry with legs
+`(bond_v, site_r, link_r)`, and `S0` the `(bond_u, bond_v)` centre.
 
-    theta  ==  U0 * S0 * V0        (exactly, no truncation)
-
-`U0` is a left isometry with legs `(link_l, site_l, bond_u)`, `V0` a right
-isometry with legs `(bond_v, site_r, link_r)`, and `S0` the `(bond_u, bond_v)`
-centre.
-
-The `link_*` / `site_*` fields are `TLIndex` handles for identifying legs.
-**A `TLIndex` carries no dimension** -- that lives in the owning tensor's
-`spaces` -- so `old_rank` and `link_mid_space` are stored separately.
+`link_*` / `site_*` are `TLIndex` handles. A `TLIndex` carries no dimension, which lives in the
+tensor's `spaces`, so `old_rank` and `link_mid_space` are stored separately.
 """
 struct BondFrame
     U0::Any

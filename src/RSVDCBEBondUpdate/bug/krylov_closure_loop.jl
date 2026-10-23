@@ -1,35 +1,17 @@
-# krylov_closure_loop.jl: the closure loop of `order = p` steps (from `krylov_closure.jl`, included right after it).
+# krylov_closure_loop.jl: the closure loop of `order = p` steps (from `krylov_closure.jl`, included
+# right after it).
 
 """
     _krylov_closure!(fr, psi, mpo, S0, tau, alloc, ckw; order, workcap, nrm, parallel, rng,
                      ledger, include_zero = false, maxpass, checks = false) -> NamedTuple
 
-Close the frontiers `j = 0..order-1` of the frames `fr` (in place) for the state `psi` with root
-coefficients `S0`.
-
-`checks = false` (THE DEFAULT, USER 2026-10-17): ONE enriching sweep per frontier, `j = 1..order-1`
-in order (`0..order-1` with `include_zero`), each frontier rebuilt in the frames the previous one
-grew. Nothing is measured before or after: an enriching sweep measures every bond's leak itself
-and enriches only the bonds over their share, so an order-2 step is the two half-sweeps plus one
-left || right sweep of `j = 1`. The measured cost of the checks (10x4, D = 512, bug2, job
-17299494): check first 12 s, re-check + final `j = 0` 16-18 s, of a 46-52 s closure in a
-78-84 s step (plan §8). `converged` is then every enriching sweep's own Tests A-D verdict; `ledger.leak[j]` is
-frontier `j`'s leak BEFORE its enrichment (`j = 0`, not measured, is `NaN`) and `defect` sums the
-measured ones; `leak_initial`/`rho_initial` stay empty.
-
-`checks = true` is the validation path the closure was built and tested with: every frontier is
-first MEASURED on the incoming frames
-([`_measure_frontiers`](@ref), `ledger.leak_initial`/`rho_initial`); when they already close
-every frontier (`n_passes = 0`) nothing is swept and `fr` is returned untouched -- the ordinary
-CBE + local-Krylov frames are then already of order `p` to the tolerance. Otherwise the
-enrichment loop runs; after every enriching sweep the root generator and `S0` are rebuilt in the
-new frames, and once the loop stops `j = 0` is MEASURED (not enriched) on the final frames, so
-`ledger.leak` holds every frontier's final time-weighted outside-space action and
-`ledger.defect = sum_j leak[j]/(j+1)` the integrated-defect estimate (a bound for a
-nearest-neighbour `H` and exact per-bond measurements; with RSVD selections the leftovers they
-measure are those of sampled directions). Not converging -- pass bound or work ceiling -- is
-`:closure`, never a silent pass; `capped` says the loop stopped at the working-rank limit
-([`_closure_loop!`](@ref)). Returns the final `S0`, the loop's verdict and its counters.
+Close the frontiers `j = 0..order-1` of the frames `fr` in place, for `psi` with root coefficients
+`S0`. `checks = false` (default) runs one enriching sweep per frontier, each rebuilt in the frames
+the previous one grew, and each sweep measures its own leaks. `checks = true` first measures every
+frontier on the incoming frames ([`_measure_frontiers`](@ref)) and returns `fr` untouched if all
+close; otherwise it enriches and then measures `j = 0` on the final frames. Non-convergence is
+`:closure`, never a silent pass; `capped` marks a stop at the working-rank limit
+([`_closure_loop!`](@ref)).
 """
 function _krylov_closure!(fr::KLFrames, psi::SymMPS, mpo, S0, tau::ComplexF64,
                           alloc::BasisAllocation, ckw::NamedTuple; order::Int,

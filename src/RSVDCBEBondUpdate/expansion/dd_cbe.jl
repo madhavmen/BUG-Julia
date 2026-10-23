@@ -1,23 +1,7 @@
 
-# ══ IMPLICIT DD-PROJECTED, MPO-STREAMED, QR-ONLY CBE (cbe_bug_high_order_rsvd_parallel_tasks.md) ══
-#
-# Task 2: the basis expansion of `cbe_bug_step!`, the only one it runs.
-# At bond (i, i+1), with left frame A = U0, right frame B = V0 and X = mat[H_eff Theta]:
-#
-#   K-sweep (left frame grows)              L-sweep (right frame grows)
-#   Om~ = P_R^D Om = Om - B'(B Om)          Om~ = P_L^D Om = Om - A(A' Om)
-#   Z   = X Om~       (MPO-streamed)        Z   = X' Om~      (MPO-streamed)
-#   Y   = P_L^D Z = Z - A(A' Z)             Y   = P_R^D Z = Z - B'(B Z)
-#   Y   = Q R  (sectorwise thin QR)         Y   = Q R
-#   A_aug = [A, Q]                          B_aug' = [B', Q]
-#
-# Neither X, an X_mu, G_DD = P_L^D X P_R^D nor a dense projector is formed, and Theta = A S B is
-# not formed either: the probe is contracted into B (or A) and the centre core separately. ONE
-# side per call, because the two QRs belong to the two half-sweep orientations (plan T2.4).
-#
-# Task 1.3/1.4: the operator-action interface the CBE sketch, the local Krylov and the root
-# share (`apply_two_site_sketch!`, `apply_one_site!`, `apply_root!`), and the per-kernel
-# counters every step reports in one typed `StepRecord`.
+# ── implicit DD-projected, MPO-streamed, QR-only CBE ──
+# The frame grows by Om~ = P^D Om, Z = X Om~ streamed through the MPO, and Y = Q R: neither X nor the
+# DD projector is formed. One side per call, since the two QRs belong to the two half-sweep orientations.
 
 # ── T1.4: per-kernel counters ─────────────────────────────────────────────────────────────
 
@@ -67,13 +51,9 @@ end
     return r, (time_ns() - t0) / 1e9, Base.gc_bytes() - b0
 end
 
-# ── T1.3: one operator-action interface ───────────────────────────────────────────────────
-#
-# Each operator is IMMUTABLE and built per bond visit from the environments of that visit, so a
-# stale operator cannot see a later gauge or environment: invalidation is by construction, and
-# `version` records which visit built it. The local Krylov and the root share the interface,
-# not a tolerance. Outputs go to a caller-held `Ref` because Telum contractions allocate their
-# result; there is no in-place block buffer to reuse.
+# ── one operator-action interface ──
+# Each operator is immutable and built per bond visit, so a stale one cannot see a later gauge.
+# Outputs go to a caller-held `Ref`, since Telum contractions allocate their result.
 
 """
     TwoSiteSketchOp(f, mpo, i, lenv, renv; adjoint = false, version = 0, counters)
@@ -169,12 +149,9 @@ end
 "`Y[] = H0 S` through the shared interface."
 apply_root!(Y::Base.RefValue, S, op::RootOp) = (Y[] = apply_zero_site(op, S); Y)
 
-# ── the streamed contractions ─────────────────────────────────────────────────────────────
-#
-# The chains of `_fold_sketch_closures` (mpo.jl), with two differences: no projection at the end
-# (the caller applies P^D to the thin result), and Theta is never formed -- the probe meets the
-# opposite frame first, then the centre-carrying core. Every intermediate is thin in `g`:
-# O(d w g D^2 + d^2 w^2 g D) work, the McCulloch-Osborne target.
+# ── the streamed contractions ──
+# As `_fold_sketch_closures` (mpo.jl), but with no final projection and Theta never formed: every
+# intermediate is thin in g.
 
 "`X Om` for `Om` in `V0`'s layout; `K0 = U0 S0`. Legs `(link_l, site_l, g)`."
 function _stream_left(K0, V0, mpo::MPO, i::Int, lenv::MPOLink, renv::MPOLink, Om)
@@ -240,15 +217,12 @@ end
 """
     _dd_probe(frame, side, w; rng, boost, exact, kc) -> P^D Om, or nothing
 
-A sector-graded Gaussian probe in `frame`'s layout, drawn ONLY in the frame's discarded space:
-columns are allotted in proportion to each fused sector's discarded dimension `dfull - dkept`
-(so a sector with no kept multiplicity gets its full share, and a sector the frame fills gets
-none), then the frame is projected out of the thin probe. `exact = true` projects the complete
-fused basis instead (the full-DD reference width). `nothing` when there is no discarded space:
-then `P^D = 0` and no DD direction exists through this side.
+A sector-graded Gaussian probe in `frame`'s layout, drawn only in the discarded space: columns are
+allotted by each sector's discarded dimension, then the frame is projected out. `exact = true`
+projects the complete fused basis instead. Returns `nothing` when there is no discarded space.
 
-Unlike `sector_graded_sketch(...; comp_ratio = 1.0)`, a short complement is NOT topped up from
-the kept space: a kept-space column has zero DD action and would only carry a DK contribution.
+Unlike `sector_graded_sketch(...; comp_ratio = 1.0)`, a short complement is not topped up from the
+kept space.
 """
 function _dd_probe(frame, side::Symbol, w::Int; rng::AbstractRNG, boost = nothing,
                    exact::Bool = false, kc::KernelCounters = KernelCounters())

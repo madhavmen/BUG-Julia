@@ -2,32 +2,14 @@
 """
     CBEBugSweepInfo
 
-What one [`cbe_bug_step!`](@ref) did.
+What one [`cbe_bug_step!`](@ref) did:
 
-  - `expanded` -- the bond dimension the basis update left at each bond, before the closing
-    truncation. In MULTIPLETS under a non-abelian symmetry.
-  - `n_new` -- directions CBE admitted per bond; an upper bound on what `expanded` could grow by.
-  - `root`, `root_rank` -- which bond took the Galerkin step, and its kept rank afterwards.
-  - `err_pre`, `err_fnl` -- largest preselection / final-selection weight discarded. `err_fnl`
-    is the one to watch: a large value means the BUDGET, not the selection, limited accuracy.
-  - `discarded` -- largest relative weight any single SVD of the closing truncation (or the
-    root split) threw away. ⚠ NOT the step's compression error: that is `ledger.discarded`, the
-    cumulative relative norm over every bond (plan §5).
-  - `ledger` -- the step's [`AdaptiveLedger`](@ref) (Test A/B/C/D indicators, probe counts,
-    cumulative compression, projection error, ranks, `tolerance_met`,
-    `workcap_reached`). [`budget_status`](@ref) reads
-    `:met` / `:budget_unmet` off it and [`budget_diagnostic`](@ref) says why.
-  - `krylov_dims` -- operator applications, summed over the `L` K-steps and the one root solve,
-    plus, for `order > 1`, the frontier sweeps' one-site and zero-site applications (their
-    two-site leak measurements are `ledger.n_h2_leak`).
-  - `peak_elements` -- working set (`state + accumulated frames + transients alive at that
-    moment`), the same definition `TDVP2Info` uses, so the two are comparable.
-    ⚠ **This sweep does NOT have a lower working set than 2-site TDVP.** It never forms a rank-4
-    block, which is true and is why its transients are small -- but it holds O(L) FRAMES alive
-    until the root solve, and at L=16, chi=32 that measured *larger* than `tdvp2_step!`'s
-    `state + one Theta`. The advantage this sweep actually has is in OPERATOR APPLICATIONS and
-    wall clock (measured 4.2x fewer applications and 1.35x faster than 2-site TDVP at L=16), not
-    in memory.
+  - `expanded`, `n_new`: bond dims after the update (multiplets under SU(2)); directions admitted.
+  - `root`, `root_rank`: the Galerkin bond and its kept rank.
+  - `err_pre`, `err_fnl`: largest discarded weight in preselection / final selection.
+  - `discarded`: largest weight one closing SVD discarded (cumulative: `ledger.discarded`).
+  - `ledger`: the [`AdaptiveLedger`](@ref), read by [`budget_status`](@ref).
+  - `krylov_dims`, `peak_elements`: applications and working set (not below 2-site TDVP's).
 """
 struct CBEBugSweepInfo
     expanded::Vector{Int}
@@ -48,12 +30,10 @@ struct CBEBugSweepInfo
     # space is `b_L x b_R`: judging completeness from `b_L` alone can call a basis complete when it
     # is not, which is exactly the wrong way for a diagnostic to fail.
     root_right::Int
-    # ⛔ SECONDS SPENT INSIDE `cbe_expand`, WHICH IS THE ONLY THING THE RANDOMISED SKETCH MAKES
-    # CHEAPER. Without it, an rSVD study cannot tell "the sketch is slow" from "the sketch is fast
-    # but the expansion is a small share of the step" -- and those call for opposite responses.
-    # Amdahl: if the expansion is a fraction `f` of the step, the speedup is capped at `1/(1-f)`
-    # however good the sketch gets. MEASURED 1.10x against a `Dpre/(d*chi)` ceiling of ~16x, which
-    # is exactly the shape of a small `f`.
+    # Seconds inside `cbe_expand`, the only phase the randomised sketch makes cheaper. Without this
+    # timer an rSVD study cannot tell a slow sketch from a fast sketch inside a small expansion
+    # share, and those call for opposite responses: by Amdahl, the speedup is capped at 1/(1-f) for
+    # an expansion share f.
     t_cbe::Float64
     # ⛔ A PHASE BREAKDOWN OF THE STEP, because "the sketch did not help" has two very different
     # causes and only one is a code problem. The sketch makes `cbe_expand` cheaper and nothing
@@ -62,13 +42,10 @@ struct CBEBugSweepInfo
     t_kry::Float64      # building the Krylov frames (`_krylov_enrich`)
     t_root::Float64     # the root Galerkin solve (`expv` on the zero-site generator)
     t_trunc::Float64    # the closing `truncate_recursive!`
-    # ⛔ THE PHASES THAT CLOSE THE ACCOUNTING. MEASURED at L=50, chi=64 with only the four timers
-    # above: cbe 0.445 + kry 0.128 + root 0.003 + trunc 0.029 = 0.605, leaving ~40% UNATTRIBUTED.
-    # A profile that does not add up cannot locate a bottleneck, and the missing block is bigger
-    # than every phase except the expansion itself.
-    #
-    # ⚠ `t_frame` IS AN SVD TOO, and the CBE sketch does not touch it: `_frame_from` factorises
-    # both sides of a bond.
+    # The timers that close the step's time accounting: without them a profile leaves a large
+    # unattributed share. `t_frame` is an SVD too (`_frame_from` factorises both sides of a bond),
+    # so it is not part of the CBE sketch. `t_split` is the removed fixed-knob path's frame splits
+    # and is always 0.
     t_split::Float64    # the removed fixed-knob path's frame splits; always 0
     t_frame::Float64    # `_frame_from`, which factorises both sides of the bond
     t_env::Float64      # environment stacks and channel pushes

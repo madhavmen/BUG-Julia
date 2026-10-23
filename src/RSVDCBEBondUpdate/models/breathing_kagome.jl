@@ -1,20 +1,7 @@
-# ── the DIPOLAR XY MODEL ON A BREATHING KAGOME LATTICE (arXiv:2603.21147) ────
-#
-#     H = (1/2) sum_{i<j} V_ij (sigma^x_i sigma^x_j + sigma^y_i sigma^y_j),   V_ij = d^2 / R_ij^3
-#
-# with the BREATHING parameter `h` displacing the B and C sublattices outward along the lattice
-# vectors, so the up-triangles expand by `(1+h)` and the down-triangles shrink to compensate. The
-# paper reports a continuous Dirac-spin-liquid -> chiral-spin-liquid transition near `h ~ 0.22`,
-# with the chiral order parameter turning on there.
-#
-# ⛔ sigma VERSUS S, AND THE FACTOR THAT HIDES IN IT. The paper writes Pauli operators;
-# `spin_vertices` builds spin-1/2 operators, `sigma = 2S`. So
-#
-#     (1/2) V (sigma^x sigma^x + sigma^y sigma^y) = 2 V (S^x S^x + S^y S^y)
-#
-# and the coupling handed to `pair_mpo` must be `J_ij = 2 * V_ij`, NOT `V_ij`. A factor of two in
-# `H` rescales the entire energy axis and every time in a quench, which reads as a physics result
-# rather than a units slip -- `test_breathing_kagome.jl` pins it against a two-site closed form.
+# ── the dipolar XY model on a breathing kagome lattice (arXiv:2603.21147) ──
+# H = (1/2) sum V_ij (sigma^x sigma^x + sigma^y sigma^y), V_ij = d^2 / R_ij^3; the breathing h moves the
+# B and C sublattices outward. The paper uses Pauli operators and this code spin-1/2 (sigma = 2S), so
+# the coupling handed to `pair_mpo` is J_ij = 2 V_ij. A factor of two rescales the energy axis and time.
 
 """
     breathing_kagome_positions(Lx, Ly, h) -> Vector{NTuple{2,Float64}}
@@ -45,32 +32,16 @@ end
 """
     breathing_kagome_couplings(Lx, Ly; h=0.0, d2=1.0, shells=7, periodic_y=true) -> Matrix
 
-`J[i,j] = 2 * d2 / R_ij^3` for every pair within the first `shells` distance shells — the factor
-2 converting the paper's Pauli convention to this code's spin-1/2 operators (see the header).
-
-⛔ `shells` COUNTS DISTINCT DISTANCES, NOT PAIRS. "Up to the seventh-nearest neighbour" means the
-seven smallest distinct separations present in the cluster, so the cutoff is set by BINNING the
-pairwise distances and keeping the first seven bins. Taking the seven nearest *pairs per site*
-instead would give a different, geometry-dependent cutoff on a lattice with three inequivalent
-sublattices, and would silently change with `h`.
-
-⚠ `periodic_y` wraps the `a2` direction by MINIMUM IMAGE: the distance used is the shortest over
-the wrap, which is what a cylinder means. Without it the two edges of the circumference would be
-`Ly` cells apart instead of adjacent, and the dipolar tail would connect the wrong sites.
+`J[i,j] = 2 * d2 / R_ij^3` for every pair within the first `shells` distinct distance shells; the
+factor 2 converts Pauli to spin-1/2 operators. `shells` counts distinct distances, not pairs per site.
+`periodic_y` uses the minimum-image distance around the circumference.
 """
 function breathing_kagome_couplings(Lx::Int, Ly::Int; h::Float64 = 0.0, d2::Float64 = 1.0,
                                     shells::Int = 7, periodic_y::Bool = true,
                                     ref_h::Float64 = 0.0)
-    # ⛔ THE CUTOFF RADIUS IS FIXED AT `ref_h`, NOT RE-DERIVED AT EVERY `h`. At h = 0 the lattice
-    # is maximally symmetric so its distance shells are highly degenerate; breathing LIFTS that
-    # degeneracy, so "the first 7 distinct distances" covers a DIFFERENT SET OF PAIRS at each h.
-    # MEASURED on a 2x3 cluster: 153 couplings at h = 0 against 132 at h = 0.22. A model whose
-    # interaction set jumps as the tuning parameter is swept can produce a perfectly sharp
-    # "transition" that is nothing but the Hamiltonian changing shape underneath the scan --
-    # exactly the artefact a chiral-order-parameter sweep would report as physics.
-    #
-    # So the shells are counted ONCE in the reference (isotropic) geometry and the resulting
-    # RADIUS is applied at every `h`. Pass `ref_h = h` to recover the old per-h behaviour.
+    # The cutoff radius is fixed at `ref_h`, not re-derived at each h: breathing lifts the degeneracy of the
+    # distance shells, so re-deriving would change the interaction set along a scan and fake a transition.
+    # Pass `ref_h = h` for the per-h behaviour.
     pos = breathing_kagome_positions(Lx, Ly, h)
     L = length(pos)
     a2 = (1.0, sqrt(3.0))

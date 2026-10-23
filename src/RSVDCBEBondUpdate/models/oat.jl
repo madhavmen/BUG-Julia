@@ -1,17 +1,7 @@
-# THE ONE-AXIS TWISTING MODEL of arXiv:2208.10972 Fig. 2 -- the paper's SECOND benchmark, and
-# the one that stresses a real-space MPS hardest, because every pair of sites is coupled with
-# the SAME strength. There is no decay to exploit and no locality to exploit.
-#
-#     H_OAT = ( Σ_ℓ S^z_ℓ )^2 / 2                                      (the paper's form)
-#
-# WHAT IT ACTUALLY IS AS AN MPO, and why the square is never formed. Expand it, and use the fact
-# that a spin-1/2 site has `(S^z)^2 = I/4` EXACTLY:
-#
-#     ( Σ_ℓ S^z_ℓ )^2  =  Σ_ℓ (S^z_ℓ)^2  +  2 Σ_{ℓ<ℓ'} S^z_ℓ S^z_ℓ'
-#                      =  L/4 · I        +  2 Σ_{ℓ<ℓ'} S^z_ℓ S^z_ℓ'
-#
-#     ⇒   H_OAT  =  Σ_{ℓ<ℓ'} S^z_ℓ S^z_ℓ'  +  (L/8) · I
-#
+# ── the one-axis twisting model (arXiv:2208.10972, Fig. 2) ──
+# H = (sum_l S^z_l)^2 / 2 couples every pair equally, so there is no decay or locality to exploit. Since
+# (S^z)^2 = I/4 on a spin-1/2 site, H = sum_{l<l'} S^z_l S^z_l' + (L/8) I. The square is never formed,
+# and the constant is returned by `oat_energy_shift`.
 
 # ── the Hamiltonian ──────────────────────────────────────────────────────────
 
@@ -47,27 +37,13 @@ oat_energy_shift(L::Int) = L / 8
 """
     oat_mpo(L; chi=1.0) -> MPO
 
-`H = chi · Σ_{ℓ<ℓ'} S^z_ℓ S^z_ℓ'` -- the one-axis twisting Hamiltonian of arXiv:2208.10972,
-up to the c-number [`oat_energy_shift`](@ref). `chi = 1` is the paper's `(Σ S^z)^2 / 2`.
+`H = chi * sum_{l<l'} S^z_l S^z_l'`, the one-axis twisting Hamiltonian up to the c-number
+[`oat_energy_shift`](@ref). `chi = 1` is the paper's `(sum S^z)^2 / 2`.
 
-VIRTUAL DIMENSION 3, INDEPENDENT OF `L`, and EXACT: a constant coupling is the `λ = 1`
-degenerate case of the geometric tail that [`long_range_mpo`](@ref) carries on a single
-self-loop channel, so there is no fit and no truncation anywhere in the operator. See the header
-of this file for the expansion of the square, and [`oat_mpo_pairs`](@ref) for the independent
-`O(L)` construction the tests pin this against.
-
-Available in `:none` and `:U1` -- `S^z` is charge-neutral (rank 2) in both, which is exactly
-what the self-loop needs. It is NOT available under `:SU2`, which has no `S^z` on its own; and
-note that a `:U1` run cannot measure the paper's observable even though it can hold this
-operator (see [`x_polarized_state`](@ref)).
-
-⛔ UNDER `:Z2` THE VIRTUAL DIMENSION IS `O(L)`, NOT 3, and the reason is structural rather than
-an oversight. The paper's Z2 lives in the sigma^x basis, where `S^z` is the CHARGE-1 FLIP and
-therefore rank 3; a self-loop carrying it would need a charged transport identity, which
-[`long_range_mpo`](@ref) refuses by an explicit check. [`pair_mpo`](@ref) builds exactly that
-charged transport block, so `:Z2` is routed there and the operator is still EXACT -- it just
-costs `O(L)` virtual dimension. Note that this makes `oat_mpo` and [`oat_mpo_pairs`](@ref) the
-SAME construction under `:Z2`, so comparing them there is a tautology, not a cross-check.
+Exact, with virtual dimension 3 independent of `L`: a constant coupling is the lambda = 1 case of the
+geometric tail in [`long_range_mpo`](@ref). Available in `:none` and `:U1`, where S^z is
+charge-neutral; not under `:SU2`. Under `:Z2` S^z is a charge-1 flip, so the virtual dimension is
+O(L); [`pair_mpo`](@ref) builds the charged transport block and the operator stays exact.
 """
 function oat_mpo(L::Int; chi::Float64 = 1.0)
     L >= 2 || throw(ArgumentError("oat_mpo needs L >= 2, got $L"))
@@ -88,18 +64,12 @@ end
 """
     oat_mpo_pairs(L; chi=1.0) -> MPO
 
-The SAME operator as [`oat_mpo`](@ref), built through [`pair_mpo`](@ref) from
-[`oat_couplings`](@ref): one channel per opening site, so virtual dimension `O(L)`.
+The same operator as [`oat_mpo`](@ref), built through [`pair_mpo`](@ref) from
+[`oat_couplings`](@ref): one channel per opening site, virtual dimension O(L).
 
-Deliberately redundant, and the redundancy is the point. `oat_mpo` leans on the `λ = 1`
-self-loop, the DEGENERATE end of `long_range_mpo`'s geometric tail -- `λ = 0` is pinned against
-the nearest-neighbour builder in `test_mpo.jl` and intermediate `λ` against a dense pair sum in
-`test_long_range.jl`, but `λ = 1` (a channel that never decays, open across the whole chain) is
-exercised by nothing else. `pair_mpo` reaches the same operator by a completely different
-automaton, so agreement between the two is a real check rather than a restatement.
-
-Use `oat_mpo` for anything that runs; use this to check it -- EXCEPT under `:Z2`, where
-`oat_mpo` is this function (see its docstring) and the two are not independent.
+It is an independent check: `oat_mpo` relies on the lambda = 1 self-loop, which no other test
+exercises, while `pair_mpo` reaches the same operator by a different automaton. Use `oat_mpo` for
+runs and this for verification. Under `:Z2` the two are the same construction.
 """
 function oat_mpo_pairs(L::Int; chi::Float64 = 1.0)
     left, right, scale = _oat_sz_vertex()
@@ -109,31 +79,11 @@ end
 """
     _oat_sz_vertex() -> (left, right, scale)
 
-The current mode's local `S^z` as the two HALVES of a pair term plus a `scale` carrying whatever
-normalisation the operators themselves do not.
+The local S^z as the two halves of a pair term, plus a `scale` for normalisation.
 
-Under `:none`/`:U1` both halves are Telum's rank-2 `Sz` (eigenvalues `±1/2`) and `scale = 1`.
-
-Under `:Z2` the sigma^x basis makes `S^z` the CHARGE-1 FLIP `Z = [0 1; 1 0]`, which is `2 S^z`
-and rank 3 -- its op leg carries the charge. So `scale = 1/4`, one factor of `1/2` per end. THE
-SCALE GOES ON THE COUPLING, NOT THE OPERATOR: rescaling a rank-3 tensor would have to preserve
-its op-leg sector bookkeeping, and a number on `J[i,j]` does the same job.
-
-⛔ THE TWO HALVES ARE AN ADJOINT PAIR `Z`/`Z'`, NOT `Z`/`Z`, AND THE DIFFERENCE IS NOT COSMETIC.
-`XXZTerm`'s own contract is documented as needing `Sp`/`Sp'` rather than `Sp`/`Sm` (see
-`henv.jl`), and `ising_bond_gate` builds `Z⊗Z` the same way -- `contract(Z, (3,), Z', (3,))`.
-The reason shows up as an ARROW, not a charge: an op leg is created with direction `'-'`, so
-`Z`/`Z` gives the opening block's outgoing virtual leg and the closing block's incoming one the
-SAME direction, and Telum refuses to contract two `'-'` legs. MEASURED, before the fix:
-
-    AssertionError: Contracted legs must have opposite arrow directions:
-                    q1 leg 4 has dir='-', q2 leg 1 has dir='-'
-
-That failure is not specific to long range -- `Z`/`Z` cannot contract at distance 1 either -- so
-it surfaced as `_charged_transport` finding no valid transport block, which reads like a missing
-mod-2 capability and is actually a malformed vertex. Charge-wise mod 2 is genuinely unusual here
-(`1 + 1 = 0`, so the flip IS its own partner, where U(1) needs `+2` and `-2`); that is exactly
-what makes the arrow the only thing left to get wrong.
+Under `:none`/`:U1` both halves are Telum's `Sz` and `scale = 1`. Under `:Z2` S^z is the charge-1
+flip, equal to 2 S^z, so `scale = 1/4`, placed on the coupling rather than the operator.
+The halves must be an adjoint pair (Z and Z'): two Z halves give both legs the same arrow.
 """
 function _oat_sz_vertex()
     if symmetry_mode() === :Z2
@@ -149,24 +99,12 @@ end
 """
     _require_sx_measurable(what)
 
-Refuse `what` in a mode where `⟨S^x_tot⟩` is not measurable, naming the physics rather than the
-implementation limit. `:none` and `:Z2` pass; `:U1` and `:SU2` do not.
+Refuse `what` where <S^x_tot> is not measurable: `:none` and `:Z2` pass, `:U1` and `:SU2` do not.
 
-⛔ THIS GUARD REPLACES A SILENT ZERO. `S^x = (S^+ + S^-)/2` changes `S^z_tot` by ±1, so on a
-`SymMPS` of definite total charge `⟨S^x_tot⟩` is not approximately zero, it is EXACTLY zero by
-symmetry -- and `site_expval` cannot even be reached to notice, because under `:U1` the local
-`S^+`/`S^-` are rank-3 (their op-leg carries the charge) and are not rank-2 operators at all.
-Both failures are quiet in the wrong way: one returns a plausible flat line, the other throws
-somewhere in `contract` about leg counts. OAT's whole signal is `S^x_tot(t)`, so this is checked
-once, at the entry point, with the reason attached.
-
-WHY `:Z2` IS THE ONE THAT WORKS, and it is the symmetry arXiv:2208.10972 Fig. 2 declares
-("computed using δ=0.01 and Z2 spin symmetry"). The conserved quantity is the GLOBAL SPIN FLIP
-`P = Π_ℓ 2 S^x_ℓ`, not `S^z_tot`: `H = (Σ S^z)^2/2` is even in `S^z`, so `P H P = H`. In the
-sigma^x basis of `z2_ising.jl` that flip is diagonal, which turns the whole difficulty inside
-out -- `S^x` becomes the DIAGONAL, charge-neutral operator (so `site_expval` reads it directly)
-and `⊗|→⟩` becomes a single charge-0 sector at `chi = 1`. Under `:U1` the same state has weight
-in every sector at once and cannot be a `SymMPS` of definite charge at all.
+Under `:U1`, S^x changes S^z_tot, so its expectation on a definite-charge SymMPS is exactly zero by
+symmetry, and the local S^+/S^- are rank-3 operators that cannot be contracted. Both failures are
+silent, so the guard runs once at the entry point. `:Z2` works because H is even under the global
+spin flip, which is diagonal in the sigma^x basis of `z2_ising.jl`.
 """
 function _require_sx_measurable(what::AbstractString)
     symmetry_mode() in (:none, :Z2) || throw(ArgumentError(
@@ -180,15 +118,11 @@ end
 """
     sx_operator() -> TLArray
 
-The local `S^x` as a rank-2 operator on the `:none` dense site, eigenvalues `±1/2`.
+The local S^x as a rank-2 operator on the `:none` dense site, eigenvalues +-1/2.
 
-MEASURED, NOT ASSUMED, AND THEN ASSERTED. Telum normalises the `:none` raising/lowering pair
-ASYMMETRICALLY -- measured, `Sp = -(1/√2) S^+_std` and `Sm = +(1/√2) S^-_std`, note the sign on
-one and not the other -- so `S^x = (S^+ + S^-)/2 = (Sm - Sp)/√2` and the plausible-looking
-`(Sp + Sm)/√2` is the operator `(S^- - S^+)/2`, which is `-i S^y`. That mistake is invisible in
-any test whose state is real and symmetric under spin flip, and it is exactly wrong for this
-benchmark. So the 2x2 block is built and then CHECKED against `[0 1/2; 1/2 0]` before it is
-returned; if Telum's normalisation ever changes, this throws instead of quietly measuring `S^y`.
+Telum's raising/lowering pair is asymmetric in sign and normalisation, so the naive (S^+ + S^-)/2
+is -i S^y. The 2x2 block is therefore checked against [0 1/2; 1/2 0] before it is returned, and the
+check throws if Telum's normalisation changes. Real symmetric test states cannot catch this.
 """
 function sx_operator()
     _require_sx_measurable("sx_operator")
@@ -230,26 +164,13 @@ end
 """
     x_polarized_state(L) -> SymMPS
 
-`|Ψ(0)⟩ = ⊗_ℓ |→⟩_ℓ`, with `|→⟩ = (|↑⟩ + |↓⟩)/√2`: the OAT initial state of arXiv:2208.10972,
-"an MPS with `D = 1`", normalised.
+The OAT initial state, the product of |+> = (|up> + |down>)/sqrt2 on every site (an MPS with D = 1).
 
-TWO MODES, TWO CONSTRUCTIONS, ONE STATE.
-
-Under `:Z2` it is [`ising_polarised_state`](@ref) -- all sites `|+>` in the sigma^x basis, Z2
-charge 0, a single sector at `chi = 1`. This is the paper's own representation.
-
-Under `:none` it is a SUM OF TWO `product_state`s rather than a new fusion recursion. The
-physical leg is ONE dense sector of dimension 2 and `_product_state_none` trims each outgoing
-link to the single selected spin index, so `product_state(all :up)` and
-`product_state(all :down)` produce site tensors with IDENTICAL leg spaces (every link dim 1,
-one trivial sector). Their sum is therefore well defined tensor by tensor, and
-`(A↑ + A↓)/√2` is exactly the site tensor of `⊗|→⟩`. Reusing the validated builder this way
-means the physical leg still carries its full 2-dimensional space, which is what
-[`site_expval`](@ref) needs to contract a local operator against.
-
-⛔ `:U1`/`:SU2` ARE REFUSED FOR PHYSICS REASONS, NOT CONVENIENCE -- see
-[`_require_sx_measurable`](@ref). Under `:U1` the two summands live in different total-charge
-sectors and their sum is not a `SymMPS` of definite charge at all.
+  * `:Z2`: [`ising_polarised_state`](@ref), the paper's own representation.
+  * `:none`: the sum of the all-up and all-down `product_state`s. Their site tensors share leg
+    spaces, so the sum is the x-polarised site tensor.
+`:U1` and `:SU2` are refused (see [`_require_sx_measurable`](@ref)): the summands lie in different
+charge sectors.
 """
 function x_polarized_state(L::Int)
     _require_sx_measurable("x_polarized_state")

@@ -1,51 +1,11 @@
 """
     RSVDCBEBondUpdate.GroundState
 
-Two-site DMRG whose bond expansion is RSVD-CBE and whose local solve is the SAME expanding
-Krylov iteration the time-evolution modes use.
-
-WHAT IS SHARED, AND IT IS ALMOST EVERYTHING. The local problem here is solved by
-`_expanding_krylov`, the identical function real- and imaginary-time evolution
-call. Same growth passes, same sector-graded sketch, same `P_perp` projection, same ranking,
-same direct sum, same embedding of stored Krylov vectors into the grown basis, same full
-reorthogonalisation. Two things are swapped:
-
-  - the OPERATOR: `apply_h_two_site` (environment-dressed `L + h + R`) instead of a gate;
-  - the REDUCTION: `LowestEigen` -- the lowest Ritz vector of the tridiagonal -- instead of
-    `Propagate` -- `exp(tau*H)` applied to the current core.
-
-So the ground-state solver is a drop-in replacement for the S step, not a second algorithm.
-
-WHY IT IS MPO-PATH ONLY. The gate path's environments are the identity by canonical form,
-which is exact for a Trotter factor but makes the local operator the bare two-site term.
-Minimising `<h_{i,i+1}>` at each bond independently does not have the global ground state as
-its fixed point -- each bond drives its own pair toward a local singlet and the next bond in
-the sweep undoes it. DMRG converges precisely because `L + h + R` makes a LOCAL minimisation
-lower the TOTAL energy. See `CBEBugOptions` for the longer argument.
-
-HOW THIS IMPROVES ON ONE-SHOT CBE-DMRG. Standard CBE picks the expansion directions from a
-single sketch of `H*Theta`, so the enlarged basis can only ever contain directions reachable
-by ONE application of `H`. Here pass `k` sketches around the `k`-th Krylov vector, which
-carries `H^k`, so the basis accumulates directions from successive powers -- and the
-stopping signal is the Lanczos `beta`, a quantity the iteration already computes, rather
-than an oversampling parameter that has to be tuned onto the problem.
-
-THE TWO-PHASE LOCAL SOLVE, and why the growth and the eigensolve are not one loop.
-`_expanding_krylov`'s tridiagonal is a Galerkin approximation across a NESTED SEQUENCE of
-subspaces: `alpha_k` is exact, but `beta_k` is measured against the projector in force at
-step `k` and misses whatever part of `H v_k` fell outside the then-current basis. For a
-short-time exponential that is a small perturbation of an already-small correction. For an
-EIGENSOLVE it is not acceptable -- the Ritz value is the answer, and one computed from an
-inconsistent tridiagonal is not variational, so it can sit BELOW the true ground energy and
-report false convergence. Hence:
-
-  phase A  grow the frames, `grow_iters` passes driven by successive Krylov vectors;
-  phase B  a clean Lanczos in the now-FIXED frames, which is an exact Rayleigh-Ritz and so
-           variational again.
-
-Phase B is `_expanding_krylov` with `grow_iters = 0`, so it is the same code once more and
-not a second Lanczos to keep in step. Phase A costs `grow_iters` matvecs (2-3 in practice),
-which is why buying back the variational guarantee is cheap.
+Two-site DMRG with RSVD-CBE expansion and the same expanding Krylov local solve as the
+time-evolution modes (`_expanding_krylov`). The operator is `apply_h_two_site` (`L + h + R`) and the
+reduction is `LowestEigen`, so it is a drop-in S step. MPO path only: gate environments are
+identities and would miss the global ground state. Growth passes build the frames, then a clean
+Lanczos in fixed frames keeps the Ritz value variational.
 """
 module GroundState
 
@@ -116,16 +76,10 @@ which assumes a true canonical snapshot.
 """
 function _write_bond!(psi::SymMPS, i::Int, f, U_aug, V_aug, S, moving::Symbol;
                       maxdim::Int, trunc_thresh::Float64, defer::Bool = false)
-    # ⛔ `defer = true` MAKES THIS SPLIT LOSSLESS. The SVD still has to happen -- it is what
-    # separates `S` into the two site tensors -- but it keeps every direction instead of cutting
-    # to `maxdim` here. Rank control then happens ONCE, at the end of `solve!`, so the eigensolve
-    # is never handed a state that a previous bond's truncation has already narrowed.
-    #
-    # WHY THAT MATTERS FOR A GROUND-STATE SEARCH SPECIFICALLY: the CBE pass and the growth
-    # iterations spend operator applications finding directions, and truncating at the very next
-    # bond can discard them before the eigensolve has ever seen them weighted. The variational
-    # bound is unaffected either way -- a smaller space still gives an upper bound -- but the
-    # SWEEPS-TO-CONVERGENCE is not, which is the quantity being optimised here.
+    # `defer = true` keeps every direction in this split, so rank control happens once at the end of
+    # `solve!`. The CBE pass and the growth iterations find directions that a truncation at the next
+    # bond could discard before the eigensolve sees them. The variational bound is unaffected, but
+    # sweeps-to-convergence is not.
     res = defer ? svd(S, (1,); cutoff = 0.0, get_lists = true) :
                   svd(S, (1,); cutoff = max(trunc_thresh, 1e-14), Nkeep = maxdim,
                       get_lists = true)
@@ -174,15 +128,10 @@ function _half_sweep!(psi::SymMPS, h::Union{XXZChain, MPO}, moving::Symbol, exkw
         lch = moving === :right ? carried : left_channels(stack, i)
         rch = moving === :right ? right_channels(stack, i + 2) : carried
 
-        # `bond_frame` demands the orthogonality centre on the bond's LEFT site. Moving right
-        # that is already true (`_write_bond!` parked it on `i+1`, which is the next bond's
-        # left site); moving left it is one site off, because the write parks the centre on
-        # `i` and the next bond is `i-1`. One QR move either way, and idempotent when already
-        # in place, so the same call serves both directions.
-        #
-        # SAFE AGAINST THE PREBUILT STACK in both directions, and that is not an accident:
-        # moving right, `canonical!` rewrites sites <= i while the right stack is read at
-        # i+2; moving left it rewrites sites >= i while the left stack is read at 1..i-1.
+        # Moving right, the centre is already on the bond's left site; moving left it is one site
+        # off, so one QR move fixes either direction (idempotent when in place). It is safe against
+        # the prebuilt stacks: moving right rewrites sites <= i while the right stack is read at
+        # i+2, and moving left rewrites sites >= i while the left stack is read at 1..i-1.
         canonical!(psi, i)
 
         f = bond_frame(psi, i)
@@ -207,46 +156,25 @@ function _half_sweep!(psi::SymMPS, h::Union{XXZChain, MPO}, moving::Symbol, exkw
 end
 
 """
-CBE growth passes per local solve of [`solve!`](@ref), the ground-state analogue of
-`s_iters = -g`. ONE IS THE MINIMUM VIABLE SETTING, and it is also enough. Measured at L=8,
-delta=1, half filling:
-
-    grow_iters   E - E_exact    maxbd   matvec
-    0            +1.625e+00     1       14      <- FROZEN at the product state
-    1            -1.776e-15     16      425
-    2            -3.553e-15     16      598
-    3            -1.332e-15     16      631
-
-At `grow_iters = 0` the frames never widen, so the local eigensolve minimises over a
-one-dimensional space and the sweep cannot leave the start state: it reports the Neel
-product-state energy `(L-1)*(-0.25) = -1.75` at bond dimension 1, and "converges" in two
-sweeps. THE CBE GROWTH PASS IS DOING ALL OF THE RANK GENERATION and the eigensolve none of
-it, which also means `info.converged` is not evidence of anything by itself.
-
-One pass then reaches machine precision, and further passes only cost matvecs. That is one
-easy model, so raise it if a harder one stalls; `benchmarks/` is where that would show.
+CBE growth passes per local solve, the ground-state analogue of `s_iters = -g`. One is the minimum
+viable setting: with zero, the frames never widen, the eigensolve minimises over a one-dimensional
+space, and the sweep stays at the Neel product state while reporting convergence. The growth pass
+does all of the rank generation, so `info.converged` is not evidence by itself. Raise it if a harder
+model stalls.
 """
 const _GROW_ITERS = 1
 
 """
     solve!(psi, h; opts=CBEBugOptions(), n_sweeps=20, etol=1e-10) -> GroundStateInfo
 
-Find the ground state of `h` in place, by two-site DMRG sweeps whose bond expansion is
-RSVD-CBE and whose local solve is the shared expanding Krylov iteration.
-
-`opts` supplies the truncation (`maxdim`, `trunc_thresh`), the Krylov budget and `exact`; the
-expansion runs at `cbe_expand`'s own settings with [`_GROW_ITERS`](@ref) growth passes per
-local solve. `opts.dt` and `opts.n_steps` are IGNORED -- there is no time step here.
-
+Ground state of `h` in place by two-site DMRG sweeps with RSVD-CBE expansion. `opts` gives the
+truncation (`maxdim`, `trunc_thresh`), the Krylov budget and `exact`; the expansion uses
+[`_GROW_ITERS`](@ref) growth passes per local solve. `opts.dt` and `opts.n_steps` are ignored.
 Sweeps alternate direction and stop when the sweep-best energy moves by less than `etol`.
 
-THE ANSWER IS A VARIATIONAL UPPER BOUND, and stays one because the local solve's phase B
-runs in fixed frames -- see the module docstring for why a single-phase expanding Lanczos
-would not give that. A reported energy below the true ground energy is therefore a bug, not
-a lucky sweep.
-
-U(1) NOTE: the symmetry pins the particle-number sector to whatever `psi` starts in, so this
-finds the ground state OF THAT SECTOR. `neel_state` is half filling.
+The result is a variational upper bound (the local solve's second phase runs in fixed frames), so a
+reported energy below the true ground energy is a bug. U(1) pins the particle-number sector of
+`psi`.
 """
 function solve!(psi::SymMPS, h::Union{XXZChain, MPO}; opts::CBEBugOptions = CBEBugOptions(),
                 n_sweeps::Int = 20, etol::Float64 = 1e-10, defer_truncation::Bool = false)
@@ -284,17 +212,9 @@ function solve!(psi::SymMPS, h::Union{XXZChain, MPO}; opts::CBEBugOptions = CBEB
         prev = e
     end
 
-    # ⛔ THE DEFERRED TRUNCATION, AND IT MUST NOT BE SKIPPED. With `defer_truncation` the sweeps
-    # never cut, so `maxdim` and `trunc_thresh` have had NO effect up to this point and the state
-    # carries whatever rank the expansions produced. One recursive root-to-leaves pass applies
-    # them, cutting each bond exactly once -- the same `Theta_tau` the time-evolution sweeps close
-    # with (arXiv:2201.10291 section 4.2, Algorithm 7), not an edge-to-edge pass that would cut
-    # every bond twice.
-    #
-    # The energies already recorded are unaffected: each was a variational bound in the space the
-    # solve actually used. This changes the STATE that is returned, so a caller measuring the
-    # energy afterwards can see it rise -- that is the truncation being paid for, once, instead of
-    # L-1 times per sweep.
+    # ── deferred truncation: must not be skipped ──
+    # One recursive root-to-leaves pass cuts each bond once (`Theta_tau`, arXiv:2201.10291 Alg. 7).
+    # Recorded energies are unaffected (variational in the space used); the returned state is cut.
     if defer_truncation
         canonical!(psi, max(1, min(L - 1, L ÷ 2)))
         truncate_recursive!(psi, max(1, min(L - 1, L ÷ 2));
@@ -331,14 +251,9 @@ rsvd_cbe_dmrg!(psi::SymMPS, h::Union{XXZChain, MPO}; opts::CBEBugOptions = CBEBu
                kwargs...) =
     solve!(psi, h; opts = _with_exact(opts, false), kwargs...)
 
-# `CBEBugOptions` is a kwdef struct with no mutation, so switch one field by rebuilding. Kept
-# private: callers should set `exact` in the options directly, and the two names above exist to
-# make the comparison legible rather than to add a second way to configure it.
-#
-# ⛔ COPIED OVER `fieldnames`, NOT BY HAND. The hand-written version listed all twenty fields, and
-# a field added to `CBEBugOptions` later would not have appeared in it -- so BOTH named arms would
-# have silently reverted that field to its default while every explicitly-set option around it
-# came through, which reads as the option having no effect rather than as a lost copy.
+# Kept private: callers set `exact` in the options directly. The copy runs over `fieldnames`, not a
+# hand-written field list, so a field added later is not silently reset to its default while its
+# neighbours keep their values.
 _with_exact(o::CBEBugOptions, e::Bool) = CBEBugOptions(;
     (f => (f === :exact ? e : getfield(o, f)) for f in fieldnames(CBEBugOptions))...)
 
