@@ -1,5 +1,8 @@
-# tests/sweeps/test_dd_cbe.jl -- updated_cbe_high_order_parallel.md, Tasks 1 to 4.
+# tests/sweeps/test_dd_cbe.jl -- updated_cbe_high_order_parallel.md, Tasks 1 to 4 (+ Task 9).
 #
+#   Task 9  U02: the thin DD kernels' flops are exactly linear in the probe width (no X, X_mu,
+#           G_DD or dense P^D) and the root generator is matrix-free; U06: one step of the DK
+#           fixture under DD+QR and one-sided+QR, physical error equal, rank and effort recorded.
 #   Task 4  the order-p frontier sweeps expand under the step's policy (`_frontier_expand`), the
 #           one-site Krylov stage keeps the DD directions verbatim and adds a direction once, and
 #           order-3 steps match the exact-CBE closure. P07's reuse-off ablation (`krylov_reuse =
@@ -207,6 +210,32 @@ end
     @info "DK/DD fixture" dk dd = norm(Gdd) n_dd = exd.n_new_l n_one_sided = ex1.n_new_l
 end
 
+# U06: the same DK fixture state, one step under each selection. DD+QR leaves the DK directions to
+# the one-site Krylov stage; one-sided+QR spends CBE rank on them. The plan claims complementarity,
+# NOT that DD is universally faster or more accurate (plan §2, "DK+DD"), so the physical error is
+# asserted equal to tolerance and the rank / Krylov effort are recorded side by side.
+@testset "U06: DK fixture, one step per policy: physical error, selected rank, Krylov effort" begin
+    L, dt = 8, 0.05
+    mpo, psi0 = _xx_warm(L, 2; delta = 1.0, maxdim = 4)          # `_hb_bond`'s warm-up
+    vref = dense_exact_propagate(dense_heisenberg(L; J = 1.0, delta = 1.0), dense_state(psi0), dt)
+    res = Dict{Symbol, Any}()
+    for pol in (:dd_qr_streamed, :one_sided_qr_streamed)
+        p = copy(psi0)
+        info = cbe_bug_step!(p, mpo, -im * dt; cbe_policy = pol, tol_basis = 1e-8,
+                             tol_trunc = 1e-12, tol_expv = 1e-12, maxdim = 64)
+        @test info.record.policy === pol
+        v = dense_state(p)
+        kc = info.record.counters
+        res[pol] = (err = sqrt(max(2 * (1 - abs(dot(v, vref)) / (norm(v) * norm(vref))), 0.0)),
+                    qr_rank = kc.qr_rank, cols = kc.n_stream_cols, D_stage = info.record.D_stage,
+                    n_one_site = kc.n_one_site)
+    end
+    dd, os = res[:dd_qr_streamed], res[:one_sided_qr_streamed]
+    @info "U06 DK fixture, one step dt = $dt" dd os
+    @test abs(dd.err - os.err) <= 0.1 * max(dd.err, os.err) + 1e-9
+    @test dd.qr_rank > 0 && os.qr_rank > 0
+end
+
 @testset "U02: no SVD inside the DD expansion (rank stop and T3 controller)" begin
     mpo, psi, f, lenv, renv = _hb_bond()
     ctrl = RC.BasisAllocation(1.0, 1e-6, 1.0, 1.0, 1.0)
@@ -221,6 +250,29 @@ end
         set_accumul_costs!(false)
         @test svdc == 0
     end
+end
+
+@testset "U02: every DD kernel contraction carries the probe leg; the root is matrix-free" begin
+    for (fx, i) in ((_hb_bond, 4), (_hb_wide, 6))
+        mpo, psi, f, lenv, renv = fx()
+        @test _unsaturated(f)
+        for side in (:left, :right)
+            fl = _dd_kernel_flops(f, mpo, i, lenv, renv, side, 4; rng = Random.MersenneTwister(4))
+            for (k, (f1, f2)) in pairs(fl)
+                @test f1 > 0
+                @test f2 == 2 * f1               # no X, X_mu, G_DD or dense P^D in kernel k
+            end
+        end
+    end
+    # The root generator is the two environments pushed through the frames, (bra, mpo, ket) each.
+    # At r = 4 those pushes are as large as a dense root matrix would be, so only the wide bond
+    # (r = 16) separates them.
+    mpo, psi, f, lenv, renv = _hb_wide()
+    H0 = RC.zero_site_h(mpo, 6, lenv, renv, f.U0, f.V0)
+    @test H0 isa RC.MPOZeroSiteH
+    @test length(H0.l.inds) == 3 && length(H0.r.inds) == 3
+    N = RC.tensor_elements(apply_zero_site(H0, f.S0))       # a generic core's entries
+    @test RC.tensor_elements(H0.l) + RC.tensor_elements(H0.r) < N^2
 end
 
 @testset "two-spin entangling step: DD finds |1> on both sides, exact to roundoff" begin
@@ -345,6 +397,9 @@ end
     @test length(tr) >= 2                                        # it had to grow
     # no repeated MPO action: each streamed column is a candidate or a holdout, never both
     @test c.kc.n_stream_cols == lg.n_probes + lg.n_holdout
+    # U04: every check runs on its own fresh holdout (>= s columns each), so a holdout promoted
+    # into Q never validates the Q it joined
+    @test lg.n_holdout >= RC._DD_HOLDOUT * length(tr)
     first_ind = [t[3] for t in tr]                               # first holdout vs each Q
     @test all(first_ind[k + 1] <= first_ind[k] * (1 + 1e-10) + 1e-14
               for k in 1:(length(first_ind) - 1))

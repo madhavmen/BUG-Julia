@@ -513,3 +513,31 @@ little work; the `small` partition allows at most 4 CPUs. Peak RSS 2.3–2.8 G t
   flat. At h = 0.2 it is not usable for p ≤ 3 (p = 2: norm² − 1 = 0.05 and Var(H) − s² = +14.3
   on a conserved 9); at h ≤ 0.1 and p ≥ 3 it is below 1e-4.
 * A measurement floor of 3–5e-9 in the state error (max|Δm| is 1e-14 there) is not fitted.
+
+## Task 9 -- regression suite and performance gates (branch plan/hq-task-9)
+
+Each U-item against its testsets. The four PARTIAL/GAP rows of the draft map got new tests (marked NEW); U04
+got one new assertion. All at s = 1/2 (USER 10-22).
+
+| ID | covered by | status |
+|---|---|---|
+| U01 | test_dd_cbe "U01: streamed DD sketch == explicit P^D X P^D Om" (bonds 1, 4, 7) | covered; check channel reuse / complex adjoint paths are asserted |
+| U02 | test_dd_cbe "U02: no SVD inside the DD expansion"; NEW "U02: every DD kernel contraction carries the probe leg; the root is matrix-free" | covered: Telum's exact flop count of input DD / stream / output DD doubles EXACTLY when the probe width doubles (bonds 4 of L=8 and 6 of L=12, both sides), so no width-independent contraction (X, X_mu, G_DD, dense P^D) exists; the root generator is two 3-leg environment pushes, smaller than one dense root matrix |
+| U03 | test_dd_cbe "U03/T2.4", "T2.3 reachable sector"; test_adaptive_rsvd UT03 | covered |
+| U04 | test_adaptive_rsvd UT04, UT06; test_dd_cbe T3 acceptance, T3.3 holdout; NEW in T3.1: `n_holdout >= s * checks` | covered: every check runs on its own holdout, so a promoted holdout never validates the Q it joined |
+| U05 | test_krylov_closure UT7; test_adaptive_compression UT11; test_dd_cbe T3.4; UT05 degeneracy | covered |
+| U06 | test_dd_cbe "DK/DD fixture"; NEW "U06: DK fixture, one step per policy" | covered: one step of the DK fixture state under DD+QR and one-sided+QR against dense exact propagation; error equal within 10% (the plan claims complementarity, not superiority, §2), QR rank / streamed columns / D_stage / one-site applications recorded side by side |
+| U07 | test_adaptive_krylov UT07; test_dd_cbe T4.1 "adds each once" | covered |
+| U08 | test_adaptive_krylov UT08 (Test C zero, Test D finds e2), e3 at unit / tiny step | covered |
+| U09 | test_adaptive_expv UT15; test_hq_root T5.2; NEW "U09: the tail estimate tracks the exponential's error; a zero Ritz value stops nothing" | covered: zero-diagonal hopping chain (T_m = path graph: a Ritz value exactly 0 at every odd m, beta_m = g at every m); true <= estimate <= (m+1) true for m = 1..5, and the conv_tol = 1e-4 solve stops at m = 5 on the tail, not at m = 1 or 3 where the Ritz value is 0 and the error 0.2 / 1e-3 |
+| U10 | test_adaptive_krylov UT10; test_krylov_closure stale-frontier refusal (line 357) | covered |
+| U11 | test_adaptive_compression UT12; test_dd_cbe T1.2; T5.1 | covered |
+| U12 | test_hq_root T5.2; test_expv; test_adaptive_expv UT15 | covered |
+| U13 | test_krylov_closure UT8; test_adaptive_compression UT13, UT14; test_hq_root T5.4 | covered |
+| U14 | test_krylov_closure UT3; test_hq_root T5.5 | covered, but p_obs = p + 1 (first-step dominated; P08) |
+| U15 | test_parallel_kls T6.2, T6.3 four-block | covered |
+| U16 | test_parallel_kls T6.4, T6.3 fallback; test_dd_cbe two-spin entangling step | covered |
+| U17 | test_parallel_kls "local order of the K/L/S recurrence", T6.5 | covered |
+| U18 | test_spin_xx T7.1 | covered |
+| U19 | test_spin_xx T7.0 (product-state variance), T7.2 (ED), T7.3 (9 J^2) | covered |
+| U20 | NEW tests/sweeps/test_hq_kernels.jl; P06 benchmark | covered: s = 1/2 XX L=16, centre bond at D = 16, 32, 64, w = 8: exact width-linearity of the thin kernels at every D; thin-kernel flops / environment-push flops fall >= 25% from D=16 to 64; one root matvec below a dense one (D >= 32); seconds and bytes of input DD, stream, DD-select (QR), sector bookkeeping, env, root and the closing compression recorded. Time and bytes are not gated (shared nodes; block metadata is width-independent allocation); timing regression stays P06 |

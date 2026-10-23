@@ -172,3 +172,46 @@ function _hop(terms)
         to_concrete(acc)
     end
 end
+
+"""
+Telum's contraction flop count of `f()`: exact and machine-independent. Contractions run serially
+meanwhile, because the counter is a plain `Ref` the sector tasks would race on.
+"""
+function _flops(f)
+    nt = TELUM_CONTRACT_THREADS[]
+    TELUM_CONTRACT_THREADS[] = 1
+    set_accumul_costs!(true)
+    read_reset_costs!()
+    try
+        f()
+        return first(read_reset_costs!())
+    finally
+        set_accumul_costs!(false)
+        TELUM_CONTRACT_THREADS[] = nt
+    end
+end
+
+"""
+Plan U02/U20: the flops `(f1, f2)` of the three thin DD kernels of one side of bond `i` -- input
+DD on the raw probe, the MPO stream, output DD on its result -- at probe width `w` (`f1`) and on
+the same probe twice along its width leg (`f2`, every sector's width doubled). Under an abelian
+symmetry each block contraction costs `f g c`, so a kernel whose every contraction carries the
+probe leg has `f2 == 2 f1` exactly; a full `X`, an `X_mu`, `G_DD` or a dense `P^D` is
+width-independent work and breaks it.
+"""
+function _dd_kernel_flops(f, mpo, i, lenv, renv, side, w; rng)
+    left = side === :left
+    opp, oside, wleg = left ? (f.V0, :right, 1) : (f.U0, :left, 3)
+    pin = left ? (X -> perp_component_right(f.V0, X)) : (X -> perp_component(f.U0, X))
+    pout = left ? (X -> perp_component(f.U0, X)) : (X -> perp_component_right(f.V0, X))
+    op = TwoSiteSketchOp(f, mpo, i, lenv, renv; adjoint = !left)
+    out = Ref{Any}(nothing)
+    stream(Om) = (apply_two_site_sketch!(out, Om, op); out[])
+    R = sector_graded_sketch(opp, oside, w; comp_ratio = nothing, rng = rng)
+    R2 = to_concrete(oplus([R, R], (wleg,)))
+    OmD, OmD2 = pin(R), pin(R2)
+    Z, Z2 = stream(OmD), stream(OmD2)
+    return (input_dd = (_flops(() -> pin(R)), _flops(() -> pin(R2))),
+            stream = (_flops(() -> stream(OmD)), _flops(() -> stream(OmD2))),
+            output_dd = (_flops(() -> pout(Z)), _flops(() -> pout(Z2))))
+end

@@ -82,6 +82,34 @@ H, exact = _known(M, e)
     end
 end
 
+# U09 (plan T4.3): the stopping test is the coupling-weighted tail `beta_m |[exp(tau T_m)]_m1|`,
+# never a Ritz value. On the zero-diagonal hopping chain `T_m` is the path graph, so every ODD m
+# has a Ritz value exactly 0 while the error is still 0.2 (m = 1) or 1e-3 (m = 3), and
+# `beta_m = g` at every m, so the coupling alone would not stop before the space closes.
+@testset "U09: the tail estimate tracks the exponential's error; a zero Ritz value stops nothing" begin
+    g = 0.2
+    Mp = ComplexF64.(diagm(1 => fill(g, n - 1), -1 => fill(g, n - 1)))
+    Hp, exactp = _known(Mp, e)
+    tau = ComplexF64(-1.0im)
+    for m in 1:(n - 1)
+        rep = Ref{Any}(nothing)
+        y = expv(Hp, tau, e[1]; maxiter = m, tol = 1e-15, reorth = true, report = rep)
+        err = norm(to_concrete(y - exactp(tau)))
+        ritz = minimum(abs, eigvals(SymTridiagonal(zeros(m), fill(g, m - 1))))
+        @test rep[].iterations == m
+        @test err <= rep[].err * (1 + 1e-8)          # an upper estimate of the true error ...
+        @test rep[].err <= (m + 1) * err             # ... and a sharp one (ratio ~ m / |tau|)
+        isodd(m) && @test ritz < 1e-12               # a Ritz-value test would stop here ...
+        isodd(m) && m <= 3 && @test err > 1e-4       # ... with this error
+        @info "U09 m = $m: estimate $(rep[].err), true $err, min |Ritz| $ritz"
+    end
+    rep = Ref{Any}(nothing)
+    y = expv(Hp, tau, e[1]; conv_tol = 1e-4, maxiter = 30, tol = 1e-15, reorth = true,
+             report = rep)
+    @test rep[].iterations == 5                      # tails: m = 4 2.7e-4, m = 5 1.3e-5
+    @test norm(to_concrete(y - exactp(tau))) <= rep[].err <= 1e-4
+end
+
 @testset "the step: tol_expv reaches the root solve and its ledger" begin
     mpo, psi0 = _xx_warm(8, 2)
     tau = ComplexF64(-0.1im)
