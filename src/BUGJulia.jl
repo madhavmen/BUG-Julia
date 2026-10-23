@@ -102,8 +102,7 @@ const _WORKLOAD = @load_preference("workload", "adaptive")
                                               tol_trunc = 1e-4, maxdim = 4, exact = ex)
             end
             let p = copy(psi0)
-                RSVDCBEBondUpdate.dmrg_cbe1s!(p, mpo; n_sweeps = 2, maxdim = 4,
-                                              trunc_thresh = 1e-10)
+                RSVDCBEBondUpdate.dmrg_cbe1s!(p, mpo; n_sweeps = 2, maxdim = 4)
                 RSVDCBEBondUpdate.mpo_energy(p, mpo)
                 RSVDCBEBondUpdate.mpo_variance(p, mpo)
             end
@@ -213,9 +212,9 @@ const _WORKLOAD = @load_preference("workload", "adaptive")
                 # same expanding-Krylov core, and the one this campaign starts every run with.
                 for ex in (true, false)
                     RSVDCBEBondUpdate.GroundState.solve!(copy(psi), mpo;
-                        opts = RSVDCBEBondUpdate.CBEBugOptions(; maxdim = 8, dex = 4,
-                                                               maxiter = 5, exact = ex),
-                        n_sweeps = 2, grow_iters = 1)
+                        opts = RSVDCBEBondUpdate.CBEBugOptions(; maxdim = 8, maxiter = 5,
+                                                               exact = ex),
+                        n_sweeps = 2)
                 end
             end
         catch err

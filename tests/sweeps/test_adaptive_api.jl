@@ -1,6 +1,6 @@
 # tests/sweeps/test_adaptive_api.jl -- UT01 and UT02 of the adaptive CBE-Krylov plan.
 #
-# STAGE 1 ONLY: the three-tolerance budget object, the allocation rule, and the migration off
+# STAGE 1 ONLY: the three-tolerance budget object, the allocation rule, and the removal of
 # the retired tuning knobs. NO PHYSICS HAS CHANGED YET, and these tests are written so that
 # they would still pass if it had -- they assert the API's contract, not a rank or an error.
 #
@@ -26,8 +26,8 @@ include(joinpath(@__DIR__, "..", "common", "adaptive_fixtures.jl"))
 @testset "UT01: public API cleanup and knob migration" begin
 
     @testset "the PUBLIC entry refuses the mixture before touching the state" begin
-        # `resolve_budget` refusing is necessary, not sufficient: what a caller meets is
-        # `cbe_bug_step!`, and the refusal must happen there, before any evolution.
+        # What a caller meets is `cbe_bug_step!`, and the refusal must happen there, before
+        # any evolution.
         set_symmetry!(:U1)
         mpo, psi = xxz_mpo(6; J = 1.0, delta = 0.0), neel_state(6)
         dims0 = bond_dims(psi)
@@ -56,78 +56,31 @@ include(joinpath(@__DIR__, "..", "common", "adaptive_fixtures.jl"))
         @test_throws ArgumentError AdaptiveBudget(1e-5, -1e-7, 1e-10)
     end
 
-    @testset "mixing the two APIs is refused, not resolved" begin
-        # Each of these names one tolerance and one retired knob. There is no precedence
-        # between them, so the only correct answer is to refuse.
-        for knob in (:dex, :growth, :comp_ratio, :krylov_basis, :stol_pre, :stol_fnl,
-                     :split_cutoff, :root_cutoff, :trunc_thresh)
-            legacy = merge((dex = nothing, dover = nothing, comp_ratio = nothing,
-                            growth = nothing, krylov_basis = nothing,
-                            split_cutoff = nothing, split_maxdim = nothing,
-                            root_cutoff = nothing, root_maxdim = nothing,
-                            trunc_thresh = nothing, stol_pre = nothing, stol_fnl = nothing),
-                           NamedTuple{(knob,)}((knob === :dex || knob === :krylov_basis ||
-                                                knob === :split_maxdim ||
-                                                knob === :root_maxdim ? 8 : 1e-6,)))
-            @test_throws ArgumentError RSVDCBEBondUpdate.resolve_budget(1e-5, nothing,
-                                                                        nothing, legacy)
+    @testset "every solver refuses the retired knobs" begin
+        # Plan invariant 1: `dex`, `dover`, `comp_ratio`, `stol_pre`, `stol_fnl`, `krylov_basis`
+        # and the independent cutoffs are internal. No public entry point takes them, so naming
+        # one is an unsupported keyword rather than a silently honoured second answer.
+        set_symmetry!(:U1)
+        mpo, h = xxz_mpo(6; J = 1.0, delta = 0.0), xxz_chain(6; J = 1.0, delta = 0.0)
+        dt = ComplexF64(-0.05im)
+        for kw in ((dex = 4,), (growth = 2.0,), (dover = 4,), (comp_ratio = 1.0,),
+                   (trunc_thresh = 1e-12,), (sulz_cap = true,), (preselect_only = true,),
+                   (thin_search = false,))
+            @test_throws MethodError dmrg_cbe1s!(neel_state(6), mpo; n_sweeps = 1, kw...)
         end
-    end
-
-    @testset "naming nothing selects the adaptive path with the documented defaults" begin
-        none = (dex = nothing, dover = nothing, comp_ratio = nothing, growth = nothing,
-                krylov_basis = nothing, split_cutoff = nothing, split_maxdim = nothing,
-                root_cutoff = nothing, root_maxdim = nothing, trunc_thresh = nothing,
-                stol_pre = nothing, stol_fnl = nothing)
-        budget, adaptive, named = RSVDCBEBondUpdate.resolve_budget(nothing, nothing,
-                                                                   nothing, none)
-        @test adaptive
-        @test isempty(named)
-        @test budget.basis == RSVDCBEBondUpdate.TOL_DEFAULTS.basis
-        @test budget.trunc == RSVDCBEBondUpdate.TOL_DEFAULTS.trunc
-        @test budget.expv  == RSVDCBEBondUpdate.TOL_DEFAULTS.expv
-    end
-
-    @testset "naming a retired knob selects the legacy path and says which" begin
-        legacy = (dex = 8, dover = nothing, comp_ratio = nothing, growth = nothing,
-                  krylov_basis = nothing, split_cutoff = nothing, split_maxdim = nothing,
-                  root_cutoff = nothing, root_maxdim = nothing, trunc_thresh = nothing,
-                  stol_pre = nothing, stol_fnl = nothing)
-        _, adaptive, named = RSVDCBEBondUpdate.resolve_budget(nothing, nothing, nothing,
-                                                              legacy)
-        @test !adaptive
-        @test named == (:dex,)
-    end
-
-    @testset "dover alone carries no signal" begin
-        # `nothing` is `dover`'s OWN historical default, so it cannot distinguish "not asked
-        # for" from "asked for the default" the way the others can. A caller who wants it is
-        # already naming `dex`; treating it as a mode selector would make `dover = nothing`
-        # ambiguous in exactly the place the inference has to be certain.
-        only_dover = (dex = nothing, dover = 4, comp_ratio = nothing, growth = nothing,
-                      krylov_basis = nothing, split_cutoff = nothing, split_maxdim = nothing,
-                      root_cutoff = nothing, root_maxdim = nothing, trunc_thresh = nothing,
-                      stol_pre = nothing, stol_fnl = nothing)
-        _, adaptive, named = RSVDCBEBondUpdate.resolve_budget(nothing, nothing, nothing,
-                                                              only_dover)
-        @test adaptive
-        @test isempty(named)
-    end
-
-    @testset "legacy values resolve to their historical defaults" begin
-        # The migration must not move a single recorded number: a call naming none of the
-        # knobs has to produce what it produced before the sentinels were introduced.
-        @test RSVDCBEBondUpdate.legacy_or_default(nothing, :dex) == 0
-        @test RSVDCBEBondUpdate.legacy_or_default(nothing, :growth) == 2.0
-        @test RSVDCBEBondUpdate.legacy_or_default(nothing, :krylov_basis) == 30
-        @test RSVDCBEBondUpdate.legacy_or_default(nothing, :stol_pre) == 1e-10
-        @test RSVDCBEBondUpdate.legacy_or_default(nothing, :stol_fnl) == 1e-13
-        @test RSVDCBEBondUpdate.legacy_or_default(nothing, :split_cutoff) == 1e-14
-        @test RSVDCBEBondUpdate.legacy_or_default(nothing, :root_cutoff) == 0.0
-        @test RSVDCBEBondUpdate.legacy_or_default(nothing, :trunc_thresh) == 1e-12
-        # An explicit value always wins over the default.
-        @test RSVDCBEBondUpdate.legacy_or_default(16, :dex) == 16
-        @test RSVDCBEBondUpdate.legacy_or_default(0.0, :root_cutoff) == 0.0
+        for kw in ((dex = 4,), (growth = 2.0,), (dover = 4,), (comp_ratio = 1.0,),
+                   (sulz_cap = true,), (preselect_only = true,))
+            @test_throws MethodError tdvp_cbe1s_step!(neel_state(6), mpo, dt; kw...)
+            @test_throws MethodError tdvp1_cbe_step!(neel_state(6), h, dt; kw...)
+            @test_throws MethodError CBEBugOptions(; kw...)
+        end
+        @test_throws MethodError GroundState.solve!(neel_state(6), mpo; n_sweeps = 1,
+                                                    grow_iters = 2)
+        # ...and the migration machinery that resolved them is gone with them.
+        for name in (:resolve_budget, :legacy_or_default, :_legacy_hint, :LEGACY_KNOBS,
+                     :LEGACY_DEFAULTS)
+            @test !isdefined(RSVDCBEBondUpdate, name)
+        end
     end
 
     @testset "the allocation rule is the documented one" begin

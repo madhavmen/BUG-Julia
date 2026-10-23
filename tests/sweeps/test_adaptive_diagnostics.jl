@@ -138,14 +138,9 @@ end
     end
 end
 
-@testset "§1 migration hint for the retired knobs (audit row 1.5)" begin
-    @test RC._legacy_hint(()) === nothing
-    msg = @test_logs (:warn, r"fixed-knob legacy path") RC._legacy_hint((:dex, :trunc_thresh))
-    @test occursin("dex, trunc_thresh", msg)
-    @test occursin("tol_basis", msg)
-
-    # Through the public entry: the BUG step has no legacy path (a retired knob is no keyword),
-    # and an adaptive step gives no warning.
+@testset "§1 the retired knobs are no keyword (audit row 1.5)" begin
+    # There is no legacy path left to hint at: a retired knob is no keyword, and an adaptive
+    # step gives no warning.
     set_symmetry!(:U1)
     mpo = xxz_mpo(6; J = 1.0, delta = 0.0)
     @test_throws MethodError cbe_bug_step!(neel_state(6), mpo, ComplexF64(-0.05im);

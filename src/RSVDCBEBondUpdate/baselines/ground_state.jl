@@ -207,19 +207,9 @@ function _half_sweep!(psi::SymMPS, h::Union{XXZChain, MPO}, moving::Symbol, exkw
 end
 
 """
-    solve!(psi, h; opts=CBEBugOptions(), n_sweeps=20, etol=1e-10, grow_iters=2)
-        -> GroundStateInfo
-
-Find the ground state of `h` in place, by two-site DMRG sweeps whose bond expansion is
-RSVD-CBE and whose local solve is the shared expanding Krylov iteration.
-
-`opts` supplies the expansion knobs (`growth`, `comp_ratio`, `dex`, ...) and the truncation
-(`maxdim`, `trunc_thresh`); `opts.dt` and `opts.n_steps` are IGNORED -- there is no time step
-here. `grow_iters` is the number of CBE growth passes per local solve, the ground-state
-analogue of `s_iters = -g`.
-
-`grow_iters = 1` IS THE DEFAULT AND THE MINIMUM VIABLE SETTING, and the two facts are
-related. Measured at L=8, delta=1, half filling:
+CBE growth passes per local solve of [`solve!`](@ref), the ground-state analogue of
+`s_iters = -g`. ONE IS THE MINIMUM VIABLE SETTING, and it is also enough. Measured at L=8,
+delta=1, half filling:
 
     grow_iters   E - E_exact    maxbd   matvec
     0            +1.625e+00     1       14      <- FROZEN at the product state
@@ -233,9 +223,20 @@ product-state energy `(L-1)*(-0.25) = -1.75` at bond dimension 1, and "converges
 sweeps. THE CBE GROWTH PASS IS DOING ALL OF THE RANK GENERATION and the eigensolve none of
 it, which also means `info.converged` is not evidence of anything by itself.
 
-One pass then reaches machine precision, and further passes only cost matvecs -- hence the
-default. That is one easy model, so raise it if a harder one stalls; `benchmarks/` is where
-that would show.
+One pass then reaches machine precision, and further passes only cost matvecs. That is one
+easy model, so raise it if a harder one stalls; `benchmarks/` is where that would show.
+"""
+const _GROW_ITERS = 1
+
+"""
+    solve!(psi, h; opts=CBEBugOptions(), n_sweeps=20, etol=1e-10) -> GroundStateInfo
+
+Find the ground state of `h` in place, by two-site DMRG sweeps whose bond expansion is
+RSVD-CBE and whose local solve is the shared expanding Krylov iteration.
+
+`opts` supplies the truncation (`maxdim`, `trunc_thresh`), the Krylov budget and `exact`; the
+expansion runs at `cbe_expand`'s own settings with [`_GROW_ITERS`](@ref) growth passes per
+local solve. `opts.dt` and `opts.n_steps` are IGNORED -- there is no time step here.
 
 Sweeps alternate direction and stop when the sweep-best energy moves by less than `etol`.
 
@@ -248,18 +249,14 @@ U(1) NOTE: the symmetry pins the particle-number sector to whatever `psi` starts
 finds the ground state OF THAT SECTOR. `neel_state` is half filling.
 """
 function solve!(psi::SymMPS, h::Union{XXZChain, MPO}; opts::CBEBugOptions = CBEBugOptions(),
-                n_sweeps::Int = 20, etol::Float64 = 1e-10, grow_iters::Int = 1,
-                defer_truncation::Bool = false)
+                n_sweeps::Int = 20, etol::Float64 = 1e-10, defer_truncation::Bool = false)
     L = length(psi)
     length(h) == L || throw(DimensionMismatch(
         "chain has $(length(h)) sites, state has $L"))
     L >= 2 || throw(ArgumentError("ground-state search needs at least two sites"))
 
     rng = MersenneTwister(opts.seed)
-    exkw = (dex = opts.dex, growth = opts.growth, dover = opts.dover,
-            comp_ratio = opts.comp_ratio, sulz_cap = opts.sulz_cap,
-            rmax = maximum(bond_dims(psi); init = 0),
-            preselect_only = opts.preselect_only, exact = opts.exact, rng = rng)
+    exkw = (rmax = maximum(bond_dims(psi); init = 0), exact = opts.exact, rng = rng)
 
     energies = Float64[]; bds = Vector{Int}[]; maxbd = Int[]
     maxexp = Int[]; kdim = Int[]; grows = Int[]
@@ -269,7 +266,7 @@ function solve!(psi::SymMPS, h::Union{XXZChain, MPO}; opts::CBEBugOptions = CBEB
     for sweep in 1:n_sweeps
         nmv = Ref(0)
         e, mx, ng = _half_sweep!(psi, h, isodd(sweep) ? :right : :left, exkw, nmv;
-                                 grow_iters = grow_iters, maxiter = opts.maxiter,
+                                 grow_iters = _GROW_ITERS, maxiter = opts.maxiter,
                                  tol = opts.tol, maxdim = opts.maxdim,
                                  trunc_thresh = opts.trunc_thresh,
                                  defer = defer_truncation)

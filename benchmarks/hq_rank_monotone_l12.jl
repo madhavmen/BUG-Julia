@@ -8,7 +8,8 @@
 #       1e-3 is the error of the looser step kept above tol_trunc by the compression;
 #   (b) the frames themselves shrink as tol_basis tightens -- a controller defect.
 # Per step: D_stage, D_final, and at the end the error vs exact CBE on the same time grid (so the
-# BASIS error alone, which is what tol_basis buys), for every policy and tolerance. Not the dense
+# BASIS error alone, which is what tol_basis buys), for every tolerance (DD-QR only; the selection
+# ablations are gone, the policy column stays). Not the dense
 # exp(-iHt) reference: at L = 12 building it ran 40 min without finishing (17418617).
 #
 # Env: HQ_L (12), HQ_NSTEP (4), HQ_DT (0.05), HQ_TOLS ("1e-3,1e-5,1e-8").
@@ -35,12 +36,12 @@ end
 println("HQRANK-HEADER policy tol_basis err D_stage_per_step D_final_per_step final_bonds limits")
 println("HQRANK-REF exact ", join(bond_dims(PREF), ","))
 flush(stdout)
-for pol in CBE_POLICIES, tol in TOLS
+for pol in (:dd_qr_streamed,), tol in TOLS
     p = neel_state(L)
     ds, df = Int[], Int[]
     lim = Symbol[]
     for _ in 1:NSTEP
-        r = cbe_bug_step!(p, MPO_, ComplexF64(-im * DT); cbe_policy = pol, tol_basis = tol,
+        r = cbe_bug_step!(p, MPO_, ComplexF64(-im * DT); tol_basis = tol,
                           STEPKW...).record
         push!(ds, r.D_stage)
         push!(df, r.D_final)

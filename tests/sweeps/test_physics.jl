@@ -65,7 +65,7 @@ const _RING_MAGNON = get(ENV, "BUGJULIA_TEST_RING_MAGNON", "0") == "1"
             for L in (6, 8)
                 m = haldane_shastry_mpo(L)
                 psi = dimer_state(L)
-                r = dmrg_cbe1s!(psi, m; n_sweeps = 30, maxdim = 128, trunc_thresh = 1e-14)
+                r = dmrg_cbe1s!(psi, m; n_sweeps = 30, maxdim = 128, DMRG_TIGHT...)
                 want = hs_ground_energy(L)
                 @test r.energies[end] ≈ want atol = 1e-6
                 # VARIATIONAL: a value below the exact ground energy is a bug.
@@ -82,7 +82,7 @@ const _RING_MAGNON = get(ENV, "BUGJULIA_TEST_RING_MAGNON", "0") == "1"
             for L in (6, 8)
                 m = heisenberg_ring_mpo(L)
                 psi = dimer_state(L)
-                r = dmrg_cbe1s!(psi, m; n_sweeps = 30, maxdim = 128, trunc_thresh = 1e-14)
+                r = dmrg_cbe1s!(psi, m; n_sweeps = 30, maxdim = 128, DMRG_TIGHT...)
                 want, _, res = bethe_xxx_ring_energy(L)
                 @test res < 1e-12
                 @test r.energies[end] ≈ want atol = 1e-6
@@ -175,7 +175,7 @@ const _RING_MAGNON = get(ENV, "BUGJULIA_TEST_RING_MAGNON", "0") == "1"
             L = 6
             m = haldane_shastry_mpo(L)
             psi = dimer_state(L)
-            dmrg_cbe1s!(psi, m; n_sweeps = 30, maxdim = 128, trunc_thresh = 1e-14)
+            dmrg_cbe1s!(psi, m; n_sweeps = 30, maxdim = 128, DMRG_TIGHT...)
             renorm!(psi)
             psi0 = copy(psi); psi0.tensors .= copy.(psi.tensors)
             want = hs_ground_energy(L)

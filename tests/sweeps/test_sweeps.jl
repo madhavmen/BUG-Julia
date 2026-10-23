@@ -140,7 +140,7 @@ include(joinpath(@__DIR__, "..", "common", "bug_tolerances.jl"))
             h = nn_chain(sym, L)
             mpo = RSVDCBEBondUpdate.mpo_from_terms(h)
             psi = dimer_state(L)
-            r = dmrg_cbe1s!(psi, mpo; n_sweeps = 20, maxdim = 64, trunc_thresh = 1e-14)
+            r = dmrg_cbe1s!(psi, mpo; n_sweeps = 20, maxdim = 64, DMRG_TIGHT...)
             # The reference is the OPEN-chain XXX ground energy in this sector, by dense
             # diagonalisation -- Bethe is for the ring, so it is not the reference here.
             e_ed = eigen(Hermitian(Matrix(dense_heisenberg(L)))).values[1]
@@ -167,13 +167,12 @@ include(joinpath(@__DIR__, "..", "common", "bug_tolerances.jl"))
         e_ed = eigen(Hermitian(Matrix(dense_heisenberg(L)))).values[1]
 
         psi_free = dimer_state(L)
-        r_free = dmrg_cbe1s!(psi_free, mpo; n_sweeps = 20, maxdim = 64, trunc_thresh = 1e-14)
+        r_free = dmrg_cbe1s!(psi_free, mpo; n_sweeps = 20, maxdim = 64, DMRG_TIGHT...)
 
         # `maxdim` at the starting rank leaves the expansion nothing it may keep.
         psi_cap = dimer_state(L)
         start = maximum(bond_dims(psi_cap))
-        r_cap = dmrg_cbe1s!(psi_cap, mpo; n_sweeps = 20, maxdim = start,
-                            trunc_thresh = 1e-14)
+        r_cap = dmrg_cbe1s!(psi_cap, mpo; n_sweeps = 20, maxdim = start, DMRG_TIGHT...)
         @test maximum(bond_dims(psi_cap)) <= start
         @test r_cap.energies[end] > r_free.energies[end] + 1e-6
         @test r_free.energies[end] ≈ e_ed atol = 1e-8

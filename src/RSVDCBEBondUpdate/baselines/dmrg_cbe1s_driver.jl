@@ -29,10 +29,10 @@ struct DMRGCBERun
     discarded::Vector{Float64}
     krylov_dims::Vector{Int}
     converged::Bool
-    # Per sweep: `budget_status` (`:met` / `:budget_unmet` / `:legacy`) and the sweep's ledger
-    # (`nothing` on the legacy path), so a converged energy carries its basis verdict with it.
+    # Per sweep: `budget_status` (`:met` / `:budget_unmet`) and the sweep's ledger, so a
+    # converged energy carries its basis verdict with it.
     status::Vector{Symbol}
-    ledgers::Vector{Union{Nothing, AdaptiveLedger}}
+    ledgers::Vector{AdaptiveLedger}
 end
 
 Base.length(r::DMRGCBERun) = length(r.energies)
@@ -67,17 +67,15 @@ function dmrg_cbe1s!(psi::SymMPS, h::Union{XXZChain, MPO};
                      n_sweeps::Int = 20, etol::Union{Nothing, Float64} = nothing, kwargs...)
     mpo = h isa MPO ? h : mpo_from_terms(h)
     kw = values(kwargs)
-    # The stopping threshold, decided after the first sweep says which path ran: an explicit
-    # `etol` always wins; the legacy path keeps its historical 1e-10; the adaptive path derives it
-    # from its own tolerances (`dmrg_etol`).
-    etol_of(info) = etol !== nothing ? etol :
-        info.ledger === nothing ? 1e-10 :
+    # The stopping threshold: an explicit `etol` wins, otherwise it is derived from the sweep's
+    # own tolerances (`dmrg_etol`).
+    etol = something(etol,
         dmrg_etol(something(get(kw, :tol_basis, nothing), DMRG_TOL_DEFAULTS.basis),
-                  something(get(kw, :tol_trunc, nothing), DMRG_TOL_DEFAULTS.trunc), length(psi))
+                  something(get(kw, :tol_trunc, nothing), DMRG_TOL_DEFAULTS.trunc), length(psi)))
     es = Float64[]; spread = Float64[]; bds = Vector{Int}[]; maxbd = Int[]
     sbds = Vector{Int}[]; maxsbd = Int[]; secs = Float64[]
     maxexp = Int[]; epre = Float64[]; efnl = Float64[]; disc = Float64[]; kd = Int[]
-    status = Symbol[]; ledgers = Union{Nothing, AdaptiveLedger}[]
+    status = Symbol[]; ledgers = AdaptiveLedger[]
     converged = false
     prev = Inf
 
@@ -95,7 +93,7 @@ function dmrg_cbe1s!(psi::SymMPS, h::Union{XXZChain, MPO};
         push!(epre, info.err_pre); push!(efnl, info.err_fnl)
         push!(disc, info.discarded); push!(kd, info.krylov_dims)
         push!(status, budget_status(info.ledger)); push!(ledgers, info.ledger)
-        if abs(info.energy - prev) < etol_of(info)
+        if abs(info.energy - prev) < etol
             converged = true
             break
         end

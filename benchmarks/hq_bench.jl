@@ -17,7 +17,7 @@
 #
 # Env: HQB_TWOS (1), HQB_L (16), HQB_TF (8.0), HQB_H (0.1), HQB_EVERY (0.1, or h if larger),
 #      HQB_ORDER (1), HQB_TOLB (1e-5), HQB_TOLR (1e-12), HQB_TOLT (1e-12), HQB_MAXDIM (1024),
-#      HQB_SEED (1), HQB_POLICY (dd_qr_streamed | one_sided_qr_streamed | svd_select),
+#      HQB_SEED (1),
 #      HQB_PARALLEL (serial | half_sweeps | full), HQB_KLS (none | sequential | kl_then_s |
 #      concurrent), HQB_REUSE (1; 0 = P07's reuse-off ablation, `krylov_reuse = false`),
 #      HQB_TWIN (0), HQB_BONDLOG (1), HQB_STATEERR (1), HQB_STATE_TIMES (1,2,4,8),
@@ -38,7 +38,9 @@ const TOLR = parse(Float64, get(ENV, "HQB_TOLR", "1e-12"))
 const TOLT = parse(Float64, get(ENV, "HQB_TOLT", "1e-12"))
 const MAXDIM = parse(Int, get(ENV, "HQB_MAXDIM", "1024"))
 const SEED = parse(Int, get(ENV, "HQB_SEED", "1"))
-const POLICY = Symbol(get(ENV, "HQB_POLICY", "dd_qr_streamed"))
+# The selection is not an option any more (DD-QR CBE only); kept in the tag and the config so
+# records from before and after read the same.
+const POLICY = :dd_qr_streamed
 const PARALLEL = Symbol(get(ENV, "HQB_PARALLEL", "serial"))
 const KLS = (k = get(ENV, "HQB_KLS", "none"); k == "none" ? nothing : Symbol(k))
 const REUSE = get(ENV, "HQB_REUSE", "1") == "1"
@@ -90,7 +92,7 @@ const KREC = round(Int, EVERY / H)
 abs(NSTEP * H - TF) < 1e-12 && abs(KREC * H - EVERY) < 1e-12 ||
     error("HQB_TF and HQB_EVERY must be multiples of HQB_H")
 const STEPKW = (order = ORDER, tol_basis = TOLB, tol_root = TOLR, tol_trunc = TOLT,
-                maxdim = MAXDIM, cbe_policy = POLICY, parallel = PARALLEL, kls = KLS,
+                maxdim = MAXDIM, parallel = PARALLEL, kls = KLS,
                 krylov_reuse = REUSE)
 
 psi = spin_domain_wall_state(L, TWOS)

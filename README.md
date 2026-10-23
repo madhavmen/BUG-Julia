@@ -80,11 +80,12 @@ mpo_energy(psi, W)
 | `tol_expv` | `1e-10` | the root Galerkin `expv` (convergence test and substep split) |
 | `maxdim` | `128` | final bond dimension; also sets the internal working-rank ceiling |
 
-Everything else (`dex`, `dover`, `comp_ratio`, `growth`, `krylov_basis`, `krylov_tol`,
-`split_*`, `root_*`, `trunc_thresh`, `stol_*`, `maxiter`, `tol`) belongs to the **legacy
-fixed-knob path**: naming any of them selects it (with a one-time warning saying so), and mixing
-them with a tolerance is an error.
-`info.ledger` (`nothing` on the legacy path) records every indicator, per step and, in
+There are no other accuracy knobs. The retired fixed-knob parameters (`dex`, `dover`,
+`comp_ratio`, `growth`, `krylov_basis`, `krylov_tol`, `split_*`, `root_*`, `stol_*`, `sulz_cap`,
+`preselect_only`, `grow_iters`) are internal (plan invariant 1): no solver takes them, so naming
+one is a `MethodError`. The baselines keep only their own truncation and Krylov controls
+(`trunc_thresh`, `maxiter`, `tol` on `tdvp2_step!` / `tdvp_cbe1s_step!`).
+`info.ledger` records every indicator, per step and, in
 `info.ledger.bond_log`, per half-sweep bond visit (Tests A-D, probes, Krylov directions, frame
 width, verdict); `budget_status(info.ledger)`
 is `:met` or `:budget_unmet`, and `budget_diagnostic` says which check failed and what to change
@@ -93,15 +94,13 @@ accepted. `exact = true` replaces the random sketch by the complete local basis.
 are complex by default; `neel_state(L; eltype = Float64)` (likewise `domain_wall_state`,
 `product_state`) gives a real one.
 
-**The bond expansion is DD-projected, MPO-streamed and QR-only** on the adaptive path
-(`cbe_policy = :dd_qr_streamed`, [cbe_bug_high_order_rsvd_parallel_tasks.md](cbe_bug_high_order_rsvd_parallel_tasks.md)
-Task 2): the K-sweep grows only the left frame from `P_L^D X P_R^D Ω`, the L-sweep only the right
+**The bond expansion is DD-projected, MPO-streamed and QR-only**
+([updated_cbe_high_order_parallel.md](updated_cbe_high_order_parallel.md) Task 2): the K-sweep grows only the left frame from `P_L^D X P_R^D Ω`, the L-sweep only the right
 frame from the mirror, with the probe projected before the MPO contraction, the output projected
 after, and a sectorwise Householder QR (numerical rank only) choosing the directions -- no
-`H*Theta`, no projector and no SVD in the selection. `:one_sided_qr_streamed` (drops the
-opposite-leg projector) and `:svd_select` (the original two-sided SVD selection, and what the
-legacy path runs) are ablations. The `order > 1` frontier sweeps expand under the same policy
-(`info.record.closure_policy`). `info.record` is the step's typed `StepRecord`: policy, QR
+`H*Theta`, no projector and no SVD in the selection. It is the only selection: the
+`:one_sided_qr_streamed` and `:svd_select` ablations are removed. The `order > 1` frontier sweeps
+expand the same way (`info.record.closure_policy`). `info.record` is the step's typed `StepRecord`: policy, QR
 backend, kernel counters (streamed actions, one-site and root applications, QR ranks, new
 sectors, seconds and bytes per kernel), `D_old`/`D_stage`/`D_final` and `limits`
 (`:basis_limited`, `:root_limited`, `:truncation_limited`, `:work_limited`, `:rank_limited`).
@@ -131,9 +130,7 @@ models), and the ordinary/midpoint choice sets the floor; re-checked on isotropi
 at `dt = 0.1`. Plan conformance: [ADAPTIVE_PLAN_AUDIT.md](ADAPTIVE_PLAN_AUDIT.md).
 
 **Search width and large χ.** The RSVD probe starts at `ADAPTIVE_GROWTH = 1.2` times the bond's
-budget and is widened only where Test B's holdout finds range missing (`thin_search = true`, the
-default; `false` keeps the old doubling, which ran every bond up to its numerical rank before
-Test B was asked). At large χ `tol_basis` is the speed knob: on the 10x4 Heisenberg cylinder at
+budget and is widened only where Test B's holdout finds range missing. At large χ `tol_basis` is the speed knob: on the 10x4 Heisenberg cylinder at
 χ = 256 (`benchmarks/spectral/bug_profile_2d.jl`, `tol_trunc = tol_expv = 1e-6`), `tol_basis`
 1e-4 → 1e-3 cut the first-order step from 31 to 20 s at an infidelity of 5e-6 after t = 0.3.
 Timing against TDVP is only quoted between arms of the same order at the same dt (bug2/bugmid
@@ -163,37 +160,12 @@ tolerance is named, the defaults are medium-loose (`DMRG_TOL_DEFAULTS`, `1e-3` /
 time step's tight ones. A sweep is repeated until the energy settles, so a direction one loose
 sweep skips is offered again on the next. These defaults are provisional until the tolerance
 study (`benchmarks/ground_state/adaptive_dmrg_tolerance.jl`) has measured them. The local
-eigensolve keeps its Ritz-residual stop (`restol`). Naming `dex`, `growth`, `dover`, `comp_ratio`
-or `trunc_thresh` selects the old fixed-knob DMRG unchanged. `mpo_variance(psi, mpo)` is the
+eigensolve keeps its Ritz-residual stop (`restol`). The old fixed-knob DMRG is removed.
+`mpo_variance(psi, mpo)` is the
 exact `<H^2> - <H>^2`, from a two-layer MPO environment. 2D spectra (square, square `J2`, kagome,
 triangular) with every integrator arm, the adaptive ground state and an exact reference up to
 N = 20 are produced by `benchmarks/spectral/fig45_2209.jl`. Conformance:
 [SIMULATION_PLAN_2_AUDIT.md](SIMULATION_PLAN_2_AUDIT.md).
-
-### The legacy fixed-knob path
-
-Its accuracy knob is the **depth of the Krylov basis** the half-sweeps build:
-
-- **`krylov_basis`** (default `30`) — the *cap* on how many orthonormal vectors
-  `span{Θ, HΘ, H²Θ, …}` the half-sweep builds per bond. `0` stops at one application of `H`, which
-  is what the CBE frame alone gives you.
-- **`krylov_tol`** (default `1e-6`) — stops the recursion when the next vector's *contribution*
-  to `exp(τH)Θ` drops below it (Saad's estimate `β_m·|[exp(τT_m)]_{m,1}|`). `0.0` runs to the cap.
-
-⛔ **`krylov_basis` is the knob to scan when an answer is less accurate than it should be**, and it
-is the one that looks like nothing is wrong. Extra rank, extra expansion budget and switching the
-closing truncation off entirely all leave the error *unmoved*, because none of them add a
-**direction** — only depth does. Measured at L=12, `dt=0.05`:
-
-| model | one power of `H` | depth 3 |
-|---|---|---|
-| XX | 1.6948e-04 | 1.6948e-04 — extra vectors are pure cost |
-| Heisenberg | 8.8424e-05 | 2.6697e-06 |
-| OAT | 2.1329e-02 | 7.0610e-14 — **eight orders** |
-
-The two schemes agree to O(τ), so they are the same *order* and can look identical (XX: bit
-identical). The difference is entirely in the prefactor, and it appears wherever `τ‖H_loc‖` is not
-small.
 
 The sweep is always **interleaved** (expand bond `i`, then immediately evolve site `i`) — the
 ordering of the reference implementation.

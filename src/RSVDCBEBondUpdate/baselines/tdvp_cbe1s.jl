@@ -65,9 +65,9 @@ One symmetric second-order 1-site-TDVP-with-CBE step of `tau`, in place.
 caller renormalises** -- for imaginary time that is load-bearing, since `exp(-dt H)` is not
 norm preserving and the norm is the thing being minimised through.
 
-Keywords: `dex`, `growth`, `dover`, `comp_ratio`, `sulz_cap`, `preselect_only`, `exact`
-forward to [`cbe_expand`](@ref); `exact = false` (default) is the RSVD selection and is the
-method. `maxdim` / `trunc_thresh` bound the splits, `maxiter` / `tol` the Krylov budget.
+The expansion is [`cbe_expand`](@ref) at its own (fixed-count) settings; `exact = false`
+(default) is the RSVD selection and is the method, `exact = true` the full fused basis.
+`maxdim` / `trunc_thresh` bound the splits, `maxiter` / `tol` the Krylov budget.
 
 `reorth = true` by default, and it is a CORRECTNESS fix rather than a tuning choice: measured
 on the channel path at L=8, XX, dt=0.02, 20 steps, the un-reorthogonalised Lanczos lost 4.6e-3
@@ -80,12 +80,6 @@ reads the other from one stack built at the start. That stack survives the half-
 a rightward pass only rewrites sites at or behind the bond it is on.
 """
 function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
-                          dex::Int = 0,
-                          growth::Float64 = 2.0,
-                          dover::Union{Nothing, Int} = nothing,
-                          comp_ratio::Union{Float64, Nothing} = 0.5,
-                          sulz_cap::Bool = false,
-                          preselect_only::Bool = false,
                           exact::Bool = false,
                           # ⛔ WITHOUT THIS THE SKETCH CANNOT SAVE ANYTHING, AND THIS ARM WAS THE
                           # ONLY ONE THAT COULD NOT BE ASKED. `cbe_bug_step!` has taken
@@ -101,11 +95,9 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                           # The fold replaces `d*chi_r` columns with `g = npre` BEFORE the
                           # environment contractions, so the saving is `chi/g` and GROWS with the
                           # bond dimension. Folding cannot share one `H*Theta` across the three
-                          # sketch calls, so it wins when `3g < chi` -- at chi = 1024 with
-                          # `dex = 64` that is `231 < 1024`, comfortable, and it is exactly the
-                          # large-chi regime this is being tuned for. It can LOSE at small chi or
-                          # wide `growth`, so the default stays off and nothing already measured
-                          # moves silently.
+                          # sketch calls, so it wins when `3g < chi` -- the large-chi regime this
+                          # is being tuned for. It can LOSE at small chi or a wide sketch, so the
+                          # default stays off and nothing already measured moves silently.
                           fold_omega::Bool = false,
                           maxdim::Int = 200,
                           trunc_thresh::Float64 = 1e-12,
@@ -143,9 +135,7 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     # `share_ht` is deliberately NOT in here: the MPO `cbe_expand` REFUSES the pair, and its
     # default (`nothing`) already means "share when project-first" -- so leaving it out is what
     # lets one `exkw` serve both paths.
-    exkw = (dex = dex, growth = growth, dover = dover, comp_ratio = comp_ratio,
-            sulz_cap = sulz_cap, rmax = maximum(bond_dims(psi); init = 0),
-            preselect_only = preselect_only, exact = exact, fold_omega = fold_omega,
+    exkw = (rmax = maximum(bond_dims(psi); init = 0), exact = exact, fold_omega = fold_omega,
             rng = rng)
 
     # Working set at this instant: the state as it stands plus the transients still alive. SAME

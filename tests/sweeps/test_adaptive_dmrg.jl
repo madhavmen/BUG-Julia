@@ -2,7 +2,7 @@
 #
 # simulation_plan_2 Task 4: the CBE-DMRG ground-state search runs on the SAME adaptive RSVD
 # engine as `cbe_bug_step!` -- Tests A/B against `tol_basis`, the `maxdim`-derived work ceiling,
-# the budgeted split against `tol_trunc` -- and the legacy fixed-knob path is unchanged.
+# the budgeted split against `tol_trunc`. The fixed-knob path is removed.
 #
 # References are exact: dense ED of the open Heisenberg chain, and sparse ED in the S^z = 0
 # sector of a 4 x 3 square cylinder (`pairs_sparse` and `square_cylinder_mpo` read ONE coupling
@@ -154,15 +154,12 @@ include(joinpath(@__DIR__, "..", "..", "benchmarks", "exact_sparse.jl"))
         @test auto.energies[end] - e_ed <= 10 * L * (2.5e-3 * tb^2 + 0.2 * tt^2)
     end
 
-    @testset "legacy path unchanged; mixing refused" begin
+    @testset "the fixed-knob path is gone" begin
         L = 8
         mpo = xxz_mpo(L; J = 1.0, delta = 1.0)
-        psi = neel_state(L)
-        r = dmrg_cbe1s!(psi, mpo; n_sweeps = 10, maxdim = 64, trunc_thresh = 1e-14)
-        @test all(s === :legacy for s in r.status)
-        @test all(l === nothing for l in r.ledgers)
-        @test r.energies[end] ≈ eigen(Hermitian(Matrix(dense_heisenberg(L)))).values[1] atol = 1e-8
-        @test_throws ArgumentError dmrg_cbe1s!(neel_state(L), mpo; n_sweeps = 1,
-                                               tol_basis = 1e-6, dex = 4)
+        @test_throws MethodError dmrg_cbe1s!(neel_state(L), mpo; n_sweeps = 1,
+                                             tol_basis = 1e-6, dex = 4)
+        @test_throws MethodError dmrg_cbe1s!(neel_state(L), mpo; n_sweeps = 1,
+                                             trunc_thresh = 1e-14)
     end
 end

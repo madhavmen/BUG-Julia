@@ -6,8 +6,9 @@
 #       orientation, and its one-site Krylov runs through V0, not a CBE-widened V_ex), so the error
 #       halves with dt and does not move with tol_basis;
 #   (b) basis: DD misses directions, so the error does not follow dt and/or the ledger is silent.
-# The grid separates them: three policies x dt x tol_basis, error vs exact at a fixed T, with the
-# step records' ranks, QR / one-site counts and limit statuses.
+# The grid separates them: dt x tol_basis, error vs exact at a fixed T, with the step records'
+# ranks, QR / one-site counts and limit statuses. The :svd_select / :one_sided_qr_streamed arms
+# are gone with the selection ablations, so only DD-QR is run (the policy column stays).
 #
 # Env: HQ_L (8), HQ_T (0.2), HQ_DTS ("0.1,0.05,0.025"), HQ_TOLS ("1e-6,1e-8,1e-10").
 
@@ -29,13 +30,13 @@ const VREF = dense_exact_propagate(dense_heisenberg(L; J = 1.0, delta = 1.0), V0
 
 println("HQGAP-HEADER policy dt tol_basis err maxD_stage maxD_final qr_rank n_qr n_one_site ",
         "n_root limits")
-for tol in TOLS, dt in DTS, pol in CBE_POLICIES
+for tol in TOLS, dt in DTS, pol in (:dd_qr_streamed,)
     n = round(Int, T / dt)
     p = neel_state(L)
     dstage, qr_rank, n_qr, n_one, n_root = 0, 0, 0, 0, 0
     lim = Symbol[]
     for _ in 1:n
-        r = cbe_bug_step!(p, MPO_, -im * dt; cbe_policy = pol, tol_basis = tol,
+        r = cbe_bug_step!(p, MPO_, -im * dt; tol_basis = tol,
                           tol_trunc = 1e-12, tol_expv = 1e-12, maxdim = 64).record
         dstage = max(dstage, r.D_stage)
         qr_rank += r.counters.qr_rank

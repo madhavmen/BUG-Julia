@@ -34,12 +34,6 @@ where the meaning is the same, so the integrators can be driven from the same ca
     real time (`tau = -im*dt`) and an INVERSE-TEMPERATURE step in imaginary time
     (`tau = -dt`); the mode
     forms `tau` from it. [`GroundState`](@ref) ignores both and uses `n_sweeps`/`etol`.
-  - `dex`, `growth`, `dover`, `comp_ratio`, `sulz_cap`, `preselect_only` -- the expansion,
-    forwarded to [`cbe_expand`](@ref). `dex = 0` and `dover = nothing` (both defaults) are
-    ADAPTIVE: the admitted directions are those clearing `stol_pre` in the preselection, and
-    the sketch width is range-found rather than fixed at `1.2x`. Setting either to a positive
-    value restores the old fixed cap / fixed oversample, which is what the A/B arms use;
-    `growth = 1.1` reproduces the reference's DMRG ratchet for the seed width.
   - `maxdim`, `trunc_thresh` -- truncation, applied at the centre and in the final sweep.
   - `normalize` -- rescale after each step; the norm is recorded BEFORE rescaling.
   - `maxiter`, `tol` -- Krylov budget for the single 0-site exponential.
@@ -70,12 +64,6 @@ runs on both, because `exp(-dt*H)` Trotterises exactly as `exp(-im*dt*H)` does.
 Base.@kwdef struct CBEBugOptions
     dt::Float64 = 0.05
     n_steps::Int = 10
-    dex::Int = 0
-    growth::Float64 = 2.0
-    dover::Union{Nothing, Int} = nothing
-    comp_ratio::Union{Float64, Nothing} = 0.5
-    sulz_cap::Bool = false
-    preselect_only::Bool = false
     centre_expand::Bool = true
     maxdim::Int = 200
     trunc_thresh::Float64 = 1e-12
@@ -93,7 +81,7 @@ Base.@kwdef struct CBEBugOptions
     # the preselection sees the exact `H*Theta` and its SVD returns the true leading directions
     # rather than an estimate. This FORMS THE RANK-4 OBJECT (cost `d*chi`, not `1.2*budget`),
     # which is precisely what the sketch exists to avoid -- it is the reference arm of the A/B,
-    # not a better default. Makes `comp_ratio`, `dover`, `seed` and the RNG inert.
+    # not a better default. Makes `seed` and the RNG inert.
     exact::Bool = false
     seed::UInt = 0x5EED
     record_magnetisation::Bool = false

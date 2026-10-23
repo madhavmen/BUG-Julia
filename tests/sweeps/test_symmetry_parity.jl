@@ -118,7 +118,7 @@ include(joinpath(@__DIR__, "..", "common", "bug_tolerances.jl"))
             set_symmetry!(sym)
             mpo = RSVDCBEBondUpdate.mpo_from_terms(nn_chain(sym, L))
             psi = dimer_state(L)
-            r = dmrg_cbe1s!(psi, mpo; n_sweeps = 20, maxdim = 64, trunc_thresh = 1e-14)
+            r = dmrg_cbe1s!(psi, mpo; n_sweeps = 20, maxdim = 64, DMRG_TIGHT...)
             push!(es, r.energies[end])
         end
         @test es[2] ≈ es[1] atol = 1e-9

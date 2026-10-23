@@ -396,102 +396,14 @@ enough to cost accuracy, `workcap_reached` in the ledger is what reports it.
 """
 work_ceiling(maxdim::Int, r::Int) = max(2 * maxdim, 2 * r, 1)
 
-# ── MIGRATING OFF THE OLD KNOBS ───────────────────────────────────────────────────────────
-#
-# ⛔ NO `adaptive = true` FLAG, DELIBERATELY. A mode switch is itself a tuning knob, and the
-# one thing it reliably produces is a run configured in one mode and read as the other. The
-# mode is INFERRED instead, from whether the caller named any of the retired parameters --
-# which is information already present at the call site and cannot disagree with itself.
-#
-# This is only detectable because every legacy keyword now defaults to `nothing` ("not asked
-# for") rather than to its old value. The old value is still what it RESOLVES to, so a caller
-# who passes none of them and none of the tolerances gets exactly the historical step.
-#
-# ⛔ AND THE TWO SETS MAY NOT BE MIXED. Honouring `tol_basis` and `dex` simultaneously means
-# two different answers to "how many directions" with no stated precedence -- the silent-
-# contradiction failure that `grow_iters` already has a guard for a few hundred lines down.
-# Refused rather than resolved.
-
-"The retired tuning parameters, in the order they are reported to the caller."
-const LEGACY_KNOBS = (:dex, :dover, :comp_ratio, :growth, :krylov_basis,
-                      :split_cutoff, :split_maxdim, :root_cutoff, :root_maxdim,
-                      :trunc_thresh, :stol_pre, :stol_fnl,
-                      # Stage 3: the fixed-depth Krylov controls. Tests C/D decide the depth
-                      # from `tol_basis` (plan §4), so these are legacy-only like `krylov_basis`.
-                      :krylov_tol, :grow_iters, :krylov_grow,
-                      # Stage 5: the root solve's iteration controls. `tol_expv` sets its
-                      # convergence test and substep split (plan §1 "root expv tolerance").
-                      :maxiter, :tol, :root_conv_tol, :root_substeps)
-
-"Historical default of every legacy knob, i.e. what `nothing` resolves to on the legacy path."
-const LEGACY_DEFAULTS = (dex = 0, dover = nothing, comp_ratio = 1.0, growth = 2.0,
-                         krylov_basis = 30, split_cutoff = 1e-14, split_maxdim = 0,
-                         root_cutoff = 0.0, root_maxdim = 0, trunc_thresh = 1e-12,
-                         stol_pre = 1e-10, stol_fnl = 1e-13,
-                         krylov_tol = 1e-6, grow_iters = nothing, krylov_grow = false,
-                         maxiter = 30, tol = 1e-15, root_conv_tol = 0.0, root_substeps = 1)
-
 """
 The adaptive search's STARTING width schedule (`budget = ceil(growth*dmax) - r`, probe `1.2x` that).
 USER 2026-10-16: 1.2, not the legacy 2.0 -- at 2.0 the first probe is ~1.2chi columns against a
 local space of 2chi, so the RSVD starts as wide as the space it sketches. Only a start: Test B
-widens a side that fails (`_certified_range(...; thin = true)`). The legacy path keeps 2.0.
+widens a side that fails (`_certified_range(...; thin = true)`). `cbe_expand`'s own default
+(2.0) is the fixed-count selection of the TDVP-CBE baselines.
 """
 const ADAPTIVE_GROWTH = 1.2
 
 "Default tolerances of the normal API. Plan §1; starting settings, not certified bounds."
 const TOL_DEFAULTS = (basis = 1e-5, trunc = 1e-7, expv = 1e-10)
-
-"""
-    resolve_budget(tol_basis, tol_trunc, tol_expv, legacy) -> (budget, adaptive, named)
-
-Decide which API the caller used, and refuse the mixture.
-
-`legacy` is a NamedTuple of the retired keywords as the caller left them, `nothing` meaning
-"not asked for". Returns the [`AdaptiveBudget`](@ref), whether the ADAPTIVE path is active,
-and the legacy keywords that were named (empty on the adaptive path).
-
-`dover` is excluded from the "was it named" test: `nothing` is its own historical default, so
-it carries no signal either way -- a legacy caller who wants it is already naming `dex`.
-A key absent from `legacy` counts as not named.
-"""
-function resolve_budget(tol_basis, tol_trunc, tol_expv, legacy::NamedTuple)
-    named = Tuple(k for k in LEGACY_KNOBS
-                  if k !== :dover && get(legacy, k, nothing) !== nothing)
-    tols  = Tuple(n for (n, v) in ((:tol_basis, tol_basis), (:tol_trunc, tol_trunc),
-                                   (:tol_expv, tol_expv)) if v !== nothing)
-
-    if !isempty(named) && !isempty(tols)
-        throw(ArgumentError(
-            "cannot mix the accuracy tolerances $(join(tols, ", ")) with the retired " *
-            "tuning parameters $(join(named, ", ")): they are two answers to the same " *
-            "question with no precedence between them. Pass only tol_basis/tol_trunc/" *
-            "tol_expv/maxdim for the adaptive solver, or only the old parameters for the " *
-            "fixed-knob legacy path."))
-    end
-
-    budget = AdaptiveBudget(something(tol_basis, TOL_DEFAULTS.basis),
-                            something(tol_trunc, TOL_DEFAULTS.trunc),
-                            something(tol_expv,  TOL_DEFAULTS.expv))
-    return (budget, isempty(named), named)
-end
-
-"""
-    _legacy_hint(named) -> Union{Nothing, String}
-
-Plan §1 ("may"): the migration hint for a caller who named retired knobs. Naming one is a
-legitimate request for the fixed-knob path -- the recorded benchmarks use it -- so this informs
-rather than refuses, and only ONCE per session: a scan of thousands of legacy steps should not
-print thousands of lines. Returns the message (for tests), `nothing` on the adaptive path.
-"""
-function _legacy_hint(named)
-    isempty(named) && return nothing
-    msg = "$(join(named, ", ")) selected the fixed-knob legacy path, which makes no accuracy " *
-          "claim (budget_status = :legacy). The adaptive solver takes only tol_basis, " *
-          "tol_trunc, tol_expv and maxdim; see README \"Three tolerances and one resource limit\"."
-    @warn msg maxlog=1
-    return msg
-end
-
-"Resolve one legacy keyword to a concrete value, falling back to its historical default."
-legacy_or_default(v, name::Symbol) = v === nothing ? getfield(LEGACY_DEFAULTS, name) : v

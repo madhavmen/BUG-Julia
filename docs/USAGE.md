@@ -356,15 +356,15 @@ opts = CBEBugOptions(;
     maxiter      = 8,         # Krylov depth (see below)
     exact        = false,     # false = RSVD-CBE (the method); true = exact CBE (A/B only)
     normalize    = true,
-    growth       = 2.0,       # seed width for the adaptive expansion, see below
     seed         = 0x5EED,    # one RNG threads the run, so runs are reproducible
 )
 ```
 
-**`dex` and `dover` are adaptive at their defaults (`0` and `nothing`), and that is the
-recommended setting.** The expansion no longer admits a *fixed* number of directions per side,
-nor oversamples the probe by a *fixed* 1.2×. Both are read off the preselection SVD against
-`stol_pre`, the tolerance that pass already applies:
+**The expansion has no knobs of its own.** `dex`, `dover`, `growth`, `comp_ratio`, `sulz_cap`
+and `preselect_only` are internal (plan invariant 1) and no longer fields of `CBEBugOptions`. The
+expansion admits no *fixed* number of directions per side and does not oversample the probe by a
+*fixed* 1.2×; both are read off the preselection SVD against `stol_pre`, the tolerance that pass
+already applies:
 
 * the directions admitted are those that clear the tolerance, capped only by `room` (the hard
   local-space limit) and by `maxdim` at the truncation;
@@ -373,9 +373,8 @@ nor oversamples the probe by a *fixed* 1.2×. Both are read off the preselection
   early once the admitted count already fills `room`, so a bond near full rank cannot drag the
   sketch out to the full fused basis.
 
-`growth` therefore no longer caps anything at `dex = 0`; it only sets the width the widening
-starts from, i.e. how many passes are needed, not what they converge to. Setting `dex > 0` or
-`dover` to an integer restores the old fixed cap / fixed oversample for an A/B.
+The seed width only sets where the widening starts, i.e. how many passes are needed, not what
+they converge to.
 
 **`exact = false` is the method and the default.** `exact = true` replaces the thin Gaussian
 sketch with the complete fused basis, which forms the rank-4 `H·Θ` that the sketch exists to
@@ -420,10 +419,14 @@ the expansion — do not add seeding. The proof the growth is not seed-driven: i
 | `energies` | only if you passed `energy_gates` |
 
 **A knob is inert unless the run is rank-starved.** If `max_bond_dims` never reaches `maxdim`,
-then `maxdim`, `growth` and `trunc_thresh` changed nothing and any comparison across them is
+then `maxdim` and `trunc_thresh` changed nothing and any comparison across them is
 measuring noise. This has produced several wrong conclusions in this repo — check it first.
 
 ## 6b. Krylov depth is what governs `cbe_bug`'s accuracy
+
+> ⚠ **Historical.** `krylov_basis` / `krylov_tol` belonged to the removed fixed-knob path and are
+> no longer keywords. `cbe_bug_step!` now decides the depth from `tol_basis` (Tests C/D) and
+> `order`. The measurements below are kept for what they show about depth.
 
 **One knob moves the error on a hard model, and it is not the one anyone reaches for.** The
 half-sweeps build an orthonormal Krylov basis `span{Θ, HΘ, H²Θ, …}` per bond, and its DEPTH is

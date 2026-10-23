@@ -131,12 +131,6 @@ only rewrites sites at or behind the bond it is on.
 """
 function tdvp1_cbe_step!(psi::SymMPS, h::XXZChain, tau::ComplexF64;
                          exact::Bool = false,
-                         dex::Int = 0,
-                         growth::Float64 = 2.0,
-                         dover::Union{Nothing, Int} = nothing,
-                         comp_ratio::Union{Float64, Nothing} = 0.5,
-                         sulz_cap::Bool = false,
-                         preselect_only::Bool = false,
                          maxdim::Int = 200,
                          trunc_thresh::Float64 = 1e-12,
                          maxiter::Int = 30,
@@ -165,11 +159,9 @@ function tdvp1_cbe_step!(psi::SymMPS, h::XXZChain, tau::ComplexF64;
     acc = Any[0, 0, 0.0, 0.0, 0.0, 0]
     half = tau / 2
 
-    # `rmax` read once, before either sweep widens anything, so the (optional) Sulz bound is a
-    # global statement about the state rather than a per-bond one. Same as `cbe_lubich_sweep`.
-    exkw = (dex = dex, growth = growth, dover = dover, comp_ratio = comp_ratio,
-            sulz_cap = sulz_cap, rmax = maximum(bond_dims(psi); init = 0),
-            preselect_only = preselect_only, exact = exact, rng = rng)
+    # `rmax` read once, before either sweep widens anything, so it is a statement about the
+    # state rather than a per-bond one. The expansion runs at `cbe_expand`'s own settings.
+    exkw = (rmax = maximum(bond_dims(psi); init = 0), exact = exact, rng = rng)
 
 
     onesite!(j, lc, rc) = begin
