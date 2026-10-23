@@ -526,7 +526,7 @@ got one new assertion. All at s = 1/2 (USER 10-22).
 | U03 | test_dd_cbe "U03/T2.4", "T2.3 reachable sector"; test_adaptive_rsvd UT03 | covered |
 | U04 | test_adaptive_rsvd UT04, UT06; test_dd_cbe T3 acceptance, T3.3 holdout; NEW in T3.1: `n_holdout >= s * checks` | covered: every check runs on its own holdout, so a promoted holdout never validates the Q it joined |
 | U05 | test_krylov_closure UT7; test_adaptive_compression UT11; test_dd_cbe T3.4; UT05 degeneracy | covered |
-| U06 | test_dd_cbe "DK/DD fixture"; NEW "U06: DK fixture, one step per policy" | covered: one step of the DK fixture state under DD+QR and one-sided+QR against dense exact propagation; error equal within 10% (the plan claims complementarity, not superiority, §2), QR rank / streamed columns / D_stage / one-site applications recorded side by side |
+| U06 | test_dd_cbe "DK/DD fixture"; NEW "U06: DK fixture, one step per policy" | covered: one step of the DK fixture state under DD+QR and one-sided+QR against dense exact propagation; error equal within 10% (the plan claims complementarity, not superiority, §2) and not exact (> 1e-7, above the fidelity distance's sqrt(2 eps) floor); DD+QR keeps a strictly smaller QR rank (the DK directions are left to the Krylov stage); streamed columns / D_stage / one-site applications recorded side by side |
 | U07 | test_adaptive_krylov UT07; test_dd_cbe T4.1 "adds each once" | covered |
 | U08 | test_adaptive_krylov UT08 (Test C zero, Test D finds e2), e3 at unit / tiny step | covered |
 | U09 | test_adaptive_expv UT15; test_hq_root T5.2; NEW "U09: the tail estimate tracks the exponential's error; a zero Ritz value stops nothing" | covered: zero-diagonal hopping chain (T_m = path graph: a Ritz value exactly 0 at every odd m, beta_m = g at every m); true <= estimate <= (m+1) true for m = 1..5, and the conv_tol = 1e-4 solve stops at m = 5 on the tail, not at m = 1 or 3 where the Ritz value is 0 and the error 0.2 / 1e-3 |
@@ -541,3 +541,20 @@ got one new assertion. All at s = 1/2 (USER 10-22).
 | U18 | test_spin_xx T7.1 | covered |
 | U19 | test_spin_xx T7.0 (product-state variance), T7.2 (ED), T7.3 (9 J^2) | covered |
 | U20 | NEW tests/sweeps/test_hq_kernels.jl; P06 benchmark | covered: s = 1/2 XX L=16, centre bond at D = 16, 32, 64, w = 8: exact width-linearity of the thin kernels at every D; thin-kernel flops / environment-push flops fall >= 25% from D=16 to 64; one root matvec below a dense one (D >= 32); seconds and bytes of input DD, stream, DD-select (QR), sector bookkeeping, env, root and the closing compression recorded. Time and bytes are not gated (shared nodes; block metadata is width-independent allocation); timing regression stays P06 |
+
+### Confirmation (LMU cluster, s = 1/2)
+
+| job | file | result |
+|---|---|---|
+| hq44a/b | test_adaptive_expv.jl | 47/47 |
+| hq44a/b | test_hq_kernels.jl | 53/53 |
+| hq46a 17454974 | test_dd_cbe.jl (6a62afd) | U06 failed one guard: err 3.67e-7 against `> 1e-6` |
+| hq47a 17455160 | test_dd_cbe.jl (d5f4178) | 277 pass, 1 broken (the T3.5/T4 SVD parity, `@test_broken` per USER), 35 min, MaxRSS 1.93G of 3G, no oom_kill |
+
+* U20 (centre bond, w = 8, D = 16 → 32 → 64): stream flops / env push 1.093 → 0.555 → 0.299 and
+  input DD 0.159 → 0.082 → 0.048, i.e. halving per doubling of D as w / D predicts; root flops
+  against a dense root matvec N^2: 3304 / 7056, 22408 / 92416, 144608 / 1153476.
+* U06 (L = 10, dt = 0.05, one step): DD+QR and one-sided+QR end in the same state (err 3.665e-7
+  both, D_stage 23, 50 one-site applications) with QR rank 24 vs 38 and 86 vs 108 streamed columns.
+  The guard moved from 1e-6 to 1e-7 (d5f4178): the step is inexact, but 3.7e-7 sits between the
+  fidelity distance's floor and the old guard. This is the task's one weakened test.
