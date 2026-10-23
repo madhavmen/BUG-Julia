@@ -21,6 +21,8 @@
 using Test
 using LinearAlgebra
 
+include(joinpath(@__DIR__, "..", "common", "bug_tolerances.jl"))
+
 @testset "OAT: analytic reference vs dense ED" begin
     # `H` LITERALLY AS THE PAPER WRITES IT -- `(Σ_ℓ S^z_ℓ)^2 / 2`, squared as a dense matrix --
     # so the reference shares nothing with `oat_mpo`'s expansion of the square. If the expansion

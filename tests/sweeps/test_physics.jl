@@ -46,6 +46,8 @@ using Test
 using LinearAlgebra
 import Random
 
+include(joinpath(@__DIR__, "..", "common", "bug_tolerances.jl"))
+
 const _HS = get(ENV, "BUGJULIA_TEST_HS", "0") == "1"
 # ⚠ The Heisenberg-RING magnon arm is opt-in too (user decision 2026-10-15): job 17199914 measured
 # cbe_bug 5.0e-3 AND tdvp_cbe1s 2.7e-3 against the 1e-4 bar with a correct reference, i.e. both

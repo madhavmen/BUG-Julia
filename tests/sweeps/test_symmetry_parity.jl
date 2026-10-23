@@ -30,6 +30,8 @@ using Test
 using LinearAlgebra
 import Random
 
+include(joinpath(@__DIR__, "..", "common", "bug_tolerances.jl"))
+
 @testset "symmetry parity" begin
 
     nn_chain(sym, L) = sym === :SU2 ? heisenberg_su2_chain(L) : xxz_chain(L; delta = 1.0)

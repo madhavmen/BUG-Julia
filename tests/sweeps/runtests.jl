@@ -41,9 +41,6 @@ include(joinpath(@__DIR__, "..", "common", "analytic_reference.jl"))
 # THESE and never against a dense propagator -- a 2^L reference caps the test at the L where it
 # fits, which is routinely not the L where the effect under test is large.
 include(joinpath(@__DIR__, "..", "common", "free_fermion.jl"))
-# The tight basis and root tolerances a physics test runs `cbe_bug_step!` at (the fixtures' own,
-# `adaptive_fixtures.jl`); each call names its compression `tol_trunc`.
-const BUG_TIGHT = (tol_basis = 1e-12, tol_expv = 1e-14)
 
 @testset "sweeps (RSVD-CBE: DMRG, 1-site TDVP, fixed-rank BUG)" begin
     include(joinpath(@__DIR__, "..", "common", "test_analytic_reference.jl"))
