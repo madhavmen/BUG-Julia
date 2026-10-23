@@ -562,19 +562,30 @@ def p11(runs, ref, outdir):
     cells = defaultdict(dict)
     for r in runs:
         c = r["config"]
-        if c["policy"] == "dd_qr_streamed" and c["parallel"] == "full" and c["kls"] in P11_SCHEDULES and finished(r):
+        if c["policy"] != "dd_qr_streamed" or not finished(r):
+            continue
+        if c["parallel"] == "full" and c["kls"] in P11_SCHEDULES:
             cells[key(r, "twoS", "order", "h", "tf", "tol_basis")][(c["kls"], c["threads"])] = r
-    cells = {k: v for k, v in cells.items() if {s for s, _ in v} == set(P11_SCHEDULES)}
+        elif c["kls"] == "none" and c.get("krylov_reuse", True) and c["parallel"] in ("serial", "half_sweeps"):
+            # the standard step at the same setting (hq45t): serial w1, half-sweeps w2/w3
+            cells[key(r, "twoS", "order", "h", "tf", "tol_basis")][("standard", c["threads"])] = r
+    cells = {k: v for k, v in cells.items() if set(P11_SCHEDULES) <= {s for s, _ in v}}
     if not cells:
         return skip("P11", "needs the three schedules on one scheme for one setting")
-    print("HQ-P11 schedule  s  p  h  threads/blas  t(steps 2..n)  sum t_K  sum t_L  sum t_root  peak_rss  speedup")
+    print("HQ-P11 schedule  s  p  h  threads/blas  t(steps 2..n)  sum t_K  sum t_L  sum t_root  peak_rss  "
+          "speedup(vs sequential w1)  vs standard w1")
     fig, ax = plt.subplots(1, 4, figsize=(20, 4.6))
     colors = {p: plt.cm.viridis((p - 1) / 4.2) for p in range(1, 6)}
-    styles = {"sequential": ("o", "-"), "kl_then_s": ("^", "--"), "concurrent": ("s", ":")}
+    styles = {"sequential": ("o", "-"), "kl_then_s": ("^", "--"), "concurrent": ("s", ":"),
+              "standard": ("x", "-.")}
     for (twoS, p, h, tf, tb), byk in sorted(cells.items()):
         base = byk.get(("sequential", 1))
         t1 = step_time(base) if base else np.nan
-        for sch in P11_SCHEDULES:
+        std1 = byk.get(("standard", 1))
+        ts1 = step_time(std1) if std1 else np.nan
+        for sch in P11_SCHEDULES + ("standard",):
+            if not any(s == sch for s, _ in byk):
+                continue
             ws = sorted(w for s, w in byk if s == sch)
             T = np.array([step_time(byk[(sch, w)]) for w in ws])
             rss = [max(s["record"]["peak_rss"] for s in byk[(sch, w)]["steps"]) / 2 ** 30 for w in ws]
@@ -588,18 +599,22 @@ def p11(runs, ref, outdir):
                 print(f"HQ-P11 {sch} {twoS / 2:g} {p} {h:g} {w}/{byk[(sch, w)]['config']['blas_threads']} {x:.1f} "
                       f"{sum((s.get('kls') or {}).get('t_K', 0) for s in st):.1f} "
                       f"{sum((s.get('kls') or {}).get('t_L', 0) for s in st):.1f} "
-                      f"{sum(s['t_root'] for s in st):.1f} {rss[ws.index(w)]:.2f}G {t1 / x:.2f}")
+                      f"{sum(s['t_root'] for s in st):.1f} {rss[ws.index(w)]:.2f}G {t1 / x:.2f} {ts1 / x:.2f}")
     from matplotlib.lines import Line2D
     ax[0].legend(handles=[Line2D([], [], color=colors[p], lw=2, label=f"p={p}") for p in range(1, 6)]
-                 + [Line2D([], [], color="k", marker=styles[s][0], ls=styles[s][1], label=s) for s in P11_SCHEDULES],
+                 + [Line2D([], [], color="k", marker=styles[s][0], ls=styles[s][1], label=s)
+                    for s in P11_SCHEDULES + ("standard",)],
                  fontsize=7)
     for a, lab in zip(ax, ("integrator time, steps 2..n [s]", "speedup vs sequential, 1 worker",
                            "parallel efficiency (speedup / workers)", "peak RSS [GiB]")):
         a.set_xlabel("workers (julia -t; BLAS 1 thread)"); a.set_ylabel(lab); a.set_xticks([1, 2, 3])
         a.grid(True, alpha=0.3)
     ax[1].axhline(1, color="grey", lw=0.8)
-    (twoS, _, h, tf, tb) = next(iter(cells))
-    fig.suptitle(f"P11 K/L/S schedules on parallel = :full, s = {twoS / 2:g}, L = 16, h = {h:g}, "
+    (twoS, _, _, tf, tb) = next(iter(cells))
+    hs = sorted({(k[1], k[2]) for k in cells})
+    hlab = (f"h = {hs[0][1]:g}" if len({h for _, h in hs}) == 1 else
+            "h = " + ", ".join(f"{h:g} (p{p})" for p, h in hs))
+    fig.suptitle(f"P11 K/L/S schedules on parallel = :full, s = {twoS / 2:g}, L = 16, {hlab}, "
                  f"Jt = {tf:g}, tol_basis = {tb:.0e} (one job, one node)")
     fig.tight_layout()
     save(fig, outdir, "P11_schedules.png")
