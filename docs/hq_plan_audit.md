@@ -351,3 +351,165 @@ tested unchanged. The fixture was changed twice:
   fall at slopes 2.000, 2.000, 2.000; remainder / leading term = 0.18.
 
 **Task 6 CONFIRMED**, with the speed-up and the matched-error comparison carried to Task 8 (P11, P12).
+
+## Task 7
+
+Branch `plan/hq-task-7` (stacked on `plan/hq-task-6`):
+* the models and references `4b77177`;
+* the generalized Jordan–Wigner map `657a399`, `16c400b`;
+* the current's sign `56b5dce`;
+* the reference solver's first-step split `5fa2a85`;
+* the checkpointed reference run and common-horizon band `e84f50f`.
+
+Models `models/spin_xx.jl`: `spin_space`, `spin_xx_mpo`, `spin_current_mpo`,
+`spin_domain_wall_state`, `spin_sz_profile`. Tests `test_spin_xx.jl` (T7.0–T7.3) and
+`test_spin_jw.jl` (U31). L = 16 reference `benchmarks/hq_xx_reference.jl` with
+`hq_xx_reference_band.jl`.
+
+| item | status | evidence |
+|---|---|---|
+| (XX), (DW): one exchange convention, OBC, d = 2s + 1 | DONE / TEST | `spin_xx_mpo(L, twoS)` = (J/2) Σ (S⁺S⁻ + S⁻S⁺) on bonds 1..L−1; T7.0: d = 2, 7 sectors, s = 1/2 equals `xxz_mpo(delta = 0)` on an evolved state (1e-12), `<H> = 0` and the exact product-state variance |
+| T7.1 closed-form open-chain propagator | TEST | `xx_open_propagator` equals `exp(-i t h)` (1e-12) at t = 0.5, 3, 8; `<S^z_i> = C_ii − 1/2`, `tr C = 8`, `tr hC = 0`, continuity of the centre current by central difference |
+| T7.1 converged solver against it, L = 16 to Jt = 8 | TEST | order-4 TDVP2, dt = 0.025, D ≤ 512, `trunc 1e-14`: err_m, err_j < 1e-6; norm, E, Var(H) − 1/4, S^z_tot, sector on every record |
+| T7.2 / U31 generalized JW map | TEST | Batista–Ortiz map, 2s flavours, any vacuum: `T'T = I`; `H_JW T = T H_s`, S⁺, S^z, the centre current, S^z_tot commute (1e-12) |
+| T7.2 / U31 "is the mapped H quadratic?" | TEST: NO for s = 3 | least-squares fit over every quadratic fermion operator: s = 1/2 residual < 1e-10 (the control); s = 3 residual 0.84–1.0 on the full range and on the domain wall's Krylov space, every vacuum (hq26a 138/138). Hence no analytical s = 3 curve (plan line 454) |
+| T7.2 (a) symmetry and short-time identities | TEST | T7.3 below; reflection × spin flip `m_{L/2+1} = −m_{L/2}`; S^z_tot = 0 |
+| T7.2 (b) sector ED, L = 4, 6 | TEST | `spin_ed.jl` (shares nothing with the package): profile and centre current < 1e-6 to Jt = 1; the ED is unitary and its current obeys continuity, which fixes the current's sign |
+| T7.2 (c) L = 16 from ≥ 2 methods/settings | BENCHMARK | hq28a–e: D_max 512/256, dt 0.025/0.0125, trunc 1e-10/1e-8, order 4/2 TDVP2; band = largest deviation from the finest |
+| T7.3 t² coefficients 1/4 and 9 | TEST | Richardson in t = 0.01, 0.005 on the MPS (L = 16) and the ED (L = 4): relative error < 1e-5 |
+| T7.3 constancy of `<H>`, Var(H), norm, S^z_tot | TEST | on every T7.1/T7.2 record; Var(H) needs the reference's first-step split (below) |
+| T7.4 frozen conventions | DONE | header of `hq_xx_reference.jl`; the run's `config` carries twoS, L, J, dt, order, maxdim, trunc, ramp, solver |
+| T7.4 converged in D_max, dt, truncation, solver; band | BENCHMARK | `hq_xx_reference_band.jl` refuses fewer than two varied axes; it covers the times every setting reached and prints that horizon |
+| Acceptance: no spin-3 free-fermion curve is claimed | DONE | `hq_xx_reference.jl` labels the s = 3 reference numerical; U31 asserts the s = 3 fit fails |
+
+**The current's sign (`56b5dce`).** `pair_mpo` applies the transpose of each vertex matrix. The
+current's imaginary antisymmetric vertex therefore came out as −j. It now enters with the
+opposite sign, and T7.2's ED-continuity check and the JW map both pin it.
+
+**The reference solver's first step (`5fa2a85`).** From the domain wall, the first projected
+TDVP2 step leaves Var(H) off by ∝ dt², and no later step removes it:
+* s = 3, L = 16: Var(H) − s² = 2.18e-3, 5.44e-4, 1.36e-4 at dt = 0.025, 0.0125, 0.00625 (hq22a/b/c), flat afterwards;
+* T7.3 asks for Var(H) constancy, so this is a defect of the reference, not a loose threshold.
+
+`tests/common/ramped_tdvp.jl` replaces step 1 by dt/2^k, dt/2^k, dt/2^(k−1), …, dt/2. hq26b,
+at t = 0.2:
+
+| k | s = 3, L = 6 vs ED: Var(H) − s² | err_j | s = 1/2, L = 16 vs closed form |
+|---|---|---|---|
+| 0 | 3.5e-4 | 5.5e-5 | 1.7e-6 |
+| 4 | 1.4e-6 | 2.1e-7 | 6.6e-9 |
+| 8 | 5.3e-9 | 8.4e-10 | 2.6e-11 |
+| 12 | 1.9e-11 | 2.9e-12 | ~1e-13 |
+
+The error falls as 4^-k. Tests and the reference use k = 12.
+
+### Confirmation
+
+* hq26a 17432427 (`56b5dce`): **test_spin_jw.jl 138 / 138** (U31: s = 1/2 control quadratic,
+  s = 3 not quadratic on every vacuum). MaxRSS 4.1 G.
+* hq27a 17433092 (`5fa2a85`): **test_spin_xx.jl 65 / 65** (T7.0–T7.3 with the ramped reference),
+  380 min. MaxRSS 1.85 G at 4 G, no `oom_kill`.
+* T7.2 (c) / T7.4, the L = 16 s = 3 band: the ladder hq28a–e (`e84f50f`) agreed only to t ≈ 0.9
+  before the D = 256 members bound (t = 1.1–1.2); it was cancelled with the rest of the s = 3 work
+  by the user's decision of 2026-10-22 (Task 8 runs s = 1/2 only), and no band was computed.
+
+**Task 7 CONFIRMED** for its tests; the s = 3 L = 16 band is not delivered (s = 3 out of scope).
+
+## Task 8
+
+Branch `plan/hq-task-8` (stacked on `plan/hq-task-7`). One setting per run:
+`benchmarks/hq_bench.jl` (L = 16 domain wall, per-step telemetry and records, `HQB_TWIN = 1` runs
+the standard step next to K/L/S, `HQB_STATE_TIMES` grades the state, and the twin, against sector
+ED). Figures: `benchmarks/hq_task8_figures.py RUNDIR[,RUNDIR...] OUTDIR [S3REF] [--figs=...]`.
+P06: `benchmarks/hq_dd_scaling.jl`. Commits `82fb919`, `eac2083`, `344877f`, `3a78fa1`, `e901769`
+(`krylov_reuse` knob, default on), `5563947` (`_merge_frame` guard), `ead126f`, `4dae685`,
+`1ce5e48`, `bd4f261`, `808bfa1`, `b33f65b`. Figures and their run JSONs: `figures/hq_task8/`.
+
+**Scope: spin 1/2 only (user, 2026-10-22).** The plan runs every real-time plot to Jt = 8 for both
+spins. At s = 3 neither side reaches it: the reference ladder (hq28a–e) agreed only to t ≈ 0.9
+(the D = 256 members bind at t = 1.1–1.2), and the MPS bond reaches ~780 at t = 0.4. By the user's
+decision Task 8 runs s = 1/2 only for now; the s = 3 jobs (hq28 ladder, hq41 campaign, the s = 3
+P11 stage, the band) were cancelled. The s = 3 K/L/S scan already measured (hq31a, hq37) is kept
+below as a finding; its JSONs are in `figures/hq_task8/runs/*_s3`, outside the figures.
+
+| item | status | evidence |
+|---|---|---|
+| P01 dynamics | DONE (s = 1/2) | `P01_dynamics_s1.png` |
+| P02 observable errors by tol_basis, order | DONE (s = 1/2) | `P02_error_s1.png` |
+| P03 norm / E / S^z_tot / Var(H) | DONE (s = 1/2) | `P03_conservation.png`; E(0) = 0, absolute drift |
+| P04 bond stages, per-bond heatmap, three tol_basis | DONE (s = 1/2) | `P04_bonds_s1.png` |
+| P05 DD-QR vs one-sided vs svd_select | DONE (s = 1/2) | hq33: p = 2 all equal; p = 4, h = 0.1, tb 1e-5: DD-QR 1.2e-7, one-sided 2.9e-9, svd_select 3.3e-6 (L2 error at t = 8) |
+| P06 DD-QR kernel scaling vs D | DONE (s = 1/2, D 32–256, hq43t) | `P06_dd_scaling.png`; every kernel's local exponent γ is −0.1 … 0.9 at fixed w: no hidden cubic work (overhead-dominated at these D). The s = 3 run (hq32a, D 32–512) is superseded |
+| P07 Krylov reuse on/off at matched error | DONE | hq36b vs hq33, p = 1: reuse saves 16–19 % Krylov directions (378/448 at h = 0.2, 412/489 at h = 0.4), same H1 count, err at t = 8 equal to 3e-9 |
+| P08 order 1–5, floors marked | DONE: order p NOT observed | below |
+| P09 tol_basis × h grids | DONE (s = 1/2) | `P09_controls_s1_p*.png` |
+| P10 time to accuracy | DONE | below |
+| P11 three schedules × workers 1/2/3 | DONE: no speedup at this size | below |
+| P12 parallel vs standard, separate reference errors | DONE | below; at matched error K/L/S is 10–15 % slower |
+| P13 failure modes, seeds | PARTIAL | hq33 seeds 1–3; limits and unmet steps logged per run |
+
+**P08: the state error is set by the first step.** At L = 16, T = 8, tol_basis 1e-7 (hq38), `e_p`
+falls as h^(p+1), not h^p: fitted slopes 2.33, 3.00, 3.99, 4.97, 5.96 for p = 1..5 (p = 1 is 2.0
+below h = 0.4; the observable slopes are the same). The error does not grow after the first step:
+at h = 0.4 it is 4.194e-6 at both t = 0.4 and 0.8 (p = 4), and 6.353e-7 at t = 0.4, 4 and 8 (p = 5).
+Mechanism, from the step-1 ledger: from the D = 1 domain wall each of the p Krylov rounds reaches
+one site further, and `ledger.leak` per round (0.08, 9.8e-3, 1.07e-3 at p = 4, h = 0.4) is the
+exact amplitude (Jt)^d/d! at distance d = 2, 3, 4. The amplitude at distance p + 1, ~h^(p+1)/(p+1)!,
+is left out and carried unitarily; step 2 starts from the wider frames, reaches 2p sites and adds
+< 1e-9. `tolerance_met` holds on every step: it covers frontiers 0..p−1, and the remainder is the
+order-p local error, so it scales with h and p as it must. It is the same pattern as T5.5 at L = 10.
+Below ~2e-8 (growing with the step count) the tol_basis floor takes over; those points are drawn
+open and not fitted (`808bfa1`).
+
+**Timing (hq43t, one job, one node, 3 CPUs, BLAS pinned to 1 thread).** Step 1 of every process
+carries the JIT compilation (145–165 s against < 1 s of physics at D = 1), so integrator time is
+the sum of `t_step` over steps 2..n (`3c32c39`).
+
+**P10: higher order wins on time to accuracy.** Standard serial step, one worker, s = 1/2,
+tb 1e-7, Jt = 8 (`P10_time_to_accuracy.png`). Integrator time to reach max|Δm(8)| ≲ 1e-6:
+
+| p | cheapest run at ≲ 1e-6 | time |
+|---|---|---|
+| 1 | not reached (6.4e-5 at h = 0.05, 68 s) | — |
+| 2 | h = 0.05, 9.2e-7 | 85.5 s |
+| 3 | h = 0.1, 1.0e-7 | 54.2 s |
+| 4 | h = 0.4, 1.2e-6 (h = 0.2: 3.6e-8, 37 s) | 24.3 s |
+| 5 | h = 0.4, 3.8e-8 | 24.7 s |
+
+p = 4–5 reach it 3.5× faster than p = 2. Operator applications follow the same ordering; peak RSS
+is 2.0–2.4 G for every run; |Δ‖ψ‖²| and |ΔE| at t_f stay below 3e-12 at every h.
+
+**P12 speed at matched error.** At h = 0.1 the K/L/S state has the standard step's error (p = 1, 2,
+3, 5 identical; p = 4 equal to 6 %), so the speeds compare at matched error. The fastest K/L/S run
+of each order (always one worker) against the standard serial step: 0.88, 0.90, 0.89, 0.90, 0.85
+for p = 1..5. K/L/S does the standard step's work plus the K and L solves and the merge, and at
+this size it gains nothing back from the extra workers (P11).
+
+**P11: more workers are slower.** s = 1/2, tb 1e-7, h = 0.1, Jt = 8, `parallel = :full`
+(`P11_schedules.png`). Integrator time at 1 / 2 / 3 workers, range over the three schedules:
+
+| p | 1 | 2 | 3 | speedup at 3 |
+|---|---|---|---|---|
+| 1 | 44–46 s | 52–53 s | 59–62 s | 0.74–0.77 |
+| 2 | 53 s | 64–66 s | 76–79 s | 0.68–0.70 |
+| 3 | 61–64 s | 75–77 s | 88–91 s | 0.70–0.72 |
+| 4 | 69–71 s | 86–88 s | 101–106 s | 0.66–0.69 |
+| 5 | 78–80 s | 98–99 s | 117–120 s | 0.65–0.67 |
+
+The three schedules agree to ~4 % at every worker count, including `:sequential`, which runs no
+K/L/S stage concurrently: the slowdown is the threaded rest of the step (the `:full` half-sweeps),
+not K/L/S. The K, L and root solves are ~8 s of a 45–80 s step, so even perfect three-way overlap
+bounds the gain at ~10 %. At s = 1/2, L = 16 the bond stays below 200 and each thread gets too
+little work; the `small` partition allows at most 4 CPUs. Peak RSS 2.3–2.8 G throughout.
+
+**P12: K/L/S against the exact state and against the standard step.**
+* s = 1/2 (hq39, tb 1e-7, t = 0.8): K/L/S equals the standard step at p = 1, 2, 3, 5. At p = 4,
+  the only order where it finds new directions, it is 3.5–5× closer to the exact state (4.19e-6
+  vs 1.90e-5 at h = 0.4). Both arms have slope p + 1. The K/L/S norm excess (3.5e-10 at p = 4,
+  h = 0.4) is real amplitude toward the exact state, not error.
+* s = 3 (hq31a, hq37, tb 1e-5, t = 0.4): the distance to the standard step falls as h^(p+1)
+  (slopes 3.5, 3.9, 4.8, 5.7 for p = 2..5) and the norm excess as its square. The excess equals
+  ‖U₊'K‖² + ‖LV₊'‖², as the plan's four-block merge implies; it is created in step 1 and then
+  flat. At h = 0.2 it is not usable for p ≤ 3 (p = 2: norm² − 1 = 0.05 and Var(H) − s² = +14.3
+  on a conserved 9); at h ≤ 0.1 and p ≥ 3 it is below 1e-4.
+* A measurement floor of 3–5e-9 in the state error (max|Δm| is 1e-14 there) is not fitted.
