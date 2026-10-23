@@ -13,8 +13,8 @@
 # ⚠ THE GROWTH KNOB DID NOT COME WITH IT. `cbe_lubich_sweep`'s `grow_iters` RE-RAN THE CBE
 # SELECTION each pass, re-truncating by budget and discarding what the next application of `H`
 # needs -- MEASURED on OAT it bought 1.8x and then went flat however many passes it was given.
-# `cbe_bug_step!` has its own `grow_iters`, which ACCUMULATES AND NEVER RE-RANKS. They are
-# different algorithms with the same name; do not port measurements between them.
+# `cbe_bug_step!`'s frame instead grows by the Tests C/D Krylov stage, which ACCUMULATES AND NEVER
+# RE-RANKS; do not port measurements between the two.
 
 # CBE-BUG: a K/L basis sweep in CBE frames, then ONE Galerkin step at the centre bond.
 #

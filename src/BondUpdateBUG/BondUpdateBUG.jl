@@ -12,8 +12,10 @@ using LinearAlgebra, Random, Printf
 using LurCGT, Telum
 
 include("symmetric_mps.jl")
+include("symmetric_mps_canonical.jl")
 include("frame.jl")
 include("expv.jl")
+include("expv_root_methods.jl")
 include("sectors.jl")
 include("gates.jl")
 include("z2_ising.jl")

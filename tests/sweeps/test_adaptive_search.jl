@@ -1,9 +1,10 @@
 # tests/sweeps/test_adaptive_search.jl -- the adaptive RSVD search WIDTH and the folded probe.
 #
 #   thin search   Test B, not the numerical rank, sets the sketch width (`_certified_range(...;
-#                 thin = true)`, the default through `thin_search`). It must still certify a
-#                 blind sector (the UT06 fixture), draw only what Test B asks for, and give the
-#                 same physics as the old full-rank widening and as exact CBE, with fewer probes.
+#                 thin = true)`, `cbe_expand`'s default through `thin_search`). It must still
+#                 certify a blind sector (the UT06 fixture), draw only what Test B asks for, and,
+#                 in the adaptive DMRG, give the same energy as the old full-rank widening with
+#                 fewer probes. (`cbe_bug_step!`'s DD controller is always thin.)
 #   fold_omega    the probe folded into the environment contractions, so `H*Theta` is never
 #                 formed -- in the half-sweeps AND in the order-p closure, whose per-bond leak is
 #                 then Test B's holdout estimate. Same states as the shared build to tolerance.
@@ -72,34 +73,6 @@ include(joinpath(@__DIR__, "..", "common", "adaptive_fixtures.jl"))
         @test lg.n_targeted >= 1
         @test lg.tolerance_met
         @test exact(Q) < 1e-3 * nA
-    end
-end
-
-@testset "cbe_bug_step!: thin == wide == exact CBE to tolerance, with fewer probes" begin
-    set_symmetry!(:U1)
-    L = 10
-    mpo = xxz_mpo(L; J = 1.0, delta = 1.0)
-    tau = ComplexF64(-0.05im)
-    # `thin_search` is `_certified_range`'s A/B, so it runs on the policy that calls it: the DD
-    # policies' controller is always thin (`dd_cbe_expand`, plan T3.1) and ignores the knob.
-    akw = (tol_basis = 1e-7, tol_trunc = 1e-9, tol_expv = 1e-10, maxdim = 64,
-           cbe_policy = :svd_select)
-    fid(a, b) = abs(overlap(a, b)) / (norm(a) * norm(b))
-    for (name, kw) in (("ordinary", NamedTuple()), ("order 2", (order = 2,)))
-        @testset "$name" begin
-            ex, th, wd = neel_state(L), neel_state(L), neel_state(L)
-            pt, pw = 0, 0
-            for _ in 1:4
-                cbe_bug_step!(ex, mpo, tau; exact = true, kw..., akw...)
-                it = cbe_bug_step!(th, mpo, tau; thin_search = true, kw..., akw...)
-                iw = cbe_bug_step!(wd, mpo, tau; thin_search = false, kw..., akw...)
-                pt += it.ledger.n_probes
-                pw += iw.ledger.n_probes
-            end
-            @test 1 - fid(th, ex) < 1e-8
-            @test 1 - fid(wd, ex) < 1e-8
-            @test pt < pw
-        end
     end
 end
 

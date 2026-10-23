@@ -122,12 +122,10 @@ end
         @test !(:expv in info.ledger.unmet)
     end
     @test lg[1e-4].expv_iters <= lg[1e-12].expv_iters
-    # The iteration controls are legacy knobs now: refused alongside a tolerance ...
+    # The iteration controls follow from `tol_expv`; they are no keyword of the step.
     for kw in ((maxiter = 8,), (tol = 1e-12,), (root_conv_tol = 1e-8,), (root_substeps = 0,))
-        @test_throws ArgumentError cbe_bug_step!(copy(psi0), mpo, tau; tol_expv = 1e-10, kw...)
+        @test_throws MethodError cbe_bug_step!(copy(psi0), mpo, tau; tol_expv = 1e-10, kw...)
     end
-    # ... and still drive the legacy path on their own.
-    @test cbe_bug_step!(copy(psi0), mpo, tau; maxiter = 8).ledger === nothing
 end
 
 end # adaptive root expv (Stage 5)

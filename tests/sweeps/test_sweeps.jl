@@ -239,7 +239,7 @@ import Random
         psi = warm(L)
         v0 = dense_state(psi)
         dt = 0.05
-        cbe_bug_step!(psi, mpo, -im * dt; maxdim = 256, trunc_thresh = 0.0)
+        cbe_bug_step!(psi, mpo, -im * dt; maxdim = 256, tol_trunc = 0.0, BUG_TIGHT...)
         want = dense_exact_propagate(dense_heisenberg(L), v0, dt)
         @test norm(dense_state(psi) - want) < 1e-9
     end
@@ -341,8 +341,8 @@ import Random
             end
             return norm(dense_state(p) - want)
         end
-        bug_d = [run_to_T((p, t) -> cbe_bug_step!(p, mpo, t; maxdim = maxdim, trunc_thresh = 1e-14), n) for n in (4, 8, 16)]
-        bug_i = [run_to_T((p, t) -> cbe_bug_step!(p, mpo, t; maxdim = maxdim, trunc_thresh = 1e-14), n) for n in (4, 8, 16)]
+        bug_d = [run_to_T((p, t) -> cbe_bug_step!(p, mpo, t; maxdim = maxdim, tol_trunc = 1e-14, BUG_TIGHT...), n) for n in (4, 8, 16)]
+        bug_i = [run_to_T((p, t) -> cbe_bug_step!(p, mpo, t; maxdim = maxdim, tol_trunc = 1e-14, BUG_TIGHT...), n) for n in (4, 8, 16)]
         tdvp1 = [run_to_T((p, t) -> tdvp_cbe1s_step!(p, mpo, t;
                           maxdim = maxdim, trunc_thresh = 1e-14), n) for n in (4, 8, 16)]
         tdvp2v = [run_to_T((p, t) -> tdvp2_step!(p, mpo, t;
@@ -377,8 +377,8 @@ import Random
         for maxdim in (4, 8)
             a = warm(L); b = copy(a); b.tensors .= copy.(a.tensors)
             for _ in 1:10
-                cbe_bug_step!(a, mpo, -0.05im; maxdim = maxdim, trunc_thresh = 1e-14)
-                cbe_bug_step!(b, mpo, -0.05im; maxdim = maxdim, trunc_thresh = 1e-14)
+                cbe_bug_step!(a, mpo, -0.05im; maxdim = maxdim, tol_trunc = 1e-14, BUG_TIGHT...)
+                cbe_bug_step!(b, mpo, -0.05im; maxdim = maxdim, tol_trunc = 1e-14, BUG_TIGHT...)
             end
             @test real(mpo_energy(a, mpo)) ≈ real(mpo_energy(b, mpo)) atol = 1e-10
             @test abs(overlap(a, b)) ≈ norm(a) * norm(b) atol = 1e-10
@@ -397,7 +397,7 @@ import Random
         # `any(>(0), info.n_new)` on that state and failed for the one reason that is not a bug.
         # A dimer product has bond dimension 2, so here there is genuinely room to expand into.
         psi = dimer_state(L)
-        info = cbe_bug_step!(psi, mpo, -0.02im; maxdim = 64, trunc_thresh = 1e-14)
+        info = cbe_bug_step!(psi, mpo, -0.02im; maxdim = 64, tol_trunc = 1e-14, BUG_TIGHT...)
         @test length(info.expanded) == L - 1
         @test all(>(0), info.expanded)
         @test info.root == L ÷ 2
@@ -416,7 +416,7 @@ import Random
             psi = dimer_state(L)
             e_prev = real(mpo_energy(psi, mpo))
             for _ in 1:60
-                cbe_bug_step!(psi, mpo, -0.1; maxdim = 64, trunc_thresh = 1e-14)
+                cbe_bug_step!(psi, mpo, -0.1; maxdim = 64, tol_trunc = 1e-14, BUG_TIGHT...)
                 renorm!(psi)
             end
             e = real(mpo_energy(psi, mpo))

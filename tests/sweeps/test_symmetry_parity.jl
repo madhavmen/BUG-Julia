@@ -74,7 +74,7 @@ import Random
                             ("tdvp_cbe1s", (p, m, t) -> tdvp_cbe1s_step!(p, m, t; maxdim = 64,
                                                                         trunc_thresh = 1e-14)),
                             ("cbe_bug", (p, m, t) -> cbe_bug_step!(p, m, t; maxdim = 64,
-                                                                   trunc_thresh = 1e-14)))
+                                                                   tol_trunc = 1e-14, BUG_TIGHT...)))
             acs = Vector{Vector{Float64}}()
             bes = Vector{Vector{Float64}}()
             for sym in (:none, :U1, :SU2)
@@ -135,7 +135,7 @@ import Random
             psi = dimer_state(L)
             t = Float64[]
             for _ in 1:20
-                cbe_bug_step!(psi, mpo, -0.05; maxdim = 64, trunc_thresh = 1e-14)
+                cbe_bug_step!(psi, mpo, -0.05; maxdim = 64, tol_trunc = 1e-14, BUG_TIGHT...)
                 renorm!(psi)
                 push!(t, real(mpo_energy(psi, mpo)))
             end
@@ -158,7 +158,7 @@ import Random
             psi0 = copy(psi); psi0.tensors .= copy.(psi.tensors)
             ac = Float64[]
             for _ in 1:6
-                cbe_bug_step!(psi, m, -0.05im; maxdim = 64, trunc_thresh = 1e-14)
+                cbe_bug_step!(psi, m, -0.05im; maxdim = 64, tol_trunc = 1e-14, BUG_TIGHT...)
                 renorm!(psi)
                 push!(ac, abs(overlap(psi0, psi)))
             end

@@ -118,9 +118,8 @@ end
     occ = hub4_cdw_occupations(L; doublon_frac = 0.5, seed = 1)
     psi = hub4_product_state(occ)
     mpo = hubbard_aa_mpo_d4(L; J = 1.0, Delta = 8.0, U = 4.0, beta = 532 / 738, phi = 0.0)
-    step!(p) = cbe_bug_step!(p, mpo, ComplexF64(-0.1im); maxdim = 32, trunc_thresh = 1e-8,
-                             split_cutoff = 1e-8, maxiter = 30, krylov_basis = 30,
-                             root_conv_tol = 0.0, root_substeps = 1)
+    step!(p) = cbe_bug_step!(p, mpo, ComplexF64(-0.1im); maxdim = 32, tol_basis = 1e-6,
+                             tol_trunc = 1e-8, tol_expv = 1e-10)
 
     p = copy(psi)
     step!(p)                                  # step 1 never truncates -- not representative

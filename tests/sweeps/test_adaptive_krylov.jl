@@ -185,15 +185,12 @@ end
         @test isfinite(lg.max_krylov_c) && isfinite(lg.max_krylov_d)
     end
 
-    @testset "the fixed-depth Krylov knobs are legacy-only" begin
-        psi = copy(psi0)
+    @testset "the fixed-depth Krylov knobs are gone" begin
         dt = ComplexF64(-0.05im)
-        for kw in ((krylov_tol = 1e-6,), (grow_iters = 2,), (krylov_grow = true,))
-            @test_throws ArgumentError cbe_bug_step!(psi, mpo, dt; tol_basis = 1e-5, kw...)
+        for kw in ((krylov_tol = 1e-6,), (grow_iters = 2,), (krylov_grow = true,),
+                   (krylov_basis = 3,))
+            @test_throws MethodError cbe_bug_step!(copy(psi0), mpo, dt; kw...)
         end
-        # ...and still drive the legacy path on their own.
-        @test cbe_bug_step!(copy(psi0), mpo, dt; krylov_basis = 3).ledger === nothing
-        @test cbe_bug_step!(copy(psi0), mpo, dt; krylov_tol = 1e-6).ledger === nothing
     end
 end
 

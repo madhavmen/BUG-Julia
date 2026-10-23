@@ -377,7 +377,7 @@ end
     mpo, psi0 = xxz_mpo(L; J = 1.0, delta = 0.0), neel_state(L)
     dt = ComplexF64(-im * 0.05)
 
-    @testset "the adaptive step reports its ledger; the legacy step does not" begin
+    @testset "the step reports its ledger" begin
         psi = copy(psi0)
         info = cbe_bug_step!(psi, mpo, dt; tol_basis = 1e-5, tol_trunc = 1e-7,
                              tol_expv = 1e-10, maxdim = 64, parallel = true)
@@ -399,9 +399,6 @@ end
         end
         @test all(isfinite, bond_dims(psi))
         @test isfinite(norm(psi)) && norm(psi) > 0
-
-        legacy = cbe_bug_step!(copy(psi0), mpo, dt; dex = 8, maxdim = 64)
-        @test legacy.ledger === nothing
     end
 
     @testset "parallel half-sweeps are reproducible for a fixed seed" begin

@@ -144,11 +144,12 @@ end
     @test occursin("dex, trunc_thresh", msg)
     @test occursin("tol_basis", msg)
 
-    # Through the public entry: a legacy step gives the hint, an adaptive step gives no warning.
+    # Through the public entry: the BUG step has no legacy path (a retired knob is no keyword),
+    # and an adaptive step gives no warning.
     set_symmetry!(:U1)
     mpo = xxz_mpo(6; J = 1.0, delta = 0.0)
-    @test_logs (:warn, r"trunc_thresh selected the fixed-knob legacy path") match_mode=:any cbe_bug_step!(
-        neel_state(6), mpo, ComplexF64(-0.05im); trunc_thresh = 1e-10)
+    @test_throws MethodError cbe_bug_step!(neel_state(6), mpo, ComplexF64(-0.05im);
+                                           trunc_thresh = 1e-10)
     @test_logs min_level=Base.CoreLogging.Warn cbe_bug_step!(
         neel_state(6), mpo, ComplexF64(-0.05im); tol_basis = 1e-5)
 end

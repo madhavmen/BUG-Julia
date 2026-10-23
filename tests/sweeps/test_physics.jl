@@ -99,7 +99,7 @@ const _RING_MAGNON = get(ENV, "BUGJULIA_TEST_RING_MAGNON", "0") == "1"
             for (nm, m, want) in models
                 for (sname, step!) in
                     (("cbe_bug", (p, t) -> cbe_bug_step!(p, m, t; maxdim = 128,
-                                                         trunc_thresh = 1e-14)),)
+                                                         tol_trunc = 1e-14, BUG_TIGHT...)),)
                     psi = dimer_state(L)
                     e0 = real(mpo_energy(psi, m))
                     es = Float64[]
@@ -140,7 +140,7 @@ const _RING_MAGNON = get(ENV, "BUGJULIA_TEST_RING_MAGNON", "0") == "1"
 
             for (sname, step!) in
                 (("cbe_bug", (p, t) -> cbe_bug_step!(p, m, t; maxdim = 64,
-                                                     trunc_thresh = 1e-14)),
+                                                     tol_trunc = 1e-14, BUG_TIGHT...)),
                  ("tdvp_cbe1s", (p, t) -> tdvp_cbe1s_step!(p, m, t; maxdim = 64,
                                                            trunc_thresh = 1e-14)))
                 psi = product_state([j == 1 ? :down : :up for j in 1:L])
@@ -179,7 +179,7 @@ const _RING_MAGNON = get(ENV, "BUGJULIA_TEST_RING_MAGNON", "0") == "1"
             want = hs_ground_energy(L)
             @test real(mpo_energy(psi, m)) ≈ want atol = 1e-6
             for _ in 1:10
-                cbe_bug_step!(psi, m, -0.05im; maxdim = 128, trunc_thresh = 1e-14)
+                cbe_bug_step!(psi, m, -0.05im; maxdim = 128, tol_trunc = 1e-14, BUG_TIGHT...)
                 renorm!(psi)
             end
             @test abs(overlap(psi0, psi)) ≈ 1.0 atol = 1e-6
@@ -202,7 +202,7 @@ const _RING_MAGNON = get(ENV, "BUGJULIA_TEST_RING_MAGNON", "0") == "1"
             # And it stays put under real time, since it is an eigenstate.
             psi0 = copy(psi); psi0.tensors .= copy.(psi.tensors)
             for _ in 1:5
-                cbe_bug_step!(psi, m, -0.05im; maxdim = 32, trunc_thresh = 1e-14)
+                cbe_bug_step!(psi, m, -0.05im; maxdim = 32, tol_trunc = 1e-14, BUG_TIGHT...)
                 renorm!(psi)
             end
             @test abs(overlap(psi0, psi)) ≈ 1.0 atol = 1e-9

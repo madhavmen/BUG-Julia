@@ -145,7 +145,7 @@ end
 
 ONE normalised imaginary-time step of CBE-BUG over `dbeta`, in place; `psi` is renormalised on
 entry and exit. `eshift = :energy` uses the state's own energy as `Eshift` (any number fixes it).
-`kwargs` reach [`cbe_bug_step!`](@ref) (e.g. `closure_probe`, `fold_omega`, `thin_search`).
+`kwargs` reach [`cbe_bug_step!`](@ref) (e.g. `closure_probe`, `fold_omega`).
 
 VERDICT. The step is accepted when its ledger is `:met` and, with `outside_residual`, the
 outside-Galerkin defect `dbeta ||(I-P) H psi_1|| / ||psi_1||` is within `tol_basis`. A defect over

@@ -87,6 +87,7 @@ using ..BondUpdateBUG: SymMPS, canonical!, bond_dims, leg_dim, local_space,
                        ising_local_space, ising_polarised_state
 
 include("henv.jl")
+include("henv_stacks.jl")
 # Multiplet-vs-state accounting. `leg_dim`, `Nkeep`, `maxdim` and every CBE budget count
 # MULTIPLETS, so under SU(2) they are not comparable with a U(1) number; `state_dim` converts.
 # The weights are already correct (`sum(sigma^2 * degeneracy) == norm^2`, measured) -- this is
@@ -97,6 +98,11 @@ include("multiplets.jl")
 # rank decisions from the allocation rather than from the retired `dex`/`dover` guesses.
 include("adaptive_budget.jl")
 include("cbe_core.jl")
+include("cbe_sketch.jl")
+include("cbe_range.jl")
+include("cbe_expand.jl")
+include("cbe_options.jl")
+include("cbe_bond_update.jl")
 # The Hamiltonian as a genuine MPO (rank-4 `W^[i]`) plus its rank-3 environments, i.e. the
 # objects arXiv:2606.28169 Eqs. (1.3), (1.7) and (1.8) name. It provides a METHOD for every
 # verb `cbe_bug_step!` uses -- `boundary_channels`, `left/right_env_stack`,
@@ -105,11 +111,14 @@ include("cbe_core.jl")
 # path in `henv.jl` stays as the independent witness that the two are one operator.
 # After `cbe_core.jl`, since it adds methods to `cbe_expand` and the sketches.
 include("mpo.jl")
+include("mpo_env.jl")
+include("mpo_fold.jl")
 include("zero_site_core.jl")
 # The DD-projected, MPO-streamed, QR-only CBE (cbe_bug_high_order_rsvd_parallel_tasks.md Task 2),
 # the shared operator-action interface and the typed step record (Task 1). After `mpo.jl` and
 # `zero_site_core.jl`, whose operators it wraps.
 include("dd_cbe.jl")
+include("dd_cbe_controller.jl")
 # Jan BUG: the full KLS step at EVERY bond across the whole chain -- CBE for the basis update and
 # the 0-site S step taken as well, then QR'd with `R` discarded so no evolution accumulates -- and
 # at the far bond the S step is KEPT, which is the step. One truncation after the sweep,
@@ -169,6 +178,7 @@ include("models/tfim.jl")
 #                            nothing. Both quench from a PRODUCT state, which is what makes them
 #                            the test of a rank-adaptive sweep rather than of a tuned schedule.
 include("models/mbl_scars.jl")
+include("models/pxp_scars.jl")
 
 # models/hubbard_d4.jl   THE SAME EXPERIMENT'S SPINFUL MODEL, ON FUSED d = 4 SITES, and the only
 #                        layout in which it can be evolved from a product state at all. The
@@ -186,6 +196,7 @@ include("models/hubbard_d4.jl")
 #                      superoperators, the exact Lindblad MPO (`pair_mpo` + on-site `field`), and
 #                      trace / expectation / RDM / dense contractions over the abelian blocks.
 include("models/liouville.jl")
+include("models/liouville_blocks.jl")
 # models/spin_xx.jl  the two U(1) XX chains of the HQ plan (Task 7): spin-1/2 (d = 2) and spin-3
 #                    (d = 7) on one exchange convention, the domain wall and the bond current.
 include("models/spin_xx.jl")
@@ -231,12 +242,19 @@ include("tdvp1_cbe/variants.jl")
 # and after `tdvp2/` for `tensor_elements`.
 include("sweeps/expansion.jl")
 include("sweeps/dmrg_cbe1s.jl")
+include("sweeps/dmrg_cbe1s_driver.jl")
 include("sweeps/tdvp_cbe1s.jl")
+include("sweeps/krylov_enrich.jl")
+include("sweeps/half_sweeps.jl")
+include("sweeps/cbe_bug_info.jl")
 include("sweeps/cbe_bug.jl")
+include("sweeps/cbe_bug_midpoint.jl")
 #   sweeps/krylov_closure.jl  the GENERAL-ORDER extension of `cbe_bug_step!` (`order = p`): the
 #                          global Krylov frontiers of the root generator, embedded as MPS and
 #                          swept with the same CBE / Tests C/D kernels until they close.
 include("sweeps/krylov_closure.jl")
+include("sweeps/frontier_sweeps.jl")
+include("sweeps/krylov_closure_loop.jl")
 #   sweeps/parallel_kls.jl  the fully parallel K/L/S integrator after the preliminary half-sweeps
 #                          (`parallel_kls_step!`, plan Task 6): K, L and the root S from `psi` in
 #                          the preliminary frames, merged in the four-block reconstruction.
@@ -281,7 +299,7 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        AdaptiveLedger, merge_ledger!, work_ceiling, budget_status, budget_diagnostic,
        CBEExpansion, cbe_expand,
        # DD-QR CBE (plan Task 2), the operator interface and the step record (Task 1)
-       CBE_POLICIES, dd_cbe_expand, dd_reference_sketch,
+       dd_cbe_expand, dd_reference_sketch,
        TwoSiteSketchOp, OneSiteOp, RootOp,
        apply_two_site_sketch!, apply_one_site!, apply_root!,
        KernelCounters, StepRecord,

@@ -35,7 +35,7 @@ using Preferences: @load_preference
 # ⛔ WHICH WORKLOAD IS A PREFERENCE, NOT AN ENV VARIABLE: a preference is part of the cache key,
 # so changing it recompiles; an ENV switch would silently keep whichever image was built first.
 #
-#   "adaptive" (default)  the U(1) spin paths the current campaign runs -- adaptive CBE-BUG at
+#   "adaptive" (default)  the U(1) spin paths the current campaign runs -- CBE-BUG at
 #                         orders 1/2/4 and midpoint, adaptive + legacy CBE-DMRG, TDVP2, CBE-TDVP,
 #                         energy / variance / S^z. MEASURED 2026-10-16: the old "full" workload
 #                         cost 1802 s of precompilation on EVERY src edit (job 17208254) while
@@ -87,10 +87,6 @@ const _WORKLOAD = @load_preference("workload", "adaptive")
                 for ord in (2, 4)
                     RSVDCBEBondUpdate.cbe_bug_step!(p, mpo, tau; order = ord, parallel = true, akw...)
                 end
-                RSVDCBEBondUpdate.cbe_bug_step!(p, mpo, tau; dex = 4, dover = 0,
-                                                comp_ratio = 1.0, krylov_basis = 3,
-                                                krylov_tol = 0.0, maxdim = 4,
-                                                trunc_thresh = 1e-10, maxiter = 5, tol = 0.0)
                 for _ in 1:2
                     RSVDCBEBondUpdate.tdvp2_step!(p, mpo, tau; maxdim = 4, trunc_thresh = 1e-10,
                                                   maxiter = 8)
@@ -125,16 +121,14 @@ const _WORKLOAD = @load_preference("workload", "adaptive")
                 BondUpdateBUG.set_symmetry!(sym)
                 psi = BondUpdateBUG.neel_state(6)
                 mpo = RSVDCBEBondUpdate.xxz_mpo(6; J = 1.0, delta = 1.0)
-                # both selection paths (exact CBE / randomised sketch) and both sweep
+                # both probe draws (exact DD reference / randomised) and both sweep
                 # executions (sequential / concurrent half-sweeps)
                 for (exact, parallel) in ((true, false), (false, false), (true, true))
                     p = copy(psi)
                     RSVDCBEBondUpdate.cbe_bug_step!(p, mpo, ComplexF64(-0.05im);
                                                    exact = exact, parallel = parallel,
-                                                   dex = 4, dover = 0, comp_ratio = 1.0,
-                                                   krylov_basis = 3, krylov_tol = 0.0,
-                                                   maxdim = 8, trunc_thresh = 1e-10,
-                                                   maxiter = 5, tol = 0.0)
+                                                   tol_basis = 1e-4, tol_trunc = 1e-6,
+                                                   tol_expv = 1e-6, maxdim = 8)
                     BondUpdateBUG.sz_expectation(p, 3)
                     RSVDCBEBondUpdate.mpo_energy(copy(p), mpo)
                 end
@@ -161,11 +155,9 @@ const _WORKLOAD = @load_preference("workload", "adaptive")
                                                        maxiter = 5, hermitian = herm)
                     p = copy(psi)
                     RSVDCBEBondUpdate.cbe_bug_step!(p, mpo, ComplexF64(-0.05im);
-                                                    exact = false, parallel = true,
-                                                    dex = 4, dover = 4, comp_ratio = 1.0,
-                                                    krylov_basis = 3, krylov_tol = 0.0,
-                                                    maxdim = 8, trunc_thresh = 1e-10,
-                                                    maxiter = 5, tol = 0.0, hermitian = herm)
+                                                    parallel = true, tol_basis = 1e-4,
+                                                    tol_trunc = 1e-6, tol_expv = 1e-6,
+                                                    maxdim = 8, hermitian = herm)
                 end
             end
         catch err
@@ -209,19 +201,9 @@ const _WORKLOAD = @load_preference("workload", "adaptive")
                 for herm in (true, false)
                     p = copy(psi)
                     RSVDCBEBondUpdate.cbe_bug_step!(p, mpo, ComplexF64(-0.05im);
-                                                   exact = false, dex = 4, dover = 4,
-                                                   krylov_basis = 3, krylov_tol = 0.0,
-                                                   maxdim = 8, trunc_thresh = 1e-10,
-                                                   maxiter = 5, tol = 0.0, hermitian = herm)
-                end
-                # The growth path is its own specialisation -- `_grow_frame` rebuilds `H1` and
-                # re-expands between Lanczos vectors, which the fixed-width builder never calls.
-                let p = copy(psi)
-                    RSVDCBEBondUpdate.cbe_bug_step!(p, mpo, ComplexF64(-0.05im);
-                                                   exact = false, dex = 4, dover = 4,
-                                                   grow_iters = 2, krylov_tol = 0.0,
-                                                   maxdim = 8, trunc_thresh = 1e-10,
-                                                   maxiter = 5, tol = 0.0)
+                                                   tol_basis = 1e-4, tol_trunc = 1e-6,
+                                                   tol_expv = 1e-6, maxdim = 8,
+                                                   hermitian = herm)
                 end
                 RSVDCBEBondUpdate.tdvp2_step!(copy(psi), mpo, ComplexF64(-0.05im);
                                               maxdim = 8, trunc_thresh = 1e-10, maxiter = 5)
@@ -293,15 +275,13 @@ const _WORKLOAD = @load_preference("workload", "adaptive")
                 mpo = RSVDCBEBondUpdate.hubbard_aa_mpo_d4(6; J = 1.0, Delta = 8.0, U = 4.0,
                                                           beta = 532 / 738, phi = 0.0),
                 tau = ComplexF64(-0.05im)
-                # The four schemes `benchmarks/mbl_scars.jl::stepper` can return, at the keywords it
-                # actually passes -- a different keyword set is a different specialisation.
+                # The four schemes a d = 4 campaign steps with -- a different keyword set is a
+                # different specialisation.
                 for mk in (
                     (p, t) -> RSVDCBEBondUpdate.cbe_bug_step!(p, mpo, t; maxdim = 4,
-                                  trunc_thresh = 1e-10, split_cutoff = 1e-10, maxiter = 5,
-                                  krylov_basis = 5, root_conv_tol = 0.0, root_substeps = 1),
+                                  tol_basis = 1e-4, tol_trunc = 1e-6, tol_expv = 1e-6),
                     (p, t) -> RSVDCBEBondUpdate.cbe_bug_midpoint_step!(p, mpo, t; maxdim = 4,
-                                  trunc_thresh = 1e-10, split_cutoff = 1e-10, maxiter = 5,
-                                  krylov_basis = 5, root_conv_tol = 0.0, root_substeps = 1),
+                                  tol_basis = 1e-4, tol_trunc = 1e-6, tol_expv = 1e-6),
                     (p, t) -> RSVDCBEBondUpdate.tdvp2_step!(p, mpo, t; maxdim = 4,
                                   trunc_thresh = 1e-10, maxiter = 5, conv_tol = 0.0),
                     (p, t) -> RSVDCBEBondUpdate.tdvp_cbe1s_step!(p, mpo, t; maxdim = 4,

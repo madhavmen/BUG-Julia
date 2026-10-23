@@ -149,7 +149,7 @@ end
     mk_t2(d)  = (p, tau) -> tdvp2_step!(p, mpo, tau; maxdim = d, trunc_thresh = 1e-14)
     # INTERLEAVED (`decoupled = false`) -- the reference's own ordering, TDVPSweepCBE1Si.m.
     mk_bug(d) = (p, tau) -> cbe_bug_step!(p, mpo, tau; maxdim = d,
-                                          trunc_thresh = 1e-14)
+                                          tol_trunc = 1e-14, BUG_TIGHT...)
 
     for (name, mk) in (("tdvp_cbe1s", mk_cbe), ("tdvp2", mk_t2), ("cbe_bug", mk_bug))
         e6  = _oat_sx_error(mk, L, 6,  0.05, T)      # AT the exact rank ceiling

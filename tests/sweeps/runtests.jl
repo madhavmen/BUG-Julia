@@ -41,6 +41,9 @@ include(joinpath(@__DIR__, "..", "common", "analytic_reference.jl"))
 # THESE and never against a dense propagator -- a 2^L reference caps the test at the L where it
 # fits, which is routinely not the L where the effect under test is large.
 include(joinpath(@__DIR__, "..", "common", "free_fermion.jl"))
+# The tight basis and root tolerances a physics test runs `cbe_bug_step!` at (the fixtures' own,
+# `adaptive_fixtures.jl`); each call names its compression `tol_trunc`.
+const BUG_TIGHT = (tol_basis = 1e-12, tol_expv = 1e-14)
 
 @testset "sweeps (RSVD-CBE: DMRG, 1-site TDVP, fixed-rank BUG)" begin
     include(joinpath(@__DIR__, "..", "common", "test_analytic_reference.jl"))
@@ -56,6 +59,7 @@ include(joinpath(@__DIR__, "..", "common", "free_fermion.jl"))
     include("test_adaptive_rsvd.jl")
     # ...and the DD-projected, MPO-streamed, QR-only expansion the half-sweeps run by default.
     include("test_dd_cbe.jl")
+    include("test_dd_cbe_controller.jl")
     # ...and the K/L Krylov enrichment (Tests C/D) that turns it into the half-sweep frames.
     include("test_adaptive_krylov.jl")
     # ...and the one budgeted compression plus the rank cap that bounds all of it (Stage 4).
@@ -66,6 +70,7 @@ include(joinpath(@__DIR__, "..", "common", "free_fermion.jl"))
     include("test_adaptive_diagnostics.jl")
     # ...and the general-order Krylov closure built on all of the above (`order = p`).
     include("test_krylov_closure.jl")
+    include("test_krylov_closure_steps.jl")
     # ...the root accuracy and orders 1-5 (plan Task 5), and the parallel K/L/S step (Task 6).
     include("test_hq_root.jl")
     include("test_parallel_kls.jl")

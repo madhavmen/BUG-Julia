@@ -119,8 +119,8 @@ function tdvp_cbe1s_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                           # since the substep work; this arm was simply never plumbed.
                           #
                           # ⚠ THIS IS A FAIRNESS FIX, NOT ONLY A SPEED ONE. CBE-BUG's half-sweeps
-                          # already stop adaptively (`_krylov_frame` takes `krylov_tol = 1e-6` and
-                          # tests Saad's contribution every iteration), so comparing wall clock
+                          # already stop adaptively (`_krylov_enrich` stops on the propagator weight
+                          # against `tol_basis` every iteration), so comparing wall clock
                           # with `conv_tol = 0` here measured an adaptive method against two
                           # non-adaptive ones and credited the difference to the ALGORITHM.
                           # Defaults stay off so nothing already measured moves silently.
