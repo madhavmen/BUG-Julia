@@ -1506,10 +1506,11 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     nroot = Ref(0)
     rootrep = Ref{Any}(nothing)
     _t0root = time_ns()
-    S1 = expv(x -> (nroot[] += 1; apply_zero_site(H0, x)), tau, S0;
-              hermitian = hermitian, maxiter = maxiter, tol = tol, reorth = reorth,
-              conv_tol = root_conv_tol, substeps = root_substeps, report = rootrep,
-              root_method = root_method)
+    solve_root(S) = expv(x -> (nroot[] += 1; apply_zero_site(H0, x)), tau, S;
+                         hermitian = hermitian, maxiter = maxiter, tol = tol, reorth = reorth,
+                         conv_tol = root_conv_tol, substeps = root_substeps, report = rootrep,
+                         root_method = root_method)
+    S1 = solve_root(S0)
     troot[] = (time_ns() - _t0root) / 1e9
     if root_report !== nothing
         # Rayleigh quotients in the Galerkin space: `S0` and `S1` ARE the state before the root
@@ -1517,14 +1518,60 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
         # for `psi` in the frames' span, so these are exact energies, not projections of them.
         rq(S) = (n2 = norm(S)^2; n2 > 0 ? real(tensor_inner(S, apply_zero_site(H0, S))) / n2 +
                                           Float64(eshift) : NaN)
-        e_pre, e_root = rq(S0), rq(S1)
-        out = outside_residual ?
-            estimate_global_complement_action(psi, mpo,
-                KLFrames(W, Z, c, lenv_root, renv_root, 0, nothing, nothing, Float64(eshift)),
-                S1; rng = copy(rng)) : nothing
+        e_pre = rq(S0)
+        outside_of(S) = estimate_global_complement_action(psi, mpo,
+            KLFrames(W, Z, c, lenv_root, renv_root, 0, nothing, nothing, Float64(eshift)),
+            S; rng = copy(rng))
+        out = outside_residual ? outside_of(S1) : nothing
+        resid_of(o, S) = o === nothing ? NaN : abs(tau) * o.bound / max(norm(S), eps())
+        resid0 = resid_of(out, S1)
+        # RE-ENRICH / RE-SOLVE ON THE FAILING RESIDUAL (plan Task 1: "re-enrich/re-solve or reject
+        # if the basis is insufficient"; USER 2026-10-18). The closure's shares can all be met while
+        # the evolved state's own outside action is not: its higher Krylov frontiers are unclosed,
+        # and re-running the closure (`closure_checks`) then adds nothing -- MEASURED d51 17346845,
+        # IT-1 L=16 Neel bug2 tb 1e-7: resid 2.44 tb before and after that retry. So the frames are
+        # grown by the enriching sweep of `S1` ITSELF -- the sweep `outside_of` runs measuring-only,
+        # with the same per-bond shares -- and the root is re-solved in them, until the defect fits,
+        # nothing is added, or the work ceiling binds. The frames only grow (old directions kept
+        # verbatim), so `psi` stays in their span and `S0` is its exact projection.
+        npass, nadded = 0, 0
+        if outside_residual && adaptive
+            okw = Base.structdiff(exkw, NamedTuple{(:share_ht, :fold_omega)})
+            while !(resid_of(out, S1) <= budget.basis) && npass < _closure_maxpass(order)
+                fr = KLFrames(W, Z, c, lenv_root, renv_root, 0, nothing, nothing, Float64(eshift))
+                npass += 1
+                r = _frontier_sweep!(fr, psi, mpo, KrylovFrontier(S1, 0, fr.gen), tau, alloc, okw;
+                                     enrich = true, workcap = wcap_step, nrm = _nrm,
+                                     parallel = parallel, rng = rng, pass = npass,
+                                     fold = fold_omega)
+                merge_ledger!(ledger, r.ledger)
+                r.added == 0 && break
+                nadded += r.added
+                lenv_root, renv_root = fr.lenv, fr.renv
+                S0 = _project_root(psi, fr)
+                H0 = shift_h(zero_site_h(mpo, c, lenv_root, renv_root, W[c], Z[c]), eshift)
+                _t0root = time_ns()
+                S1 = solve_root(S0)
+                troot[] += (time_ns() - _t0root) / 1e9
+                out = outside_of(S1)
+                r.capped && break
+            end
+            if nadded > 0
+                for i in 1:(c - 1)
+                    expanded[i] = leg_dim(W[i], 3)
+                end
+                for j in (c + 1):(L - 1)
+                    expanded[j] = leg_dim(Z[j], 1)
+                end
+                ledger.r_aug = max(maximum(expanded; init = 0), leg_dim(Z[c], 1))
+            end
+        end
+        e_root = rq(S1)
         n1 = max(norm(S1), eps())
         root_report[] = (root_method = root_method, eshift = Float64(eshift), e_pre = e_pre,
                          e_root = e_root, solve = rootrep[], n_root = nroot[],
+                         # the defect before the re-enrichment above, its passes and directions
+                         resid_initial = resid0, outside_passes = npass, outside_added = nadded,
                          outside = out === nothing ? NaN : out.bound / n1,
                          outside_left = out === nothing ? NaN : out.left / n1,
                          outside_right = out === nothing ? NaN : out.right / n1,

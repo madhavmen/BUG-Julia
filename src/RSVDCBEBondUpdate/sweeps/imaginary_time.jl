@@ -128,7 +128,9 @@ function _ite_attempt!(psi::SymMPS, mpo::MPO, dbeta::Float64; order::Int, root_m
     return (dbeta = dbeta, ok = isempty(unmet), unmet = unmet, eshift = es,
             e_before = e0, e_pre_root = r.e_pre, e_root = r.e_root, e_after = e1,
             de_root = r.e_root - r.e_pre, de_compression = e1 - r.e_root,
-            outside = r.outside, resid = r.resid, root_err = info.ledger.expv_err,
+            outside = r.outside, resid = r.resid, resid_initial = r.resid_initial,
+            outside_passes = r.outside_passes, outside_added = r.outside_added,
+            root_err = info.ledger.expv_err,
             root_iters = info.ledger.expv_iters, discarded = info.ledger.discarded,
             growth = growth, chi = maximum(bond_dims(psi); init = 0),
             r_aug = info.ledger.r_aug, closure_checks = closure_checks,
@@ -146,11 +148,13 @@ entry and exit. `eshift = :energy` uses the state's own energy as `Eshift` (any 
 `kwargs` reach [`cbe_bug_step!`](@ref) (e.g. `closure_probe`, `fold_omega`, `thin_search`).
 
 VERDICT. The step is accepted when its ledger is `:met` and, with `outside_residual`, the
-outside-Galerkin defect `dbeta ||(I-P) H psi_1|| / ||psi_1||` is within `tol_basis`. Otherwise it is
-redone from the saved state:
+outside-Galerkin defect `dbeta ||(I-P) H psi_1|| / ||psi_1||` is within `tol_basis`. A defect over
+it is first RE-ENRICHED inside the attempt: the frames grow by the evolved state's own outside
+directions and the root is re-solved (`cbe_bug_step!`; the record keeps `resid_initial`,
+`outside_passes`, `outside_added`). Otherwise the step is redone from the saved state:
 
-  1. `order > 1` and the closure or the outside test failed: once more with the closure run to
-     closure (`closure_checks = true`) -- RE-ENRICH, same `dbeta`;
+  1. `order > 1` and the closure failed: once more with the closure run to closure
+     (`closure_checks = true`) -- RE-ENRICH, same `dbeta`;
   2. then, while `retries > 0`, as `n` sub-steps of `dbeta/n` (each with `retries - 1`) -- REJECT.
      `n` comes from the measured outside defect and the order (`_ite_nsplit`: the defect is
      `O(dbeta^(order+1))`), else 2.
@@ -187,7 +191,9 @@ function ite_step!(psi::SymMPS, mpo::MPO, dbeta::Real; order::Int = 2,
     attempts = Any[]
     a = _ite_attempt!(psi, mpo, Float64(dbeta); akw..., closure_checks = false, kwargs...)
     push!(attempts, a)
-    if !a.ok && order > 1 && any(in((:closure, :outside)), a.unmet)
+    # `:outside` is re-enriched inside the attempt (`cbe_bug_step!`); rerunning the closure adds
+    # nothing for it (d51: identical defect), so only an unclosed closure is retried this way.
+    if !a.ok && order > 1 && :closure in a.unmet
         restore!()
         a = _ite_attempt!(psi, mpo, Float64(dbeta); akw..., closure_checks = true, kwargs...)
         push!(attempts, a)

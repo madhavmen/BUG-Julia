@@ -205,28 +205,36 @@ end
     @test r.root_err <= 1e-12 * (1 + 1e-8)                           # projected residual: tiny
 
     # the outside defect is the BASIS error, not the root solve's: it shrinks with dbeta at a
-    # converged root (order 1: dbeta * ||(I-P) H psi_1|| ~ dbeta^2)
+    # converged root (order 1: dbeta * ||(I-P) H psi_1|| ~ dbeta^2). Measured on the basis the
+    # step built (`resid_initial`): a defect over tol_basis is re-enriched to within it, and that
+    # controlled value no longer scales with dbeta (s49test 17347098: 1.0e-4 vs 9.9e-5).
     rs = Float64[]
     for db in (0.2, 0.05)
         q = ite_step!(neel_state(_IT_L), _IT_MPO, db; order = 1, tol_basis = 1e-3,
                       tol_trunc = 1e-12, tol_root = 1e-14, maxdim = 256, retries = 0)
-        push!(rs, q.resid)
+        push!(rs, q.attempts[1].resid_initial)
     end
     @info "IT-U5 outside defect at dbeta 0.2 / 0.05: $(rs)"
     @test rs[1] > 4 * rs[2] > 0
 
-    # a coarse step whose defect fails tol_basis is redone (re-enrich, then split), never
-    # accepted as it stood
+    # a coarse step whose defect fails tol_basis is re-enriched on that defect (frames grown by
+    # the evolved state's outside directions, root re-solved), then split -- never accepted as
+    # it stood
     psi = neel_state(_IT_L)
     q = ite_step!(psi, _IT_MPO, 0.5; order = 2, tol_basis = 1e-7, tol_trunc = 1e-12,
                   tol_root = 1e-14, maxdim = 256, retries = 2)
     a1 = q.attempts[1]
-    @info "IT-U5 coarse step: status $(q.status), attempts $(length(q.attempts)), first unmet $(a1.unmet), resid $(a1.resid), nsub $(q.nsub)"
-    @test !a1.ok                                                  # non-vacuous
-    @test length(q.attempts) > 1
-    @test q.attempts[2].closure_checks || q.nsub > 1                # re-enriched or split
+    @info "IT-U5 coarse step: status $(q.status), attempts $(length(q.attempts)), first unmet $(a1.unmet), resid $(a1.resid_initial) -> $(a1.resid) in $(a1.outside_passes) passes (+$(a1.outside_added)), nsub $(q.nsub)"
+    @test a1.resid_initial > 1e-7                                 # non-vacuous
+    @test a1.outside_passes >= 1                                  # re-enriched on the defect
+    a1.outside_added > 0 && @test a1.resid < a1.resid_initial     # ... and it helped
+    @test a1.ok || q.nsub > 1                                     # else split
     q.status === :failed || @test q.resid <= 1e-7 * (1 + 1e-8)
     @test abs(total_sz(psi)) < 1e-12
+    # a defect already within tol_basis is not re-enriched
+    q = ite_step!(neel_state(_IT_L), _IT_MPO, 0.1; order = 2, tol_basis = 1e-3,
+                  tol_trunc = 1e-12, tol_root = 1e-14, maxdim = 256, retries = 0)
+    q.attempts[1].resid_initial <= 1e-3 && @test q.attempts[1].outside_passes == 0
 end
 
 @testset "IT-U6: fail safely" begin
@@ -279,16 +287,17 @@ end
 
 @testset "first step from a product state: the split is sized from the defect" begin
     # Neel and the domain wall, order 2, a tight tol_basis: two halvings cannot reach it (the old
-    # ladder flagged this step), a defect-sized split does, in ONE rejection
+    # ladder flagged this step); the in-step re-enrichment and/or a defect-sized split do
     for (name, st) in (("neel", neel_state(_IT_L)), ("dw", domain_wall_state(_IT_L)))
         psi = st
         q = ite_step!(psi, _IT_MPO, 0.125; order = 2, tol_basis = 1e-7, tol_trunc = 1e-10,
                       tol_root = 1e-12, maxdim = 256, retries = 2)
         a1 = q.attempts[1]
-        @info "first step $name: status $(q.status), first resid $(a1.resid), nsub $(q.nsub), final resid $(q.resid)"
-        @test !a1.ok && :outside in a1.unmet                       # non-vacuous: it IS rejected
-        @test RC._ite_nsplit(a1, 1e-7, 2) > 4                      # more than two halvings give
-        @test q.status === :retried
+        @info "first step $name: status $(q.status), first resid $(a1.resid_initial) -> $(a1.resid) ($(a1.outside_passes) re-enrich passes), nsub $(q.nsub), final resid $(q.resid)"
+        @test a1.resid_initial > 1e-7                              # non-vacuous: it IS over
+        # the split is sized from the defect: more than two halvings give
+        @test RC._ite_nsplit((unmet = [:outside], resid = a1.resid_initial), 1e-7, 2) > 4
+        @test q.status !== :failed
         @test q.resid <= 1e-7 * (1 + 1e-8)
     end
     # a RESOURCE cap is not split: the binding maxdim stays binding at any dbeta

@@ -1,31 +1,3 @@
-# ── THE STEP'S ACCURACY BUDGET ────────────────────────────────────────────────────────────
-#
-# Three tolerances and one resource limit, and the whole point of the file is that NOTHING
-# ELSE IS A USER KNOB. `dex`, `dover`, `comp_ratio`, `growth`, `krylov_basis`,
-# `split_cutoff`, `root_cutoff` and the two `stol_*` were each a GUESS AT A RANK made before
-# the run had produced the spectrum that answers it, and a guess made per Hamiltonian: the
-# measured `err_fnl = 0.62` in `cbe_expand`'s budget block is one of those guesses discarding
-# 62% of the ranked candidate weight because `growth = 2.0` happened to be wrong for that
-# bond. The quantities are real and the algorithm still needs them -- they just belong
-# DOWNSTREAM of a tolerance, derived from what the sketch actually found, rather than upstream
-# of it as inputs.
-#
-# ⛔ THE THREE ARE NOT INTERCHANGEABLE, and the separation is the design:
-#
-#     tol_basis   what must be EXPLORED AND RETAINED in the trial space (RSVD + Krylov)
-#     tol_trunc   what may be DISCARDED FROM THE EVOLVED STATE (final compression)
-#     tol_expv    how accurately the root Galerkin ODE is SOLVED
-#
-# They fail independently and they are not substitutes. A converged root `expv` does not
-# certify that the RSVD found a sufficient Galerkin space, and a poor root exponential is not
-# fixed by admitting more CBE directions. Collapsing them into one number -- which is what
-# "just set every cutoff to 1e-10" does -- hides which of the three is actually limiting.
-#
-# ⚠ `tol_basis` IS NOT A CERTIFIED GLOBAL ERROR BOUND, and must not be documented as one.
-# The residual indicators below are timestep-scaled, leading-order SURROGATES for basis error,
-# and the randomised ones are probabilistic estimates rather than certificates. They are
-# calibrated against reference dynamics (`tests/common/free_fermion.jl`), which is evidence,
-# not proof.
 
 """
     AdaptiveBudget(basis, trunc, expv)

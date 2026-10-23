@@ -35,7 +35,7 @@ function svd_leg(arr::AbstractArray{T, N},
 	right_dims = size(arr_perm)[2:end]
 	mat = reshape(arr_perm, left_dim, :)
 
-	F = svd(mat)
+	F = _robust_svd(mat)
 	singular_vals = F.S
 
 	keep = singular_vals .> cutoff
@@ -65,7 +65,29 @@ function svd_leg(arr::AbstractArray{T, N},
 	# The first element of U can be zero
 	if !isempty(S) && U[findfirst(!iszero, U), 1] < 0
 		U .= -U; 
-		SV .= -SV; 
+		SV .= -SV;
 	end
 	return U, SV, S
+end
+
+"""
+	_robust_svd(mat; full=false)
+
+`svd(mat; full)` with LAPACK's divide-and-conquer driver (`gesdd`), falling back to QR iteration
+(`gesvd`) when `gesdd` fails to converge (`LAPACKException`). `gesdd` is faster but occasionally
+does not converge on matrices `gesvd` handles -- in BUG-Julia's imaginary-time closure, exact
+isometries with every singular value 1 (d50g16 17346776, d50g20 17346777); the fallback is the one
+ITensors uses. A matrix with non-finite entries is an upstream defect, so it is reported rather
+than retried. Ported from the cluster fork `~/Telum-fork` (247a5bd, svd-qr-fallback).
+"""
+function _robust_svd(mat::AbstractMatrix; full::Bool=false)
+	try
+		return svd(mat; full=full)
+	catch err
+		err isa LinearAlgebra.LAPACKException || rethrow()
+		all(isfinite, mat) || throw(ArgumentError(
+			"svd: non-finite entries in a $(size(mat, 1))x$(size(mat, 2)) matrix ($err from gesdd)"))
+		@warn "gesdd did not converge ($err) on a $(size(mat, 1))x$(size(mat, 2)) matrix; retrying with QR iteration" maxlog=100
+		return svd(mat; full=full, alg=LinearAlgebra.QRIteration())
+	end
 end

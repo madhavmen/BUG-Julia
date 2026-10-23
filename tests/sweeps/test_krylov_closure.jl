@@ -631,12 +631,11 @@ end
     end
 end
 
-@testset "_extend_frame never exceeds the local space (saturated sector + roundoff)" begin
-    # s38test 17341708: a nearly saturated frame (253 of 256) gained 72 > 70 directions in one
-    # sector -- roundoff cleared Telum's GLOBALLY relative cutoff because another sector carried a
-    # real direction. Reproduced: the complete local basis minus ONE column of one sector, with
-    # 1e-11 orthogonality loss (an accumulated-frame level), and a residual with one genuine
-    # direction (that sector) and roundoff everywhere else.
+# A nearly saturated frame: the complete local basis of one site tensor of an evolved L=8 chain minus
+# ONE column of its largest sector, with 1e-11 orthogonality loss (an accumulated-frame level).
+# `side = :left` uses the centre tensor `(link, site, bond)`, `:right` the next one `(bond, site,
+# link)`. Returns the frame, the source tensor, the local sector dims, the unsaturated sector, rng.
+function saturated_frame(side::Symbol)
     set_symmetry!(:U1)
     L = 8
     psi = neel_state(L)
@@ -645,14 +644,24 @@ end
         cbe_bug_step!(psi, mpo, ComplexF64(-0.3); exact = true, tol_basis = 1e-10,
                       tol_trunc = 1e-12, tol_expv = 1e-12, maxdim = 64)
     end
-    canonical!(psi, L)
-    A = psi[L ÷ 2]                                                      # (link, site, bond)
-    F = RC.full_local_basis(A, :left)
-    dims = Dict(q => d for (q, d) in F.spaces[3])
+    canonical!(psi, side === :left ? L : 1)
+    A = psi[side === :left ? L ÷ 2 : L ÷ 2 + 1]
+    F = RC.full_local_basis(A, side)
+    fl = side === :left ? 3 : 1
+    dims = Dict(q => d for (q, d) in F.spaces[fl])
     qbig = argmax(q -> dims[q], collect(keys(dims)))
-    Q = RC._trim_per_sector(F, 3, Dict(q => d - (q == qbig ? 1 : 0) for (q, d) in dims))
+    Q = RC._trim_per_sector(F, fl, Dict(q => d - (q == qbig ? 1 : 0) for (q, d) in dims))
     rng = Random.MersenneTwister(11)
     Q = to_concrete(Q + 1e-11 * RC._randomize_like(Q, rng))
+    return Q, A, dims, qbig, rng
+end
+
+@testset "_extend_frame never exceeds the local space (saturated sector + roundoff)" begin
+    # s38test 17341708: a nearly saturated frame (253 of 256) gained 72 > 70 directions in one
+    # sector -- roundoff cleared Telum's GLOBALLY relative cutoff because another sector carried a
+    # real direction. Reproduced on `saturated_frame`, with a residual with one genuine direction
+    # (the unsaturated sector) and roundoff everywhere else.
+    Q, A, dims, _, rng = saturated_frame(:left)
     v = RC._randomize_like(A, rng)
     v = to_concrete((1.0 / norm(v)) * v)
     R = to_concrete(RC.perp_component(Q, v))
@@ -662,6 +671,37 @@ end
     @test nadd >= 1                                                     # the genuine one is kept
     @test RC.leg_dim(Qn, 3) <= nloc
     RC._frame_sector_dims(Qn, :left, RC.fusion_basis(Qn, 1, 2; tag = "chk"), "test")  # no throw
+end
+
+@testset "cbe_expand's appended block never exceeds the local space (_guarded_block)" begin
+    # d50f_trap 17346775 / d50f_rad3 17346774 (IT_FRAME_CHECKS, IT-1 L=20 domain wall): the first
+    # over-wide frame was `cbe_expand V_ex` (10 > 9) and `U_ex` (253 > 252), whose re-orthogonalised
+    # block had no local-room cap. A candidate block spanning the whole local space is appended to
+    # `saturated_frame`: only the one free direction may survive.
+    for side in (:left, :right)
+        Q, _, dims, _, rng = saturated_frame(side)
+        fl = side === :left ? 3 : 1
+        C = RC._randomize_like(Q, rng)
+        # the control: re-orthogonalisation alone turns the saturated sectors' roundoff into columns
+        bare = side === :left ? RC._reortho_left(Q, C) : RC._reortho_right(Q, C)
+        @test RC.leg_dim(bare, fl) > 1
+        U = RC._guarded_block(Q, C, side)
+        @test U !== nothing
+        @test RC.leg_dim(U, fl) == 1
+        # width == the local dimension and no sector over its own: the one column is the free one
+        Qn = to_concrete(oplus([Q, to_concrete(setitag(U, fl, Q.inds[fl].itags))], (fl,)))
+        @test RC.leg_dim(Qn, fl) == sum(values(dims))
+        a, b = side === :left ? (1, 2) : (2, 3)
+        RC._frame_sector_dims(Qn, side, RC.fusion_basis(Qn, a, b; tag = "chk"), "test")  # no throw
+    end
+end
+
+@testset "Telum's dense SVD falls back from gesdd (_robust_svd)" begin
+    # d50g16 17346776 / d50g20 17346777: gesdd threw LAPACKException(1) in `_frame_onto_left` on a
+    # FINITE exact isometry (every sigma 1); the vendored Telum now retries with QR iteration.
+    @test isdefined(Telum, :_robust_svd)
+    M = randn(Random.MersenneTwister(3), ComplexF64, 7, 5)
+    @test Telum._robust_svd(M).S ≈ svd(M).S
 end
 
 end # Krylov closure

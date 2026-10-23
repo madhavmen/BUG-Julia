@@ -1586,7 +1586,7 @@ function _build_svd_cgtsvd_class(q::TLArray{T, QD, N, RD, QT, PS, M, RMT},
     m, n = size(mat)
     k = min(m, n)
     _add_svd_cost!(4 * max(m, n) * k^2 + 8 * k^3)
-    F = svd(mat; full=false)
+    F = _robust_svd(mat; full=false)
     dimq = Float64(_svd_sector_degeneracy(PS, sector, irrepdim_caches, Val(N)))
     scale = sqrt(dimq)
     Result = _svd_cgtsvd_class_result_type(Meta, Tbuf)

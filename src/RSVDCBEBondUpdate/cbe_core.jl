@@ -1401,8 +1401,8 @@ function cbe_expand(f::BondFrame, skl, skr;
     # Re-establish orthonormality and orthogonality to the frame before the direct sum. See
     # the guard block above `_trim_total` for why this is not redundant with the preselection's
     # `RepairOrtho`: that pass ran on `Q`, this one runs on what the final selection made of it.
-    TLC = _reortho_left(U0, TLC)
-    TRC = _reortho_right(V0, TRC)
+    TLC = _guarded_block(U0, TLC, :left)
+    TRC = _guarded_block(V0, TRC, :right)
 
     if ledger !== nothing
         ledger.n_selected += (TLC === nothing ? 0 : leg_dim(TLC, 3)) +
@@ -1482,6 +1482,22 @@ function _reortho(C, perp, orth)
     norm(R) <= _CBE_EPS * max(norm(C), 1.0) && return nothing
     return to_concrete(orth(R))
 end
+
+"""
+    _guarded_block(frame, C, side) -> the block `C` cleared for `[frame | C]`, or nothing
+
+Orthonormal and orthogonal to `frame` (`_reortho_*`), then at most the local room of each sector
+(`_cap_to_local_room`). The second half is not redundant with the first: `_reortho`'s SVD cutoff is
+relative to the GLOBAL sigma_max, so in a sector the frame already fills, its orthogonality loss
+survives the cut and is renormalised into a fake unit column. MEASURED (IT_FRAME_CHECKS, IT-1 L=20
+domain wall, panel, bug4): `cbe_expand V_ex` held 10 directions in a sector of local dimension 9
+(d50f_trap 17346775, trapezoid, tol_basis 1e-5) and `cbe_expand U_ex` 253 in the full half-chain
+S^z = 0 sector of 252 (d50f_rad3 17346774, radau3, 1e-3); the closure frontier's Krylov enrichment
+then refused the frame and the runs crashed (it1r 17345037, 17345039).
+"""
+_guarded_block(frame, C, side::Symbol) =
+    _cap_to_local_room(frame, side === :left ? _reortho_left(frame, C) :
+                                               _reortho_right(frame, C), side)
 
 
 "Keep at most `n` columns of `Q` on `leg`, walking sectors in Telum's order."
