@@ -558,3 +558,54 @@ got one new assertion. All at s = 1/2 (USER 10-22).
   both, D_stage 23, 50 one-site applications) with QR rank 24 vs 38 and 86 vs 108 streamed columns.
   The guard moved from 1e-6 to 1e-7 (d5f4178): the step is inexact, but 3.7e-7 sits between the
   fidelity distance's floor and the old guard. This is the task's one weakened test.
+
+### Software structure (the plan's API sketch against the code)
+
+The plan's component list is a sketch ("not presumed code"); each role exists, under these names:
+
+| plan component | code |
+|---|---|
+| MPOEnvironment | `MPOLink` (mpo.jl), `push_left_channels` / `push_right_channels`; frames carry a generation (`KLFrames.gen`) and a stale frontier is refused (krylov_closure.jl, U10) |
+| ChargeBlockSketchWorkspace | `TwoSiteSketchOp` + `apply_two_site_sketch!`, `_dd_probe`, `_thin_qr`, `_dd_select` (dd_cbe.jl); no X, X_mu, G_DD or P^D is formed (U02, U20 flop linearity) |
+| CBEController | `_dd_controller` + `dd_cbe_expand` (dd_cbe.jl): incremental width, holdout, `tol_basis` shares |
+| LocalKrylovWorkspace | the half-sweeps' and frontiers' Krylov stage (`_extend_frame`, cbe_bug.jl; `krylov_reuse`, default on) |
+| StageBasisBuilder | the half-sweeps of `cbe_bug_step!` + `_krylov_closure!` for frontiers 1..p−1 |
+| RootOperator / RootIntegrator | `RootOp` + `apply_zero_site` (matrix-free); `expv` / `lanczos_expv` / `arnoldi_expv` at `tol_root`, `root_method` |
+| StandardBUGStepper | `cbe_bug_step!` |
+| ParallelKLSBUGStepper | `parallel_kls_step!` → `_kls_start` / `_kls_finish` (sweeps/parallel_kls.jl), its own file and entry point |
+| CompressionController | `truncate_recursive!` (zero_site_core.jl) at `tol_trunc`, `maxdim` |
+| StepDiagnostics | `StepRecord`, `KernelCounters` (dd_cbe.jl), `AdaptiveLedger` (adaptive_budget.jl) |
+
+Against the plan's "avoid" list:
+
+* **References debug-only.** `dd_reference_sketch` (the materialised `H Theta` DD reference) has
+  no caller in `src/`. `:dd_qr_streamed` is the adaptive default (cbe_bug.jl `policy = something(
+  cbe_policy, adaptive ? :dd_qr_streamed : :svd_select)`); `:one_sided_qr_streamed` and
+  `:svd_select` are reached only by naming them. The frontier closure falls back to `:svd_select`
+  when `cbe_policy` is absent from its keywords (krylov_closure.jl `_frontier_expand`), but
+  `cbe_bug_step!` always passes the step's policy; only tests call it without one.
+* **One error test.** Lanczos and Arnoldi share one tail estimate `_tail` (`beta_k |c_k|`, expv.jl)
+  for the stop and the reported error; no Ritz-value test (U09).
+* **BLAS threading.** The library spawns tasks (`parallel`, `kls` schedules, frontiers) and does not
+  set BLAS threads; every HQ benchmark records `threads` and `blas_threads` in its JSON
+  (hq_bench.jl, hq_dd_scaling.jl), and the HQ timing jobs pin BLAS to 1 thread.
+* **MPS copies.** `copy(psi)` copies the tensor vector, not the tensors (every mutation replaces a
+  slot); it is used for the midpoint predictor, the right half-sweep's frame state and
+  `frames_from_state` (tests and from-scratch closures).
+* **SVD outside CBE.** The DD+QR CBE has no SVD (U02). SVDs remain in three non-CBE places: the
+  Krylov stage's frame extension (`_extend_frame`: block SVD of the thin one-site residual, ranked by
+  Test A's tail), the lossless half-sweep / root splits (`cutoff = 0`, U13), and the final
+  compression. Under SU(2) the DD-QR backend is `:svd_orth` (reported in `StepRecord.qr_backend`).
+* **Conventions.** Tensor legs, gauges and tags are fixed in T1.2 above.
+
+### Definition of done (s = 1/2 scope, USER 2026-10-22)
+
+| item | status | evidence |
+|---|---|---|
+| implicit DD-projected streamed sketch + QR-only CBE; per-channel equivalence, missing sectors, quadratic sketch kernel at fixed width; one-sided+QR benchmark-only | MET | Tasks 2–3; U01, U02, U03; U20 (thin / env-push flops halve per doubling of D); P06 |
+| one `tol_basis` controls CBE and recycled Krylov for p = 1..5, bounded work, unmet-budget status | MET | Tasks 3–4; P09; `tolerance_met` and `workcap` in every ledger |
+| `tol_root`, `tol_trunc` independent; no hidden truncation | MET | Task 5; U12, U13 |
+| standard p = 1..5 orders measured or the defect documented | MET (documented) | P08: p_obs = p + 1, set by the first step from the D = 1 domain wall |
+| full parallel K/L/S as a separate algorithm; omitted block tested; order and speedup evidence | PARTIAL | parallel_kls.jl; M11 test + fallback (U16); order (U17, P12). Speedup: none at Jt = 8, h = 0.1 (P11, 0.65–0.77 at 3 workers); the Jt = 5 per-order rerun (hq45t) is pending |
+| s = 1/2 vs analytical finite chain; s = 3 vs converged numerical reference | s = 1/2 MET; s = 3 OUT OF SCOPE | U18, P01/P02; s = 3 cancelled by the user (Task 8 scope) |
+| all plots with saved configurations and scripts | MET at s = 1/2, P13 PARTIAL | `figures/hq_task8/` + `runs/`; `benchmarks/hq_bench.jl`, `hq_task8_figures.py`, `hq_dd_scaling.jl` |
