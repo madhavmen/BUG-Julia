@@ -33,8 +33,13 @@ include(joinpath(@__DIR__, "..", "common", "dd_fixtures.jl"))
 include(joinpath(@__DIR__, "..", "common", "dissipative_fixtures.jl"))
 include(joinpath(@__DIR__, "..", "..", "benchmarks", "open_system", "sparse_lindblad.jl"))
 
+# `closure_checks = true`: the validated order-p closure, which loops until a frontier pass adds
+# nothing. From a U(1) product state the range >= 2 emission hops are invisible to every two-site
+# environment, so the default single enriching pass per frontier misses half of Q_LR psi0 at L = 8
+# (first-step error 4e-2, independent of tol_basis and the exact DD sketch); the second pass, on
+# multi-sector frames, sees them (dt3e: error 1e-15). The solver default stays off (USER 10-17).
 const _A2_BUG = (hermitian = false, order = 3, tol_basis = 1e-8, tol_root = 1e-12,
-                 tol_trunc = 1e-10, maxdim = 256)
+                 tol_trunc = 1e-10, maxdim = 256, closure_checks = true)
 const _A2_K = π / 3
 const _A2_OCC = Dict(4 => [:up, :down, :up, :down],
                      6 => [:up, :down, :down, :up, :down, :down],
