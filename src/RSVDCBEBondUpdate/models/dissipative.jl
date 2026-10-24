@@ -9,30 +9,14 @@ the pair loss `L_j = √κ_j c_j↓ c_j↑`. `kappa` is one rate (A1, bulk loss)
 single nonzero entry). Charge-neutral, virtual dimension 2.
 """
 function doublon_loss_mpo(L::Int; kappa)
-    k = _rate_vector(L, kappa)
+    k = kappa isa Number ? fill(Float64(kappa), L) : collect(Float64, kappa)
+    length(k) == L || throw(DimensionMismatch("doublon_loss_mpo got $(length(k)) rates for $L sites"))
+    all(>=(0.0), k) || throw(ArgumentError("doublon_loss_mpo: loss rates must be nonnegative, got $k"))
     q = hub4_space()
     nu = to_concrete(lock(q.Fu', 2) * q.Fu)
     nd = to_concrete(lock(q.Fd', 2) * q.Fd)
     nupdn = to_concrete(lock(nu, 1) * nd)
     return onsite_mpo(L, [to_concrete(k[j] * nupdn) for j in 1:L]; Iloc = q.I)
-end
-
-function _rate_vector(L::Int, kappa)
-    k = kappa isa Number ? fill(Float64(kappa), L) : collect(Float64, kappa)
-    length(k) == L || throw(DimensionMismatch("got $(length(k)) loss rates for $L sites"))
-    all(>=(0.0), k) || throw(ArgumentError("loss rates must be nonnegative, got $k"))
-    return k
-end
-
-"""
-    doublon_loss_local(L; kappa) -> Vector{Function}
-
-The same `Q` as [`doublon_loss_mpo`](@ref) site by site, `Q_j(s) = κ_j` on the doublon sector
-`HUB4_BOTH` and `0` elsewhere, for [`tdvp2_split_loss_step!`](@ref) (`:U1` only).
-"""
-function doublon_loss_local(L::Int; kappa)
-    k = _rate_vector(L, kappa)
-    return [s -> s == HUB4_BOTH ? k[j] : 0.0 for j in 1:L]
 end
 
 """

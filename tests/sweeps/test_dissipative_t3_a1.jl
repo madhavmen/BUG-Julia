@@ -8,11 +8,9 @@
 #             conditional doublon density, <S^z S^z>_c, <Q>_c and the sector ranks against ED;
 #             κ = 0 keeps the norm (the Hermitian control). The strict gate is κ ≤ 1 at this step;
 #             κ ≥ 8 is graded by refinement below.
-#   split     the split-loss baseline is the Strang product it claims, at full rank, and that
-#             product differs from exp(dt G) (its splitting error is real)
-#   strong    κ ∈ {8, 20}, dt halved twice: BUG, direct non-Hermitian TDVP2 and TDVP2 with the loss
-#             split off exactly all converge to ED, P0 never grows, TDVP2's backward-substep
-#             amplification is recorded; the split arm is second order
+#   strong    κ ∈ {8, 20}, dt halved twice: BUG and two-site TDVP2 (the plan's only baseline) on
+#             the same non-Hermitian G both converge to ED, P0 never grows, TDVP2's backward-substep
+#             amplification is recorded; BUG's coarse error is above the floor (a control)
 #   Lindblad  L = 2, 4: trace 1, ρ ⪰ 0, d<N>/dt = -2κ Σ<n↑n↓> exactly, and the initial-sector block
 #             of ρ(t) is the no-jump |ψ̃><ψ̃| (loss only lowers N, so nothing re-enters the sector),
 #             at L = 4 the BUG run's. Trajectory averages and jump counts need the jump engine
@@ -37,8 +35,6 @@ const _A1_BUG = (hermitian = false, order = 3, tol_basis = 1e-8, tol_root = 1e-1
                  tol_trunc = 1e-10, maxdim = 256)
 const _A1_TDVP = (hermitian = false, maxdim = 256, trunc_thresh = 1e-12, maxiter = 40,
                   conv_tol = 1e-12)
-# the split arm's TDVP2 sees only the Hermitian H: Lanczos, same settings otherwise
-const _A1_SPLIT = merge(_A1_TDVP, (hermitian = true,))
 # a doublon and an empty site at every L
 const _A1_OCC = Dict(2 => [:both, :empty], 4 => [:both, :up, :empty, :down],
                      6 => [:both, :up, :empty, :down, :both, :empty])
@@ -169,44 +165,22 @@ end
     end
 end
 
-@testset "A1 split baseline: the Strang product, at full rank" begin
-    L, κ, dt = 4, 8.0, 0.05
-    sec = _A1_SEC[L]
-    ops = _a1_ops(sec; U = 4.0, kappa = κ)
-    psi = _entangle!(hub4_product_state(_A1_OCC[L]), ops.H; t = 2.0)
-    v0 = _amplitudes(psi, sec.states)
-    full = all(1:(L - 1)) do i
-        sv = _sector_schmidt(v0, sec.bs, _hub_split(i))
-        _mps_sector_dims(psi, i, _hub_decode) == Dict(c => length(s) for (c, s) in sv)
-    end
-    @test full                                   # TDVP2's projector is then the identity
-    tdvp2_split_loss_step!(psi, ops.H, ComplexF64(-dt * im), doublon_loss_local(L; kappa = κ);
-                           _A1_SPLIT...)
-    D = exp(-dt / 4 * ops.Qp)
-    strang = D * exp(-1im * dt * ops.Hp) * D * v0
-    exact = exp(dt * ops.Gp) * v0
-    @test norm(_amplitudes(psi, sec.states) - strang) < 1e-8 * norm(strang)
-    @test norm(strang - exact) > 1e-6 * norm(exact)          # CONTROL: the splitting is real
-end
-
-@testset "A1 strong loss, κ = $κ: BUG, TDVP2 and split TDVP2 under refinement" for κ in (8.0, 20.0)
+@testset "A1 strong loss, κ = $κ: BUG and TDVP2 under refinement" for κ in (8.0, 20.0)
     L, T = 6, 0.2
     sec = _A1_SEC[L]
     ops = _a1_ops(sec; U = 4.0, kappa = κ)
     psi0 = hub4_product_state(_A1_OCC[L])
     v0 = _amplitudes(psi0, sec.states)
-    qloc = doublon_loss_local(L; kappa = κ)
     dts = (0.05, 0.025, 0.0125)
-    errs = Dict(a => Float64[] for a in (:bug, :tdvp, :split))
-    logp = Dict(a => Float64[] for a in (:bug, :tdvp, :split))
+    errs = Dict(a => Float64[] for a in (:bug, :tdvp))
+    logp = Dict(a => Float64[] for a in (:bug, :tdvp))
     amp = Float64[]
     for dt in dts
         tau = ComplexF64(-dt * im)
         arms = (bug = p -> cbe_bug_step!(p, ops.G, tau; _A1_BUG...),
                 tdvp = p -> (r = Ref(0.0);
                              tdvp2_step!(p, ops.G, tau; _A1_TDVP..., backward_report = r);
-                             push!(amp, r[])),
-                split = p -> tdvp2_split_loss_step!(p, ops.H, tau, qloc; _A1_SPLIT...))
+                             push!(amp, r[])))
         for a in keys(arms)
             d, _ = _a1_compare!(copy(psi0), sec, ops, v0, dt, round(Int, T / dt), arms[a])
             push!(errs[a], d[:psi])
@@ -219,10 +193,9 @@ end
     @test all(isfinite, amp)
     # converges: each halving at least halves the error, down to a 1e-9 floor
     conv(e, r) = all(e[k + 1] <= max(e[k] / r, 1e-9) for k in 1:(length(e) - 1))
-    @test conv(errs[:bug], 2) && errs[:bug][end] < 1e-4
+    # the coarse BUG error is above the floor, so its convergence is measured, not assumed
+    @test errs[:bug][1] > 1e-7 && conv(errs[:bug], 2) && errs[:bug][end] < 1e-4
     @test conv(errs[:tdvp], 2) && errs[:tdvp][end] < 1e-2
-    # the split arm is second order, and its splitting error is above the floor (a control)
-    @test errs[:split][1] > 1e-6 && conv(errs[:split], 3) && errs[:split][end] < 1e-2
     @test logp[:bug][end] < 1e-4                 # -log P0, the hazard integral, after refinement
 end
 

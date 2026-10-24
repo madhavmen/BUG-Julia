@@ -81,7 +81,6 @@ include("models/spin_xx.jl")
 # baselines/ -- files of this module rather than submodules: they need the same internals.
 # `tdvp2.jl` before `bond_expansion.jl`, which uses its `tensor_elements`.
 include("baselines/tdvp2.jl")
-include("baselines/tdvp2_split.jl")
 include("baselines/tdvp1_cbe.jl")
 include("baselines/tdvp1_cbe_variants.jl")
 include("expansion/bond_expansion.jl")
@@ -167,7 +166,7 @@ export PairVertex, pair_vertices, pair_mpo,
        HUB4_EMPTY, HUB4_UP, HUB4_DOWN, HUB4_BOTH,
        hubbard_aa_mpo_d4, hub4_density, hub4_imbalance, hub4_cdw_occupations,
        # dissipative.jl -- the dissipative plan's loss operators Q, for `no_jump_mpo(H, Q)`
-       doublon_loss_mpo, doublon_loss_local, collective_emission_mpo,
+       doublon_loss_mpo, collective_emission_mpo,
        # liouville*.jl -- symmetry-aware MPDOs
        LiouvilleSpace, liouville_space, liouville_index, liouville_pair, liouville_charge,
        liouville_op, ket_super, bra_super, dissipator_super, lindblad_mpo, mpdo_apply!,
@@ -177,7 +176,7 @@ export PairVertex, pair_vertices, pair_mpo,
 
 # baselines/
 export OneSiteH, one_site_h, apply_one_site, TDVP2Info, tdvp2_step!, tdvp2_composed_step!,
-       tensor_elements, scale_site_sectors!, tdvp2_split_loss_step!,
+       tensor_elements,
        TDVP1CBEInfo, tdvp1_cbe_step!, tdvp1_rsvd_cbe_step!, tdvp1_cbe_exact_step!,
        TDVPCBEInfo, tdvp_cbe1s_step!,
        DMRGCBEInfo, DMRGCBERun, dmrg_cbe1s_sweep!, dmrg_cbe1s!,

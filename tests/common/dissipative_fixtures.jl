@@ -180,8 +180,25 @@ function _hub4_nupdn()
     return to_concrete(lock(nu, 1) * nd)
 end
 
+"""
+Multiply each site-leg sector `s` of `psi[j]` by `f(s)`, in place: an onsite operator constant on
+each charge sector, by sector projection as `apply_sz!` does (contracting an operator onto the
+site leg re-sorts its sectors). Needs a charge-resolved site leg (`:U1`).
+"""
+function _scale_site_sectors!(psi, j, f)
+    canonical!(psi, j)
+    A = psi[j]
+    terms = Any[]
+    for (s, _) in A.spaces[2]
+        B = to_concrete(getsub(A, 2, t -> t == s ? Colon() : nothing; preserve_space = true))
+        isempty(B.qlabels) || push!(terms, to_concrete(f(s) * B))
+    end
+    psi[j] = reduce((a, b) -> to_concrete(a + b), terms)
+    return psi
+end
+
 "`S^z_j = (n↑ - n↓)/2` on a d = 4 site, by sector scaling."
-_hub4_sz!(psi, j) = scale_site_sectors!(psi, j, s -> s == HUB4_UP ? 0.5 : s == HUB4_DOWN ? -0.5 : 0.0)
+_hub4_sz!(psi, j) = _scale_site_sectors!(psi, j, s -> s == HUB4_UP ? 0.5 : s == HUB4_DOWN ? -0.5 : 0.0)
 
 "`<ψ|S^z_i S^z_j|ψ>` (unnormalised) with `apply!(psi, j)` the in-place `S^z_j`."
 _szsz(psi, i, j, apply!) = real(overlap(apply!(copy(psi), i), apply!(copy(psi), j)))
