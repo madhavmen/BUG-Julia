@@ -250,7 +250,9 @@ end
     L, T, dts = 10, 0.8, (0.2, 0.1)
     tdvp_kw(w) = (hermitian = false, maxdim = 256, trunc_thresh = 1e-12, maxiter = 40,
                   conv_tol = 1e-12, weight_tol = w)
-    for (name, gamma, wt) in ((:hermitian, zeros(L), 1e-12), (:lossy, _loss_rates(L), 1e-8))
+    # 1e-10, not 1e-8, on the lossy arm: at 1e-8 the discards made BUG's floor 1/9 of its time
+    # error (dt2f), inside the 10x margin
+    for (name, gamma, wt) in ((:hermitian, zeros(L), 1e-12), (:lossy, _loss_rates(L), 1e-10))
         f = _g12_local(L; gamma = gamma, start = :dw)
         v0 = dense_state(f.psi0)
         nup = _spin_charge(argmax(abs.(v0)) - 1, L)
