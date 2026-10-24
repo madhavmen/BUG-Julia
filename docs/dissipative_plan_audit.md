@@ -88,7 +88,7 @@ generator `G = -iH - Q/2` is therefore the MPO `H_eff = H - (i/2) Q` at `tau = -
 | dt1a 17471485 | `c0a42e2` | `test_dissipative_t1.jl` | ERROR: `onsite_mpo`'s `Any[Iid O]` literal concatenated the TLArrays (fixed `b8837f0`, also in `mpo_sum`) |
 | dt1a 17471485 | `c0a42e2` | `test_dd_cbe.jl` | 131/131 |
 | dt1a 17471485 | `c0a42e2` | `test_hq_root.jl` | 46/46 |
-| dt1a 17471485 | `c0a42e2` | `test_liouville.jl` | (see job) |
+| dt1a 17471485 | `c0a42e2` | `test_liouville.jl` | 91/92: OS-U3 `min_eig = -1.76e-4 > -1e-4` fails, the pre-existing regression parked by the USER 2026-10-22 (not on Task 1's code path) |
 | dt1b 17471544 | `b8837f0` | `test_dissipative_t1.jl` | 29/31: two vacuous fixture checks (fixed `d276134`) |
 | dt1c 17471567 | `d276134` | `test_dissipative_t1.jl` | 30/31, MaxRSS 1.9 G |
 
