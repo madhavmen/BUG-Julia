@@ -88,9 +88,10 @@ end
     L, U, kap = 3, 4.0, [1.0, 0.3, 2.0]
     f = _t4_hub(L, U, kap)
     @test f.res < 1e-12
-    psi = hub4_product_state([:both, :up, :both])                    # (N↑, N↓) = (3, 2)
-    # t = 3, not 0.6: at t = 0.6 site 1 is still ~1e-4 from doubly occupied, so the string control
-    # below sees only a global sign and cannot fail (dt4g).
+    # (N↑, N↓) = (2, 2), not (3, 2): with every up orbital filled, n_1↑ = 1 in every component after a
+    # loss at site 2 or 3, so (-1)^{n_1↑} below is a global sign and the control cannot fail (dt4g,
+    # dt5n). Evolved to t = 3 so the occupations mix.
+    psi = hub4_product_state([:both, :empty, :both])
     for _ in 1:10
         tdvp2_step!(psi, f.Hm, ComplexF64(-0.3im); maxdim = 64, trunc_thresh = 1e-14)
     end
@@ -108,7 +109,7 @@ end
         e = Diagonal(f.s) * (f.jumps[j] * v)                         # the Fock jump, MPS basis
         @test abs(norm(aj) - norm(e)) < 1e-10 * norm(e)
         @test abs(abs(dot(e, aj)) - norm(e) * norm(aj)) < 1e-10 * norm(e)^2  # one global phase
-        @test all(_hub_charges(b, L) == (2, 1) for b in 0:(D - 1) if abs(aj[b + 1]) > 1e-12)
+        @test all(_hub_charges(b, L) == (1, 1) for b in 0:(D - 1) if abs(aj[b + 1]) > 1e-12)
         if j > 1                                                     # CONTROL: a sign error
             ew = Diagonal(f.s) * (string1 * (f.jumps[j] * v))
             @test abs(dot(aj, string1 * aj)) < 0.9 * norm(aj)^2     # the string is not a global sign
