@@ -94,9 +94,12 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # parallel K/L/S step in the preliminary frames, with this K/L/S schedule
                        # (`KLS_SCHEDULES`). `nothing` is the standard augmented root step.
                        kls::Union{Nothing, Symbol} = nothing,
-                       # ⚠ AN A/B OF THE CLOSURE'S LEAK MEASUREMENT (`krylov_closure.jl`): fold the
-                       # probe into the two-site contraction instead of building `H*Theta`.
-                       fold_omega::Bool = false,
+                       # The closure's leak measurement (`krylov_closure.jl`): fold the probe into
+                       # the two-site contraction instead of building `H*Theta`. `nothing` folds
+                       # for `order > 1`, so the closure forms no dense two-site action (dissipative
+                       # plan §1.2), except under `exact`: the folded leak is sampled, and the debug
+                       # reference draws no random numbers. `false` keeps the exact `H*Theta` leak.
+                       fold_omega::Union{Nothing, Bool} = nothing,
                        rng::AbstractRNG = MersenneTwister(0x5EED))
     L = length(psi)
     length(mpo) == L || throw(DimensionMismatch(
@@ -115,6 +118,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                             something(tol_trunc, TOL_DEFAULTS.trunc),
                             something(tol_expv,  TOL_DEFAULTS.expv))
     order >= 1 || throw(ArgumentError("order must be >= 1, got $order"))
+    fold_omega = something(fold_omega, order > 1 && !exact)
     order == 1 || frame_state === nothing || throw(ArgumentError(
         "order > 1 is a single-step method and does not combine with the midpoint predictor"))
     closure_probe >= 0 || throw(ArgumentError(

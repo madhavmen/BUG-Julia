@@ -133,14 +133,14 @@ end
     @test i1.record.order == 1 && i1.record.closure_policy === :none
     @test i1.ledger.n_h2_leak == 0                   # the half-sweep CBE streams, never H*Theta
     @test i1.record.counters.n_stream > 0 && i1.record.counters.n_qr > 0
-    for fold in (false, true)
+    for fold in (nothing, false, true)
         i3 = cbe_bug_step!(copy(psi0), G, tau; order = 3, fold_omega = fold, kw...)
         @test i3.record.order == 3 && i3.record.closure_policy === :dd_qr_streamed
         @test Set(e.frontier for e in i3.ledger.closure_log) == Set([1, 2])
         @test i3.ledger.proj_err < 1e-12             # the root starts from P psi_n = psi_n
-        # the frontier leak test is the only place a two-site action is formed, and only
-        # with `fold_omega = false` (the default)
-        fold ? (@test i3.ledger.n_h2_leak == 0) : (@test i3.ledger.n_h2_leak > 0)
+        # the frontier leak test is the only place a two-site action can be formed, and only
+        # with an explicit `fold_omega = false`; the order > 1 default folds
+        fold === false ? (@test i3.ledger.n_h2_leak > 0) : (@test i3.ledger.n_h2_leak == 0)
     end
 end
 

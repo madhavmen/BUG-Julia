@@ -88,7 +88,7 @@ end
         @testset "$name" begin
             ex, fo = neel_state(L), neel_state(L)
             for _ in 1:4
-                cbe_bug_step!(ex, mpo, tau; exact = true, kw..., akw...)
+                cbe_bug_step!(ex, mpo, tau; exact = true, fold_omega = false, kw..., akw...)
                 info = cbe_bug_step!(fo, mpo, tau; fold_omega = true, kw..., akw...)
                 @test info.ledger isa AdaptiveLedger
                 # A folded closure never forms the two-site action.

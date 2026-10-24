@@ -147,8 +147,10 @@ slope 2.1 (order 2) and 5.6 (Suzuki order 4) from dt 0.2 to 0.1, while Yoshida n
 cap 6: order-4 errors no smaller than order 2; 6x4 D=512: `tdvp2_step!` slopes 0.95–0.99).
 `fold_omega = true` folds the probe into the environment contractions instead of forming
 `H Theta` (with `order > 1` the closure's leak estimate then uses the folded sketches and a Test-B
-holdout); it pays only when the probe is much thinner than χ (3·width < χ), was slower at every
-χ ≤ 256 measured, and is off by default.
+holdout); it pays only when the probe is much thinner than χ (3·width < χ) and was slower at every
+χ ≤ 256 measured. It is on by default for `order > 1`, so the closure forms no dense two-site
+action, and off for `order = 1` and under `exact = true`; `fold_omega = false` restores the exact
+`H Theta` leak.
 
 **Ground states use the same engine.** `dmrg_cbe1s!(psi, mpo; tol_basis, tol_trunc, maxdim)`
 (and `rsvd_cbe_dmrg1s!`) runs the one-site CBE-DMRG with the adaptive Test A/B selection and the

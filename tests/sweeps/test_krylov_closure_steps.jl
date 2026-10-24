@@ -132,8 +132,9 @@ end
                        rng = Random.MersenneTwister(7))
     @test all(norm(to_concrete(a[i] - pc[i])) == 0.0 for i in 1:L)
     @test ic.ledger.n_passes == 0 && isempty(ic.ledger.leak) && length(ic.ledger.rho_initial) == 3
+    # the probe measures with the exact `H*Theta` leak, so the closure must too
     id = cbe_bug_step!(copy(psi0), mpo, dt; tol_basis = 1e-6, order = 3, closure_checks = true,
-                       rng = Random.MersenneTwister(7))
+                       fold_omega = false, rng = Random.MersenneTwister(7))
     @test isapprox(ic.ledger.leak_initial, id.ledger.leak_initial; rtol = 1e-12)
     @test isapprox(ic.ledger.rho_initial, id.ledger.rho_initial; rtol = 1e-12)
     @info "UT9 probe: rho_initial $(ic.ledger.rho_initial), leak_initial " *
