@@ -93,6 +93,7 @@ generator `G = -iH - Q/2` is therefore the MPO `H_eff = H - (i/2) Q` at `tau = -
 | dt1e 17471646 | `39e9cea` | `test_dd_cbe.jl`, `test_krylov_closure_steps.jl`, `test_adaptive_search.jl`, `test_adaptive_parallel.jl`, `test_hq_root.jl` | 131/131, 102/102, 32/32, 32/32, 46/46 |
 | dt1e 17471646 | `39e9cea` | `test_liouville.jl` | 91/92: OS-U3 only (parked) |
 | dt1e 17471646 | `39e9cea` | `test_imaginary_time.jl` | 203/205: IT-U6 `:radau2` at `tol_root = 1e-30` reports `:met` (expected `:failed`, `:expv`). Last full run of this file was 10-18 (s49); control dt1m 17471800 runs it at `main` `3139c6e`. 54 min, MaxRSS 2.5 G |
+| dt1m 17471800 | `main` `3139c6e` | `test_imaginary_time.jl` | 203/205, the same two IT-U6 checks: **pre-existing on `main`, not Task 1.** `main` touched this path after 10-18 in `1a1779a` (legacy `cbe_bug_step!` path removed), `dfa2543`, `3139c6e`; not bisected (outside this plan). MaxRSS 1.9 G |
 
 - D1.1 3/3, D1.2 9/9 (root error 1.1e-12 at `tol_root` 1e-6 and 1e-10, Saad estimate 1.8e-11, root
   dim 20 = the whole N = 3 sector; Lanczos on the same root 0.67), D1.4 3/3, D1.5 11/11, D1.6 3/3.
@@ -103,3 +104,25 @@ generator `G = -iH - Q/2` is therefore the MPO `H_eff = H - (i/2) Q` at `tau = -
   Arnoldi to 6e-15 (L = 2) and 7e-14 (L = 6). The flag IS wired (`_tdvp2_bond!`, `_tdvp2_backward`
   pass `hermitian`). D1.2's root Lanczos is wrong because it stops early on Saad's estimate of
   the wrong `T`. A control that can fail needs an early stop (`conv_tol`) or a larger `||tau G||`.
+
+# Task 2 (G0 → G1): hard mathematical unit tests
+
+Branch `plan/dissip-task-2`, cut from `plan/dissip-task-1`. The G0 gate (U01-U05, U08, U12, U17)
+is `tests/sweeps/test_dissipative_t2.jl`; G1/G2 (U06, U07, U09-U11, U13-U16, U18) are not written
+yet, and U07, U13-U15 test the jump engine of plan Task 4.
+
+| item | status | where |
+|---|---|---|
+| pair-loss `Q` (A1/B1) | NEW | `doublon_loss_mpo` (`models/dissipative.jl`): `Σ κ_j n↑n↓`, virtual dim 2 |
+| collective-emission `Q` (A2/B2) | NEW | `collective_emission_mpo`: one transported channel per (hop direction, phase), virtual dim 6 at any `L`. c_ij sits on vertex `(Sm, Sm')`, which the MPO applies as `S⁺_i S⁻_j` (transpose rule, `spin_xx.jl`) |
+| MPO as a matrix on small systems | NEW | `mpo_matrix_element(bra, mpo, ket)`; `mpo_energy` is its `bra = ket` case |
+| bytes per phase (U17) | NEW | `KernelCounters.b_one_site`, `b_root`, `b_env`, `b_compress` |
+| d = 4 Hubbard under `:U1` | FIXED | had never run: `HUB4_*` labels were `((n-1, s),)`, Telum's are `((n-1,), (s,))`; channel B's op-legs (`f'Z`, `f`) needed `legflip` and the op-leg last (`_hub4_half`); the automaton's zero pre-fill is `:none`-only (`91e8c6a`) |
+
+| job | commit | file | result |
+|---|---|---|---|
+| dt2a 17471813 | `fd00dc4` | `test_dissipative_t2.jl` | 180/184. U02 Hubbard `:U1`: ERROR (Duplicate TLIndex, `f'Z` is `(s, op, s)`); U02 emission: `MQ = Q(-k)` exactly (3 fails, c_ij on the wrong vertex). Fixed `ff2473b`, labels `d76cec2`. U03-U17 all pass |
+| dt2a 17471813 | `fd00dc4` | `test_dissipative_t1.jl`, `test_dd_cbe.jl`, `test_krylov_closure.jl` | 51/51, 131/131, 222/222. MaxRSS 2.2 G (cold compile), 21 min |
+| dt2b 17471868 | `ff2473b` | -- | cancelled: the `:U1` labels (`d76cec2`) were found before it ran |
+| dt2c 17471888 | `d76cec2` | `test_dissipative_t2.jl` | 183/184: emission U01/U02 8/8 (fix confirmed). Hubbard `:U1`: ERROR in `oplus`, "column 2 has incompatible spaces on leg 4": the automaton's vacuum-zero pre-fill contradicts a charged hop column. Fixed `91e8c6a` |
+| dt2d 17471938 | `91e8c6a` | `test_dissipative_t2.jl` | **184/184: the G0 gate passes.** MaxRSS 2.0 G, 14 min |
