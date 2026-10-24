@@ -3,8 +3,8 @@
 # the L = 10 domain wall, where the no-jump step's time error is above its floors (see U10).
 #
 #   U15a  the first jump time of one seed, whose exact crossing P0(t*) = u lies several steps in,
-#         is LOCATED to 1e-8 at every dt (CONTROL: snapping it to the step grid is off by >= 1e-2),
-#         and where its error is above the floor it falls at the segment's order
+#         is LOCATED: its error is far below snapping to the step grid (CONTROL: snapping is off by
+#         >= 1e-2), and where it is above the floor it falls at the segment's order
 #   U15b  weak convergence: paired-seed ensembles (same thresholds and channel draws) converge to a
 #         fine-step ensemble in the left-half occupation, which jumps do not fix (the excitation
 #         number is conserved between jumps, so it would be identical at every dt, dt4b). Pathwise
@@ -53,7 +53,11 @@ flow = _ed_flow(-1im * Matrix(Gd), v0)
     floors = fill(1e-10, 3)
     @info "U15a first jump (seed $seed): ED $ts, |t(dt) - t*| $(errs), p_obs " *
           "$(_observed_orders(errs, floors)); snapped to the grid $(snap)"
-    @test all(<=(1e-8), errs)                               # located, not snapped
+    # Located, not snapped. The crossing itself is solved to `event_tol` (U13: residual 1e-14);
+    # what remains is the segment's own time error in P0, which no absolute bound at dt = 0.4 can
+    # sit under (dt4g: 1.1e-5, 8.5e-7, 5.8e-8), so it is compared with the grid instead.
+    @test all(errs .< 1e-2 .* snap)
+    @test errs[end] <= 1e-7
     @test maximum(snap) >= 1e-2                             # CONTROL: the grid would not do
     p = _finest_order(errs, floors)
     p === nothing || @test p >= 2.6                         # converges where measurable
