@@ -374,11 +374,12 @@ function _fock_c(m, basis, target = basis)
     return C
 end
 
-"The bond current `j = -iJ (c'_{b+1,s} c_{b,s} - h.c.)` and `n_{j,s}` on the full Fock space."
+"The bond current `j = iJ (c'_{b+1,s} c_{b,s} - h.c.)` (flow `b -> b+1` under the hopping `-J`) and
+`n_{j,s}` on the full Fock space."
 function _fock_current(L, b, s, J)
     bs = 0:(4^L - 1)
     c1, c2 = _fock_c(hub_mode(b, s), bs), _fock_c(hub_mode(b + 1, s), bs)
-    return -1im * J * (c2' * c1 - c1' * c2)
+    return 1im * J * (c2' * c1 - c1' * c2)
 end
 _fock_n(L, j, s) = Diagonal(ComplexF64[hub_occ(b, hub_mode(j, s)) for b in 0:(4^L - 1)])
 

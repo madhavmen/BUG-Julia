@@ -245,18 +245,18 @@ end
     hub4_current_mpo(L, b, s; J = 1.0) -> MPO
 
 The spin-`s` (0 = ↑, 1 = ↓) particle current across bond `(b, b+1)`,
-`j = -iJ (c'_{b+1,s} c_{b,s} - c'_{b,s} c_{b+1,s})`, positive for flow towards larger `i`: under
-`hubbard_aa_mpo_d4` with hopping `J` on that bond, `d<n_{b,s}>/dt = j_{b-1} - j_b`. The two hop
-channels of `_hub4_channels` on bond `b` only, with weights `±iJ`. The MPO applies each channel as
-its transpose (`spin_xx.jl`): channel A, stored `c'_{b+1} c_b`, applies `c'_b c_{b+1}` and carries
-`+iJ`.
+`j = iJ (c'_{b+1,s} c_{b,s} - c'_{b,s} c_{b+1,s})`, positive for flow towards larger `i`: under
+`hubbard_aa_mpo_d4` (hopping `-J`) on that bond, `d<n_{b,s}>/dt = i<[H, n_{b,s}]> = j_{b-1} - j_b`.
+The two hop channels of `_hub4_channels` on bond `b` only, with weights `∓iJ`. The MPO applies each
+channel as its transpose (`spin_xx.jl`): channel A, stored `c'_{b+1} c_b`, applies `c'_b c_{b+1}` and
+carries `-iJ`.
 """
 function hub4_current_mpo(L::Int, b::Int, s::Int; J::Real = 1.0)
     1 <= b <= L - 1 || throw(ArgumentError("bond must be in 1:$(L - 1), got $b"))
     s in (0, 1) || throw(ArgumentError("spin must be 0 (up) or 1 (down), got $s"))
     q = hub4_space()
     chans = _hub4_channels(q)[(2s + 1):(2s + 2)]
-    w = (ComplexF64(0, J), ComplexF64(0, -J))
+    w = (ComplexF64(0, -J), ComplexF64(0, J))
     Ws = Any[]
     for i in 1:L
         tl, tr = "W,$(i - 1)", "W,$i"
