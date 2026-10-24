@@ -22,6 +22,7 @@
 # Env (defaults): DR_MODEL (A2), DR_L (8), DR_MODE (no_jump), DR_INT (bug), DR_DT (0.05), DR_T (1),
 #   DR_EVERY (= DR_DT), DR_ORDER (3), DR_TOLB (1e-8), DR_TOLR (1e-12), DR_TOLT (1e-10),
 #   DR_MAXDIM (256), DR_CLOSURE (1 for A2/B2, else 0: USER 2026-10-24), DR_KEEP_KRYLOV (0),
+#   DR_EXACT (0; 1 = the complete DD probe, the lossless arm of the Task 5 order ablation),
 #   DR_TARGET (none), DR_CHECK (4), DR_NTRAJ (100), DR_SEED (1), DR_REF (auto: ed when small),
 #   A1/B1: DR_U (4), DR_KAPPA (1), DR_START (dbl_rich | low_dbl; B1: biased leads), DR_JLINK (1);
 #   A2/B2: DR_JZ (1), DR_GAMMA (1), DR_GM (= DR_GAMMA), DR_KA (pi/3), DR_NEXC (L/2 for A2,
@@ -47,6 +48,7 @@ const MAXDIM = parse(Int, env("DR_MAXDIM", 256))
 const NONLOCAL = MODEL in (:A2, :B2)
 const CLOSURE = env("DR_CLOSURE", NONLOCAL ? 1 : 0) == "1"
 const KEEPK = parse(Int, env("DR_KEEP_KRYLOV", 0))
+const EXACT = env("DR_EXACT", 0) == "1"
 const TARGET = (x = env("DR_TARGET", "none"); x == "none" ? nothing : parse(Float64, x))
 const CHECK = parse(Int, env("DR_CHECK", 4))
 const NTRAJ = parse(Int, env("DR_NTRAJ", 100))
@@ -121,9 +123,9 @@ end
 
 const M = build_model()
 const G = no_jump_mpo(M.H, M.Q)
-const TAG = @sprintf("%s_L%d_%s_%s_dt%g_b%g_t%g_%s%s%s_seed%d", MODEL, L, MODE, INT, DT, TOLB, TOLT,
-                     START, TARGET === nothing ? "" : "_tau$(TARGET)", KEEPK > 0 ? "_keep$(KEEPK)" : "",
-                     SEED)
+const TAG = @sprintf("%s_L%d_%s_%s_dt%g_b%g_r%g_t%g_%s%s%s%s_seed%d", MODEL, L, MODE, INT, DT, TOLB,
+                     TOLR, TOLT, START, TARGET === nothing ? "" : "_tau$(TARGET)",
+                     KEEPK > 0 ? "_keep$(KEEPK)" : "", EXACT ? "_exact" : "", SEED)
 const OUT = env("DR_OUT", "dissipative_$(TAG).json")
 
 # ── the step ────────────────────────────────────────────────────────────────────────────────
@@ -147,7 +149,7 @@ function step!(psi, h)
     if INT === :bug
         info = cbe_bug_step!(psi, G, ComplexF64(-im * h); hermitian = false, order = ORDER,
                              tol_basis = TOLB, tol_root = TOLR, tol_trunc = TOLT, maxdim = MAXDIM,
-                             closure_checks = CLOSURE,
+                             closure_checks = CLOSURE, exact = EXACT,
                              keep_states = KEEPK > 0 ? krylov_keep(psi) : Any[])
         lg, rc = info.ledger, info.record
         logv!("r_aug", lg.r_aug); logv!("expv_iters", lg.expv_iters); logv!("n_probes", lg.n_probes)
@@ -179,7 +181,8 @@ if REF == "ed" && NONLOCAL
     include(joinpath(@__DIR__, "..", "tests", "common", "dissipative_fixtures.jl"))
     em = _emission_model(L; Jz = M.par["Jz"], gp = M.par["gamma_plus"], gm = M.par["gamma_minus"],
                          k = M.par["ka"], start = [:down for _ in 1:L])
-    global dense_amps = (Gd = em.Gd, v0 = dense_state(M.psi))
+    v0 = dense_state(M.psi)
+    global dense_amps = (flow = _ed_flow(-1im * em.Gd, v0), v0 = v0)
 end
 
 # ── the run ─────────────────────────────────────────────────────────────────────────────────
@@ -201,7 +204,7 @@ if MODE === :no_jump
                              if dense_amps !== nothing
                                  # the state is the normalised conditional one: compare directions
                                  t = tg[nrec[] + 1]
-                                 w = exp(-im * t * dense_amps.Gd) * dense_amps.v0
+                                 w = dense_amps.flow(t)
                                  v = dense_state(p)
                                  x["err_state"] = norm(v / norm(v) - w / norm(w) * (dot(w, v) / abs(dot(w, v))))
                                  x["logp_exact"] = log(real(dot(w, w)) / real(dot(dense_amps.v0, dense_amps.v0)))
@@ -235,7 +238,8 @@ result["peak_rss"] = Sys.maxrss()
 result["config"] = Dict("model" => string(MODEL), "L" => L, "mode" => string(MODE), "int" => string(INT),
                         "dt" => DT, "T" => TF, "every" => EVERY, "order" => ORDER, "tol_basis" => TOLB,
                         "tol_root" => TOLR, "tol_trunc" => TOLT, "maxdim" => MAXDIM,
-                        "closure_checks" => CLOSURE, "keep_krylov" => KEEPK, "start" => string(START),
+                        "closure_checks" => CLOSURE, "keep_krylov" => KEEPK, "exact" => EXACT,
+                        "start" => string(START),
                         "target" => TARGET === nothing ? "none" : TARGET, "check_every" => CHECK,
                         "ntraj" => NTRAJ, "seed" => SEED, "ref" => REF, "params" => M.par,
                         "threads" => Threads.nthreads())
