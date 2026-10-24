@@ -167,6 +167,7 @@ export PairVertex, pair_vertices, pair_mpo,
        hub4_space, hub4_basis_index, hub4_sector, hub4_product_state,
        HUB4_EMPTY, HUB4_UP, HUB4_DOWN, HUB4_BOTH,
        hubbard_aa_mpo_d4, hub4_density, hub4_imbalance, hub4_cdw_occupations,
+       hub4_current_mpo, pair_loss_junction,
        # dissipative.jl -- the dissipative plan's loss operators Q, for `no_jump_mpo(H, Q)`
        doublon_loss_mpo, collective_emission_mpo,
        jump_mpo, JumpChannel, pair_loss_channels, collective_emission_channels,

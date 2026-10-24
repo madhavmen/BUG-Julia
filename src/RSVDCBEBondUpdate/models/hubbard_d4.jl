@@ -158,10 +158,12 @@ function _hub4_half(O, side::Symbol)
 end
 
 """
-    hubbard_aa_mpo_d4(L; J, Delta, U, phi, beta) -> MPO
+    hubbard_aa_mpo_d4(L; J, Delta, U, phi, beta, Vup, Vdn) -> MPO
 
 The Aubry-Andre-Hubbard chain of arXiv:1501.05661 on `L` fused d = 4 sites. `L` counts physical
-sites, not modes.
+sites, not modes. `J` is one hopping or one per bond (`J[b]` on `(b, b+1)`: the dissipative plan's
+B1 junction, its central `J_link`); `Vup`/`Vdn` add spin-resolved on-site potentials
+`Σ_i (Vup[i] n_i↑ + Vdn[i] n_i↓)` (a lead bias), on top of the spin-independent `Delta` field.
 
 Virtual dimension 6 (id, four hopping channels, done), independent of `L`, `U` and `Delta`.
 `beta = 532/738` is the experiment's wavelength ratio; `phi` is the realisation label.
@@ -169,10 +171,18 @@ Virtual dimension 6 (id, four hopping channels, done), independent of `L`, `U` a
 The field sits in the id -> done slot, so it must survive both boundary reductions. That corner is
 zeroed by a field-free MPO at i = 1 and i = L, which would silently remove the potential at the ends.
 """
-function hubbard_aa_mpo_d4(L::Int; J::Float64 = 1.0, Delta::Float64 = 0.0,
-                           U::Float64 = 0.0, phi::Float64 = 0.0,
-                           beta::Float64 = 532 / 738)
+function hubbard_aa_mpo_d4(L::Int; J::Union{Real, AbstractVector{<:Real}} = 1.0,
+                           Delta::Float64 = 0.0, U::Float64 = 0.0, phi::Float64 = 0.0,
+                           beta::Float64 = 532 / 738,
+                           Vup::Union{Nothing, AbstractVector{<:Real}} = nothing,
+                           Vdn::Union{Nothing, AbstractVector{<:Real}} = nothing)
     L >= 2 || throw(ArgumentError("hubbard_aa_mpo_d4 needs L >= 2, got $L"))
+    Jb = J isa Real ? fill(Float64(J), L - 1) : collect(Float64, J)
+    length(Jb) == L - 1 || throw(DimensionMismatch("hubbard_aa_mpo_d4: $(length(Jb)) hoppings for $(L - 1) bonds"))
+    for V in (Vup, Vdn)
+        V === nothing || length(V) == L || throw(DimensionMismatch(
+            "hubbard_aa_mpo_d4: $(length(V)) on-site potentials for $L sites"))
+    end
     sym = symmetry_mode()
     q = hub4_space(sym)
 
@@ -210,12 +220,14 @@ function hubbard_aa_mpo_d4(L::Int; J::Float64 = 1.0, Delta::Float64 = 0.0,
 
         onsite = to_concrete(h[i] * ntot)
         U == 0.0 || (onsite = to_concrete(onsite + U * nupdn))
+        Vup === nothing || (onsite = to_concrete(onsite + Vup[i] * nu))
+        Vdn === nothing || (onsite = to_concrete(onsite + Vdn[i] * nd))
         mat[1, ncol] = _mpo_block(onsite, i, tl, tr, :none)
 
         for (t, (open_op, close_op)) in enumerate(chans)
             i < L && (mat[1, 1 + t] = _mpo_block(open_op, i, tl, tr,
                                                  _side(open_op, :left)))
-            i > 1 && (mat[1 + t, ncol] = to_concrete(-J *
+            i > 1 && (mat[1 + t, ncol] = to_concrete(-Jb[i - 1] *
                           _mpo_block(close_op, i, tl, tr, _side(close_op, :right))))
         end
 
@@ -227,6 +239,63 @@ function hubbard_aa_mpo_d4(L::Int; J::Float64 = 1.0, Delta::Float64 = 0.0,
         push!(Ws, to_concrete(oplus(mat, (1, 4))))
     end
     return MPO(Ws)
+end
+
+"""
+    hub4_current_mpo(L, b, s; J = 1.0) -> MPO
+
+The spin-`s` (0 = ↑, 1 = ↓) particle current across bond `(b, b+1)`,
+`j = -iJ (c'_{b+1,s} c_{b,s} - c'_{b,s} c_{b+1,s})`, positive for flow towards larger `i`: under
+`hubbard_aa_mpo_d4` with hopping `J` on that bond, `d<n_{b,s}>/dt = j_{b-1} - j_b`. The two hop
+channels of `_hub4_channels` on bond `b` only, with weights `±iJ`. The MPO applies each channel as
+its transpose (`spin_xx.jl`): channel A, stored `c'_{b+1} c_b`, applies `c'_b c_{b+1}` and carries
+`+iJ`.
+"""
+function hub4_current_mpo(L::Int, b::Int, s::Int; J::Real = 1.0)
+    1 <= b <= L - 1 || throw(ArgumentError("bond must be in 1:$(L - 1), got $b"))
+    s in (0, 1) || throw(ArgumentError("spin must be 0 (up) or 1 (down), got $s"))
+    q = hub4_space()
+    chans = _hub4_channels(q)[(2s + 1):(2s + 2)]
+    w = (ComplexF64(0, J), ComplexF64(0, -J))
+    Ws = Any[]
+    for i in 1:L
+        tl, tr = "W,$(i - 1)", "W,$i"
+        W = if i == b
+            mat = Matrix{Any}(nothing, 1, 2)
+            for (t, (op, _)) in enumerate(chans)
+                mat[1, t] = _mpo_block(op, i, tl, tr, _side(op, :left))
+            end
+            oplus(mat, (1, 4))
+        elseif i == b + 1
+            mat = Matrix{Any}(nothing, 2, 1)
+            for (t, (_, cl)) in enumerate(chans)
+                mat[t, 1] = to_concrete(w[t] * _mpo_block(cl, i, tl, tr, _side(cl, :right)))
+            end
+            oplus(mat, (1, 4))
+        else
+            _mpo_block(q.I, i, tl, tr, :none)
+        end
+        push!(Ws, to_concrete(W))
+    end
+    return MPO(Ws)
+end
+
+"""
+    pair_loss_junction(L; J = 1.0, J_link = 1.0, U = 0.0, kappa, j0 = L ÷ 2) -> NamedTuple
+
+The plan's B1 model: a Hubbard chain of hopping `J` whose sink site `j0` is joined to both leads by
+`J_link` (bonds `(j0-1, j0)` and `(j0, j0+1)`), on-site `U`, and ONE jump channel, the pair loss
+`L_0 = √κ c_{j0↓} c_{j0↑}`. Returns `(; H, Q, G, channels, j0, Jb)`; `Jb` are the bond hoppings.
+`J_link = 0` decouples the leads, for the preparation.
+"""
+function pair_loss_junction(L::Int; J::Real = 1.0, J_link::Real = 1.0, U::Real = 0.0, kappa::Real,
+                            j0::Int = L ÷ 2)
+    2 <= j0 <= L - 1 || throw(ArgumentError("the sink must be an interior site, got j0 = $j0 of $L"))
+    Jb = [b in (j0 - 1, j0) ? Float64(J_link) : Float64(J) for b in 1:(L - 1)]
+    H = hubbard_aa_mpo_d4(L; J = Jb, U = Float64(U))
+    k = [j == j0 ? Float64(kappa) : 0.0 for j in 1:L]
+    Q = doublon_loss_mpo(L; kappa = k)
+    return (; H, Q, G = no_jump_mpo(H, Q), channels = pair_loss_channels(L; kappa = k), j0, Jb)
 end
 
 # ── observables ─────────────────────────────────────────────────────────────────────────────

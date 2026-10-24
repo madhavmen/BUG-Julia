@@ -45,13 +45,16 @@ _annihilate(b, m) = hub_occ(b, m) == 0 ? (0, b) :
 
 """
 `(H, Q, jumps)` of the Hubbard chain with pair loss on the Fock space (bit `m` = mode `m`),
-`H = -J Σ (c'c + h.c.) + U Σ n↑n↓`, `L_j = √κ_j c_j↓ c_j↑`, on the patterns `basis` (default all
+`H = -Σ_b J_b (c'c + h.c.) + U Σ n↑n↓ + Σ (Vup n↑ + Vdn n↓)` (`J` one hopping or one per bond),
+`L_j = √κ_j c_j↓ c_j↑`, on the patterns `basis` (default all
 `4^L`; a sector from [`_hub_sector`](@ref) for ED beyond L = 4). On the full space `Q = Σ L'L` from
 the jumps; on a sector, where the jumps leave the basis, `jumps` is `nothing` and `Q` sums
 `|<b'|L_j|b>|²` directly. `wrong = true` is the CONTROL: the up-spin hop between `j` and `j+1`
 takes an extra `(-1)^{n_j↓}`, a Hermitian sign error that no basis phase removes.
 """
-function _hub_fock(L; J = 1.0, U = 0.0, kappa = zeros(L), wrong = false, basis = 0:(4^L - 1))
+function _hub_fock(L; J = 1.0, U = 0.0, kappa = zeros(L), wrong = false, basis = 0:(4^L - 1),
+                   Vup = zeros(L), Vdn = zeros(L))
+    Jb = J isa Number ? fill(J, L - 1) : J
     D = length(basis)
     full = D == 4^L
     pos = Dict(b => k for (k, b) in enumerate(basis))
@@ -61,7 +64,7 @@ function _hub_fock(L; J = 1.0, U = 0.0, kappa = zeros(L), wrong = false, basis =
     for (k, b) in enumerate(basis)
         for j in 1:L
             nu, nd = hub_occ(b, hub_mode(j, 0)), hub_occ(b, hub_mode(j, 1))
-            H[k, k] += U * nu * nd
+            H[k, k] += U * nu * nd + Vup[j] * nu + Vdn[j] * nd
             s1, b1 = _annihilate(b, hub_mode(j, 0))
             s2, b2 = s1 == 0 ? (0, b1) : _annihilate(b1, hub_mode(j, 1))
             s2 == 0 && continue
@@ -69,12 +72,13 @@ function _hub_fock(L; J = 1.0, U = 0.0, kappa = zeros(L), wrong = false, basis =
             full && (jumps[j][pos[b2], k] = sqrt(kappa[j]) * s1 * s2)
         end
         for j in 1:(L - 1), σ in 0:1
+            Jb[j] == 0 && continue          # a cut bond (decoupled leads) leaves the basis closed
             m, mp = hub_mode(j, σ), hub_mode(j + 1, σ)
             for (a, c) in ((m, mp), (mp, m))
                 s = hub_sign(b, a, c)
                 s == 0 && continue
                 wrong && σ == 0 && hub_occ(b, hub_mode(j, 1)) == 1 && (s = -s)
-                H[pos[b ⊻ (1 << a) ⊻ (1 << c)], k] += -J * s     # hops conserve (N↑, N↓)
+                H[pos[b ⊻ (1 << a) ⊻ (1 << c)], k] += -Jb[j] * s  # hops conserve (N↑, N↓)
             end
         end
     end
@@ -355,4 +359,56 @@ largest `|mean - exact| / (z stderr + atol)`."
 function _within_ci(means, errs, exact; z = 4.0, atol = 2e-3)
     dev = maximum(abs(m - e) / (z * s + atol) for (m, s, e) in zip(means, errs, exact))
     return dev <= 1, dev
+end
+
+# ── the B1 junction and B2 counting statistics (Task 4) ──
+
+"The Fock annihilator of mode `m` on the patterns `basis` (to the patterns `target`), dense."
+function _fock_c(m, basis, target = basis)
+    pos = Dict(b => k for (k, b) in enumerate(target))
+    C = zeros(ComplexF64, length(target), length(basis))
+    for (k, b) in enumerate(basis)
+        sg, b2 = _annihilate(b, m)
+        sg == 0 || haskey(pos, b2) && (C[pos[b2], k] = sg)
+    end
+    return C
+end
+
+"The bond current `j = -iJ (c'_{b+1,s} c_{b,s} - h.c.)` and `n_{j,s}` on the full Fock space."
+function _fock_current(L, b, s, J)
+    bs = 0:(4^L - 1)
+    c1, c2 = _fock_c(hub_mode(b, s), bs), _fock_c(hub_mode(b + 1, s), bs)
+    return -1im * J * (c2' * c1 - c1' * c2)
+end
+_fock_n(L, j, s) = Diagonal(ComplexF64[hub_occ(b, hub_mode(j, s)) for b in 0:(4^L - 1)])
+
+"The projector onto the dark states `ker L₊ ∩ ker L₋` of the dense jumps `Ld`."
+function _dark_projector(Ld; tol = 1e-10)
+    F = svd(reduce(vcat, Ld); full = true)
+    r = count(>(tol), F.S)
+    K = F.V[:, (r + 1):end]
+    return K * K'
+end
+
+"""
+The photon-count distribution `P(n, t) = Tr ρ_n(t)`, `n = 0..nmax`, of the jumps `Ld` from `rho0`:
+the count-resolved master equation `dρ_n/dt = L0 ρ_n + J ρ_{n-1}`, `J ρ = Σ X ρ X'`, `L0 = L - J`,
+with `ρ_nmax` absorbing every later count (so `Σ_n P = 1`). Row-major `vec` as `sparse_lindblad.jl`.
+"""
+function _count_distribution(Hd, Ld, rho0, t; nmax)
+    D = size(Hd, 1)
+    S = lindbladian_from(Hd, Ld)
+    Jsup = sum(kron(sparse(X), sparse(conj(X))) for X in Ld)
+    L0 = S - Jsup
+    n = nmax + 1
+    blocks = spzeros(ComplexF64, n * D^2, n * D^2)
+    for k in 1:n
+        r = ((k - 1) * D^2 + 1):(k * D^2)
+        blocks[r, r] = k < n ? L0 : S                     # the last block keeps every later jump
+        k > 1 && (blocks[r, r .- D^2] = Jsup)
+    end
+    v = zeros(ComplexF64, n * D^2)
+    v[1:(D^2)] = vec_rm(ComplexF64.(rho0))
+    w = arnoldi_expv_sparse(blocks, v, t; tol = 1e-12)
+    return [real(tr(unvec_rm(w[((k - 1) * D^2 + 1):(k * D^2)], D))) for k in 1:n]
 end
