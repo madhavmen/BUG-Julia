@@ -196,11 +196,14 @@ function hubbard_aa_mpo_d4(L::Int; J::Float64 = 1.0, Delta::Float64 = 0.0,
         Iid  = _mpo_block(q.I, i, tl, tr, :none)
         Znil = to_concrete(0.0 * Iid)
 
-        # ── every slot filled, then overwritten ──
+        # ── under :none every slot filled, then overwritten ──
         # `oplus` infers an omitted entry's spaces from its row and column, which fails on a row that is
-        # empty at some site. Pre-filling with shape-correct zeros avoids that.
-        mat = Matrix{Any}(undef, ncol, ncol)
-        fill!(mat, Znil)
+        # empty at some site. Pre-filling with shape-correct zeros avoids that. Under :U1 a hop
+        # column's virtual space is the CHARGED op-leg, which a vacuum zero contradicts ("column 2
+        # has incompatible spaces on leg 4", dt2c); every row and column below has an entry, so
+        # there the gaps are left to `oplus`.
+        mat = Matrix{Any}(nothing, ncol, ncol)
+        sym === :none && fill!(mat, Znil)
 
         i < L && (mat[1, 1] = Iid)                     # stay `id`
         i > 1 && (mat[ncol, ncol] = Iid)               # stay `done`
