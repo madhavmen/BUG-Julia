@@ -277,3 +277,82 @@ _emission_jumps(L; gp, gm, k) =
 _spin_states(L) = [product_state([((idx >> (L - j)) & 1) == 0 ? :up : :down for j in 1:L])
                    for idx in 0:(2^L - 1)]
 _spin_charge(idx, L) = count(j -> ((idx >> (L - j)) & 1) == 0, 1:L)
+
+# ── quantum-jump trajectories (Task 4) ──
+
+"""
+Collective emission (A2) on `L` spins: XXZ in a staggered field, `L_± = √Γ_± Σ_j e^{±ikj} S⁻_j`.
+`start` is `:warm` (Neel after two TDVP2 steps of `H`) or a product-state occupation list.
+Returns the MPOs `H, Q, G`, their dense `Hd, Qd`, `Gd = Hd - (i/2)Qd`, the dense jumps `Ld`, the
+channels `ch` and `psi0`.
+"""
+function _emission_model(L; Jz = 1.0, gp = 1.0, gm = gp, k = π / 3, start = :warm)
+    set_symmetry!(:U1)
+    h = [0.2 * (-1)^j for j in 1:L]
+    H = field_mpo_from_terms(xxz_chain(L; J = 1.0, delta = Jz), h)
+    Q = collective_emission_mpo(L; gamma_plus = gp, gamma_minus = gm, k = k)
+    Lp, Lm = _emission_jumps(L; gp = gp, gm = gm, k = k)
+    Ld = [Matrix(Lp), Matrix(Lm)][[gp > 0, gm > 0]]
+    Qd = sum(X' * X for X in Ld)
+    Hd = Matrix(dense_heisenberg(L; J = 1.0, delta = Jz) +
+                sum(h[j] * _embed(_SZ, j, L) for j in 1:L))
+    psi0 = start === :warm ? neel_state(L) : product_state(start)
+    if start === :warm
+        for _ in 1:2
+            tdvp2_step!(psi0, H, ComplexF64(-0.2im); maxdim = 64, trunc_thresh = 1e-14)
+        end
+    end
+    ch = collective_emission_channels(L; gamma_plus = gp, gamma_minus = gm, k = k)
+    return (; H, Q, G = no_jump_mpo(H, Q), Hd, Qd, Gd = Hd - 0.5im * Qd, Ld, ch, psi0)
+end
+
+"The excitation numbers a dense spin vector occupies."
+_spin_support(v, L; tol = 1e-12) = Set(_spin_charge(b - 1, L) for b in eachindex(v) if abs(v[b]) > tol)
+
+"`t -> exp(t A) v0` for a small diagonalisable `A`, from one eigendecomposition (the jump-time
+bisection reads the flow hundreds of times)."
+function _ed_flow(A, v0)
+    F = eigen(Matrix(A))
+    c = F.vectors \ v0
+    return t -> F.vectors * (exp.(F.values .* t) .* c)
+end
+
+"The first jump time of threshold `u`: `||v(t)||² = u ||v0||²` on the exact no-jump `flow`, by
+bisection on `[0, tmax]`; `Inf` if the survival stays above `u`."
+function _ed_jump_time(flow, v0, u; tmax, tol = 1e-13)
+    f(t) = norm(flow(t))^2 / norm(v0)^2 - u
+    f(tmax) > 0 && return Inf
+    a, b = 0.0, Float64(tmax)
+    while b - a > tol
+        m = (a + b) / 2
+        f(m) > 0 ? (a = m) : (b = m)
+    end
+    return (a + b) / 2
+end
+
+"""
+`(rhos, counts)` on the uniform grid `ts` (from 0): the Lindblad states `exp(t S) rho0` and the mean
+jump count `∫_0^t Tr(Q rho) dt'`, Simpson on `nsub` (even) substeps per interval.
+"""
+function _lindblad_counts(S, Q, rho0, ts; nsub = 8, tol = 1e-12)
+    h = (ts[2] - ts[1]) / nsub
+    all(abs(ts[k + 1] - ts[k] - nsub * h) < 1e-12 for k in 1:(length(ts) - 1)) ||
+        throw(ArgumentError("_lindblad_counts needs a uniform grid"))
+    fine = [ts[1] + m * h for m in 1:(nsub * (length(ts) - 1))]
+    rf = vcat([Matrix{ComplexF64}(rho0)], sparse_lindblad_trajectory(S, rho0, fine; tol = tol))
+    q = [real(tr(Q * r)) for r in rf]
+    counts = [0.0]
+    for k in 1:(length(ts) - 1)
+        y = q[((k - 1) * nsub + 1):(k * nsub + 1)]
+        push!(counts, counts[end] + h / 3 * (y[1] + 4 * sum(y[2:2:end - 1]) +
+                                               2 * sum(y[3:2:end - 2]; init = 0.0) + y[end]))
+    end
+    return rf[1:nsub:end], counts
+end
+
+"`(ok, worst)`: every ensemble mean within `z` standard errors plus `atol` of its exact value, and the
+largest `|mean - exact| / (z stderr + atol)`."
+function _within_ci(means, errs, exact; z = 4.0, atol = 2e-3)
+    dev = maximum(abs(m - e) / (z * s + atol) for (m, s, e) in zip(means, errs, exact))
+    return dev <= 1, dev
+end
