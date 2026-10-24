@@ -140,7 +140,7 @@ The trajectory averages and jump counts of A1/A2 need the jump engine: LATER(T4)
 |---|---|---|
 | baseline | USER 2026-10-24 | standard two-site TDVP (`tdvp2_step!`, `hermitian = false`, same MPO) is the plan's only baseline; the split-loss TDVP of `6faaa23` is removed (`9b99150`) |
 | bond-charge decoders | FIXED `4f2d96c` | the outgoing bond leg carries the NEGATED left-block charge; before the fix the A1 sector-rank checks passed vacuously |
-| A2 order 3 from a product state | `2530c55` (tests) | see below; the A2 BUG settings set `closure_checks = true`, the solver default stays OFF (USER 10-17) |
+| A2 order 3 from a product state | `2530c55` (tests) | see below; the A2 BUG settings set `closure_checks = true`, the solver default stays OFF (USER 10-17). USER 2026-10-24: every nonlocal-`Q` run (A2/B2 pilot and production) sets it too; the plan's driver sketch and Task 6/7 items say so |
 
 **A2 at L = 8 (dt3a, dt3b): the first step missed `Q`'s long-range hops.** The error is all in
 step 1 and scales with `dt Γ`. dt3e (`dt3diag2.jl`, one step from the product state, Γ = 2,
