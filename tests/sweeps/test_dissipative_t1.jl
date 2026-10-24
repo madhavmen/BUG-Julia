@@ -94,15 +94,19 @@ end
 end
 
 @testset "D1.3: two-site TDVP on the same generator, exact at L = 2" begin
+    kw = (maxdim = 8, trunc_thresh = 1e-14, maxiter = 30, tol = 1e-15)
     _, _, G2, Gd2, _ = _lossy_xx(2; delta = 0.5)
-    for herm in (false, true)
-        psi = neel_state(2)
-        w0 = dense_state(psi)
-        tdvp2_step!(psi, G2, tau; hermitian = herm, maxdim = 8, trunc_thresh = 1e-14,
-                    maxiter = 30, tol = 1e-15)
-        err = norm(dense_state(psi) - exp(tau * Gd2) * w0) / norm(w0)
-        herm ? (@test err > 1e-3) : (@test err < 1e-12)              # Lanczos is the control
-    end
+    psi = neel_state(2)
+    w0 = dense_state(psi)
+    tdvp2_step!(psi, G2, tau; hermitian = false, kw...)
+    @test norm(dense_state(psi) - exp(tau * Gd2) * w0) / norm(w0) < 1e-12
+    # CONTROL on the L = 6 state: at L = 2 the N = 1 sector is two-dimensional and the projected
+    # G is complex symmetric, so Lanczos's tridiagonal IS that 2x2 and cannot be wrong there
+    a, b = copy(psi0), copy(psi0)
+    kw6 = merge(kw, (maxdim = 64,))
+    tdvp2_step!(a, G, tau; hermitian = false, kw6...)
+    tdvp2_step!(b, G, tau; hermitian = true, kw6...)
+    @test norm(dense_state(a) - dense_state(b)) > 1e-3 * norm(v0)
 end
 
 @testset "D1.4: lossless runs are the Hermitian step" begin
@@ -120,7 +124,9 @@ end
 
 @testset "D1.5: order = 3 dispatch and no dense two-site CBE action" begin
     kw = (hermitian = false, tol_basis = 1e-8, tol_root = 1e-12, maxdim = 64)
-    i1 = cbe_bug_step!(copy(psi0), G, tau; order = 1, kw...)
+    # from the Neel state: psi0 is full rank (its root space is the whole N = 3 sector), so the
+    # half-sweep CBE has no room and would stream nothing
+    i1 = cbe_bug_step!(neel_state(L), G, tau; order = 1, kw...)
     @test i1.record.order == 1 && i1.record.closure_policy === :none
     @test i1.ledger.n_h2_leak == 0                   # the half-sweep CBE streams, never H*Theta
     @test i1.record.counters.n_stream > 0 && i1.record.counters.n_qr > 0
