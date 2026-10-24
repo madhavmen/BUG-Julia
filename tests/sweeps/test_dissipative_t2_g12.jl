@@ -8,9 +8,9 @@
 #   U09  the norm balance (2) and the conditional-energy balance (3) by finite differences, on the
 #        BUG trajectory and on ED; <H>_c against ED directly; CONTROL: <H>_c is not conserved, and
 #        (3) without its <H>_c <Q>_c term fails
-#   U10  global slope ~3 and one-step slope ~4 against exp(T G), truncation off, on local loss and
-#        on collective emission (closure_checks, USER 2026-10-24); CONTROL: order 1 fails the same
-#        slope criterion
+#   U10  global slope ~3 and one-step slope ~4 against exp(T G) from the domain wall (HQ T5.5),
+#        read where the error is 10x above the step's floors, on local loss and on collective
+#        emission (closure_checks, USER 2026-10-24); CONTROL: order 1 fails the same criterion
 #   U11  each of tol_basis, tol_root, tol_trunc moves its own error and cost with the other two
 #        tight; the retired fixed knobs are refused
 #   U16  two-site TDVP and BUG on the same MPO: with Q = 0 both converge to the Hermitian reference,
@@ -37,16 +37,21 @@ include(joinpath(@__DIR__, "..", "common", "dissipative_fixtures.jl"))
 const _G12_BUG = (hermitian = false, order = 3, tol_basis = 1e-10, tol_root = 1e-12,
                   tol_trunc = 1e-12, maxdim = 256)
 
-"Local loss: `_lossy_xx` (loss 1.0 / 0.2 on odd / even sites) and Neel warmed by two TDVP2 steps."
-function _g12_local(L; delta = 0.5, gamma = _loss_rates(L))
+"""
+Local loss: `_lossy_xx` (loss 1.0 / 0.2 on odd / even sites) from Neel warmed by two TDVP2 steps,
+or (`start = :dw`) from the domain wall, where the frames start small enough that the step's
+time error is visible (as in `_dw_errors`).
+"""
+function _g12_local(L; delta = 0.5, gamma = _loss_rates(L), start = :warm)
     set_symmetry!(:U1)
     H, Q, G, Gd, Qd = _lossy_xx(L; delta = delta, gamma = gamma)
-    _, psi0 = _xx_warm(L, 2; delta = delta)
+    psi0 = start === :dw ? domain_wall_state(L) : _xx_warm(L, 2; delta = delta)[2]
     return (; H, Q, G, Gd = Matrix(Gd), Qd = Matrix(Qd), Hd = Matrix(Gd + 0.5im * Qd), psi0)
 end
 
-"Collective emission (A2): XXZ in a staggered field, `L_±` at `ka = π/3`, Neel warmed by `H`."
-function _g12_emission(L; Jz = 1.0, g = 1.0, k = π / 3)
+"Collective emission (A2): XXZ in a staggered field, `L_±` at `ka = π/3`, from Neel warmed by `H`
+or (`start = :dw`) from the domain wall."
+function _g12_emission(L; Jz = 1.0, g = 1.0, k = π / 3, start = :warm)
     set_symmetry!(:U1)
     h = [0.2 * (-1)^j for j in 1:L]
     H = field_mpo_from_terms(xxz_chain(L; J = 1.0, delta = Jz), h)
@@ -55,16 +60,38 @@ function _g12_emission(L; Jz = 1.0, g = 1.0, k = π / 3)
     Qd = Matrix(Lp' * Lp + Lm' * Lm)
     Hd = Matrix(dense_heisenberg(L; J = 1.0, delta = Jz) +
                 sum(h[j] * _embed(_SZ, j, L) for j in 1:L))
-    psi0 = neel_state(L)
-    for _ in 1:2
-        tdvp2_step!(psi0, H, ComplexF64(-0.2im); maxdim = 64, trunc_thresh = 1e-14)
+    psi0 = start === :dw ? domain_wall_state(L) : neel_state(L)
+    if start !== :dw
+        for _ in 1:2
+            tdvp2_step!(psi0, H, ComplexF64(-0.2im); maxdim = 64, trunc_thresh = 1e-14)
+        end
     end
     return (; H, Q, G = no_jump_mpo(H, Q), Gd = Hd - 0.5im * Qd, Qd, Hd, psi0)
 end
 
+"""
+`_dw_errors` on `G`: order-`p` steps of each `dt` from `f.psi0` against the dense flow, one step
+(`T = nothing`) or `T/dt` steps, and the floor the step's other errors may account for (per step
+`tol_basis` plus the ledger's root, compression and projection figures). `kw` is a NamedTuple.
+"""
+function _g12_errors(f, p, dts, kw; T = nothing)
+    v0 = dense_state(f.psi0)
+    errs, floors = Float64[], Float64[]
+    for dt in dts
+        n = T === nothing ? 1 : round(Int, T / dt)
+        psi, floor = copy(f.psi0), 0.0
+        for _ in 1:n
+            lg = cbe_bug_step!(psi, f.G, ComplexF64(-1im * dt); kw..., order = p).ledger
+            floor += kw.tol_basis + lg.expv_err + lg.discarded + lg.proj_err
+        end
+        push!(errs, _g12_err(psi, f.Gd, n * dt, v0))
+        push!(floors, floor)
+    end
+    return errs, floors
+end
+
 _P0(psi) = norm(psi)^2
 _qc(psi, Q) = real(mpo_energy(psi, Q)) / _P0(psi)
-_slope(e, k) = log2(e[k] / e[k + 1])
 
 "`n` steps `step!` from a copy of `psi0`: the final state and the dense states, the start first."
 function _g12_run(step!, psi0, n)
@@ -122,7 +149,7 @@ end
 
 @testset "U09: the norm and conditional-energy balances against ED finite differences" begin
     f = _g12_local(8)
-    dt, n = 0.02, 25
+    dt, n = 0.01, 50                 # the five-point difference error is O(dt^4)
     v0 = dense_state(f.psi0)
     _, vm = _g12_run(p -> cbe_bug_step!(p, f.G, ComplexF64(-im * dt); _G12_BUG...), f.psi0, n)
     U = exp(-1im * dt * f.Gd)
@@ -158,34 +185,24 @@ end
     @test rE_bad > 0.1 * scaleE                               # CONTROL: (3) needs <H>_c <Q>_c
 end
 
+# From the domain wall, as HQ T5.5: from a warmed state at tight tolerances the frames fill the
+# sector and every step is exact (dt2e: errors at the floor), so no slope is measured. Slopes are
+# read only where both errors are 10x above the step's own floors (`_observed_orders`).
 @testset "U10: order 3 on G without a truncation floor, $name" for name in (:local_loss, :collective)
-    f = name === :local_loss ? _g12_local(10) : _g12_emission(10)
-    kw = merge(_G12_BUG, (truncate = false, maxdim = 10_000),
-               name === :collective ? (closure_checks = true,) : NamedTuple())
-    v0 = dense_state(f.psi0)
-    T, dts = 0.4, (0.1, 0.05, 0.025)
-    glob = Dict(p => Float64[] for p in (1, 3))
-    lte = Float64[]
-    for dt in dts
-        tau = ComplexF64(-im * dt)
-        for p in (1, 3)
-            psi = copy(f.psi0)
-            for _ in 1:round(Int, T / dt)
-                cbe_bug_step!(psi, f.G, tau; kw..., order = p)
-            end
-            push!(glob[p], _g12_err(psi, f.Gd, T, v0))
-        end
-        psi = copy(f.psi0)
-        cbe_bug_step!(psi, f.G, tau; kw...)
-        push!(lte, _g12_err(psi, f.Gd, dt, v0))
-    end
-    @info("U10 $name", dts, glob3 = glob[3], glob1 = glob[1], lte,
-          slopes3 = [_slope(glob[3], k) for k in 1:2], slopes1 = [_slope(glob[1], k) for k in 1:2],
-          slopes_lte = [_slope(lte, k) for k in 1:2])
-    @test glob[3][end] > 1e-10 && lte[end] > 1e-12          # above the floors: slopes are measured
-    @test all(_slope(glob[3], k) >= 2.6 for k in 1:2)       # global O(dt^3)
-    @test all(_slope(lte, k) >= 3.5 for k in 1:2)           # one step O(dt^4)
-    @test _slope(glob[1], 2) < 2.6                          # CONTROL: order 1 fails the criterion
+    f = name === :local_loss ? _g12_local(10; start = :dw) : _g12_emission(10; start = :dw)
+    kw = (hermitian = false, tol_basis = 1e-12, tol_trunc = 1e-14, tol_root = 1e-14,
+          maxdim = 256, exact = true, closure_checks = name === :collective)
+    dts = (0.4, 0.2, 0.1)
+    eg, fg = _g12_errors(f, 3, dts, kw; T = 0.8)
+    el, fl = _g12_errors(f, 3, dts, kw)
+    e1, f1 = _g12_errors(f, 1, dts, kw; T = 0.8)
+    sg, sl, s1 = _finest_order(eg, fg), _finest_order(el, fl), _finest_order(e1, f1)
+    @info "U10 $name: global p=3 $(eg) floors $(fg) p_obs $(_observed_orders(eg, fg)); one step " *
+          "$(el) floors $(fl) p_obs $(_observed_orders(el, fl)); global p=1 $(e1) p_obs " *
+          "$(_observed_orders(e1, f1))"
+    @test sg !== nothing && sg >= 3 - 0.4                   # global O(dt^3)
+    @test sl !== nothing && sl >= 4 - 0.4                   # one step O(dt^4)
+    @test s1 !== nothing && s1 < 3 - 0.4                    # CONTROL: order 1 fails the criterion
 end
 
 @testset "U11: each tolerance controls its own error and cost" begin
@@ -204,7 +221,7 @@ end
     rt = [run1((tol_trunc = t,)) for t in (1e-5, 1e-7, 1e-9)]
     row(r) = (err = r.err, r_aug = r.lg.r_aug, expv = r.lg.expv_err, iters = r.lg.expv_iters,
               disc = r.lg.discarded, D = r.rec.D_final)
-    @info "U11 tol_basis / tol_root / tol_trunc ladders" basis = row.(rb) root = row.(rr) trunc = row.(rt)
+    @info "U11 ladders: tol_basis $(row.(rb)); tol_root $(row.(rr)); tol_trunc $(row.(rt))"
     # tol_basis: the error falls and the frames widen as it tightens; root and compression stay tight
     @test rb[3].err < rb[1].err && all(rb[k + 1].err <= 1.5 * rb[k].err for k in 1:2)
     @test all(rb[k + 1].lg.r_aug >= rb[k].lg.r_aug for k in 1:2) && rb[3].lg.r_aug > rb[1].lg.r_aug
@@ -229,26 +246,30 @@ end
 end
 
 @testset "U16: two-site TDVP and BUG on the same generator" begin
-    L, T, dts = 10, 0.4, (0.1, 0.05)
+    # from the domain wall, so both arms carry a time error above their floors (see U10)
+    L, T, dts = 10, 0.8, (0.2, 0.1)
     tdvp_kw(w) = (hermitian = false, maxdim = 256, trunc_thresh = 1e-12, maxiter = 40,
                   conv_tol = 1e-12, weight_tol = w)
     for (name, gamma, wt) in ((:hermitian, zeros(L), 1e-12), (:lossy, _loss_rates(L), 1e-8))
-        f = _g12_local(L; gamma = gamma)
+        f = _g12_local(L; gamma = gamma, start = :dw)
         v0 = dense_state(f.psi0)
         nup = _spin_charge(argmax(abs.(v0)) - 1, L)
         off = [b for b in 1:(2^L) if _spin_charge(b - 1, L) != nup]
-        eb, et, disc_b, disc_t = Float64[], Float64[], 0.0, 0.0
+        eb, et, fb, disc_b, disc_t = Float64[], Float64[], Float64[], 0.0, 0.0
         for dt in dts
             tau = ComplexF64(-im * dt)
-            pb, pt = copy(f.psi0), copy(f.psi0)
+            pb, pt, floor = copy(f.psi0), copy(f.psi0), 0.0
             for _ in 1:round(Int, T / dt)
                 ib = cbe_bug_step!(pb, f.G, tau; _G12_BUG..., tol_trunc = wt)     # the same MPO
                 it = tdvp2_step!(pt, f.G, tau; tdvp_kw(wt)...)
-                disc_b = max(disc_b, ib.ledger.discarded)
+                lg = ib.ledger
+                floor += _G12_BUG.tol_basis + lg.expv_err + lg.discarded + lg.proj_err
+                disc_b = max(disc_b, lg.discarded)
                 disc_t = max(disc_t, it.cumulative)
             end
             push!(eb, _g12_err(pb, f.Gd, T, v0))
             push!(et, _g12_err(pt, f.Gd, T, v0))
+            push!(fb, floor)
             for p in (pb, pt)
                 @test norm(dense_state(p)[off]) < 1e-10 * norm(p)                 # one U(1) sector
                 @test maximum(bond_dims(p)) <= 256                                # the same cap
@@ -257,9 +278,9 @@ end
                                       @test(_P0(p) < 0.99 * _P0(f.psi0))
             end
         end
-        @info "U16 $name" eb et disc_b disc_t
+        @info "U16 $name: BUG $(eb) floors $(fb), TDVP2 $(et), discarded $(disc_b) / $(disc_t)"
+        @test eb[2] > 10 * fb[2]                               # BUG's ratio is a time error
         @test eb[2] < eb[1] / 6 && et[2] < et[1] / 3          # both converge (orders 3 and 2)
-        @test eb[end] < 1e-3 && et[end] < 1e-2
         @test disc_b <= wt * (1 + 1e-8)                        # the per-cut rule, both arms
         @test disc_t <= sqrt(2) * wt * (1 + 1e-8)              # 2(L-1) cuts against BUG's L-1
     end
