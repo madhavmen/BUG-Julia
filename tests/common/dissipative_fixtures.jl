@@ -224,9 +224,11 @@ charge of a bond label. The decoders below are checked on product states, where 
 each bond is known, before any rank is compared.
 """
 _mps_sector_dims(psi, i, decode) = Dict(decode(lab, i) => d for (lab, d) in psi[i].spaces[3])
-# Telum labels: d = 4 `((n - 1,), (n↑ - n↓,))` per site (`HUB4_*`), spin `((2 S^z,),)`
-_hub_decode(lab, i) = (N = only(lab[1]) + i; s = only(lab[2]); ((N + s) ÷ 2, (N - s) ÷ 2))
-_spin_decode(lab, i) = (only(only(lab)) + i) ÷ 2
+# Telum labels: d = 4 `((n - 1,), (n↑ - n↓,))` per site (`HUB4_*`), spin `((2 S^z,),)`. The bond
+# leg (leg 3, outgoing) carries the NEGATED left-block charge (dt3a: a doublon on site 1 reads
+# `((-1,), (0,))` on bond 1).
+_hub_decode(lab, i) = (N = i - only(lab[1]); s = -only(lab[2]); ((N + s) ÷ 2, (N - s) ÷ 2))
+_spin_decode(lab, i) = (i - only(only(lab))) ÷ 2
 
 """
 Grade the MPS sector ranks at every bond against ED Schmidt values `sv` (from
