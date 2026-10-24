@@ -170,3 +170,56 @@ root grows to the whole sector and the step is exact.
 | dt3b 17472046 | `4f2d96c` | A1, A2 | A1 293/293; A2 134/138 (the four L = 8 smoke accuracy checks only) |
 | dt3e 17472284 | `4f2d96c` | `dt3diag2.jl` | the table above (17472280: script path mangled, cancelled) |
 | dt3c 17472355 | `2530c55` | A1, A2 | **A1 276/276, A2 138/138.** A1's 17 fewer = the removed split arm (3 Strang checks, 2 refinement checks, 2 per dt × 3 dt × 2 κ in the loop). MaxRSS 2.0 G of 3.9 G, 17 min, CPU 49.7% (one core) |
+
+# Task 2 (G1/G2): U06, U09, U10, U11, U16
+
+Branch `plan/dissip-task-2` (`fadedf8`, `85e9916`, `fb152fb`), `tests/sweeps/test_dissipative_t2_g12.jl`.
+U07, U13-U15 test the jump engine and are in Task 4's files; U18 (optional parallel K/L/S) is not
+run, because the parallel backend is not used in production (plan §1.2).
+
+| test | dt2f 17473173 (`85e9916`) | note |
+|---|---|---|
+| U06 contractivity, hazard | 6/6 | `P0` never grows before or after the recorded compression; `-Δ log P0` against `∫⟨Q⟩_c dt` |
+| U09 balances | 5/5 | eq. (2), (3) against ED finite differences at dt 0.01 (at 0.05 the FD error was above the tolerance) |
+| U10 local loss | 3/3 | from the L = 10 domain wall (HQ T5.5 method: slopes only where error ≥ 10× floor): global 4.3e-5 → 2.7e-6 → 1.7e-7 (slope 4.0), one-step 3.76, order-1 control 2.04 |
+| U10 collective | **1/3, open** | global 2.2e-2 → 5.4e-3 → 1.0e-3 (slopes 2.0, 2.4), see below |
+| U11 ladders | 17/17 | each tolerance moves its own error and cost |
+| U16 fairness | 31/32 | the lossy arm's BUG floor was `tol_trunc`'s: `fb152fb` sets 1e-10 (to be confirmed) |
+
+**U10 collective: frontier j = 2 is not closed from a U(1) product state.** The order-3 step closes
+frontiers j = 1, 2 (`_krylov_closure!`). Closing frontier j should put G^{j+1}ψ in the root space.
+dt5k (`67eff34`, L = 10 domain wall, closure_checks, one step, dt 0.4/0.2/0.1):
+
+| trial space | one-step errors | slopes |
+|---|---|---|
+| closure_checks | 4.6e-2, 1.7e-2, 4.1e-3 | 1.42, 2.06 |
+| + keep Gψ, G²ψ | identical to 4 digits | 1.43, 2.06 |
+| + keep Gψ, G²ψ, G³ψ | 2.0e-2, 4.2e-3, 5.3e-4 | 2.23, 2.99 |
+
+Gψ and G²ψ are in the frames already; G³ψ is not. The closure measures each frontier's leak in
+two-site windows inside the environments. A hop S⁺_a S⁻_b with a and b far apart moves both blocks
+out of their frames' charge sectors at once, and every window projects that away. The loop
+therefore stops on "nothing added" while the global vector still leaks. Keeping the exact global
+vectors (`apply_mpo`, the existing `keep_states`) supplies them. Passing more than one kept state
+exposed a crash: a later union widened the frame after an earlier carry was taken. That is fixed
+in `67eff34`. dt5m measures whether the defect is first-step only, and the asymptotic slopes.
+
+# Task 4 (G1 → G2): the quantum-jump engine, B1/B2 smoke
+
+Branch `plan/dissip-task-4`, cut from `plan/dissip-task-3`.
+
+| item | status | where |
+|---|---|---|
+| `L_μψ` | NEW | `mpo_product`, `site_op_product`, `apply_factor` (`operators/mpo_apply.jl`): exact product, a gauge sweep, one `truncate_recursive!` at `tol_trunc`; a zero product is refused |
+| jump channels | NEW | `JumpChannel(name, factors)`; `jump_mpo` (charged MPO), `SiteOp` (local, no MPO); `pair_loss_channels`, `collective_emission_channels`, `site_emission_channels` (`models/dissipative.jl`) |
+| eq. (8) trajectory | NEW | `jump_trajectory` (`bug/quantum_jumps.jl`): log survival carried with per-step renormalisation; the event located by Illinois regula falsi on `log P0 = log u` to `event_tol`; channel `∝ ‖L_μψ‖²`; `:norm_growth` flags; seeds stored with events; `jump_ensemble` (eq. 9) with standard errors |
+| B1 junction | NEW | `hubbard_aa_mpo_d4` with bond `J_j` and `V_jσ`; `hub4_current_mpo`; `pair_loss_junction` (one channel at `j0`) |
+| conventions (traps) | FIXED `86e9533`, `d205a4a` | the MPO and `_apply_site_op` apply the TRANSPOSE of the stored tensor (store `Sp` to apply S⁻, `f'` to apply f); Telum's `Sp = -S⁺/√2`, so jumps are scaled to a unit matrix element by a two-site probe |
+
+| job | commit | file | result |
+|---|---|---|---|
+| dt4a | `6a599bb` | t4.jl | engine reproduces the ED event time (1.5e-14); U14 A2 vs Lindblad |
+| dt4c | `a54866e` | t4_b.jl | B2 smoke: MPS vs ED 1e-14; interaction identity holds at N_exc = 1 (1e-14), breaks at N_exc = 2; counts [32, 209, 59] vs master equation [39.0, 202.5, 58.5]; the independent-emitter control fails, as it should |
+| dt4g 17474462 | `d205a4a` | t4.jl | 50/52: J0 (spin, pair loss with signs), U07, U13 (event 0.18173997222066 vs ED …6403, residual 1e-14; channel draw 120 vs 110.8 ± 5.6), U14 A2 L = 4, A1 L = 2, 4 vs Lindblad. The 2 fails: the pair-loss STRING CONTROL could not fail (site 1 still ~1e-4 from doubly occupied at t = 0.6) → `1ab7d0e` (t = 3, asserts the string is not a global sign) |
+| dt4g | `d205a4a` | t4_conv.jl | 6/7: U15b weak convergence 1.2e-7 → 7.0e-9 → 3.2e-9. U15a: located (errors 1.1e-5, 8.5e-7, 5.8e-8, order 3.7-3.9, vs snapping 0.31, 0.11, 0.008) but the absolute 1e-8 bound was a wrong premise: the remainder is the segment's time error in P0 → `9de020d` |
+| dt4g MaxRSS | | | 2.5 G, 55 min |
