@@ -388,7 +388,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     rec = StepRecord(:dd_qr_streamed, _qr_backend(), order > 1 ? :dd_qr_streamed : :none,
                      order, kls === nothing ? parallel_sym : :full, kc,
                      maximum(bd0; init = 0), max(maximum(expanded; init = 0), leg_dim(Z[c], 1)),
-                     maximum(bond_dims(psi); init = 0), nroot[], t_step,
+                     maximum(bond_dims(psi); init = 0), maxdim, wcap_step, nroot[], t_step,
                      Base.gc_bytes() - _b0step, Int(Sys.maxrss()),
                      _step_limits(ledger), alloc.rule)
     return CBEBugSweepInfo(expanded, n_new, c, root_rank, epre, efnl,

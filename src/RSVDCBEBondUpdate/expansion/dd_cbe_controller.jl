@@ -190,7 +190,9 @@ end
 One `cbe_bug_step!`'s account, typed and allocation-light (plan T1.4): which algorithm ran
 (`policy`, `qr_backend`, `closure_policy` for the order > 1 frontier sweeps, `order`,
 `parallel`), the kernel counters, the ranks `D_old` (largest bond before), `D_stage` (largest
-trial-space frame), `D_final` (after compression), root iterations, total seconds and bytes,
+trial-space frame, untruncated), `D_final` (after compression) and the two limits they are held
+to, `D_max` (`maxdim`, the final rank) and `D_work` (the working-rank ceiling `work_ceiling`
+puts on the frames), root iterations, total seconds and bytes,
 the process `peak_rss` (`Sys.maxrss()`, a high-water mark, not per step), and `limits`: which
 of `:basis_limited`, `:root_limited`, `:truncation_limited`, `:work_limited`, `:rank_limited`
 held the step back (empty when the budget held), and `budget_rule`, how `tol_basis` was
@@ -206,6 +208,8 @@ struct StepRecord
     D_old::Int
     D_stage::Int
     D_final::Int
+    D_max::Int
+    D_work::Int
     root_iters::Int
     t_step::Float64
     bytes_step::Int

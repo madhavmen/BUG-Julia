@@ -112,6 +112,7 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        LeftEnvStack, RightEnvStack, left_env_stack, right_env_stack, env_energy, env_energy_right,
        apply_h_two_site, sketch_h_left, sketch_h_right,
        MPO, mpo_from_terms, xxz_mpo, heisenberg_su2_mpo, mpo_virtual_dims, mpo_energy, mpo_variance,
+       onsite_mpo, mpo_sum, no_jump_mpo,
        LongRangeTerm, long_range_mpo, long_range_zz_mpo,
        LongRangeFit, fit_long_range, default_decays, long_range_terms, power_law_zz_mpo,
        MPOLink, MPOLeftEnvStack, MPORightEnvStack, MPOZeroSiteH, MPOOneSiteH,

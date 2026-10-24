@@ -137,6 +137,70 @@ so the virtual dimension is 3 multiplets rather than U(1)'s 5.
 heisenberg_su2_mpo(L::Int; J::Float64 = 1.0) =
     mpo_from_terms(heisenberg_su2_chain(L; J = J))
 
+# ── sums of MPOs: the no-jump generator of a dissipative model ──────────────────────────────
+# The integrators read `tau * mpo`, so `G = -iH - Q/2` is the MPO `H - (i/2) Q` at `tau = -im*dt`.
+# A direct sum of virtual legs makes any builder's `H` and `Q` one operator without a new
+# automaton; its virtual dimension is the sum of the two.
+
+"""
+    onsite_mpo(L, ops; Iloc = nothing) -> MPO
+
+`Σ_i ops[i]` for rank-2 (charge-neutral) on-site operators, virtual dimension 2. `Iloc` is the
+local identity, by default the mode's own (pass `hub4_space().I` for a fused d = 4 site).
+"""
+function onsite_mpo(L::Int, ops::AbstractVector; Iloc = nothing)
+    L >= 2 || throw(ArgumentError("onsite_mpo needs at least two sites, got $L"))
+    length(ops) == L || throw(DimensionMismatch(
+        "onsite_mpo got $(length(ops)) operators for $L sites"))
+    all(length(O.inds) == 2 for O in ops) || throw(ArgumentError(
+        "onsite_mpo: every operator must be rank 2 (charge-neutral)"))
+    Iloc = Iloc !== nothing ? Iloc :
+           symmetry_mode() === :SU2 ? local_space(:SU2).I : local_space().I
+    Ws = Any[]
+    for i in 1:L
+        tl, tr = "W,$(i - 1)", "W,$i"
+        Iid = _mpo_block(Iloc, i, tl, tr, :none)
+        O   = _mpo_block(ops[i], i, tl, tr, :none)
+        # rows/columns: 1 = id, 2 = done; the operator is the `id -> done` entry at EVERY site
+        mat = i == 1 ? Any[Iid O] :
+              i == L ? reshape(Any[O, Iid], 2, 1) : Any[Iid O; nothing Iid]
+        push!(Ws, to_concrete(oplus(mat, (1, 4))))
+    end
+    return MPO(Ws)
+end
+
+"""
+    mpo_sum(A, B; a = 1, b = 1) -> MPO
+
+`a A + b B` as one MPO: block-diagonal virtual legs, the end sites concatenated. Both must act on
+the same site legs; the scalars sit on site 1. Every tensor is complex, as `b` may be.
+"""
+function mpo_sum(A::MPO, B::MPO; a::Number = 1.0, b::Number = 1.0)
+    L = length(A)
+    length(B) == L || throw(DimensionMismatch("mpo_sum: $L sites against $(length(B))"))
+    L >= 2 || throw(ArgumentError("mpo_sum needs at least two sites, got $L"))
+    Ws = Any[]
+    for i in 1:L
+        sa, sb = i == 1 ? (a, b) : (1, 1)
+        Ai = to_concrete(ComplexF64(sa) * A[i])
+        Bi = to_concrete(ComplexF64(sb) * B[i])
+        W = i == 1 ? oplus([Ai, Bi], (4,)) :
+            i == L ? oplus([Ai, Bi], (1,)) : oplus(Any[Ai nothing; nothing Bi], (1, 4))
+        push!(Ws, to_concrete(W))
+    end
+    return MPO(Ws)
+end
+
+"""
+    no_jump_mpo(H, Q) -> MPO
+
+`H_eff = H - (i/2) Q`, so `tau = -im*dt` integrates the no-jump equation `dψ/dt = Gψ`,
+`G = -iH - Q/2`, with `Q = Σ_μ L_μ' L_μ` (the caller's MPO, positive semidefinite). Not Hermitian:
+pass `hermitian = false` to `cbe_bug_step!` / `tdvp2_step!`, since Lanczos on it returns a wrong
+vector without an error.
+"""
+no_jump_mpo(H::MPO, Q::MPO) = mpo_sum(H, Q; b = -0.5im)
+
 # Long range: a geometric tail lambda^(j-i-1) needs one self-loop channel, lambda * I, so the virtual
 # dimension stays constant in L and in the range. Restricted to rank-2 operators, since a rank-3
 # self-loop would need a charged identity; the constructor throws on a rank-3 operator.
