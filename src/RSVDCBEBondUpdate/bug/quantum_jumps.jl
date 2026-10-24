@@ -32,9 +32,34 @@ function jump_weight(ch::JumpChannel, psi::SymMPS)
     return max(real(overlap(phi, phi)), 0.0)
 end
 
-"`||a - b||` from overlaps (any gauge, no dense state)."
-_mps_distance(a::SymMPS, b::SymMPS) =
-    sqrt(max(real(overlap(a, a)) + real(overlap(b, b)) - 2 * real(overlap(a, b)), 0.0))
+"""
+`||a - b||` (any gauge, no dense state): the direct-sum MPS of `a - b` (block-diagonal bonds, as
+[`mpo_sum`](@ref)) swept to its last site by SVDs, each backward stable, so the distance resolves
+to roundoff. The overlap form `||a||^2 + ||b||^2 - 2 Re<a,b>` cancels to `~eps`: a distance below
+`~1.5e-8` reads as 0 or `sqrt(eps)` (dt5s), which is where a converged step-doubling estimate lies.
+"""
+function _mps_distance(a::SymMPS, b::SymMPS)
+    L = length(a)
+    length(b) == L || throw(DimensionMismatch("_mps_distance: $L sites against $(length(b))"))
+    L == 1 && return norm(to_concrete(to_concrete(ComplexF64(1) * a[1]) +
+                                      to_concrete(ComplexF64(-1) * b[1])))
+    Ts = Any[]
+    for i in 1:L
+        Ai = to_concrete(ComplexF64(1) * a[i])
+        Bi = to_concrete(ComplexF64(i == 1 ? -1 : 1) * b[i])
+        T = if i == 1 || i == L
+            oplus(Any[Ai, Bi], (i == 1 ? 3 : 1,))
+        else
+            mat = Matrix{Any}(nothing, 2, 2)
+            mat[1, 1], mat[2, 2] = Ai, Bi
+            oplus(mat, (1, 3))
+        end
+        push!(Ts, to_concrete(T))
+    end
+    d = SymMPS(Ts, 1)
+    canonical!(d, L)
+    return norm(d[L])
+end
 
 """
     step_doubling_error(full, half, p = 3) -> Float64
