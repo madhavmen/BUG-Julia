@@ -161,9 +161,12 @@ function onsite_mpo(L::Int, ops::AbstractVector; Iloc = nothing)
         tl, tr = "W,$(i - 1)", "W,$i"
         Iid = _mpo_block(Iloc, i, tl, tr, :none)
         O   = _mpo_block(ops[i], i, tl, tr, :none)
-        # rows/columns: 1 = id, 2 = done; the operator is the `id -> done` entry at EVERY site
-        mat = i == 1 ? Any[Iid O] :
-              i == L ? reshape(Any[O, Iid], 2, 1) : Any[Iid O; nothing Iid]
+        # rows/columns: 1 = id, 2 = done; the operator is the `id -> done` entry at EVERY site.
+        # Filled by index: an `Any[Iid O]` literal concatenates the TLArrays instead.
+        mat = Matrix{Any}(nothing, 2, 2)
+        mat[1, 1], mat[1, 2], mat[2, 2] = Iid, O, Iid
+        i == 1 && (mat = reshape(mat[1, :], 1, 2))
+        i == L && (mat = reshape(mat[:, 2], 2, 1))
         push!(Ws, to_concrete(oplus(mat, (1, 4))))
     end
     return MPO(Ws)
@@ -184,8 +187,13 @@ function mpo_sum(A::MPO, B::MPO; a::Number = 1.0, b::Number = 1.0)
         sa, sb = i == 1 ? (a, b) : (1, 1)
         Ai = to_concrete(ComplexF64(sa) * A[i])
         Bi = to_concrete(ComplexF64(sb) * B[i])
-        W = i == 1 ? oplus([Ai, Bi], (4,)) :
-            i == L ? oplus([Ai, Bi], (1,)) : oplus(Any[Ai nothing; nothing Bi], (1, 4))
+        W = if i == 1 || i == L
+            oplus(Any[Ai, Bi], (i == 1 ? 4 : 1,))
+        else
+            mat = Matrix{Any}(nothing, 2, 2)
+            mat[1, 1], mat[2, 2] = Ai, Bi
+            oplus(mat, (1, 4))
+        end
         push!(Ws, to_concrete(W))
     end
     return MPO(Ws)
