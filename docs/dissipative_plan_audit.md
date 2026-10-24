@@ -1,10 +1,10 @@
 # Audit: `dissipative_cbe_bug_implementation_plan.md`, Task 1 (G0)
 
 Branch `plan/dissip-task-1` (cut from `dissipative_benchmarks` = `main` @ `3139c6e`), commit
-`c0a42e2` (fixes `b8837f0`, `d276134`). Status per plan item: **IMPLEMENTED** (on the production call path, with a test that
+`c0a42e2` (fixes `b8837f0`, `d276134`; decisions `7c7adb6`, `39e9cea`). Status per plan item: **IMPLEMENTED** (on the production call path, with a test that
 calls it), **PARTIAL**, **MISSING**, **DIVERGES** (exists but contradicts the plan text),
 **LATER(Tn)** (belongs to a later task). Evidence is `file:symbol`. Tests:
-`tests/sweeps/test_dissipative_t1.jl` (D1.1–D1.6), regressions `test_dd_cbe.jl`,
+`tests/sweeps/test_dissipative_t1.jl` (D1.1–D1.8), regressions `test_dd_cbe.jl`,
 `test_hq_root.jl`, `test_liouville.jl` (cluster job dt1a 17471485).
 
 **How a dissipative run is expressed.** The integrators advance `exp(tau * mpo)`. The no-jump
@@ -29,7 +29,7 @@ generator `G = -iH - Q/2` is therefore the MPO `H_eff = H - (i/2) Q` at `tau = -
 | MPO / operator dispatch for `G` | IMPLEMENTED (new) | `no_jump_mpo(H, Q)` = `mpo_sum(H, Q; b = -i/2)`, `onsite_mpo(L, ops)` (operators/mpo.jl). Direct sum of the virtual legs: any builder's `H` and `Q` combine without a new automaton. D1.1: on a root space the MPO action is the dense `H - iQ/2`, and `B - B' = -iQ` |
 | adjoint for the right sketch | IMPLEMENTED (unchanged) | `_stream_right` contracts `Ω'` into the bra side of the SAME MPO, i.e. the rows `Ω_L' X`; no step assumes `H = H'`. The plan's `X'` is the matrix adjoint of `X = mat[G Θ]`, not `G'`. Explicit tiny check is U03 (Task 2) |
 | complex U(1) charge flow | IMPLEMENTED | states are complex by default; `mpo_sum` promotes every site tensor to `ComplexF64`; `Q` here is charge-neutral. Complex cross-site phases (collective emission) are U02 / Task 3 |
-| complex normalisation | PARTIAL | the budget scale is `‖ψ‖` at the step's start (`_nrm`, bug/cbe_bug.jl). `_kry_weight` takes its unitary branch whenever `real(tau) == 0`, so at `tau = -im*dt` with a non-Hermitian `H_eff` the Krylov weights are absolute (start norm), not relative to the decaying state. Exact for unitary steps; for strong loss (`κ h` large) it under-weights by the step's decay factor. Not changed here; see §6 |
+| complex normalisation | IMPLEMENTED (`7c7adb6`) | the budget scale is `‖ψ‖` at the step's start (`_nrm`, bug/cbe_bug.jl). `_kry_weight` (bug/krylov_enrich.jl) takes its unitary branch only when `tau*H_k` is skew-Hermitian (`_KRY_SKEW_TOL`), so a lossy step at `tau = -im*dt` weighs each Krylov direction relative to the decayed state. D1.7 |
 | operator / gauge cache invalidation | IMPLEMENTED | operators rebuilt per bond visit (`OneSiteOp`, `TwoSiteSketchOp` with `version`, symmetry check); stale frontiers refused (`_frontier_sweep!`). Rebuild after a jump: LATER(T4) |
 | backward-compatible loss-free evolution | IMPLEMENTED | D1.4: `hermitian = false` on Hermitian `H` equals the Hermitian step; `no_jump_mpo(H, 0)` equals it and keeps the norm |
 
@@ -39,8 +39,8 @@ generator `G = -iH - Q/2` is therefore the MPO `H_eff = H - (i/2) Q` at `tau = -
 |---|---|---|
 | root `expv` | IMPLEMENTED | `hermitian = false` → `arnoldi_expv` (BondUpdateBUG/expv_root_methods.jl): CGS2, Saad tail `conv_tol = tol_root`, adaptive substeps. D1.2 against `exp(tau U'GU)`; Lanczos on the same root is wrong by > 1e-3 (control) |
 | local one-site Krylov | IMPLEMENTED | `_krylov_enrich` always builds the full Hessenberg (CGS2 against every vector); its weight `_kry_weight` reads `exp` of the Hessenberg, not a tridiagonal |
-| non-Hermitian two-site TDVP | IMPLEMENTED | `tdvp2_step!(...; hermitian = false)` reaches both the forward two-site and backward one-site `expv` (baselines/tdvp2.jl); D1.3 (L = 2 exact, Lanczos control wrong). Same MPO object as BUG |
-| Radau IIA(2) + GMRES | MISSING as specified | `root_method = :radau2` applies Radau IIA's stability function `R(z)` on the Arnoldi space (one stage, no coupled-stage solve, no GMRES). Usable as the stiffness benchmark the plan asks for; the default stays `:exp` |
+| non-Hermitian two-site TDVP | IMPLEMENTED | `tdvp2_step!(...; hermitian = false)` reaches both the forward two-site and backward one-site `expv` (baselines/tdvp2.jl); D1.3: at L = 2 Arnoldi is exact at `maxiter` 30 and 2, Lanczos at `maxiter = 2` is wrong (> 1e-3). Same MPO object as BUG |
+| Radau IIA(2) + GMRES | IMPLEMENTED (`7c7adb6`) | `root_method = :radau2_gmres` → `radau2_gmres_expv` (BondUpdateBUG/expv_root_methods.jl): the coupled stage system `(I - τA⊗B)Y = 1⊗S0`, decoupled by `A = PΛP⁻¹` into two shifted systems that share ONE Arnoldi basis; GMRES to `tol_root` on the true stage residual, at most `_RADAU_MAXCYCLE` restarts, then `root_limited`. Plugs into the same root call, so the CBE, the local Krylov and the order-3 frontier enrichment are unchanged. D1.8 (order 1 and 3: both stages = the dense coupled solve, end state = stage 2, ≠ exp, = `:radau2` when converged). `:radau2` (stability function on the Arnoldi space) stays. Not recycled yet: the frontier vectors as GMRES start space, GMRES subspaces across steps |
 
 ## 4. `order = 3` dispatch
 
@@ -68,18 +68,15 @@ generator `G = -iH - Q/2` is therefore the MPO `H_eff = H - (i/2) Q` at `tau = -
 |---|---|---|
 | `model = :lossless` reproduces the Hermitian tests | see results | D1.4 + `test_dd_cbe.jl`, `test_hq_root.jl` (T5.2 Hermitian root), `test_liouville.jl` |
 | `model = :nonhermitian` root `expv` = small-matrix exponential | see results | D1.2 |
-| no dense two-site action allocated by CBE | IMPLEMENTED for the half-sweeps; **DIVERGES** for `order > 1` | the half-sweep CBE has no `apply_h_two_site` call site and `ledger.n_h2_leak == 0` (D1.5). The order > 1 frontier sweeps measure each bond's leak with `_bond_action`, which forms `X = H Θ_F` once per bond unless `fold_omega = true` (then a Test-B holdout estimate, `n_h2_leak == 0`). Selection stays QR-only either way. The README records `fold_omega = true` slower at every χ ≤ 256 measured, which is why it is off |
+| no dense two-site action allocated by CBE | IMPLEMENTED (`39e9cea`) | the half-sweep CBE has no `apply_h_two_site` call site and `ledger.n_h2_leak == 0` (D1.5). The order > 1 frontier sweeps measure each bond's leak with `_bond_action`; `fold_omega` now defaults to `order > 1 && !exact`, so they use the folded sketch and a Test-B holdout estimate (`n_h2_leak == 0`, D1.5 default and `true`). `fold_omega = false` keeps the exact `H Θ_F` leak (D1.5 control, `n_h2_leak > 0`); `exact = true` keeps it too, since the folded leak is sampled. The README records the fold slower at every χ ≤ 256 measured |
 
-### Open decisions (not changed in Task 1)
+### Decisions (USER 2026-10-24)
 
-1. **`fold_omega` default for `order = 3`.** The plan (§1.2) forbids dense `X`; the default
-   forms it in the frontier leak test. Flipping the default is plan-conformant and measured
-   slower at χ ≤ 256.
-2. **Krylov weight under loss.** `_kry_weight`'s unitary branch keys on `real(tau) == 0` rather
-   than on the propagator being unitary. Using the non-unitary branch for `hermitian = false`
-   would make the local Krylov test relative to the decayed state.
-3. **Radau IIA(2) + GMRES.** Only the stability-function form exists. The plan wants it as a
-   benchmark only, so it can wait for Task 5's stiffness profile.
+1. **`fold_omega` for `order > 1`:** on by default (`39e9cea`).
+2. **Krylov weight under loss:** implemented (`7c7adb6`, D1.7).
+3. **Radau IIA(2) + GMRES:** implemented with the same CBE / Krylov / frontier enrichment
+   (`7c7adb6`, D1.8).
+4. **D1.3 control:** rebuilt at `maxiter = 2` (`7c7adb6`).
 
 ## Results
 
@@ -91,6 +88,11 @@ generator `G = -iH - Q/2` is therefore the MPO `H_eff = H - (i/2) Q` at `tau = -
 | dt1a 17471485 | `c0a42e2` | `test_liouville.jl` | 91/92: OS-U3 `min_eig = -1.76e-4 > -1e-4` fails, the pre-existing regression parked by the USER 2026-10-22 (not on Task 1's code path) |
 | dt1b 17471544 | `b8837f0` | `test_dissipative_t1.jl` | 29/31: two vacuous fixture checks (fixed `d276134`) |
 | dt1c 17471567 | `d276134` | `test_dissipative_t1.jl` | 30/31, MaxRSS 1.9 G |
+| dt1d 17471631 | `7c7adb6` | -- | cancelled after 6.5 min, superseded by `39e9cea` |
+| dt1e 17471646 | `39e9cea` | `test_dissipative_t1.jl` | 51/51 (D1.1-D1.8) |
+| dt1e 17471646 | `39e9cea` | `test_dd_cbe.jl`, `test_krylov_closure_steps.jl`, `test_adaptive_search.jl`, `test_adaptive_parallel.jl`, `test_hq_root.jl` | 131/131, 102/102, 32/32, 32/32, 46/46 |
+| dt1e 17471646 | `39e9cea` | `test_liouville.jl` | 91/92: OS-U3 only (parked) |
+| dt1e 17471646 | `39e9cea` | `test_imaginary_time.jl` | 203/205: IT-U6 `:radau2` at `tol_root = 1e-30` reports `:met` (expected `:failed`, `:expv`). Last full run of this file was 10-18 (s49); control dt1m 17471800 runs it at `main` `3139c6e`. 54 min, MaxRSS 2.5 G |
 
 - D1.1 3/3, D1.2 9/9 (root error 1.1e-12 at `tol_root` 1e-6 and 1e-10, Saad estimate 1.8e-11, root
   dim 20 = the whole N = 3 sector; Lanczos on the same root 0.67), D1.4 3/3, D1.5 11/11, D1.6 3/3.
