@@ -146,9 +146,14 @@ function _half_left!(psiL, W, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_Ha
         _record_krylov!(bondlg, kst, cx.alloc)
         _peak!(acc, held + _state_stored(psiL), Wkry)
         W[i] = to_concrete(setitag(Wkry, 3, _tagW(i)))
-        for (t, X) in pairs(cx.keep_states)
-            KX = kcar[t] === nothing ? X[i] : to_concrete!(contract(kcar[t], (2,), X[i], (1,)))
+        # Union every kept state first: a later union widens `W[i]`, so a carry taken before it
+        # would hold a stale bond leg.
+        KXs = [kcar[t] === nothing ? X[i] : to_concrete!(contract(kcar[t], (2,), X[i], (1,)))
+               for (t, X) in pairs(cx.keep_states)]
+        for KX in KXs
             W[i] = _union_left(W[i], KX)
+        end
+        for (t, KX) in pairs(KXs)
             kcar[t] = to_concrete!(contract(W[i]', (1, 2), KX, (1, 2)))
         end
         _check_frame(W[i], :left, "half-sweep W[$i]")
@@ -209,10 +214,12 @@ function _half_right!(psiR, Z, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_H
         _record_krylov!(bondlg, kst, cx.alloc)
         _peak!(acc, held + _state_stored(psiR), Zkry)
         Z[j] = to_concrete(setitag(Zkry, 1, _tagZ(j)))
-        for (t, X) in pairs(cx.keep_states)
-            BX = kcar[t] === nothing ? X[j + 1] :
-                 to_concrete!(contract(X[j + 1], (3,), kcar[t], (1,)))
+        BXs = [kcar[t] === nothing ? X[j + 1] : to_concrete!(contract(X[j + 1], (3,), kcar[t], (1,)))
+               for (t, X) in pairs(cx.keep_states)]
+        for BX in BXs                  # all unions before any carry, as on the left
             Z[j] = _union_right(Z[j], BX)
+        end
+        for (t, BX) in pairs(BXs)
             kcar[t] = to_concrete!(contract(BX, (2, 3), Z[j]', (2, 3)))
         end
         _check_frame(Z[j], :right, "half-sweep Z[$j]")
