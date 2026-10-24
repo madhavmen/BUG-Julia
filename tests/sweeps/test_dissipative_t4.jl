@@ -89,7 +89,9 @@ end
     f = _t4_hub(L, U, kap)
     @test f.res < 1e-12
     psi = hub4_product_state([:both, :up, :both])                    # (N↑, N↓) = (3, 2)
-    for _ in 1:2
+    # t = 3, not 0.6: at t = 0.6 site 1 is still ~1e-4 from doubly occupied, so the string control
+    # below sees only a global sign and cannot fail (dt4g).
+    for _ in 1:10
         tdvp2_step!(psi, f.Hm, ComplexF64(-0.3im); maxdim = 64, trunc_thresh = 1e-14)
     end
     a = _amplitudes(psi, f.states)
@@ -109,6 +111,7 @@ end
         @test all(_hub_charges(b, L) == (2, 1) for b in 0:(D - 1) if abs(aj[b + 1]) > 1e-12)
         if j > 1                                                     # CONTROL: a sign error
             ew = Diagonal(f.s) * (string1 * (f.jumps[j] * v))
+            @test abs(dot(aj, string1 * aj)) < 0.9 * norm(aj)^2     # the string is not a global sign
             @test abs(dot(ew, aj)) < (1 - 1e-3) * norm(ew) * norm(aj)
         end
     end
