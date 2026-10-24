@@ -119,14 +119,41 @@ function jump_mpo(L::Int, op, close, coeffs::AbstractVector; Iloc)
 end
 
 """
-    JumpChannel(name, mpos)
+    SiteOp(j, O, c)
 
-One Lindblad jump `L_μ`, the product of `mpos` applied first to last (a pair loss is two fermion
-annihilators on one site). `name` labels it in a trajectory's event list.
+The one-site factor `c O_j` of a jump, `O` a charged (rank-3) local operator applied as it acts
+(`_apply_site_op`, as `site_expval` reads operators), not through an MPO: its charge leg is carried
+through the links right of `j` into the boundary (`operators/mpo_apply.jl`). A local jump needs no
+MPO channel, and the d = 4 fermion operators have no charged transport block.
+"""
+struct SiteOp
+    j::Int
+    O::Any
+    c::ComplexF64
+end
+
+"""
+    JumpChannel(name, factors)
+
+One Lindblad jump `L_μ`, the product of `factors` (each an `MPO` or a [`SiteOp`](@ref)) applied
+first to last (a pair loss is two fermion annihilators on one site). `name` labels it in a
+trajectory's event list.
 """
 struct JumpChannel
     name::String
-    mpos::Vector{MPO}
+    factors::Vector{Any}
+end
+
+"""
+The factor that makes a stored operator act with unit matrix element: `1 / <dst|F|src>` for one
+probe pair of product states. Telum's spin operators are spherical tensor components (`Sp` is
+`-S⁺/√2`), and a jump's weight `||L ψ||²` must be `<ψ|L'L|ψ>` with `L'L` the `Q` the generator
+uses, not a multiple of it. Computed, not hard-coded, so a convention change cannot pass silently.
+"""
+function _unit_scale(F, src::SymMPS, dst::SymMPS)
+    x = overlap(dst, factor_product(F, src))
+    abs(x) > 1e-12 || error("_unit_scale: the probe matrix element vanishes; wrong probe pair")
+    return 1 / x
 end
 
 """
@@ -134,19 +161,17 @@ end
 
 `L_j = √κ_j c_j↓ c_j↑` on fused d = 4 sites, one channel per site with `κ_j > 0`, so that
 `Σ_j L_j' L_j = doublon_loss_mpo(L; kappa)`. The two annihilators' Jordan-Wigner strings over
-sites `< j` cancel, so each is applied as a bare one-site operator (`c↑` first).
+sites `< j` cancel, so each is a bare one-site factor (`c↑` first). Each is normalised on one
+matrix element (`<0|c↑|↑>`, `<0|c↓|↓>`), which leaves the intra-site sign structure as Telum's.
 """
 function pair_loss_channels(L::Int; kappa)
     k = kappa isa Number ? fill(Float64(kappa), L) : collect(Float64, kappa)
     length(k) == L || throw(DimensionMismatch("pair_loss_channels got $(length(k)) rates for $L sites"))
     all(>=(0.0), k) || throw(ArgumentError("pair_loss_channels: rates must be nonnegative, got $k"))
     q = hub4_space()
-    # stored f' applies f; `_hub4_half` orients the op-legs as channel B of `_hub4_channels`
-    half(F) = (_hub4_half(to_concrete(F'), :left), _hub4_half(to_concrete(F), :right))
-    (ou, cu), (od, cd) = half(q.Fu), half(q.Fd)
-    e(j, a) = [i == j ? a : 0.0 for i in 1:L]
-    return [JumpChannel("pair$j", [jump_mpo(L, ou, cu, e(j, sqrt(k[j])); Iloc = q.I),
-                                   jump_mpo(L, od, cd, e(j, 1.0); Iloc = q.I)])
+    su = _unit_scale(SiteOp(1, q.Fu, 1), hub4_product_state([:up]), hub4_product_state([:empty]))
+    sd = _unit_scale(SiteOp(1, q.Fd, 1), hub4_product_state([:down]), hub4_product_state([:empty]))
+    return [JumpChannel("pair$j", Any[SiteOp(j, q.Fu, sqrt(k[j]) * su), SiteOp(j, q.Fd, sd)])
             for j in 1:L if k[j] > 0]
 end
 
@@ -154,18 +179,22 @@ end
     collective_emission_channels(L; gamma_plus, gamma_minus = gamma_plus, k, x = 1:L)
 
 `L_± = √Γ_± Σ_j e^{±i k x_j} S⁻_j` (plan A2/B2), the jumps whose `L₊'L₊ + L₋'L₋` is
-`collective_emission_mpo` with the same arguments. Zero rates give no channel.
+`collective_emission_mpo` with the same arguments; each a charged [`jump_mpo`](@ref) on the stored
+`Sp` (applied as `S⁻`), scaled to unit `S⁻` matrix elements. Zero rates give no channel.
 """
 function collective_emission_channels(L::Int; gamma_plus::Real, gamma_minus::Real = gamma_plus,
                                       k::Real, x = 1:L)
     length(x) == L || throw(DimensionMismatch("got $(length(x)) positions for $L sites"))
     q = local_space()
     sp = to_concrete(q.Sp')
+    s = _unit_scale(jump_mpo(2, q.Sp, sp, [1.0, 0.0]; Iloc = q.I), product_state([:up, :down]),
+                    product_state([:down, :down]))
     ch = JumpChannel[]
-    for (name, g, s) in (("L+", gamma_plus, 1), ("L-", gamma_minus, -1))
+    for (name, g, sg) in (("L+", gamma_plus, 1), ("L-", gamma_minus, -1))
         g > 0 || continue
-        push!(ch, JumpChannel(name, [jump_mpo(L, q.Sp, sp, [sqrt(g) * cis(s * k * x[j]) for j in 1:L];
-                                              Iloc = q.I)]))
+        push!(ch, JumpChannel(name, Any[jump_mpo(L, q.Sp, sp,
+                                                 [s * sqrt(g) * cis(sg * k * x[j]) for j in 1:L];
+                                                 Iloc = q.I)]))
     end
     isempty(ch) && throw(ArgumentError("collective_emission_channels: both rates are zero"))
     return ch
@@ -174,15 +203,13 @@ end
 """
     site_emission_channels(L; gamma) -> Vector{JumpChannel}
 
-Independent `L_j = √γ_j S⁻_j` on a spin-1/2 chain (`Q = Σ_j γ_j n_j`), one channel per site with
-`γ_j > 0`: the local-loss counterpart of the collective channels.
+Independent `L_j = √γ_j S⁻_j` on a spin-1/2 chain (`Q = Σ_j γ_j n_j`), one [`SiteOp`](@ref) channel
+per site with `γ_j > 0`: the local-loss counterpart of the collective channels.
 """
 function site_emission_channels(L::Int; gamma)
     g = gamma isa Number ? fill(Float64(gamma), L) : collect(Float64, gamma)
     length(g) == L || throw(DimensionMismatch("got $(length(g)) rates for $L sites"))
     q = local_space()
-    sp = to_concrete(q.Sp')
-    return [JumpChannel("site$j", [jump_mpo(L, q.Sp, sp, [i == j ? sqrt(g[j]) : 0.0 for i in 1:L];
-                                            Iloc = q.I)])
-            for j in 1:L if g[j] > 0]
+    s = _unit_scale(SiteOp(1, q.Sm, 1), product_state([:up]), product_state([:down]))
+    return [JumpChannel("site$j", Any[SiteOp(j, q.Sm, sqrt(g[j]) * s)]) for j in 1:L if g[j] > 0]
 end
