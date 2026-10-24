@@ -150,9 +150,16 @@ end
     end
     Gf = -1im * Hf - 0.5 * Qf
     cond = [(w = exp(t * Gf) * v0; ex(w * w') ./ real(dot(w, w))) for t in tg]
-    ok, dev = _within_ci(reduce(vcat, ens.mean), reduce(vcat, ens.stderr), reduce(vcat, ex.(rhos)))
-    okn, devn = _within_ci(ens.jumps_mean, ens.jumps_stderr, nex)
-    okc, devc = _within_ci(reduce(vcat, ens.mean), reduce(vcat, ens.stderr), reduce(vcat, cond))
+    # Before any trajectory has jumped the sample standard error is exactly 0 and says nothing
+    # (dt4h: at t = 0.5, 0 of 200 jumped against 0.004 expected, |ΔN| = 0.008 against the 2e-3 floor
+    # alone; pathwise the engine matches ED to 3e-8, dt5p). The jump count's null-model error,
+    # sqrt(m/n) for m expected jumps, floors it, and twice that floors N (each jump removes 2).
+    n = length(ens.trajs)
+    sej = [max(s, sqrt(m / n)) for (s, m) in zip(ens.jumps_stderr, nex)]
+    se = [vcat(max(s[1], 2 * j), s[2:end]) for (s, j) in zip(ens.stderr, sej)]
+    ok, dev = _within_ci(reduce(vcat, ens.mean), reduce(vcat, se), reduce(vcat, ex.(rhos)))
+    okn, devn = _within_ci(ens.jumps_mean, sej, nex)
+    okc, devc = _within_ci(reduce(vcat, ens.mean), reduce(vcat, se), reduce(vcat, cond))
     @info "B1 L=4: worst |mean - Lindblad| / (4 se + 2e-3): obs $dev, jumps $devn; no-jump control " *
           "$devc; final ensemble [N, Sz, d0, j(j0-1)↑↓, j(j0)↑↓] $(ens.mean[end]) ± $(ens.stderr[end]), " *
           "Lindblad $(ex(rhos[end])); jumps $(ens.jumps_mean[end]) vs $(nex[end])"
