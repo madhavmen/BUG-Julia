@@ -23,6 +23,11 @@ const _KRY_MAXDEPTH = 64
 # accuracy one: `substeps = 0` splits `tau` whenever this basis cannot reach `tol_expv`.
 const _ROOT_MAXITER = 30
 
+# Relative Hermitian part of `tau*H_k` below which the Krylov propagator counts as unitary: CGS2
+# leaves a Hermitian generator's Hessenberg Hermitian to ~1e-15, and a loss term far below this
+# gives the same weight in both branches anyway.
+const _KRY_SKEW_TOL = 1e-12
+
 """
     _kry_weight(Hm, k, tau; state_seed = true) -> Float64
 
@@ -33,14 +38,19 @@ the closure test: below the allowance, no later direction matters more.
 
 `state_seed` is false when `v_1` is a closure frontier rather than the state's own tensor; it
 matters only for a non-unitary propagator.
+
+The propagator is unitary when `tau*H_k` is skew-Hermitian, not whenever `real(tau) == 0`: a
+no-jump generator `H - (i/2)Q` at `tau = -im*dt` contracts, and its weight must be relative to the
+decayed state, not to the start norm.
 """
 function _kry_weight(Hm::Matrix{ComplexF64}, k::Int, tau::ComplexF64; state_seed::Bool = true)
     A = zeros(ComplexF64, k + 1, k + 1)
     A[1:k, 1:k] .= tau .* @view Hm[1:k, 1:k]
     A[k + 1, k] = tau * Hm[k + 1, k]
-    real(tau) == 0 && return abs(exp(A)[k + 1, 1])
-    # Non-unitary (imaginary time, Lindblad): weigh relative to the state's own growth `g =
-    # ||exp(tau*H_k) e_1||`, which is `exp(dbeta*|E|)` unshifted and overflows at large dbeta. The
+    Ak = @view A[1:k, 1:k]
+    norm(Ak + Ak') <= _KRY_SKEW_TOL * norm(Ak) && return abs(exp(A)[k + 1, 1])
+    # Non-unitary (imaginary time, Lindblad, no-jump loss): weigh relative to the state's own
+    # growth `g = ||exp(tau*H_k) e_1||`, which is `exp(dbeta*|E|)` unshifted and overflows at large dbeta. The
     # shift `s` cancels in that ratio exactly.
     s = maximum(real, eigvals(A[1:k, 1:k]))
     E = exp(A - s * I)

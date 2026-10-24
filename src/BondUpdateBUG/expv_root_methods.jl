@@ -8,17 +8,19 @@
 # smaller of root and closure.
 
 "Root integrators [`expv`](@ref) accepts, see the block above."
-const ROOT_METHODS = (:exp, :trapezoid, :radau2, :radau3)
+const ROOT_METHODS = (:exp, :trapezoid, :radau2, :radau3, :radau2_gmres)
 
 # Numerator / denominator coefficients of each stability function, constant term first.
+# `:radau2_gmres` is the same Runge-Kutta method as `:radau2`, solved by its coupled stages.
 const _ROOT_PADE = Dict(
-    :trapezoid => ([1.0, 1 / 2], [1.0, -1 / 2]),
-    :radau2    => ([1.0, 1 / 3], [1.0, -2 / 3, 1 / 6]),
-    :radau3    => ([1.0, 2 / 5, 1 / 20], [1.0, -3 / 5, 3 / 20, -1 / 60]))
+    :trapezoid    => ([1.0, 1 / 2], [1.0, -1 / 2]),
+    :radau2       => ([1.0, 1 / 3], [1.0, -2 / 3, 1 / 6]),
+    :radau2_gmres => ([1.0, 1 / 3], [1.0, -2 / 3, 1 / 6]),
+    :radau3       => ([1.0, 2 / 5, 1 / 20], [1.0, -3 / 5, 3 / 20, -1 / 60]))
 
 "Classical order of a root integrator (`typemax(Int)` for the exponential)."
 root_order(m::Symbol) = m === :exp ? typemax(Int) : m === :trapezoid ? 2 :
-                        m === :radau2 ? 3 : m === :radau3 ? 5 : _bad_root(m)
+                        m in (:radau2, :radau2_gmres) ? 3 : m === :radau3 ? 5 : _bad_root(m)
 
 _bad_root(m) = throw(ArgumentError("root_method must be one of $(ROOT_METHODS), got :$m"))
 
@@ -97,6 +99,10 @@ function lanczos_expv(apply, tau::ComplexF64, x;
                       conv_tol::Float64 = 0.0, substeps::Int = 1,
                       report::Union{Nothing, Base.RefValue} = nothing,
                       root_method::Symbol = :exp)
+    # GMRES needs the full orthogonalisation whatever `B` is: the shifted stage systems are
+    # complex non-Hermitian even for a Hermitian generator
+    root_method === :radau2_gmres && return radau2_gmres_expv(apply, tau, x; tol = tol,
+        maxiter = maxiter, conv_tol = conv_tol, report = report)
     root_method in ROOT_METHODS || _bad_root(root_method)
     # An implicit root takes the WHOLE step in one stage -- that is what it is for -- so the
     # exponential's substep split does not apply to it.
@@ -242,6 +248,27 @@ function _combine(coeff, basis, beta0::Float64)
 end
 
 """
+    _cgs2!(H, j, basis, w) -> w
+
+`w` orthogonalised against `basis` by classical Gram-Schmidt applied twice, the coefficients added
+to column `j` of `H`. One materialisation per pass, as in `lanczos_expv`: a symbolic `w` would make
+each inner product force a sum one term longer, so `w` stays concrete for the whole pass and only
+`corr` is lazy.
+"""
+function _cgs2!(H::AbstractMatrix{ComplexF64}, j::Int, basis, w)
+    for _pass in 1:2
+        corr = nothing
+        for i in 1:length(basis)
+            h = tensor_inner(basis[i], w)
+            H[i, j] += h
+            corr = corr === nothing ? h * basis[i] : corr + h * basis[i]
+        end
+        corr === nothing || (w = to_concrete(w - corr))
+    end
+    return w
+end
+
+"""
     arnoldi_expv(apply, tau, x; tol=1e-13, maxiter=60, conv_tol=0.0, substeps=1)
 
 `exp(tau*A)*x` for a **non-Hermitian** action, via the upper-Hessenberg Arnoldi factorisation. This
@@ -255,6 +282,8 @@ function arnoldi_expv(apply, tau::ComplexF64, x;
                       conv_tol::Float64 = 0.0, substeps::Int = 1,
                       report::Union{Nothing, Base.RefValue} = nothing,
                       root_method::Symbol = :exp)
+    root_method === :radau2_gmres && return radau2_gmres_expv(apply, tau, x; tol = tol,
+        maxiter = maxiter, conv_tol = conv_tol, report = report)
     root_method in ROOT_METHODS || _bad_root(root_method)
     root_method === :exp || (substeps = 1)     # an implicit root takes the whole step at once
     hcoeffs(Hm, t) = root_method === :exp ? _hess_coeffs(Hm, t) :
@@ -285,20 +314,7 @@ function arnoldi_expv(apply, tau::ComplexF64, x;
         betak = 0.0
 
         for j in 1:maxiter
-            w = apply(basis[j]); total += 1
-            for _pass in 1:2                       # double Gram-Schmidt (CLASSICAL, applied twice)
-                # One materialisation per pass, as in `lanczos_expv`. A symbolic `w` would make each
-                # inner product force a sum one term longer, so `w` stays concrete for the whole
-                # pass and only `corr` is lazy. Taking every product against the same `w` makes this
-                # classical Gram-Schmidt, applied twice.
-                corr = nothing
-                for i in 1:length(basis)
-                    h = tensor_inner(basis[i], w)
-                    H[i, j] += h
-                    corr = corr === nothing ? h * basis[i] : corr + h * basis[i]
-                end
-                corr === nothing || (w = to_concrete(w - corr))
-            end
+            w = _cgs2!(H, j, basis, apply(basis[j])); total += 1
             m = j
             b = norm(w)
             betak = b
@@ -353,6 +369,122 @@ function _hess_rational(Hm::Matrix{ComplexF64}, tau::ComplexF64, m::Symbol)
     sigma = _rational_shift(eigvals(Hm), tau)
     e1 = zeros(ComplexF64, size(Hm, 1)); e1[1] = 1
     return _rational_apply(m, tau * (Hm - sigma * I), e1), zero(ComplexF64)
+end
+
+# ── `:radau2_gmres`: Radau IIA(2) on its coupled stages, matrix-free GMRES (dissipative plan §1.2) ──
+# The stages solve `(I - tau A ⊗ B) Y = 1 ⊗ x`. Under `A = P Λ P^{-1}` they decouple into the
+# shifted systems `(I - tau λ_k B) Z_k = d_k x`, `d = P^{-1} 1`, `Y = (P ⊗ I) Z`. A Krylov space is
+# shift invariant and both right-hand sides are multiples of `x`, so ONE Arnoldi basis of `B` is
+# recycled for both stages: an iteration costs one action, not the coupled system's two. The
+# method is stiffly accurate, so the end state is `Y_2`. The spectral shift is `:radau2`'s
+# (`_rational_shift`, none in real time): converged, both give the same rational step.
+
+const _RADAU2_A = [5 / 12 -1 / 12; 3 / 4 1 / 4]
+const _RADAU2_EIG = let F = eigen(ComplexF64.(_RADAU2_A))
+    (F.values, F.vectors, inv(F.vectors))
+end
+"Bound on the restarted GMRES cycles of one Radau solve; missing `conv_tol` after it is reported."
+const _RADAU_MAXCYCLE = 4
+
+"""
+    _shifted_gmres(apply, r, tau, zs, ds, Wt, sigma, target, maxiter, tol)
+        -> (Zs, res, nmv, sigma)
+
+One GMRES cycle for the systems `(I - z_k (B - sigma)) Z_k = d_k r` on one Arnoldi basis of `B`
+from `r`. Each `Z_k` minimises its own residual `g_k`; the cycle stops when the stage residual they
+make, `‖Σ_k Wt[:, k] ⊗ g_k‖` (`Wt` the columns of `P` they enter with), reaches `target`, at
+breakdown (`tol`) or at `maxiter`. `sigma = nothing` takes `:radau2`'s shift from the current Ritz
+values; a restart passes the first cycle's, so every cycle solves the same system.
+"""
+function _shifted_gmres(apply, r, tau::ComplexF64, zs, ds, Wt, sigma, target::Float64,
+                        maxiter::Int, tol::Float64)
+    beta = norm(r)
+    basis = Any[to_concrete((1.0 / beta) * r)]
+    H = zeros(ComplexF64, maxiter + 1, maxiter)
+    ys, res, sig, nmv = Vector{Vector{ComplexF64}}(), Inf, zero(ComplexF64), 0
+    for j in 1:maxiter
+        w = _cgs2!(H, j, basis, apply(basis[j])); nmv += 1
+        b = norm(w)
+        H[j + 1, j] = b
+        Hb = H[1:(j + 1), 1:j]
+        Ib = Matrix{ComplexF64}(I, j + 1, j)
+        sig = sigma === nothing ? _rational_shift(eigvals(H[1:j, 1:j]), tau) : sigma
+        e1 = zeros(ComplexF64, j + 1); e1[1] = beta
+        G = zeros(ComplexF64, j + 1, length(zs))
+        empty!(ys)
+        for (k, z) in pairs(zs)
+            M = Ib - z * (Hb - sig * Ib)
+            y = M \ (ds[k] * e1)                     # the small least-squares problem
+            push!(ys, y)
+            G[:, k] = ds[k] * e1 - M * y
+        end
+        res = norm(G * transpose(Wt))
+        (b < tol || res <= target || j == maxiter) && break
+        push!(basis, to_concrete((1.0 / b) * w))
+    end
+    return ([_combine(y, basis[1:length(y)], 1.0) for y in ys], res, nmv, sig)
+end
+
+"""
+    radau2_gmres_expv(apply, tau, x; tol = 1e-13, maxiter = 60, conv_tol = 0.0, report = nothing)
+
+One Radau IIA(2) step (order 3, L-stable) of `dx/dt = B x` over `tau`, the coupled stages solved
+matrix-free by GMRES (block above) to the relative stage residual `conv_tol` (the plan's
+`tol_root`; `0` runs one cycle to breakdown or `maxiter`), restarted at most `_RADAU_MAXCYCLE`
+times. `report` receives `(iterations, substeps = 1, err, cycles, stages)`: `err` is the TRUE
+relative stage residual `‖1 ⊗ x - (I - tau A ⊗ (B - sigma)) Y‖ / ‖x‖`, recomputed with two actions
+rather than read off the recurrence, and `stages = (Y_1, Y_2)`. As for `:radau2` the shift's scale
+is not returned.
+"""
+function radau2_gmres_expv(apply, tau::ComplexF64, x; tol::Float64 = 1e-13, maxiter::Int = 60,
+                           conv_tol::Float64 = 0.0,
+                           report::Union{Nothing, Base.RefValue} = nothing)
+    xc = _as_complex(x)
+    beta0 = norm(xc)
+    if beta0 == 0
+        _record_krylov(0)
+        _report!(report, 0, 0, 0.0)
+        return xc
+    end
+    lam, P, Pinv = _RADAU2_EIG
+    zs = tau .* lam
+    target = conv_tol > 0 ? conv_tol * beta0 : 0.0
+    Zs, _, nmv, sigma = _shifted_gmres(apply, xc, tau, zs, Pinv * ones(ComplexF64, 2), P,
+                                       nothing, target, maxiter, tol)
+    stage(Zs, i) = to_concrete(P[i, 1] * Zs[1] + P[i, 2] * Zs[2])
+    Y = [stage(Zs, 1), stage(Zs, 2)]
+    function residual(Y)
+        BY = [(w = apply(y); iszero(sigma) ? w : to_concrete(w - sigma * y)) for y in Y]
+        nmv += 2
+        R = [to_concrete(xc - Y[i] + tau * (_RADAU2_A[i, 1] * BY[1] + _RADAU2_A[i, 2] * BY[2]))
+             for i in 1:2]
+        return R, sqrt(norm(R[1])^2 + norm(R[2])^2)
+    end
+    R, res = residual(Y)
+    cycles = 1
+    while target > 0 && res > target && cycles < _RADAU_MAXCYCLE
+        # Restart on the true residual: decoupled again, but the two right-hand sides are no longer
+        # parallel, so each stage system gets its own basis.
+        cycles += 1
+        dZ = Any[]
+        for k in 1:2
+            rho = to_concrete(Pinv[k, 1] * R[1] + Pinv[k, 2] * R[2])
+            if norm(rho) == 0
+                push!(dZ, rho)
+                continue
+            end
+            Zk, _, n, _ = _shifted_gmres(apply, rho, tau, zs[k:k], ComplexF64[1], P[:, k:k],
+                                         sigma, target / sqrt(2), maxiter, tol)
+            nmv += n
+            push!(dZ, Zk[1])
+        end
+        Y = [to_concrete(Y[i] + stage(dZ, i)) for i in 1:2]
+        R, res = residual(Y)
+    end
+    _record_krylov(nmv)
+    report === nothing || (report[] = (iterations = nmv, substeps = 1, err = res / beta0,
+                                       cycles = cycles, stages = (Y[1], Y[2])))
+    return Y[2]
 end
 
 """

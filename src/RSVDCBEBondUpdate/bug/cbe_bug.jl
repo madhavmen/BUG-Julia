@@ -43,7 +43,9 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # ── IMAGINARY TIME (plan: cbe_bug_imaginary_open_benchmark, Task 1) ──
                        # The root integrator (`ROOT_METHODS`): `:exp` is the Saad-converged
                        # exponential (the reference); `:trapezoid`/`:radau2`/`:radau3` apply that
-                       # implicit method's stability function in one stage. A METHOD choice.
+                       # implicit method's stability function in one stage; `:radau2_gmres` solves
+                       # Radau IIA(2)'s coupled stages by GMRES to `tol_root`. A METHOD choice: the
+                       # CBE, local Krylov and frontier enrichment before the root are the same.
                        root_method::Symbol = :exp,
                        # The step integrates `H - eshift` (`shift_h`): the root and every Krylov
                        # generator, so the basis weights measure the change of the NORMALISED

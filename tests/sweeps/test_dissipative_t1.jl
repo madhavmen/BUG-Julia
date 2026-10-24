@@ -11,6 +11,9 @@
 #   D1.5  order = 3 is an explicit dispatch: recorded, frontiers j = 1, 2 swept, the root starts
 #         from P psi_n; no dense two-site action outside the frontier leak measurement
 #   D1.6  StepRecord keeps D_stage / D_final apart from D_max / D_work
+#   D1.7  the local Krylov weight of a contracting no-jump step is relative to the decayed state
+#   D1.8  `root_method = :radau2_gmres`: the GMRES stages equal the direct coupled Radau IIA(2)
+#         solve, after the same CBE / Krylov / order-3 frontier enrichment
 #
 # The fixture is the XX chain with site-dependent single-site loss L_j = sqrt(g_j) S^-_j, so
 # Q = Σ g_j (S^z_j + 1/2) does not commute with H and G is non-normal.
@@ -96,17 +99,17 @@ end
 @testset "D1.3: two-site TDVP on the same generator, exact at L = 2" begin
     kw = (maxdim = 8, trunc_thresh = 1e-14, maxiter = 30, tol = 1e-15)
     _, _, G2, Gd2, _ = _lossy_xx(2; delta = 0.5)
-    psi = neel_state(2)
-    w0 = dense_state(psi)
-    tdvp2_step!(psi, G2, tau; hermitian = false, kw...)
-    @test norm(dense_state(psi) - exp(tau * Gd2) * w0) / norm(w0) < 1e-12
-    # CONTROL on the L = 6 state: at L = 2 the N = 1 sector is two-dimensional and the projected
-    # G is complex symmetric, so Lanczos's tridiagonal IS that 2x2 and cannot be wrong there
-    a, b = copy(psi0), copy(psi0)
-    kw6 = merge(kw, (maxdim = 64,))
-    tdvp2_step!(a, G, tau; hermitian = false, kw6...)
-    tdvp2_step!(b, G, tau; hermitian = true, kw6...)
-    @test norm(dense_state(a) - dense_state(b)) > 1e-3 * norm(v0)
+    err(herm, k) = (psi = neel_state(2); w0 = dense_state(psi);
+                    tdvp2_step!(psi, G2, tau; hermitian = herm, merge(kw, (maxiter = k,))...);
+                    norm(dense_state(psi) - exp(tau * Gd2) * w0) / norm(w0))
+    @test err(false, 30) < 1e-12
+    # CONTROL. At maxiter = 30 Lanczos is accurate here too (measured 6e-15): its recurrence
+    # `G V = V T + b v e'` holds for any `alpha`, so `V exp(tau T) e1` is a degree-29 polynomial in
+    # G, which converges at ||tau G|| ~ 1 although `real(alpha)` drops the loss. At maxiter = 2
+    # Arnoldi spans the whole two-dimensional N = 1 sector and is exact, while Lanczos's T is not
+    # the projected G (~2e-2 by hand).
+    @test err(false, 2) < 1e-12
+    @test err(true, 2) > 1e-3
 end
 
 @testset "D1.4: lossless runs are the Hermitian step" begin
@@ -148,6 +151,58 @@ end
     @test r.D_max == md
     @test r.D_work == work_ceiling(md, r.D_old)
     @test r.D_stage <= r.D_work && r.D_final <= r.D_max
+end
+
+@testset "D1.7: local Krylov weights under loss are relative to the decayed state" begin
+    k = 3
+    Hh = ComplexF64[0.3 0.7 0 0; 0.7 -0.2 0.5 0; 0 0.5 0.1 0.4; 0 0 0.4 0]   # Hermitian Hessenberg
+    Hl = Hh - 0.5im * Diagonal([1.0, 0.2, 1.0, 0.2])                         # H - (i/2) Q
+    function expA(Hm)
+        A = zeros(ComplexF64, k + 1, k + 1)
+        A[1:k, 1:k] .= tau .* Hm[1:k, 1:k]
+        A[k + 1, k] = tau * Hm[k + 1, k]
+        return exp(A)
+    end
+    E = expA(Hh)
+    @test RC._kry_weight(Hh, k, tau) ≈ abs(E[k + 1, 1]) rtol = 1e-12            # unitary: unchanged
+    E = expA(Hl)
+    w = RC._kry_weight(Hl, k, tau)
+    @test w ≈ abs(E[k + 1, 1]) / norm(E[1:k, 1]) rtol = 1e-10
+    @test w > 1.05 * abs(E[k + 1, 1])                         # not against the start norm
+    @test RC._kry_weight(Hl, k, tau; state_seed = false) ≈ abs(E[k + 1, 1]) rtol = 1e-10
+end
+
+@testset "D1.8: Radau IIA(2) + GMRES root against the direct coupled stage solve" begin
+    A = [5 / 12 -1 / 12; 3 / 4 1 / 4]
+    for order in (1, 3)
+        fr, rr = Ref{Any}(nothing), Ref{Any}(nothing)
+        psi = copy(psi0)
+        cbe_bug_step!(psi, G, tau; order = order, hermitian = false, root_method = :radau2_gmres,
+                      tol_basis = 1e-8, tol_root = 1e-10, truncate = false,
+                      frames_report = fr, root_report = rr)
+        U = _root_basis(psi0, G, fr[]; mmax = 10)
+        M = U' * Gd * U
+        s0 = U' * v0
+        n = length(s0)
+        Y = (Matrix{ComplexF64}(I, 2n, 2n) - tau * kron(A, M)) \ vcat(s0, s0)
+        sol = rr[].solve
+        @test sol.err <= 1e-10 * (1 + 1e-8)                      # the TRUE stage residual
+        for i in 1:2
+            dYi = dense_state(RC._frontier_mps(psi0, fr[], sol.stages[i]))
+            @test norm(dYi - U * Y[((i - 1) * n + 1):(i * n)]) < 1e-8 * norm(v0)
+        end
+        y2 = U * Y[(n + 1):(2n)]
+        @test norm(dense_state(psi) - y2) < 1e-8 * norm(v0)      # stiffly accurate: S1 = Y_2
+        @test norm(y2 - U * (exp(tau * M) * s0)) > 1e-6 * norm(v0)   # a Radau step, not exp
+        if order == 1
+            # converged, the stability-function form on the Arnoldi space is the same step
+            q = copy(psi0)
+            cbe_bug_step!(q, G, tau; hermitian = false, root_method = :radau2, tol_basis = 1e-8,
+                          tol_root = 1e-12, truncate = false)
+            @test norm(dense_state(q) - y2) < 1e-8 * norm(v0)
+        end
+        @info "D1.8 Radau IIA(2)+GMRES" order iterations = sol.iterations cycles = sol.cycles err = sol.err
+    end
 end
 
 end
