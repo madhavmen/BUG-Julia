@@ -42,14 +42,16 @@ function collective_emission_mpo(L::Int; gamma_plus::Real, gamma_minus::Real = g
         "collective_emission_mpo: rates must be nonnegative, got $gamma_plus, $gamma_minus"))
     q = local_space()
     n = to_concrete(q.Sz + 0.5 * q.I)
-    # `xxz_chain(J = 2)` gives each hop vertex the weight of one `S⁺_i S⁻_j` (vertex 1) or
-    # `S⁻_i S⁺_j` (vertex 2), as in every XY model here.
+    # `xxz_chain(J = 2)` gives each hop vertex unit weight. ⛔ The MPO APPLIES a vertex as its
+    # transpose (`spin_xx.jl`, the `liouville.jl` header): vertex 1 `(Sp, Sp')` is `S⁻_i S⁺_j`
+    # and vertex 2 `(Sm, Sm')` is `S⁺_i S⁻_j`. Only complex couplings see it: with c_ij on
+    # vertex 1 this built Q(-k) exactly (dt2a, test_dissipative_t2 U02).
     v = pair_vertices(xxz_chain(L; J = 2.0, delta = 0.0))
     length(v) == 2 || error("xxz_chain(delta = 0) gave $(length(v)) vertices, expected the two hops")
-    # (vertex, rate, s): opens with e^{-isk x_i}, closes with rate * e^{isk x_j}. Vertex 1 carries
-    # c_ij, vertex 2 its conjugate.
-    chans = [(t, g, s) for (t, g, s) in ((1, gamma_plus, 1), (1, gamma_minus, -1),
-                                         (2, gamma_plus, -1), (2, gamma_minus, 1)) if g != 0]
+    # (vertex, rate, s): opens with e^{-isk x_i}, closes with rate * e^{isk x_j}. Vertex 2 carries
+    # c_ij, vertex 1 its conjugate.
+    chans = [(t, g, s) for (t, g, s) in ((2, gamma_plus, 1), (2, gamma_minus, -1),
+                                         (1, gamma_plus, -1), (1, gamma_minus, 1)) if g != 0]
     isempty(chans) && throw(ArgumentError("collective_emission_mpo: both rates are zero"))
     m = length(chans)
     ncol = m + 2

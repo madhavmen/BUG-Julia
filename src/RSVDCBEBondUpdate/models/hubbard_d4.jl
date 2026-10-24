@@ -129,10 +129,29 @@ function _hub4_channels(q)
         ZA  = to_concrete(lock(q.Z, 1) * A)          # Z · f4σ   (opens channel A)
         Ad  = to_concrete(A')                        # f4σ†      (closes channel A)
         AdZ = to_concrete(A' * lock(q.Z, 2))         # f4σ† · Z  (opens channel B)
-        push!(chans, (ZA, Ad))
-        push!(chans, (AdZ, to_concrete(A)))
+        push!(chans, (_hub4_half(ZA, :left), _hub4_half(Ad, :right)))
+        push!(chans, (_hub4_half(AdZ, :left), _hub4_half(to_concrete(A), :right)))
     end
     return chans
+end
+
+"""
+    _hub4_half(O, side) -> TLArray
+
+`O` as one half of a hop under `:U1`, where it carries an op-leg (rank 3; `:none` is returned as
+is). The op-leg goes LAST: a product keeps its factors' leg order, so `f' * Z` is `(s, op, s)`
+and `_mpo_retag` would tag its op-leg as a site leg (dt2a: "Duplicate TLIndex"). And it must
+point out of an opening half and into a closing one (`_mpo_block`). Telum's fermion space has
+annihilators only, so channel B opens on `f'` and closes on `f`, both pointing the other way;
+`legflip` takes each to the dual, exact for U(1), which leaves their contraction unchanged.
+"""
+function _hub4_half(O, side::Symbol)
+    length(O.inds) == 3 || return O
+    k = findfirst(l -> occursin("op", O.inds[l].itags.value), 1:3)
+    k === nothing && error("_hub4_half: no op-leg among the legs $(O.inds)")
+    O = to_concrete(permutedims(O, (filter(!=(k), 1:3)..., k)))
+    O.inds[3].dir == (side === :left ? '-' : '+') || (O = to_concrete(legflip(O, 3)))
+    return O
 end
 
 """
