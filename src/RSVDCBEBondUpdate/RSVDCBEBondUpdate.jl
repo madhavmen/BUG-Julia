@@ -57,6 +57,7 @@ include("operators/mpo.jl")
 include("operators/mpo_env.jl")
 include("operators/mpo_fold.jl")
 include("operators/zero_site_core.jl")
+include("operators/mpo_apply.jl")
 include("expansion/dd_cbe.jl")
 include("expansion/dd_cbe_controller.jl")
 
@@ -101,6 +102,7 @@ include("bug/frontier_sweeps.jl")
 include("bug/krylov_closure_loop.jl")
 include("bug/parallel_kls.jl")
 include("bug/imaginary_time.jl")
+include("bug/quantum_jumps.jl")
 
 # Last: a submodule that imports from the parent, so everything it names must exist already.
 include("baselines/ground_state.jl")
@@ -167,6 +169,8 @@ export PairVertex, pair_vertices, pair_mpo,
        hubbard_aa_mpo_d4, hub4_density, hub4_imbalance, hub4_cdw_occupations,
        # dissipative.jl -- the dissipative plan's loss operators Q, for `no_jump_mpo(H, Q)`
        doublon_loss_mpo, collective_emission_mpo,
+       jump_mpo, JumpChannel, pair_loss_channels, collective_emission_channels,
+       site_emission_channels,
        # liouville*.jl -- symmetry-aware MPDOs
        LiouvilleSpace, liouville_space, liouville_index, liouville_pair, liouville_charge,
        liouville_op, ket_super, bra_super, dissipator_super, lindblad_mpo, mpdo_apply!,
@@ -185,6 +189,7 @@ export OneSiteH, one_site_h, apply_one_site, TDVP2Info, tdvp2_step!, tdvp2_compo
 
 # bug/
 export CBEBugSweepInfo, cbe_bug_step!, cbe_bug_midpoint_step!, parallel_kls_step!,
-       ite_step!, ite_evolve!, log_panel_steps, uniform_beta_steps, beta_grid
+       ite_step!, ite_evolve!, log_panel_steps, uniform_beta_steps, beta_grid,
+       mpo_product, apply_mpo, apply_jump, jump_weight, jump_trajectory, jump_ensemble
 
 end # module
