@@ -32,6 +32,22 @@ function jump_weight(ch::JumpChannel, psi::SymMPS)
     return max(real(overlap(phi, phi)), 0.0)
 end
 
+"`||a - b||` from overlaps (any gauge, no dense state)."
+_mps_distance(a::SymMPS, b::SymMPS) =
+    sqrt(max(real(overlap(a, a)) + real(overlap(b, b)) - 2 * real(overlap(a, b)), 0.0))
+
+"""
+    step_doubling_error(full, half, p = 3) -> Float64
+
+Plan eq. (7): `||Φ_h ψ - Φ_{h/2} Φ_{h/2} ψ|| / (1 - 2^-p)`, the full step's error estimated from the
+two half steps, for an order-`p` method.
+"""
+step_doubling_error(full::SymMPS, half::SymMPS, p::Int = 3) = _mps_distance(full, half) / (1 - 2.0^(-p))
+
+"Plan eq. (7): `clip(0.8 h (tau / e)^(1/(p+1)), h/2, 2h)`."
+next_step_size(h::Real, e::Real, tau::Real, p::Int = 3) =
+    clamp(0.8 * h * (tau / max(e, eps()))^(1 / (p + 1)), h / 2, 2h)
+
 "Scale the canonical `psi` to unit norm in place; returns the squared norm it had."
 function _jt_normalise!(psi::SymMPS)
     n2 = norm(psi)^2
@@ -44,7 +60,9 @@ end
 """
     jump_trajectory(psi0, G, channels, tgrid; dt, seed, observe = nothing, step = nothing,
                     step_kw = NamedTuple(), event_tol = 1e-10, max_event_evals = 40,
-                    growth_tol = 1e-10, tol_trunc = 1e-10, maxdim = 256) -> NamedTuple
+                    growth_tol = 1e-10, tol_trunc = 1e-10, maxdim = 256, jumps = true,
+                    target_step_error = nothing, check_every = 4, dt_min = dt / 64,
+                    dt_max = 4dt) -> NamedTuple
 
 One quantum-jump trajectory from `psi0` (normalised first) on the output grid `tgrid` (starting at
 0). The no-jump segment runs `step(psi, h)`, by default `cbe_bug_step!(psi, G, -im h;
@@ -62,18 +80,30 @@ Every random number comes from `MersenneTwister(seed)` (thresholds, then a chann
 a seed reproduces its trajectory. `observe(psi)` (a vector) is read on the NORMALISED conditional
 state at each grid time. A step that RAISES the norm by more than `growth_tol` is recorded in
 `flags` (`:norm_growth`): physically `P0` cannot grow, so this separates a defect from the
-per-step renormalisation, which is bookkeeping and never flagged.
+per-step renormalisation, which is bookkeeping and never flagged. `jumps = false` never jumps: the
+no-jump segment alone, with its log survival.
+
+STEP CONTROL (plan eq. 7, Task 5): with `target_step_error = τ`, every `check_every`-th step is a
+calibration: the full step is compared with two half steps from the same state
+([`step_doubling_error`](@ref)), the two-half-step state is kept, and the step size becomes
+[`next_step_size`](@ref) within `[dt_min, dt_max]`; a check above `τ` is rejected and redone at the
+smaller step. The other steps are plain. A jump resets the step size to `dt` and the check counter
+(no history survives a jump). `nothing` (default) is the fixed step `dt`.
 
 Returns `times`, `obs`, `logp` (log survival since the last jump, at each grid time), `njumps`
 (cumulative, at each grid time), `events` (`t`, `channel`, `weights`, `evals`, `resid`,
-`discarded`), `flags`, `nsteps` (accepted steps), `nevals` (extra event-location steps), `seed`.
+`discarded`), `flags`, `nsteps` (accepted steps), `nevals` (extra event-location steps), `seed`,
+and with step control `steps` (`(t, h)` of every accepted step), `checks` (`(t, h, err, accepted)`)
+and `nreject`.
 """
 function jump_trajectory(psi0::SymMPS, G::MPO, channels::AbstractVector{JumpChannel},
                          tgrid::AbstractVector{<:Real}; dt::Real, seed::Integer,
                          observe = nothing, step = nothing, step_kw = NamedTuple(),
                          event_tol::Float64 = 1e-10, max_event_evals::Int = 40,
                          growth_tol::Float64 = 1e-10, tol_trunc::Float64 = 1e-10,
-                         maxdim::Int = 256)
+                         maxdim::Int = 256, jumps::Bool = true,
+                         target_step_error::Union{Nothing, Real} = nothing, check_every::Int = 4,
+                         dt_min::Real = dt / 64, dt_max::Real = 4dt)
     isempty(channels) && throw(ArgumentError("jump_trajectory needs at least one channel"))
     (length(tgrid) >= 1 && tgrid[1] == 0 && issorted(tgrid)) || throw(ArgumentError(
         "tgrid must be sorted and start at 0"))
@@ -84,8 +114,12 @@ function jump_trajectory(psi0::SymMPS, G::MPO, channels::AbstractVector{JumpChan
     rng = MersenneTwister(seed)
     psi = copy(psi0)
     _jt_normalise!(psi)
-    logp, logu = 0.0, log(rand(rng))
+    draw() = jumps ? log(rand(rng)) : -Inf
+    logp, logu = 0.0, draw()
     t, nj, nsteps, nevals = 0.0, 0, 0, 0
+    ctl = target_step_error !== nothing
+    hcur, since, nreject = Float64(dt), 0, 0
+    steps, checks = Tuple{Float64, Float64}[], NamedTuple[]
     events, flags = NamedTuple[], NamedTuple[]
     obs, logps, njs = Any[], Float64[], Int[]
     record!(p) = (push!(obs, observe === nothing ? nothing : observe(p)); push!(logps, logp);
@@ -94,9 +128,28 @@ function jump_trajectory(psi0::SymMPS, G::MPO, channels::AbstractVector{JumpChan
     for k in 2:length(tgrid)
         tnext = Float64(tgrid[k])
         while tnext - t > 1e-12 * max(1.0, tnext)
-            h = min(Float64(dt), tnext - t)
+            h = min(hcur, tnext - t)
             saved = copy(psi)
-            stepfn(psi, h)
+            if ctl && (since += 1) >= check_every
+                since = 0
+                full = copy(saved)
+                stepfn(full, h)
+                stepfn(psi, h / 2)
+                stepfn(psi, h / 2)
+                e = step_doubling_error(full, psi)            # saved has norm 1: relative
+                hn = clamp(next_step_size(h, e, target_step_error), dt_min, dt_max)
+                ok = e <= target_step_error || h <= dt_min * (1 + 1e-12)
+                push!(checks, (t = t, h = h, err = e, accepted = ok))
+                if !ok
+                    nreject += 1
+                    psi, hcur, since = saved, hn, check_every - 1   # redo, and check the redo
+                    continue
+                end
+                # a grid-shortened step says nothing about growing past `hcur`
+                hcur = h >= hcur * (1 - 1e-12) ? hn : min(hcur, hn)
+            else
+                stepfn(psi, h)
+            end
             n2 = norm(psi)^2
             n2 > 1 + growth_tol && push!(flags, (t = t + h, kind = :norm_growth, value = n2 - 1))
             if logp + log(n2) > logu
@@ -104,6 +157,7 @@ function jump_trajectory(psi0::SymMPS, G::MPO, channels::AbstractVector{JumpChan
                 logp += log(n2)
                 t += h
                 nsteps += 1
+                push!(steps, (t, h))
                 continue
             end
             # ── the survival crossed `u` inside (t, t + h]: locate it (Illinois regula falsi) ──
@@ -143,13 +197,15 @@ function jump_trajectory(psi0::SymMPS, G::MPO, channels::AbstractVector{JumpChan
             nj += 1
             push!(events, (t = t, channel = channels[mu].name, weights = w, evals = ev,
                            resid = fb, discarded = disc))
-            logp, logu = 0.0, log(rand(rng))
+            logp, logu = 0.0, draw()
+            hcur, since = Float64(dt), 0
         end
         t = tnext
         record!(psi)
     end
     return (times = collect(Float64, tgrid), obs = obs, logp = logps, njumps = njs,
-            events = events, flags = flags, nsteps = nsteps, nevals = nevals, seed = seed)
+            events = events, flags = flags, nsteps = nsteps, nevals = nevals, seed = seed,
+            steps = steps, checks = checks, nreject = nreject)
 end
 
 """
