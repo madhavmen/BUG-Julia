@@ -378,10 +378,13 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                                     Float64(eshift)))
     res = svd(S1, (1,); cutoff = 0.0, get_lists = true)
     expanded[c] = leg_dim(W[c], 3)
+    # bytes by hand, not `_measure`: a closure here would box the reassigned `maxdim`
+    bcomp = Base.gc_bytes()
     root_rank, discarded, ttrunc[] = _assemble_and_compress!(psi, W, Z, c, res, ledger, bwts, bd0;
                                                             maxdim = maxdim,
                                                             tol_trunc = budget.trunc,
                                                             truncate = truncate)
+    bcomp = Base.gc_bytes() - bcomp
 
     # ⚠ THE PHASE TIMERS ARE SUMS ACROSS BOTH HALF-SWEEPS, i.e. CPU time, while `t_step` is WALL
     # clock. Under `parallel = false` they are the same clock and the shares sum to ~1 as before.
@@ -391,6 +394,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     t_step = (time_ns() - _t0step) / 1e9
     kc = merge_counters!(merge_counters!(merge_counters!(KernelCounters(), accL.kc), accR.kc),
                          kroot)
+    kc.b_compress += bcomp
     rec = StepRecord(:dd_qr_streamed, _qr_backend(), order > 1 ? :dd_qr_streamed : :none,
                      order, kls === nothing ? parallel_sym : :full, kc,
                      maximum(bd0; init = 0), max(maximum(expanded; init = 0), leg_dim(Z[c], 1)),

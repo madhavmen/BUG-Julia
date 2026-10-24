@@ -27,14 +27,15 @@ MPO tensor `W`, returning the environment on link `i+1` with legs `(bra, mpo, ke
 
 `A` may be a state tensor OR an expanded frame -- both carry an MPS tensor's
 `(link_l, site, link_r)` layout, which is what lets `zero_site_h` push an environment
-through `U_ex` with this same function.
+through `U_ex` with this same function. `B` is the bra tensor, `A` unless a matrix element
+between two states is wanted ([`mpo_matrix_element`](@ref)).
 """
-function _mpo_left_step(E, A, W)
+function _mpo_left_step(E, A, W, B = A)
     if E === nothing
         # Boundary: `link_l` is the dim-1 vacuum, contracted bra-to-ket, and `W`'s `w_l`
         # is the dim-1 leg left by trimming, dropped rather than contracted.
         T = contract(W, (2,), A, (2,))                  # (w_l, s_bra, w_r, ℓ_l, ℓ_r)
-        T = contract(to_concrete!(T), (2, 4), _bra_left_boundary(A), (2, 1))
+        T = contract(to_concrete!(T), (2, 4), _bra_left_boundary(B), (2, 1))
         T = to_concrete(deleteSingleton(to_concrete!(T), 1))   # (w_r, ℓ_r, ℓ_r')
         return to_concrete(permutedims(T, (3, 1, 2)))
     end
@@ -43,7 +44,7 @@ function _mpo_left_step(E, A, W)
     # The outer `to_concrete` stays -- `permutedims`/`deleteSingleton` return views.
     T = contract(E, (3,), A, (1,))                       # (bra, w, s, ℓ_r)
     T = contract(to_concrete!(T), (2, 3), W, (1, 2))      # (bra, ℓ_r, s_bra, w_r)
-    T = contract(to_concrete!(T), (1, 3), _bra_interior(A), (1, 2))  # (ℓ_r, w_r, ℓ_r')
+    T = contract(to_concrete!(T), (1, 3), _bra_interior(B), (1, 2))  # (ℓ_r, w_r, ℓ_r')
     return to_concrete(permutedims(to_concrete!(T), (3, 2, 1)))
 end
 
@@ -151,11 +152,11 @@ is contracted bra-to-ket, and `W`'s `w_r` is the dim-1 leg left by trimming to t
 column, so it is dropped. The result is a scalar. `deleteSingleton` doubles as the
 assertion that the trimming really did leave a singleton there.
 """
-function _mpo_left_close(E, A, W)
+function _mpo_left_close(E, A, W, B = A)
     T = contract(E, (3,), A, (1,))                       # (bra, w, s, ℓ_r)
     T = contract(to_concrete!(T), (2, 3), W, (1, 2))       # (bra, ℓ_r, s_bra, w_r)
     T = to_concrete(deleteSingleton(to_concrete!(T), 4))   # (bra, ℓ_r, s_bra)
-    s = contract(T, (1, 3, 2), _bra_right_boundary(A), (1, 2, 3))
+    s = contract(T, (1, 3, 2), _bra_right_boundary(B), (1, 2, 3))
     return ComplexF64(to_concrete(s)[])
 end
 
@@ -169,15 +170,24 @@ Unnormalised, like `env_energy` -- compare against `energy(psi, gates) * norm(ps
 unless the state is normalised. Exact in any gauge: bra and ket are contracted
 explicitly and no isometry is assumed anywhere.
 """
-function mpo_energy(psi::SymMPS, mpo::MPO)
-    L = length(psi)
-    length(mpo) == L || throw(DimensionMismatch(
-        "MPO has $(length(mpo)) sites, state has $L"))
+mpo_energy(psi::SymMPS, mpo::MPO) = mpo_matrix_element(psi, mpo, psi)
+
+"""
+    mpo_matrix_element(bra, mpo, ket) -> ComplexF64
+
+`⟨bra|mpo|ket⟩`, the [`mpo_energy`](@ref) recursion with a separate bra. Both states need the
+same site legs and, under a symmetry, total charges that the MPO connects. Reads a non-Hermitian
+MPO (`no_jump_mpo`) as a matrix on a small product basis.
+"""
+function mpo_matrix_element(bra::SymMPS, mpo::MPO, ket::SymMPS)
+    L = length(ket)
+    length(mpo) == L && length(bra) == L || throw(DimensionMismatch(
+        "MPO has $(length(mpo)) sites, ket $L, bra $(length(bra))"))
     E = nothing
     for i in 1:(L - 1)
-        E = _mpo_left_step(E, psi[i], mpo[i])
+        E = _mpo_left_step(E, ket[i], mpo[i], bra[i])
     end
-    return _mpo_left_close(E, psi[L], mpo[L])
+    return _mpo_left_close(E, ket[L], mpo[L], bra[L])
 end
 
 """

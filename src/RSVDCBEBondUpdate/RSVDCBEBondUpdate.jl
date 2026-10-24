@@ -73,6 +73,7 @@ include("models/tfim.jl")
 include("models/mbl_scars.jl")
 include("models/pxp_scars.jl")
 include("models/hubbard_d4.jl")
+include("models/dissipative.jl")
 include("models/liouville.jl")
 include("models/liouville_blocks.jl")
 include("models/spin_xx.jl")
@@ -111,7 +112,8 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
        push_left_channels, push_right_channels,
        LeftEnvStack, RightEnvStack, left_env_stack, right_env_stack, env_energy, env_energy_right,
        apply_h_two_site, sketch_h_left, sketch_h_right,
-       MPO, mpo_from_terms, xxz_mpo, heisenberg_su2_mpo, mpo_virtual_dims, mpo_energy, mpo_variance,
+       MPO, mpo_from_terms, xxz_mpo, heisenberg_su2_mpo, mpo_virtual_dims, mpo_energy,
+       mpo_matrix_element, mpo_variance,
        onsite_mpo, mpo_sum, no_jump_mpo,
        LongRangeTerm, long_range_mpo, long_range_zz_mpo,
        LongRangeFit, fit_long_range, default_decays, long_range_terms, power_law_zz_mpo,
@@ -163,6 +165,8 @@ export PairVertex, pair_vertices, pair_mpo,
        hub4_space, hub4_basis_index, hub4_sector, hub4_product_state,
        HUB4_EMPTY, HUB4_UP, HUB4_DOWN, HUB4_BOTH,
        hubbard_aa_mpo_d4, hub4_density, hub4_imbalance, hub4_cdw_occupations,
+       # dissipative.jl -- the dissipative plan's loss operators Q, for `no_jump_mpo(H, Q)`
+       doublon_loss_mpo, collective_emission_mpo,
        # liouville*.jl -- symmetry-aware MPDOs
        LiouvilleSpace, liouville_space, liouville_index, liouville_pair, liouville_charge,
        liouville_op, ket_super, bra_super, dissipator_super, lindblad_mpo, mpdo_apply!,

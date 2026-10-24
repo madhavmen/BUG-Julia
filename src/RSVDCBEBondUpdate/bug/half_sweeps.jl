@@ -29,6 +29,15 @@ mutable struct _HalfAcc
 end
 _HalfAcc() = _HalfAcc(0, 0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, KernelCounters())
 
+"`f(args...)`, an environment build or push, charged to the half-sweep's `tenv` and `kc.b_env`.
+The arguments are passed, not captured: a closure over the sweep's reassigned `lch`/`rch` boxes them."
+function _env_timed!(acc::_HalfAcc, f, args...; kw...)
+    e, dt, db = _measure(() -> f(args...; kw...))
+    acc.tenv += dt
+    acc.kc.b_env += db
+    return e
+end
+
 """
     _HalfSweepCtx
 
@@ -107,8 +116,7 @@ environment pushed through it immediately -- the reference's own ordering
 function _half_left!(psiL, W, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_HalfSweepCtx)
     mpo, c = cx.mpo, cx.c
     canonical!(psiL, 1)
-    rstack = (t0 = time_ns(); e = right_env_stack(psiL, mpo; downto = 3);
-              acc.tenv += (time_ns() - t0) / 1e9; e)
+    rstack = _env_timed!(acc, right_env_stack, psiL, mpo; downto = 3)
     lch = boundary_channels(mpo)
     lroot = lch
     C = nothing
@@ -152,8 +160,7 @@ function _half_left!(psiL, W, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_Ha
         # only legs 1-2, so this lands on `(b_i, link_i)` and composes with `psiL[i+1]`.
         C = to_concrete!(contract(W[i]', (1, 2), K, (1, 2)))
         i == c && (lroot = lch)         # captured BEFORE pushing through the root frame
-        i < c && ((lch = (t0 = time_ns(); e = push_left_channels(lch, mpo, W[i], i);
-                 acc.tenv += (time_ns() - t0) / 1e9; e)))
+        i < c && (lch = _env_timed!(acc, push_left_channels, lch, mpo, W[i], i))
     end
     return lroot
 end
@@ -173,8 +180,7 @@ function _half_right!(psiR, Z, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_H
     mpo, c = cx.mpo, cx.c
     L = length(psiR)
     canonical!(psiR, L)
-    lstack = (t0 = time_ns(); e = left_env_stack(psiR, mpo; upto = L - 2);
-              acc.tenv += (time_ns() - t0) / 1e9; e)
+    lstack = _env_timed!(acc, left_env_stack, psiR, mpo; upto = L - 2)
     rch = boundary_channels(mpo)
     rroot = rch
     D = nothing
@@ -216,8 +222,7 @@ function _half_right!(psiR, Z, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_H
 
         D = to_concrete!(contract(B, (2, 3), Z[j]', (2, 3)))          # (link_j, b_j)
         j == c && (rroot = rch)
-        j > c && ((rch = (t0 = time_ns(); e = push_right_channels(rch, mpo, Z[j], j + 1);
-                 acc.tenv += (time_ns() - t0) / 1e9; e)))
+        j > c && (rch = _env_timed!(acc, push_right_channels, rch, mpo, Z[j], j + 1))
     end
     return (rroot, D)                   # `D` is (link_{c+1}, b_R)
 end

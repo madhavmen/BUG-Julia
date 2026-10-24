@@ -33,8 +33,15 @@ mutable struct KernelCounters
     b_stream::Int
     b_output_dd::Int
     b_qr::Int
+    # dissipative plan U17: every phase measured in bytes as well as seconds. The environment
+    # and compression times are the step's `t_env` / `t_trunc`.
+    b_one_site::Int
+    b_root::Int
+    b_env::Int             # environment stacks and channel pushes of the half-sweeps
+    b_compress::Int        # the closing compression
 end
-KernelCounters() = KernelCounters(0, 0, 0, 0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0, 0)
+KernelCounters() = KernelCounters(0, 0, 0, 0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0, 0,
+                                  0, 0, 0, 0)
 
 function merge_counters!(a::KernelCounters, b::KernelCounters)
     for f in fieldnames(KernelCounters)
@@ -119,9 +126,10 @@ struct OneSiteOp{H}
 end
 
 function apply_one_site(op::OneSiteOp, A)
-    y, dt, _ = _measure(() -> apply_one_site(op.h, A))
+    y, dt, db = _measure(() -> apply_one_site(op.h, A))
     op.counters.n_one_site += 1
     op.counters.t_one_site += dt
+    op.counters.b_one_site += db
     return y
 end
 
@@ -140,9 +148,10 @@ struct RootOp{H}
 end
 
 function apply_zero_site(op::RootOp, S)
-    y, dt, _ = _measure(() -> apply_zero_site(op.h, S))
+    y, dt, db = _measure(() -> apply_zero_site(op.h, S))
     op.counters.n_root += 1
     op.counters.t_root += dt
+    op.counters.b_root += db
     return y
 end
 

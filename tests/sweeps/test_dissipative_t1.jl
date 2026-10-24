@@ -28,19 +28,7 @@ import Random
 
 include(joinpath(@__DIR__, "..", "common", "adaptive_fixtures.jl"))
 include(joinpath(@__DIR__, "..", "common", "dense_reference.jl"))
-
-_loss_rates(L) = [isodd(j) ? 1.0 : 0.2 for j in 1:L]
-
-"`(H, Q, G)` as MPOs and the dense `H - (i/2) Q`, with `delta` the XXZ anisotropy."
-function _lossy_xx(L; delta = 0.0, gamma = _loss_rates(L))
-    q = local_space()
-    n = to_concrete(q.Sz + 0.5 * q.I)                       # S^+ S^- = |up><up|
-    H = xxz_mpo(L; J = 1.0, delta = delta)
-    Q = onsite_mpo(L, [to_concrete(gamma[j] * n) for j in 1:L])
-    Qd = sum(gamma[j] * (_embed(_SZ, j, L) + 0.5 * I) for j in 1:L)
-    Hd = dense_heisenberg(L; J = 1.0, delta = delta)
-    return H, Q, no_jump_mpo(H, Q), Hd - 0.5im * Qd, Qd
-end
+include(joinpath(@__DIR__, "..", "common", "dissipative_fixtures.jl"))   # _lossy_xx
 
 @testset "dissipative Task 1: the solver on G = -iH - Q/2" begin
 
