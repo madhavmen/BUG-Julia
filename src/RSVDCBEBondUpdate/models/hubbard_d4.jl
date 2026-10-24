@@ -55,11 +55,12 @@ end
 
 # ── U(1) charge x U(1) spin labels ──
 # Telum appends charge first (`n_up + n_down - nchannels`, particle-hole centred), then spin
-# (`n_up - n_down`), so the four states are four distinct one-dimensional sectors.
-const HUB4_EMPTY = ((-1, 0),)
-const HUB4_UP    = ((0, 1),)
-const HUB4_DOWN  = ((0, -1),)
-const HUB4_BOTH  = ((1, 0),)
+# (`n_up - n_down`), so the four states are four distinct one-dimensional sectors. ONE TUPLE PER
+# SYMMETRY (`charge_symmops`/`spin_symmops` weights are `(w,)`): `((-1, 0),)` matches no leg.
+const HUB4_EMPTY = ((-1,), (0,))
+const HUB4_UP    = ((0,), (1,))
+const HUB4_DOWN  = ((0,), (-1,))
+const HUB4_BOTH  = ((1,), (0,))
 
 hub4_sector(occ::Symbol) =
     occ === :empty ? HUB4_EMPTY :
@@ -100,6 +101,8 @@ function hub4_product_state(occ::Vector{Symbol})
             target = hub4_sector(occ[i])
             B = getsub(F, 2, s -> s == target ? Colon() : nothing; preserve_space = true)
             B = to_concrete(B)
+            isempty(B.qlabels) && error("hub4_product_state: site $i sector $target matches " *
+                "none of the site leg's labels $(first.(F.spaces[2]))")
             present = Set(ql[3] for ql in B.qlabels)
             to_concrete(getsub(B, 3, s -> s in present ? Colon() : nothing))
         end
