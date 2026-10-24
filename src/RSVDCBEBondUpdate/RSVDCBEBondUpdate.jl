@@ -170,7 +170,7 @@ export PairVertex, pair_vertices, pair_mpo,
        hub4_current_mpo, pair_loss_junction,
        # dissipative.jl -- the dissipative plan's loss operators Q, for `no_jump_mpo(H, Q)`
        doublon_loss_mpo, collective_emission_mpo,
-       jump_mpo, JumpChannel, pair_loss_channels, collective_emission_channels,
+       jump_mpo, SiteOp, JumpChannel, pair_loss_channels, collective_emission_channels,
        site_emission_channels,
        # liouville*.jl -- symmetry-aware MPDOs
        LiouvilleSpace, liouville_space, liouville_index, liouville_pair, liouville_charge,
@@ -191,7 +191,7 @@ export OneSiteH, one_site_h, apply_one_site, TDVP2Info, tdvp2_step!, tdvp2_compo
 # bug/
 export CBEBugSweepInfo, cbe_bug_step!, cbe_bug_midpoint_step!, parallel_kls_step!,
        ite_step!, ite_evolve!, log_panel_steps, uniform_beta_steps, beta_grid,
-       mpo_product, apply_mpo, apply_jump, jump_weight, jump_trajectory, jump_ensemble,
-       step_doubling_error, next_step_size
+       mpo_product, site_op_product, factor_product, apply_factor, apply_mpo, apply_jump,
+       jump_weight, jump_trajectory, jump_ensemble, step_doubling_error, next_step_size
 
 end # module

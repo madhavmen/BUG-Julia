@@ -66,22 +66,22 @@ end
     @test [c.name for c in ch] == ["L+", "L-"]
     for (c, Ld) in zip(ch, (Lp, Lm))
         w = Ld * v
-        @test norm(dense_state(mpo_product(c.mpos[1], psi)) - w) < 1e-12 * norm(w)
+        @test norm(dense_state(factor_product(c.factors[1], psi)) - w) < 1e-12 * norm(w)
         @test abs(jump_weight(c, psi) - norm(w)^2) < 1e-12 * norm(w)^2
         phi, disc = apply_jump(c, psi)
         @test disc < 1e-14 && norm(dense_state(phi) - w) < 1e-10 * norm(w)
         @test _spin_support(dense_state(phi), L) == Set([n - 1])     # N_exc -> N_exc - 1
     end
     Lp2, _ = _emission_jumps(L; gp = gp, gm = gm, k = -k)
-    @test norm(dense_state(mpo_product(ch[1].mpos[1], psi)) - Lp2 * v) > 1e-3 * norm(Lp * v)  # CONTROL
+    @test norm(dense_state(factor_product(ch[1].factors[1], psi)) - Lp2 * v) > 1e-3 * norm(Lp * v)  # CONTROL
     Qm = collective_emission_mpo(L; gamma_plus = gp, gamma_minus = gm, k = k)
     @test abs(sum(jump_weight(c, psi) for c in ch) - real(mpo_energy(psi, Qm))) < 1e-12
     g = _loss_rates(L)
     sc = site_emission_channels(L; gamma = g)
-    @test all(norm(dense_state(mpo_product(c.mpos[1], psi)) - sqrt(g[j]) * _embed(_SM, j, L) * v) <
+    @test all(norm(dense_state(factor_product(c.factors[1], psi)) - sqrt(g[j]) * _embed(_SM, j, L) * v) <
               1e-12 for (j, c) in enumerate(sc))
     @test abs(sum(jump_weight(c, psi) for c in sc) - real(mpo_energy(psi, _site_loss_mpo(L)))) < 1e-12
-    @test maximum(mpo_virtual_dims(sc[3].mpos[1])) == 1             # a one-site jump: one channel
+    @test sc[3].factors[1] isa SiteOp                               # a local jump needs no MPO
 end
 
 @testset "J0: pair loss against the Fock jump, sign structure included" begin

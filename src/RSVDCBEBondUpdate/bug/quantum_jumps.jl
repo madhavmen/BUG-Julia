@@ -8,12 +8,12 @@
     apply_jump(ch, psi; tol_trunc = 0.0, maxdim = 10_000) -> (SymMPS, discarded)
 
 `L_μ ψ` for the channel `ch` ([`JumpChannel`](@ref)), unnormalised, each factor applied exactly
-and compressed once ([`apply_mpo`](@ref)). The returned discarded norm is the largest factor's.
+and compressed once ([`apply_factor`](@ref)). The returned discarded norm is the largest factor's.
 """
 function apply_jump(ch::JumpChannel, psi::SymMPS; tol_trunc::Float64 = 0.0, maxdim::Int = 10_000)
     phi, worst = psi, 0.0
-    for m in ch.mpos
-        phi, d = apply_mpo(m, phi; tol_trunc = tol_trunc, maxdim = maxdim)
+    for m in ch.factors
+        phi, d = apply_factor(m, phi; tol_trunc = tol_trunc, maxdim = maxdim)
         worst = max(worst, d)
     end
     return phi, worst
@@ -22,9 +22,9 @@ end
 "`||L_μ ψ||^2`, exact: the uncompressed product, read by `overlap` (any gauge)."
 function jump_weight(ch::JumpChannel, psi::SymMPS)
     phi = psi
-    for (k, m) in pairs(ch.mpos)
-        phi = mpo_product(m, phi)
-        k < length(ch.mpos) || break
+    for (k, m) in pairs(ch.factors)
+        phi = factor_product(m, phi)
+        k < length(ch.factors) || break
         n2 = real(overlap(phi, phi))
         n2 > 0 || return 0.0
         canonical!(phi, 1)           # a gauged input for the next factor (exact, nothing cut)
