@@ -35,14 +35,24 @@ end
 `-i[H, rho] -> -i (H (x) I - I (x) H^T)` and `D[X] -> X (x) conj(X) - (X'X (x) I + I (x) (X'X)^T)/2`.
 """
 function sparse_lindbladian(L, d; pairs, onsite_h = nothing, jumps = Any[])
-    D = d^L
-    H = sparse_hamiltonian(L, d, pairs, onsite_h)
+    Xs = [sqrt(rates isa Number ? rates : rates[i]) * _sp_emb(Jop, i, L, d)
+          for (Jop, rates) in jumps for i in 1:L if !iszero(rates isa Number ? rates : rates[i])]
+    return lindbladian_from(sparse_hamiltonian(L, d, pairs, onsite_h), Xs)
+end
+
+"""
+    lindbladian_from(H, Xs) -> SparseMatrixCSC
+
+The same superoperator from a given `H` and jump operators `Xs` (each `D x D`), for models that
+are not a sum of `kron` site operators: fermions in a Fock basis, collective jumps.
+"""
+function lindbladian_from(H, Xs)
+    D = size(H, 1)
+    Hs = sparse(ComplexF64.(H))
     Id = sparse(1.0I, D, D)
-    S = -1im * (kron(H, Id) - kron(Id, transpose(H)))
-    for (Jop, rates) in jumps, i in 1:L
-        g = rates isa Number ? rates : rates[i]
-        iszero(g) && continue
-        X = sqrt(g) * _sp_emb(Jop, i, L, d)
+    S = -1im * (kron(Hs, Id) - kron(Id, transpose(Hs)))
+    for X0 in Xs
+        X = sparse(ComplexF64.(X0))
         XX = X' * X
         S += kron(X, conj(X)) - kron(XX, Id) / 2 - kron(Id, transpose(XX)) / 2
     end
