@@ -121,10 +121,12 @@ end
 """
     SiteOp(j, O, c)
 
-The one-site factor `c O_j` of a jump, `O` a charged (rank-3) local operator applied as it acts
-(`_apply_site_op`, as `site_expval` reads operators), not through an MPO: its charge leg is carried
-through the links right of `j` into the boundary (`operators/mpo_apply.jl`). A local jump needs no
-MPO channel, and the d = 4 fermion operators have no charged transport block.
+The one-site factor `c O_j` of a jump, `O` a charged (rank-3) local operator applied by
+`_apply_site_op`, i.e. as the TRANSPOSE of the stored tensor -- the convention of the environments
+and the MPO (`spin_xx.jl`, the `liouville.jl` header): stored `Sp` applies `S⁻`, stored `f'` applies
+`f` (dt4f: a stored `Sm` applied `S⁺`). Its charge leg is carried through the links right of `j`
+into the boundary (`operators/mpo_apply.jl`). A local jump needs no MPO channel, and the d = 4
+fermion operators have no charged transport block.
 """
 struct SiteOp
     j::Int
@@ -149,6 +151,7 @@ The factor that makes a stored operator act with unit matrix element: `1 / <dst|
 probe pair of product states. Telum's spin operators are spherical tensor components (`Sp` is
 `-S⁺/√2`), and a jump's weight `||L ψ||²` must be `<ψ|L'L|ψ>` with `L'L` the `Q` the generator
 uses, not a multiple of it. Computed, not hard-coded, so a convention change cannot pass silently.
+Two-site probes: `overlap` of states in different sectors is then an exact 0, not a leg mismatch.
 """
 function _unit_scale(F, src::SymMPS, dst::SymMPS)
     x = overlap(dst, factor_product(F, src))
@@ -169,9 +172,11 @@ function pair_loss_channels(L::Int; kappa)
     length(k) == L || throw(DimensionMismatch("pair_loss_channels got $(length(k)) rates for $L sites"))
     all(>=(0.0), k) || throw(ArgumentError("pair_loss_channels: rates must be nonnegative, got $k"))
     q = hub4_space()
-    su = _unit_scale(SiteOp(1, q.Fu, 1), hub4_product_state([:up]), hub4_product_state([:empty]))
-    sd = _unit_scale(SiteOp(1, q.Fd, 1), hub4_product_state([:down]), hub4_product_state([:empty]))
-    return [JumpChannel("pair$j", Any[SiteOp(j, q.Fu, sqrt(k[j]) * su), SiteOp(j, q.Fd, sd)])
+    fu, fd = to_concrete(q.Fu'), to_concrete(q.Fd')                  # applied as c↑, c↓
+    e2 = hub4_product_state([:empty, :empty])
+    su = _unit_scale(SiteOp(1, fu, 1), hub4_product_state([:up, :empty]), e2)
+    sd = _unit_scale(SiteOp(1, fd, 1), hub4_product_state([:down, :empty]), e2)
+    return [JumpChannel("pair$j", Any[SiteOp(j, fu, sqrt(k[j]) * su), SiteOp(j, fd, sd)])
             for j in 1:L if k[j] > 0]
 end
 
@@ -210,6 +215,6 @@ function site_emission_channels(L::Int; gamma)
     g = gamma isa Number ? fill(Float64(gamma), L) : collect(Float64, gamma)
     length(g) == L || throw(DimensionMismatch("got $(length(g)) rates for $L sites"))
     q = local_space()
-    s = _unit_scale(SiteOp(1, q.Sm, 1), product_state([:up]), product_state([:down]))
-    return [JumpChannel("site$j", Any[SiteOp(j, q.Sm, sqrt(g[j]) * s)]) for j in 1:L if g[j] > 0]
+    s = _unit_scale(SiteOp(1, q.Sp, 1), product_state([:up, :down]), product_state([:down, :down]))
+    return [JumpChannel("site$j", Any[SiteOp(j, q.Sp, sqrt(g[j]) * s)]) for j in 1:L if g[j] > 0]
 end
