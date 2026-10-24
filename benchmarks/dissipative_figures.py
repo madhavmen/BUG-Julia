@@ -150,11 +150,25 @@ def fig_ablation(runs, refs, out):
     return rows
 
 
+def same_dt_baseline(r, runs):
+    """The tight-tolerance BUG run of the same point and step (E 1 or 2base): against it a ladder
+    entry's error is its tolerance's own, not the time error the fine-step reference also sees
+    (dr5b: the A1 L = 8 ladders were flat at the dt = 0.05 time error, 1.4e-6)."""
+    c = r["config"]
+    cands = [x for x in runs if x is not r and x["E"] in ("1", "2base") and key(x) == key(r)
+             and x["config"]["int"] == "bug" and x["config"]["dt"] == c["dt"]]
+    return min(cands, key=lambda x: x["config"]["tol_basis"], default=None)
+
+
 def fig_tolerances(runs, refs, out):
     lad = {"2b": "tol_basis", "2r": "tol_root", "2t": "tol_trunc"}
     rs = [r for r in runs if r["E"] in lad]
     if not rs:
         return []
+
+    def own_error(r):
+        b = same_dt_baseline(r, runs)
+        return max(error(r, b)) if b is not None else np.nan
     models = sorted({r["config"]["model"] for r in rs})
     fig, axs = plt.subplots(len(models), 6, figsize=(22, 3.6 * len(models)), squeeze=False)
     rows = []
@@ -166,8 +180,9 @@ def fig_tolerances(runs, refs, out):
                 continue
             x = [r["config"][tol] for r in sel]
             err = [max(ref_error(r, refs) or (np.nan, np.nan)) for r in sel]
+            own = [own_error(r) for r in sel]
             sl = [r["steplog"] for r in sel]
-            series = [("error", err),
+            series = [("error vs reference (o) / vs same-dt tight run (x)", err),
                       ("frame width r_aug", [np.mean(s.get("r_aug", [np.nan])) for s in sl]),
                       ("root iterations", [np.mean(s.get("expv_iters", [np.nan])) for s in sl]),
                       ("discarded", [np.max(s.get("discarded", [np.nan])) for s in sl]),
@@ -177,7 +192,8 @@ def fig_tolerances(runs, refs, out):
                 axs[i, j].loglog(x, y, "o-", label=tol)
                 axs[i, j].set_title(f"{m}: {name}", fontsize=8)
                 axs[i, j].set_xlabel("requested tolerance")
-            rows.append((f"F02 {m} {tol}", list(zip(x, err)), []))
+            axs[i, 0].loglog(x, own, "x--", label=f"{tol}, same dt")
+            rows.append((f"F02 {m} {tol} (vs reference, vs same-dt tight)", list(zip(x, err, own)), []))
         for ax in axs[i]:
             ax.legend(fontsize=6)
     fig.tight_layout()
