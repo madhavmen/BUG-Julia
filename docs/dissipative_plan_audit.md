@@ -126,3 +126,47 @@ yet, and U07, U13-U15 test the jump engine of plan Task 4.
 | dt2b 17471868 | `ff2473b` | -- | cancelled: the `:U1` labels (`d76cec2`) were found before it ran |
 | dt2c 17471888 | `d76cec2` | `test_dissipative_t2.jl` | 183/184: emission U01/U02 8/8 (fix confirmed). Hubbard `:U1`: ERROR in `oplus`, "column 2 has incompatible spaces on leg 4": the automaton's vacuum-zero pre-fill contradicts a charged hop column. Fixed `91e8c6a` |
 | dt2d 17471938 | `91e8c6a` | `test_dissipative_t2.jl` | **184/184: the G0 gate passes.** MaxRSS 2.0 G, 14 min |
+
+# Task 3 (G1): A1 / A2 model fixtures and exact smoke tests
+
+Branch `plan/dissip-task-3`, cut from `plan/dissip-task-2` @ `91e8c6a`. Tests
+`tests/sweeps/test_dissipative_t3_a1.jl` (Hubbard chain, bulk doublon loss) and
+`test_dissipative_t3_a2.jl` (XXZ chain, collective emission); shared fixtures
+`tests/common/dissipative_fixtures.jl`; exact Lindblad references through
+`lindbladian_from(H, Xs)` (`benchmarks/open_system/sparse_lindblad.jl`). `src/` equals Task 2's.
+The trajectory averages and jump counts of A1/A2 need the jump engine: LATER(T4).
+
+| item | status | where |
+|---|---|---|
+| baseline | USER 2026-10-24 | standard two-site TDVP (`tdvp2_step!`, `hermitian = false`, same MPO) is the plan's only baseline; the split-loss TDVP of `6faaa23` is removed (`9b99150`) |
+| bond-charge decoders | FIXED `4f2d96c` | the outgoing bond leg carries the NEGATED left-block charge; before the fix the A1 sector-rank checks passed vacuously |
+| A2 order 3 from a product state | `2530c55` (tests) | see below; the A2 BUG settings set `closure_checks = true`, the solver default stays OFF (USER 10-17) |
+
+**A2 at L = 8 (dt3a, dt3b): the first step missed `Q`'s long-range hops.** The error is all in
+step 1 and scales with `dt Γ`. dt3e (`dt3diag2.jl`, one step from the product state, Γ = 2,
+dt = 0.025) separates the cause:
+
+| settings | root dim (sector 56) | `‖BX − PGPX‖/‖X‖` | step vs own Galerkin | `Q_LR ψ₀` outside frames | step error |
+|---|---|---|---|---|---|
+| A2 smoke | 44 | 5.1e-14 | 1.2e-15 | 49% | 4.0e-2 |
+| `tol_basis` 1e-12 | 44 | 5.8e-14 | 1.2e-15 | 49% | 4.0e-2 |
+| + `exact = true` (DD sketch) | 44 | 3.7e-14 | 1.4e-15 | 49% | 4.0e-2 |
+| + `closure_checks = true` | 56 | 1.4e-13 | 1.6e-15 | 1.4e-15 | 1.3e-15 |
+
+The Telum contractions are exact. `Hψ₀`, the onsite part and the nearest-neighbour hops of `Qψ₀`
+all lie in the frames (≤ 1.5e-15). The S⁺S⁻ hops of range ≥ 2 do not: from a U(1) product
+state, the two-site environments cannot see them, since the charge makes every
+⟨frame|S±|frame⟩ zero. The single enriching pass per frontier therefore cannot capture them
+either, and its per-bond leak estimate is exact only for nearest-neighbour terms.
+`dt‖(I−P)Gψ₀‖ = 4.9e-2` accounts for the 4.0e-2 step error. Tighter tolerances and the exact
+sketch change nothing. The validated closure (`closure_checks = true`) repeats the pass until
+it adds nothing. The second pass starts from frames that already mix charge sectors, so the
+root grows to the whole sector and the step is exact.
+
+| job | commit | file | result |
+|---|---|---|---|
+| dt3a 17471939 | `6faaa23` | A1, A2 | A1 physics green (rank checks vacuous, see `4f2d96c`); A2 L = 6 exact (1e-14), L = 8 smoke fails ED by 3e-3 (Γ = 0.2) to 4.6e-2 (Γ = 2) |
+| dt3d 17472019 | `6faaa23` | diagnostic | MPO exact at L = 7, 8; H-only 4e-9; error all in step 1, ∝ `dt Γ` (dt/4 → /3.8); same with `tol_basis` 1e-11, exact DD, TDVP2 (7e-3) |
+| dt3b 17472046 | `4f2d96c` | A1, A2 | A1 293/293; A2 134/138 (the four L = 8 smoke accuracy checks only) |
+| dt3e 17472284 | `4f2d96c` | `dt3diag2.jl` | the table above (17472280: script path mangled, cancelled) |
+| dt3c 17472355 | `2530c55` | A1, A2 | **A1 276/276, A2 138/138.** A1's 17 fewer = the removed split arm (3 Strang checks, 2 refinement checks, 2 per dt × 3 dt × 2 κ in the loop). MaxRSS 2.0 G of 3.9 G, 17 min, CPU 49.7% (one core) |
