@@ -10,7 +10,9 @@
 #        (3) without its <H>_c <Q>_c term fails
 #   U10  global slope ~3 and one-step slope ~4 against exp(T G) from the domain wall (HQ T5.5),
 #        read where the error is 10x above the step's floors, on local loss and on collective
-#        emission (closure_checks, USER 2026-10-24); CONTROL: order 1 fails the same criterion
+#        emission (closure_checks, USER 2026-10-24, and the global Krylov vectors G psi..G^3 psi
+#        kept on the product-state first step); CONTROLS: order 1 fails the same criterion, and
+#        without the kept vectors the collective first step loses an order (dt5m)
 #   U11  each of tol_basis, tol_root, tol_trunc moves its own error and cost with the other two
 #        tight; the retired fixed knobs are refused
 #   U16  two-site TDVP and BUG on the same MPO: with Q = 0 both converge to the Hermitian reference,
@@ -73,15 +75,18 @@ end
 `_dw_errors` on `G`: order-`p` steps of each `dt` from `f.psi0` against the dense flow, one step
 (`T = nothing`) or `T/dt` steps, and the floor the step's other errors may account for (per step
 `tol_basis` plus the ledger's root, compression and projection figures). `kw` is a NamedTuple.
+`first_keep = m` keeps `G psi .. G^m psi` (`global_krylov_states`) on the first step only.
 """
-function _g12_errors(f, p, dts, kw; T = nothing)
+function _g12_errors(f, p, dts, kw; T = nothing, first_keep = 0)
     v0 = dense_state(f.psi0)
     errs, floors = Float64[], Float64[]
     for dt in dts
         n = T === nothing ? 1 : round(Int, T / dt)
         psi, floor = copy(f.psi0), 0.0
-        for _ in 1:n
-            lg = cbe_bug_step!(psi, f.G, ComplexF64(-1im * dt); kw..., order = p).ledger
+        for s in 1:n
+            keep = s == 1 && first_keep > 0 ? global_krylov_states(f.G, psi, first_keep) : Any[]
+            lg = cbe_bug_step!(psi, f.G, ComplexF64(-1im * dt); kw..., order = p,
+                               keep_states = keep).ledger
             floor += kw.tol_basis + lg.expv_err + lg.discarded + lg.proj_err
         end
         push!(errs, _g12_err(psi, f.Gd, n * dt, v0))
@@ -190,12 +195,25 @@ end
 # read only where both errors are 10x above the step's own floors (`_observed_orders`).
 @testset "U10: order 3 on G without a truncation floor, $name" for name in (:local_loss, :collective)
     f = name === :local_loss ? _g12_local(10; start = :dw) : _g12_emission(10; start = :dw)
+    coll = name === :collective
     kw = (hermitian = false, tol_basis = 1e-12, tol_trunc = 1e-14, tol_root = 1e-14,
-          maxdim = 256, exact = true, closure_checks = name === :collective)
-    dts = (0.4, 0.2, 0.1)
-    eg, fg = _g12_errors(f, 3, dts, kw; T = 0.8)
-    el, fl = _g12_errors(f, 3, dts, kw)
+          maxdim = 256, exact = true, closure_checks = coll)
+    # Collective: from the product state, both legs of a long-range S⁺_a S⁻_b leave their frames'
+    # sectors, so the closure cannot see G^3 psi and the first step is one order short (dt5k,
+    # dt5m: one-step slope 2.7, global error 2.7-18x larger). Keeping G psi..G^3 psi on that step
+    # restores it; later steps are unaffected (keeping on every step gave identical errors).
+    # Smaller steps there: at dt 0.2 -> 0.1 the kept-vector slope is still pre-asymptotic (3.0).
+    dts = coll ? (0.1, 0.05, 0.025) : (0.4, 0.2, 0.1)
+    fk = coll ? 3 : 0
+    eg, fg = _g12_errors(f, 3, dts, kw; T = 0.8, first_keep = fk)
+    el, fl = _g12_errors(f, 3, dts, kw; first_keep = fk)
     e1, f1 = _g12_errors(f, 1, dts, kw; T = 0.8)
+    if coll                                                  # CONTROL: the kept vectors are needed
+        en, fn = _g12_errors(f, 3, dts, kw)
+        sn = _finest_order(en, fn)
+        @info "U10 collective without the kept vectors: one step $(en) p_obs $(_observed_orders(en, fn))"
+        @test sn !== nothing && sn < 4 - 0.4
+    end
     sg, sl, s1 = _finest_order(eg, fg), _finest_order(el, fl), _finest_order(e1, f1)
     @info "U10 $name: global p=3 $(eg) floors $(fg) p_obs $(_observed_orders(eg, fg)); one step " *
           "$(el) floors $(fl) p_obs $(_observed_orders(el, fl)); global p=1 $(e1) p_obs " *

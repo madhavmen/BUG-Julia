@@ -92,3 +92,26 @@ end
 
 "`apply_factor` for an MPO: `mpo * psi`, gauged and compressed once."
 apply_mpo(mpo::MPO, psi::SymMPS; kw...) = apply_factor(mpo, psi; kw...)
+
+"""
+    global_krylov_states(mpo, psi, m; tol_trunc = 1e-13, maxdim = 10_000) -> Vector{SymMPS}
+
+`mpo^j psi` for `j = 1..m`, each by [`apply_mpo`](@ref) from the previous one and normalised: the
+global Krylov vectors, to pass as `cbe_bug_step!(...; keep_states)`. From a U(1) product state an
+order-`p` step's closure cannot see the long-range terms of a nonlocal generator (dissipative
+plan U10: both legs of `S⁺_a S⁻_b` leave their frames' sectors, and every two-site window projects
+that away), so `mpo^p psi` is missing from the root space unless it is kept (dt5m: one-step slope
+2.7 -> 3.7, global error /2.7-18; keeping them on later steps changes nothing).
+"""
+function global_krylov_states(mpo::MPO, psi::SymMPS, m::Int; tol_trunc::Float64 = 1e-13,
+                              maxdim::Int = 10_000)
+    ks, cur = SymMPS[], psi
+    for _ in 1:m
+        nxt, _ = apply_mpo(mpo, cur; tol_trunc = tol_trunc, maxdim = maxdim)
+        canonical!(nxt, 1)
+        nxt[1] = to_concrete(nxt[1] / norm(nxt[1]))
+        push!(ks, nxt)
+        cur = nxt
+    end
+    return ks
+end

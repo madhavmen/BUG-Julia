@@ -191,7 +191,7 @@ export OneSiteH, one_site_h, apply_one_site, TDVP2Info, tdvp2_step!, tdvp2_compo
 # bug/
 export CBEBugSweepInfo, cbe_bug_step!, cbe_bug_midpoint_step!, parallel_kls_step!,
        ite_step!, ite_evolve!, log_panel_steps, uniform_beta_steps, beta_grid,
-       mpo_product, site_op_product, factor_product, apply_factor, apply_mpo, apply_jump,
+       mpo_product, site_op_product, factor_product, apply_factor, apply_mpo, global_krylov_states, apply_jump,
        jump_weight, jump_trajectory, jump_ensemble, step_doubling_error, next_step_size
 
 end # module

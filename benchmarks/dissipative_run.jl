@@ -21,7 +21,9 @@
 #
 # Env (defaults): DR_MODEL (A2), DR_L (8), DR_MODE (no_jump), DR_INT (bug), DR_DT (0.05), DR_T (1),
 #   DR_EVERY (= DR_DT), DR_ORDER (3), DR_TOLB (1e-8), DR_TOLR (1e-12), DR_TOLT (1e-10),
-#   DR_MAXDIM (256), DR_CLOSURE (1 for A2/B2, else 0: USER 2026-10-24), DR_KEEP_KRYLOV (0),
+#   DR_MAXDIM (256), DR_CLOSURE (1 for A2/B2, else 0: USER 2026-10-24),
+#   DR_KEEP_KRYLOV (DR_ORDER for A2/B2, else 0: G psi..G^m psi kept on steps from a product state,
+#   dt5m), DR_KEEP_EVERY (0; 1 = on every step, the ablation),
 #   DR_EXACT (0; 1 = the complete DD probe, the lossless arm of the Task 5 order ablation),
 #   DR_TARGET (none), DR_CHECK (4), DR_NTRAJ (100), DR_SEED (1), DR_REF (auto: ed when small),
 #   A1/B1: DR_U (4), DR_KAPPA (1), DR_START (dbl_rich | low_dbl; B1: biased leads), DR_JLINK (1);
@@ -47,7 +49,8 @@ const TOLT = parse(Float64, env("DR_TOLT", 1e-10))
 const MAXDIM = parse(Int, env("DR_MAXDIM", 256))
 const NONLOCAL = MODEL in (:A2, :B2)
 const CLOSURE = env("DR_CLOSURE", NONLOCAL ? 1 : 0) == "1"
-const KEEPK = parse(Int, env("DR_KEEP_KRYLOV", 0))
+const KEEPK = parse(Int, env("DR_KEEP_KRYLOV", NONLOCAL ? ORDER : 0))
+const KEEP_EVERY = env("DR_KEEP_EVERY", 0) == "1"
 const EXACT = env("DR_EXACT", 0) == "1"
 const TARGET = (x = env("DR_TARGET", "none"); x == "none" ? nothing : parse(Float64, x))
 const CHECK = parse(Int, env("DR_CHECK", 4))
@@ -125,32 +128,25 @@ const M = build_model()
 const G = no_jump_mpo(M.H, M.Q)
 const TAG = @sprintf("%s_L%d_%s_%s_dt%g_b%g_r%g_t%g_%s%s%s%s_seed%d", MODEL, L, MODE, INT, DT, TOLB,
                      TOLR, TOLT, START, TARGET === nothing ? "" : "_tau$(TARGET)",
-                     KEEPK > 0 ? "_keep$(KEEPK)" : "", EXACT ? "_exact" : "", SEED)
+                     KEEPK > 0 ? "_keep$(KEEPK)$(KEEP_EVERY ? "e" : "")" : "", EXACT ? "_exact" : "", SEED)
 const OUT = env("DR_OUT", "dissipative_$(TAG).json")
 
 # ── the step ────────────────────────────────────────────────────────────────────────────────
 const LOG = Dict{String, Vector{Float64}}()
 logv!(k, v) = push!(get!(LOG, k, Float64[]), Float64(v))
 
-function krylov_keep(psi)
-    ks, cur = SymMPS[], psi
-    for _ in 1:KEEPK
-        nxt, _ = apply_mpo(G, cur; tol_trunc = TOLT, maxdim = MAXDIM)
-        canonical!(nxt, 1)
-        nxt[1] = to_concrete(nxt[1] / norm(nxt[1]))
-        push!(ks, nxt)
-        cur = nxt
-    end
-    return ks
-end
+# From a U(1) product state the closure cannot see a nonlocal Q's long-range hops, so the global
+# Krylov vectors are kept on such a step (plan U10, dt5m); on any later step they change nothing.
+keep_now(psi) = KEEPK > 0 && (KEEP_EVERY || maximum(bond_dims(psi); init = 1) == 1)
 
 function step!(psi, h)
     t0 = time_ns()
     if INT === :bug
+        keep = keep_now(psi) ? global_krylov_states(G, psi, KEEPK; tol_trunc = TOLT, maxdim = MAXDIM) :
+               Any[]
         info = cbe_bug_step!(psi, G, ComplexF64(-im * h); hermitian = false, order = ORDER,
                              tol_basis = TOLB, tol_root = TOLR, tol_trunc = TOLT, maxdim = MAXDIM,
-                             closure_checks = CLOSURE, exact = EXACT,
-                             keep_states = KEEPK > 0 ? krylov_keep(psi) : Any[])
+                             closure_checks = CLOSURE, exact = EXACT, keep_states = keep)
         lg, rc = info.ledger, info.record
         logv!("r_aug", lg.r_aug); logv!("expv_iters", lg.expv_iters); logv!("n_probes", lg.n_probes)
         logv!("n_selected", lg.n_selected); logv!("n_krylov", lg.n_krylov)
@@ -238,7 +234,7 @@ result["peak_rss"] = Sys.maxrss()
 result["config"] = Dict("model" => string(MODEL), "L" => L, "mode" => string(MODE), "int" => string(INT),
                         "dt" => DT, "T" => TF, "every" => EVERY, "order" => ORDER, "tol_basis" => TOLB,
                         "tol_root" => TOLR, "tol_trunc" => TOLT, "maxdim" => MAXDIM,
-                        "closure_checks" => CLOSURE, "keep_krylov" => KEEPK, "exact" => EXACT,
+                        "closure_checks" => CLOSURE, "keep_krylov" => KEEPK, "keep_every" => KEEP_EVERY, "exact" => EXACT,
                         "start" => string(START),
                         "target" => TARGET === nothing ? "none" : TARGET, "check_every" => CHECK,
                         "ntraj" => NTRAJ, "seed" => SEED, "ref" => REF, "params" => M.par,
