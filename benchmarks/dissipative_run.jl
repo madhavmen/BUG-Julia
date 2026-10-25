@@ -22,7 +22,8 @@
 # For L small enough an ED reference is computed here and the errors recorded.
 #
 # traj records the ensemble mean / standard error of the observables and of the jump count, and
-# per trajectory the steps, event-location evaluations, rejections and norm-growth flags.
+# per trajectory the observables and jump count on the grid, the steps, event-location evaluations,
+# rejections and norm-growth flags.
 #
 # Env (defaults): DR_MODEL (A2), DR_L (8), DR_MODE (no_jump), DR_INT (bug), DR_DT (0.05), DR_T (1),
 #   DR_EVERY (= DR_DT), DR_ORDER (3), DR_TOLB (1e-8), DR_TOLR (1e-12), DR_TOLT (1e-10),
@@ -359,8 +360,10 @@ else
     result["stderr"] = ens.stderr
     result["jumps_mean"] = ens.jumps_mean
     result["jumps_stderr"] = ens.jumps_stderr
+    # per-trajectory observables and jump counts on the grid: plan F11's trajectory-count
+    # convergence resamples them
     result["traj"] = [Dict("seed" => tr.seed, "njumps" => tr.njumps[end], "nsteps" => tr.nsteps,
-                           "nevals" => tr.nevals,
+                           "nevals" => tr.nevals, "obs" => tr.obs, "njumps_t" => tr.njumps,
                            "nreject" => tr.nreject, "flags" => length(tr.flags),
                            "events" => [Dict("t" => e.t, "channel" => e.channel) for e in tr.events])
                       for tr in ens.trajs]
