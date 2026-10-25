@@ -402,7 +402,7 @@ The scale consists of:
 | §3 per trajectory: RNG seed, events | `traj[].seed`, `traj[].events` (t, channel) | **added**: `seed` |
 | Task 4/6 B1: currents on both sides of the sink, lead imbalance | `jup/jdn_left/right` (`hub4_current_mpo` on bonds j0-1 and j0), `imb_up/dn` | **added** |
 | Task 4 B1: preparation convergence | `params.prep` (β, status, energy, residual of each ITE step) | **added** |
-| §4.3 checkpoint / restart | `jump_trajectory` / `jump_ensemble` `checkpoint`, `resume`; driver `DR_CKPT`, `DR_CKPT_SEC`, `DR_STOP_AT` (`1787e44`) | **added**, see below; tests dt6r, driver check dr6x |
+| §4.3 checkpoint / restart | `jump_trajectory` / `jump_ensemble` `checkpoint`, `resume`; driver `DR_CKPT`, `DR_CKPT_SEC`, `DR_STOP_AT` (`1787e44`) | **added and confirmed**, see below: dt6s (t6 R1-R3), dt6r (t4 54/54, t5 24/24 unchanged), dr6y (15/15 restart checks) |
 | B2: dark-state overlap | none | optional, not added |
 
 Two Julia scope traps were avoided while adding these. Local methods of one function share a name
@@ -443,3 +443,36 @@ tests check exact equality, with no tolerance.
   restart"):** each run goes uninterrupted, then is stopped at checkpoint n and resumed. The two
   JSONs must be equal apart from measurements. CONTROL: a resume with a changed `tol_trunc` must
   be refused.
+
+**Results:**
+
+- dt6s (`b173c8e`): t6 passes. R1 resumes from t = 0.45, between the jumps at 0.18 and 0.50.
+  The first version (dt6r) stopped at its own premise guard: on a grid of 0.5, both jumps fall
+  before the first checkpoint. The grid was refined; the guard and exact equality are unchanged.
+- dt6r: t4 54/54 and t5 24/24, so the jump engine and controller are unchanged by the hooks.
+- dr6y: all three configurations pass all five checks. They are A2 no_jump with the controller and
+  an ED reference, A2 traj stopped inside trajectory 2, and B1 traj with the recomputed
+  preparation. Each check confirms:
+  - the stopped run wrote the checkpoint and no JSON;
+  - the changed `tol_trunc` was refused;
+  - the resume removed the checkpoint;
+  - the resumed JSON equals the uninterrupted one.
+
+  The first version (dr6x) read "no JSON yet" after the resume had written it, a harness bug.
+
+## Profiling: dr6p / dr6q / dr6r
+
+- **B1, L = 20, maxdim 256, two trajectories to Jt = 6 (dr6r):** ~14 s per step, ~30 min per
+  trajectory, MaxRSS 6.3 G.
+  - The cap binds almost at once: 96 % of steps are work-limited and 86 % rank-limited.
+  - The root error is at most 1e-12, and the holdout estimate is nonzero (up to 1e-3).
+  - A B1 pilot at 20 trajectories × 4-6 points costs ~40-60 CPU-h, rank-limited and marked so.
+- **A2, L = 32, nexc 8, maxdim 1024: BUG crashes (dr6q rows 1 and 3, reproduced by dr6z):**
+  - Both crash in the step after the first, a NaN in the root Arnoldi Hessenberg (fixed step) and
+    an empty root SVD (controller). It is deterministic.
+  - Each crashing step ran ~45 min before failing, starting from D ≈ 74 with the budget met. The
+    first step (from the product state, 170 s) left P0 = 0.52: at finite density the collective
+    `Q` is large (‖Q‖ ~ Γ L²/4).
+  - TDVP2 on the same point and B2 at L = 24 run normally.
+  - The driver now writes `DR_OUT.partial` and, with `DR_CRASH_STATE`, the failing step's input.
+    Being diagnosed: rp6z replays it with an instrumented `arnoldi_expv`.
