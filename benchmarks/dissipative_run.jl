@@ -12,8 +12,12 @@
 # dimensions and the centre bond's charge sectors; per step: the step size, wall seconds and, for
 # BUG, the ledger (frame width, root iterations, probes, selected and Krylov directions, discarded
 # norm, closure passes), the step record (D_stage, D_work, D_final, bytes) and its limit flags
-# (basis/root/truncation/rank/work_limited, StepRecord.limits); for TDVP2 its
-# discarded norm, Krylov applications and backward-substep amplification. With DR_TARGET the
+# (basis/root/truncation/rank/work_limited, StepRecord.limits), the phase timers (t_cbe, t_kry,
+# t_root, t_trunc, t_frame, t_env, t_closure), kernel counters, matvecs, holdout columns and
+# estimate, Krylov defect, root error, kept Krylov vectors and peak RSS; for TDVP2 its
+# discarded norm, Krylov applications, backward-substep amplification and peak RSS; for both the
+# unnormalised norm after the step and the centre bond's sectors. B1 also records the sink-adjacent
+# spin currents, the lead imbalances and the preparation's convergence. With DR_TARGET the
 # step-doubling controller of plan eq. (7) sets the step (jump_trajectory with jumps = false).
 # For L small enough an ED reference is computed here and the errors recorded.
 #
@@ -86,15 +90,30 @@ function build_model()
             lead(n, s) = [isodd(k) ? s : :both for k in 1:n]
             psi = hub4_product_state(vcat(lead(j0 - 1, :up), [:empty], lead(L - j0, :down)))
             prep = pair_loss_junction(L; J = 1.0, J_link = 0.0, U = U, kappa = 1.0, j0 = j0)
-            ite_evolve!(psi, prep.H, log_panel_steps(20.0, 8; per_panel = 4); order = 2,
-                        tol_basis = 1e-9, tol_trunc = 1e-12, tol_root = 1e-12, maxdim = MAXDIM,
-                        retries = 3)
-            par = Dict("U" => U, "kappa" => κ, "J_link" => Jl, "j0" => j0)
+            pl = ite_evolve!(psi, prep.H, log_panel_steps(20.0, 8; per_panel = 4); order = 2,
+                             tol_basis = 1e-9, tol_trunc = 1e-12, tol_root = 1e-12, maxdim = MAXDIM,
+                             retries = 3)
+            # plan B1 "controlled preparation": its convergence is saved with the run
+            par = Dict("U" => U, "kappa" => κ, "J_link" => Jl, "j0" => j0,
+                       "prep" => [Dict("beta" => r.beta, "status" => string(r.status),
+                                       "e_after" => r.e_after, "resid" => r.resid) for r in pl])
+            # plan B1: the spin currents on BOTH sink-adjacent bonds, (j0-1, j0) and (j0, j0+1)
+            Jc = [hub4_current_mpo(L, b, s; J = Jl) for b in (j0 - 1, j0) for s in (0, 1)]
         end
-        obs = p -> vcat([real(site_expval(p, j, dbl)) for j in 1:L],
-                        [real(site_expval(p, j, nup)) + real(site_expval(p, j, ndn)) for j in 1:L])
-        names = vcat(["dbl_$j" for j in 1:L], ["n_$j" for j in 1:L])
-        return (; H, Q, ch, psi, obs, names, par)
+        # local methods of one function share a name space: `hub_obs`, not `obs` (the A2 branch's)
+        nsite(p, n) = [real(site_expval(p, j, n)) for j in 1:L]
+        function hub_obs(p)
+            nu, nd = nsite(p, nup), nsite(p, ndn)
+            o = vcat(nsite(p, dbl), nu .+ nd)
+            MODEL === :B1 || return o
+            P = real(overlap(p, p))
+            imb = [sum(x[1:(j0 - 1)]) - sum(x[(j0 + 1):L]) for x in (nu, nd)]
+            return vcat(o, [real(mpo_energy(p, Jm)) / P for Jm in Jc], imb)
+        end
+        names = vcat(["dbl_$j" for j in 1:L], ["n_$j" for j in 1:L],
+                     MODEL === :B1 ? ["jup_left", "jdn_left", "jup_right", "jdn_right",
+                                      "imb_up", "imb_dn"] : String[])
+        return (; H, Q, ch, psi, obs = hub_obs, names, par)
     end
     Jz, g = parse(Float64, env("DR_JZ", 1.0)), parse(Float64, env("DR_GAMMA", 1.0))
     gm, ka = parse(Float64, env("DR_GM", g)), parse(Float64, env("DR_KA", π / 3))
@@ -152,6 +171,14 @@ function step!(psi, h)
                              closure_checks = CLOSURE, exact = EXACT, keep_states = keep)
         lg, rc = info.ledger, info.record
         logv!("r_aug", lg.r_aug); logv!("expv_iters", lg.expv_iters); logv!("n_probes", lg.n_probes)
+        # plan §3 / Task 6: holdout columns, DD holdout estimate, local Krylov defect, root
+        # residual, reused (kept) Krylov vectors, peak memory
+        logv!("n_holdout", lg.n_holdout); logv!("holdout_est", lg.max_sample)
+        logv!("krylov_defect", lg.max_krylov); logv!("root_err", lg.expv_err)
+        logv!("n_keep", length(keep)); logv!("peak_rss", rc.peak_rss)
+        # Task 6 A2: the closure's passes (closure_sweeps) and their cost, which none of the phase
+        # timers below includes
+        logv!("t_closure", lg.t_closure)
         logv!("n_selected", lg.n_selected); logv!("n_krylov", lg.n_krylov)
         logv!("discarded", lg.discarded); logv!("closure_sweeps", lg.n_closure_sweeps)
         logv!("D_stage", rc.D_stage); logv!("D_work", rc.D_work); logv!("D_final", rc.D_final)
@@ -178,8 +205,11 @@ function step!(psi, h)
                            backward_report = amp)
         logv!("discarded", info.cumulative); logv!("krylov", info.krylov_dims)
         logv!("backward_amp", amp[]); logv!("D_final", info.max_bond)
+        logv!("peak_rss", Sys.maxrss())
     end
     logv!("h", h); logv!("wall", (time_ns() - t0) / 1e9)
+    # plan §3: the unnormalised norm after the step (log survival increment) and centre sectors
+    logv!("norm2", norm(psi)^2); logv!("sectors", centre_sectors(psi))
     return psi
 end
 
@@ -259,7 +289,8 @@ else
     result["stderr"] = ens.stderr
     result["jumps_mean"] = ens.jumps_mean
     result["jumps_stderr"] = ens.jumps_stderr
-    result["traj"] = [Dict("njumps" => tr.njumps[end], "nsteps" => tr.nsteps, "nevals" => tr.nevals,
+    result["traj"] = [Dict("seed" => tr.seed, "njumps" => tr.njumps[end], "nsteps" => tr.nsteps,
+                           "nevals" => tr.nevals,
                            "nreject" => tr.nreject, "flags" => length(tr.flags),
                            "events" => [Dict("t" => e.t, "channel" => e.channel) for e in tr.events])
                       for tr in ens.trajs]
@@ -275,7 +306,14 @@ result["config"] = Dict("model" => string(MODEL), "L" => L, "mode" => string(MOD
                         "start" => string(START), "warm" => WARM,
                         "target" => TARGET === nothing ? "none" : TARGET, "check_every" => CHECK,
                         "ntraj" => NTRAJ, "seed" => SEED, "ref" => REF, "params" => M.par,
-                        "threads" => Threads.nthreads())
+                        "threads" => Threads.nthreads(),
+                        # plan §3/§4.1: the operator definition (with the commit it fixes H, Q
+                        # exactly) and the MPO widths (Task 6 A2: the collective MPO's width)
+                        "mpo_dims" => Dict("H" => mpo_virtual_dims(M.H), "Q" => mpo_virtual_dims(M.Q),
+                                           "G" => mpo_virtual_dims(G)),
+                        "operator_hash" => string(hash((string(MODEL), L, string(START),
+                                                        JSON.json(filter(kv -> kv[1] != "prep", M.par))));
+                                                  base = 16))
 open(OUT, "w") do io
     JSON.print(io, result)
 end

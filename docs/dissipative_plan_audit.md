@@ -362,3 +362,49 @@ output times before the first capped step (the run's own or its reference's).
   from BUG's working rank, and report `budget_met` and TDVP2's cap hits.
 
 G2 passes on this reading of the order criterion, once dt5w confirms the first-step check.
+USER 2026-10-25: G2 accepted on this reading.
+
+# Task 6 (G3): pilots and profiling
+
+Branch `plan/dissip-task-6`, cut from the Task 5 head. USER 2026-10-25 chose the "G3 essentials"
+scale (about 300-500 CPU-h) over the plan's full grid. Measured costs rule the grid out:
+
+- A1 at L = 12-16 reaches maxdim 512 by Jt ≈ 0.7, and BUG's work ceiling by Jt ≈ 0.4. A
+  non-binding run to Jt ≈ 8 is not feasible.
+- B1 at 100 trajectories per point costs about 0.25 CPU-h per trajectory at L = 12, or about
+  1800 CPU-h for the grid (dr6t).
+
+The scale consists of:
+
+- one non-binding BUG-vs-TDVP2 time-to-accuracy curve each for A1 and A2, run as sequential single
+  timing jobs;
+- a tol_trunc ladder subset;
+- the plan's A1/A2 points at a binding cap, for cost and bond profiling;
+- B1/B2 on 4-6 points with about 20 trajectories each.
+
+## Pre-submission audit of the driver against the plan (call sites in `benchmarks/dissipative_run.jl`)
+
+| plan item | where | status |
+|---|---|---|
+| Task 6 "measure before scaling": time_CBE_DD, time_QR, local Krylov, Arnoldi root, compress, environments | `t_dd`, `t_qr`, `t_kry`, `t_root`, `t_trunc`, `t_env` (plus `t_cbe`, `t_frame`, `t_step`) | logged since `dc729ae` |
+| MPO matvecs | `matvecs` = `info.krylov_dims` (operator applications, cbe_bug_info.jl) | logged |
+| probe / holdout columns | `n_probes`, `n_stream_cols`; `n_holdout` | **added**: `n_holdout` |
+| reused Krylov vectors | `n_keep` (global Krylov states kept on product-state steps) | **added** |
+| rejected steps | `nreject`, `checks` (controller runs) | logged |
+| peak working D, final D, sectors | `D_stage`, `D_work`, `D_final`; `sectors` per step | **added**: per-step `sectors` |
+| CPU time, peak memory | `wall` per step (1 thread); `peak_rss` per step | **added**: per-step `peak_rss` (BUG and TDVP2) |
+| §3 accuracy status | `budget_met`, plus the `StepRecord.limits` flags (`eaf8a1f`); figures mark caps | logged |
+| §3 DD holdout estimate, local Krylov defect, root residual | `holdout_est` (ledger `max_sample`), `krylov_defect` (`max_krylov`), `root_err` (`expv_err`) | **added** |
+| §3 norm / log survival per step | `norm2` (unnormalised norm after the step) | **added** |
+| §3 Hamiltonian / jump-operator hash | `config.operator_hash` (model, L, start, parameters; with the commit it fixes H and Q) | **added** |
+| Task 6 A2: compressed collective MPO width | `config.mpo_dims` (H, Q, G virtual dims) | **added** |
+| Task 6 A2: closure passes per step and their cost | `closure_sweeps`; `t_closure` (ledger; in none of the phase timers) | **added**: `t_closure` |
+| §3 per trajectory: RNG seed, events | `traj[].seed`, `traj[].events` (t, channel) | **added**: `seed` |
+| Task 4/6 B1: currents on both sides of the sink, lead imbalance | `jup/jdn_left/right` (`hub4_current_mpo` on bonds j0-1 and j0), `imb_up/dn` | **added** |
+| Task 4 B1: preparation convergence | `params.prep` (β, status, energy, residual of each ITE step) | **added** |
+| §4.3 checkpoint / restart | none | **gap**, needed before Task 7 (its scheduler smoke job tests restart) |
+| B2: dark-state overlap | none | optional, not added |
+
+Two Julia scope traps were avoided while adding these. Local methods of one function share a name
+space, so B1's `lead(n, s)`, which builds the start state, would have been replaced by a new
+`lead(n, r)`. The A1/B1 observable is `hub_obs`, not a second `obs(p)`.

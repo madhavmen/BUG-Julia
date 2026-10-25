@@ -47,7 +47,7 @@ def load(rundirs):
 
 def key(r):
     c = r["config"]
-    p = json.dumps(c["params"], sort_keys=True)
+    p = json.dumps({k: v for k, v in c["params"].items() if k != "prep"}, sort_keys=True)
     return (c["model"], c["L"], c["start"], p, c["T"], c.get("warm", 0.0))
 
 
