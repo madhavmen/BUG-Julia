@@ -33,6 +33,7 @@
 #   DR_EXACT (0; 1 = the complete DD probe, the lossless arm of the Task 5 order ablation),
 #   DR_WARM (0; t_w > 0 = start from the state evolved to t_w by tight BUG steps, see below),
 #   DR_TARGET (none), DR_CHECK (4), DR_NTRAJ (100), DR_SEED (1), DR_REF (auto: ed when small),
+#   DR_JIT_WARMUP (0; n = n unlogged steps on a copy first, for timing runs),
 #   A1/B1: DR_U (4), DR_KAPPA (1), DR_START (dbl_rich | low_dbl; B1: biased leads), DR_JLINK (1);
 #   A2/B2: DR_JZ (1), DR_GAMMA (1), DR_GM (= DR_GAMMA), DR_KA (pi/3), DR_NEXC (L/2 for A2,
 #   L/4 for B2), DR_START (block | alt | neel | bright | dark); DR_OUT (dissipative_<tag>.json)
@@ -253,6 +254,22 @@ centre_entropy(p) =(s = abs2.(bond_spectrum(copy(p), L ÷ 2)); s ./= sum(s);
                      -sum(x * log(x) for x in s if x > 1e-300; init = 0.0))
 centre_sectors(p) = length(p[L ÷ 2].spaces[3])
 
+# DR_JIT_WARMUP = n: n steps of the same integrator on a copy of the start state, then forgotten.
+# Every run is a fresh process, so its first step's wall is mostly compilation (dr6p: BUG 141 s vs
+# 44 s for step 2, TDVP2 65 s vs 4 s), which a time-to-accuracy curve would charge to the coarse-step
+# arms; the second step reaches the paths a product state does not.
+const JIT_WARMUP = parse(Int, env("DR_JIT_WARMUP", 0))
+if JIT_WARMUP > 0
+    let p = copy(M.psi), t0 = time()
+        for _ in 1:JIT_WARMUP
+            step!(p, DT)
+        end
+        empty!(LOG)
+        PRE[] = nothing
+        @printf("JIT warm-up: %d steps, %.1f s (not logged)\n", JIT_WARMUP, time() - t0)
+    end
+end
+
 # ── an ED reference for small systems ──────────────────────────────────────────────────────
 const REF = env("DR_REF", (NONLOCAL && L <= 12) ? "ed" : "none")
 dense_amps = nothing
@@ -278,6 +295,7 @@ const CONFIG = Dict("model" => string(MODEL), "L" => L, "mode" => string(MODE), 
                     "exact" => EXACT, "start" => string(START), "warm" => WARM,
                     "target" => TARGET === nothing ? "none" : TARGET, "check_every" => CHECK,
                     "ntraj" => NTRAJ, "seed" => SEED, "ref" => REF, "params" => M.par,
+                    "jit_warmup" => JIT_WARMUP,
                     "threads" => Threads.nthreads(), "src_hash" => SRC_HASH,
                     # plan §3/§4.1: the operator definition (with the commit it fixes H, Q
                     # exactly) and the MPO widths (Task 6 A2: the collective MPO's width)
