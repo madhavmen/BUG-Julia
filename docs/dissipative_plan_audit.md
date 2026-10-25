@@ -381,6 +381,19 @@ The scale consists of:
 - a tol_trunc ladder subset;
 - the plan's A1/A2 points at a binding cap, for cost and bond profiling;
 - B1/B2 on 4-6 points with about 20 trajectories each.
+- USER 2026-10-25, added: a stability run for the plan's Task 5 stability bullet, which Task 5
+  only covered at Jt ≤ 1. The points are A1 L = 12 κ = 20 and A2 L = 24, 6 excitations, Γ = 5
+  (A2 at L = 12 and 20 sat at full rank). Both use a warm start, so TDVP2's product-state
+  blindness to long-range hops is not read as instability. BUG runs at dt 0.4-0.05 and TDVP2 at
+  dt 0.4-0.025, to Jt = 4, against a tight BUG reference, plus one controller run (τ = 1e-6) per
+  model.
+
+  The F04 energy-balance check used to be the finite-difference residual, which came out at
+  0.7-24, the same for both integrators and every dt: it measured the output grid. It is now the
+  integrated balance, compared with the reference on the same grid. On dr5d this "excess" tracks
+  the state error (BUG κ = 8: 1.5e-9, 2.0e-8, 3.0e-7 at dt 0.0125, 0.025, 0.05), while the
+  own-grid residual stays at its floor of 0.045. F04 also reports error against t, the largest dt
+  per error target (1e-3, 1e-4, 1e-6) and the steps that raised P0.
 
 ## Pre-submission audit of the driver against the plan (call sites in `benchmarks/dissipative_run.jl`)
 

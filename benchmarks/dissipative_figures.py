@@ -7,8 +7,9 @@ plus configs.txt, whose E= tag names the experiment).
   F02  tol_basis / tol_root / tol_trunc ladders: error against the requested setting, frame width,
        root iterations, discarded norm, final rank, wall per step
   F03  the eq. (7) controller: accepted step against t, its error against the fixed-step reference
-  F04  strong dissipation: error against dt for BUG and TDVP2, TDVP2's backward-substep
-       amplification, the energy-balance (3) residual, P0 growth flags
+  F04  strong dissipation: error against dt and against t for BUG and TDVP2, the largest dt per
+       error target, TDVP2's backward-substep amplification, P0 monotonicity, and the energy balance
+       (3) in integrated form relative to the reference on the same grid
   F10  cost at matched error: total wall against error, BUG and TDVP2
 
 The error of a run is the largest |log P0 - log P0_ref| and the largest observable difference over the
@@ -285,30 +286,85 @@ def fig_control(runs, refs, out):
     return rows
 
 
-def fig_stability(runs, out):
+def balance_residual(r, times=None):
+    """Energy balance (3) in integrated form on the run's output grid (or the subset `times`):
+    E(t) - E(0) - int_0^t (-Re<HQ>_c + E<Q>_c) by the trapezoid rule, as an array over the grid.
+    On a coarse grid the quadrature error dominates; it is the same for a run and its reference on
+    the same grid, so only their difference measures the integrator (dr5d: the finite-difference
+    residual was 0.7-24, identical for BUG and TDVP2 and for every dt)."""
+    rec = r["records"]
+    t = np.round([x["t"] for x in rec], 9)
+    keep = np.ones(len(t), bool) if times is None else np.isin(t, np.round(times, 9))
+    t, rec = t[keep], [x for x, k in zip(rec, keep) if k]
+    E = np.array([x["E"] for x in rec])
+    rhs = np.array([-x["HQ"] + x["E"] * x["Q"] for x in rec])
+    integ = np.concatenate([[0.0], np.cumsum(0.5 * (rhs[1:] + rhs[:-1]) * np.diff(t))])
+    return t, E - E[0] - integ
+
+
+def error_vs_time(r, ref):
+    """(t, max over observables and log P0 of |run - reference|) on the common output times."""
+    t, tr = np.round(r["times"], 9), np.round(ref["times"], 9)
+    common = [x for x in t if x in set(tr)]
+    i = [list(t).index(x) for x in common]
+    j = [list(tr).index(x) for x in common]
+    lp = np.abs(np.array(r["logp"])[i] - np.array(ref["logp"])[j])
+    ob = np.max(np.abs(obs_matrix(r)[i] - obs_matrix(ref)[j]), axis=1)
+    return np.array(common), np.maximum(lp, ob)
+
+
+def fig_stability(runs, refs, out):
+    """Plan Task 5 stability diagnostics on the E 4 runs: TDVP2's backward-substep amplification,
+    the error against t (does it grow?), the largest dt meeting a fixed error, P0 monotonicity (the
+    unnormalised norm may only fall) and the energy balance (3) relative to the reference."""
     rs = [r for r in runs if r["E"] == "4"]
     if not rs:
         return []
-    fig, axs = plt.subplots(1, 2, figsize=(11, 4))
-    rows = []
-    for r in rs:
+    fig, axs = plt.subplots(1, 4, figsize=(21, 4))
+    rows, best = [], {}
+    for r in sorted(rs, key=lambda r: (key(r), r["config"]["int"], r["config"]["dt"])):
         c = r["config"]
-        t = np.array([x["t"] for x in r["records"]])
-        E = np.array([x["E"] for x in r["records"]])
-        HQ = np.array([x["HQ"] for x in r["records"]])
-        Q = np.array([x["Q"] for x in r["records"]])
-        res = np.max(np.abs(np.gradient(E, t) - (-HQ + E * Q)))
+        ref = refs.get(key(r))
         amp = max(r["steplog"].get("backward_amp", [0.0]))
-        lab = f"{c['model']} {json.dumps(c['params'])} {c['int']} dt={c['dt']}"
-        rows.append((f"F04 {lab}", [("energy-balance residual", res), ("backward amp", amp),
-                                     ("P0 growth flags", len(r.get("flags", [])))], []))
+        lab = f"{c['model']} {json.dumps(c['params'])[:40]} {c['int']} dt={c['dt']}"
+        n2 = np.array(r["steplog"].get("norm2", []))
+        p0_up = int(np.sum(n2 > 1 + 1e-12))                   # a step that raised P0
+        item = [("backward amp", amp), ("P0 growth flags", len(r.get("flags", []))),
+                ("steps raising P0", p0_up), ("first capped step ends", capped_at(r))]
+        if ref is not None and ref is not r:
+            t, e = error_vs_time(r, ref)
+            ln, = axs[1].semilogy(t, np.maximum(e, 1e-16), "-" if c["int"] == "bug" else "--", label=lab)
+            _, res = balance_residual(r)
+            _, rres = balance_residual(ref, r["times"])
+            m = min(len(res), len(rres))
+            item += [("max error", float(e.max())), ("error at T", float(e[-1])),
+                     ("balance residual (own grid)", float(np.max(np.abs(res)))),
+                     ("balance excess over reference", float(np.max(np.abs(res[:m] - rres[:m]))))]
+            best.setdefault((key(r), c["int"]), []).append((c["dt"], float(e.max()), capped_at(r)))
+        rows.append((f"F04 {lab}", item, []))
         if c["int"] == "tdvp2":
             axs[0].semilogy(c["dt"], amp, "s", label=lab)
-        axs[1].semilogy(c["dt"], res, "o" if c["int"] == "bug" else "s", label=lab)
+    for (g, integ), pts in sorted(best.items()):
+        for tol in (1e-3, 1e-4, 1e-6):
+            ok = [d for d, e, cap in pts if e <= tol]
+            rows.append((f"F04 largest dt with error <= {tol:g}: {g[0]} L={g[1]} {g[3]} {integ}",
+                         [("dt", max(ok) if ok else None),
+                          ("capped runs", [d for d, _, cap in pts if cap is not None])], []))
+        d, e = zip(*sorted((p[0], p[1]) for p in pts))
+        axs[2].loglog(d, e, "o-" if integ == "bug" else "s--", label=f"{g[0]} L={g[1]} {integ}")
+    for r in refs.values():
+        if any(key(r) == key(x) for x in rs):
+            t, res = balance_residual(r)
+            axs[3].semilogy(t[1:], np.maximum(np.abs(res[1:]), 1e-16), label=f"reference {label(r)[:40]}")
     axs[0].set_title("TDVP2 backward-substep amplification", fontsize=9)
-    axs[1].set_title("energy balance (3) residual (finite differences)", fontsize=9)
+    axs[0].set_xlabel("dt")
+    axs[1].set_title("error against t (solid BUG, dashed TDVP2)", fontsize=9)
+    axs[1].set_xlabel("t")
+    axs[2].set_title("max error against dt", fontsize=9)
+    axs[2].set_xlabel("dt")
+    axs[3].set_title("energy balance (3), integrated, reference run", fontsize=9)
+    axs[3].set_xlabel("t")
     for ax in axs:
-        ax.set_xlabel("dt")
         ax.legend(fontsize=5)
     fig.tight_layout()
     fig.savefig(os.path.join(out, "F04_stability.png"), dpi=130)
@@ -352,7 +408,7 @@ def main():
     rows = []
     for f in (lambda: fig_order(runs, refs, out), lambda: fig_ablation(runs, refs, out),
               lambda: fig_tolerances(runs, refs, out), lambda: fig_control(runs, refs, out),
-              lambda: fig_stability(runs, out), lambda: fig_cost(runs, refs, out)):
+              lambda: fig_stability(runs, refs, out), lambda: fig_cost(runs, refs, out)):
         rows += f() or []
     with open(os.path.join(out, "summary.txt"), "w") as io:
         for name, pts, sl in rows:
