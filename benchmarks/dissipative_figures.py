@@ -14,7 +14,7 @@ plus configs.txt, whose E= tag names the experiment).
 The error of a run is the largest |log P0 - log P0_ref| and the largest observable difference over the
 common output times, against the matching reference run (E tag ending in "ref": same model, size,
 parameters and start, the finest step) or, where the run carries one, against ED (err_state).
-usage: python dissipative_figures.py RUNDIR [OUTDIR]   (OUTDIR default ../figures/dissipative_t5)
+usage: python dissipative_figures.py RUNDIR[,RUNDIR...] [OUTDIR]   (OUTDIR default ../figures/dissipative_t5)
 """
 import glob
 import json
@@ -28,24 +28,26 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-def load(rundir):
-    cfg = open(os.path.join(rundir, "configs.txt")).read().split("\n")
+def load(rundirs):
+    """Runs of one or more array directories (a later array can reuse an earlier one's reference)."""
     runs = []
-    for f in glob.glob(os.path.join(rundir, "out", "*.json")):
-        k = int(os.path.basename(f).split(".")[0])
-        with open(f) as io:
-            r = json.load(io)
-        line = cfg[k - 1].split()
-        r["E"] = next((x[2:] for x in line if x.startswith("E=")), "")
-        r["k"] = k
-        runs.append(r)
+    for d, rundir in enumerate(rundirs):
+        cfg = open(os.path.join(rundir, "configs.txt")).read().split("\n")
+        for f in glob.glob(os.path.join(rundir, "out", "*.json")):
+            k = int(os.path.basename(f).split(".")[0])
+            with open(f) as io:
+                r = json.load(io)
+            line = cfg[k - 1].split()
+            r["E"] = next((x[2:] for x in line if x.startswith("E=")), "")
+            r["k"] = (d, k)
+            runs.append(r)
     return sorted(runs, key=lambda r: r["k"])
 
 
 def key(r):
     c = r["config"]
     p = json.dumps(c["params"], sort_keys=True)
-    return (c["model"], c["L"], c["start"], p, c["T"])
+    return (c["model"], c["L"], c["start"], p, c["T"], c.get("warm", 0.0))
 
 
 def obs_matrix(r):
@@ -82,7 +84,8 @@ def ref_error(r, refs):
 
 def label(r):
     c = r["config"]
-    return f"{c['model']} L={c['L']} {c['start']} {json.dumps(c['params'])}"
+    w = f" warm {c['warm']:g}" if c.get("warm", 0) else ""
+    return f"{c['model']} L={c['L']} {c['start']}{w} {json.dumps(c['params'])}"
 
 
 def fig_order(runs, refs, out):
@@ -211,14 +214,21 @@ def fig_control(runs, refs, out):
     for r in rs:
         c = r["config"]
         ch = r.get("checks", [])
+        st = r.get("steps", [])                   # (t, h) of every accepted step
         e = ref_error(r, refs)
-        lab = f"{c['model']} tau={c['target']}"
-        axs[0].plot([x["t"] for x in ch], [x["h"] for x in ch], "o-", label=lab)
+        lab = f"{c['model']}{' warm' if c.get('warm', 0) else ''} tau={c['target']} check {c['check_every']}"
+        ln, = axs[0].step([x[0] for x in st], [x[1] for x in st], where="post", label=lab)
+        rej = [x for x in ch if not x["accepted"]]
+        axs[0].plot([x["t"] for x in rej], [x["h"] for x in rej], "x", color=ln.get_color())
         axs[1].plot([c["target"]], [max(e) if e else np.nan], "o", label=lab)
         rows.append((f"F03 {lab}", [("error", max(e) if e else None), ("rejected", r.get("nreject")),
-                                     ("checks", len(ch))], []))
+                                     ("checks", len(ch)), ("accepted", len(st)),
+                                     ("h range", (min(x[1] for x in st), max(x[1] for x in st)) if st else None),
+                                     ("estimates", [x["err"] for x in ch]),
+                                     ("wall", sum(r["steplog"]["wall"]))], []))
     axs[0].set_xlabel("t")
-    axs[0].set_ylabel("step size at each check")
+    axs[0].set_ylabel("accepted step (x: rejected attempt)")
+    axs[0].set_yscale("log")
     axs[1].set_xscale("log")
     axs[1].set_yscale("log")
     axs[1].set_xlabel("target step error")
@@ -288,11 +298,11 @@ def fig_cost(runs, refs, out):
 
 
 def main():
-    rundir = sys.argv[1]
+    rundirs = sys.argv[1].split(",")
     here = os.path.dirname(os.path.abspath(__file__))
     out = sys.argv[2] if len(sys.argv) > 2 else os.path.join(here, "..", "figures", "dissipative_t5")
     os.makedirs(out, exist_ok=True)
-    runs = load(rundir)
+    runs = load(rundirs)
     refs = references(runs)
     rows = []
     for f in (lambda: fig_order(runs, refs, out), lambda: fig_ablation(runs, refs, out),

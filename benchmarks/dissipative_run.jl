@@ -25,6 +25,7 @@
 #   DR_KEEP_KRYLOV (DR_ORDER for A2/B2, else 0: G psi..G^m psi kept on steps from a product state,
 #   dt5m), DR_KEEP_EVERY (0; 1 = on every step, the ablation),
 #   DR_EXACT (0; 1 = the complete DD probe, the lossless arm of the Task 5 order ablation),
+#   DR_WARM (0; t_w > 0 = start from the state evolved to t_w by tight BUG steps, see below),
 #   DR_TARGET (none), DR_CHECK (4), DR_NTRAJ (100), DR_SEED (1), DR_REF (auto: ed when small),
 #   A1/B1: DR_U (4), DR_KAPPA (1), DR_START (dbl_rich | low_dbl; B1: biased leads), DR_JLINK (1);
 #   A2/B2: DR_JZ (1), DR_GAMMA (1), DR_GM (= DR_GAMMA), DR_KA (pi/3), DR_NEXC (L/2 for A2,
@@ -52,6 +53,7 @@ const CLOSURE = env("DR_CLOSURE", NONLOCAL ? 1 : 0) == "1"
 const KEEPK = parse(Int, env("DR_KEEP_KRYLOV", NONLOCAL ? ORDER : 0))
 const KEEP_EVERY = env("DR_KEEP_EVERY", 0) == "1"
 const EXACT = env("DR_EXACT", 0) == "1"
+const WARM = parse(Float64, env("DR_WARM", 0))
 const TARGET = (x = env("DR_TARGET", "none"); x == "none" ? nothing : parse(Float64, x))
 const CHECK = parse(Int, env("DR_CHECK", 4))
 const NTRAJ = parse(Int, env("DR_NTRAJ", 100))
@@ -126,8 +128,8 @@ end
 
 const M = build_model()
 const G = no_jump_mpo(M.H, M.Q)
-const TAG = @sprintf("%s_L%d_%s_%s_dt%g_b%g_r%g_t%g_%s%s%s%s_seed%d", MODEL, L, MODE, INT, DT, TOLB,
-                     TOLR, TOLT, START, TARGET === nothing ? "" : "_tau$(TARGET)",
+const TAG = @sprintf("%s_L%d_%s_%s_dt%g_b%g_r%g_t%g_%s%s%s%s%s_seed%d", MODEL, L, MODE, INT, DT, TOLB,
+                     TOLR, TOLT, START, WARM > 0 ? "_warm$(WARM)" : "", TARGET === nothing ? "" : "_tau$(TARGET)",
                      KEEPK > 0 ? "_keep$(KEEPK)$(KEEP_EVERY ? "e" : "")" : "", EXACT ? "_exact" : "", SEED)
 const OUT = env("DR_OUT", "dissipative_$(TAG).json")
 
@@ -165,7 +167,25 @@ function step!(psi, h)
     return psi
 end
 
-centre_entropy(p) = (s = abs2.(bond_spectrum(copy(p), L ÷ 2)); s ./= sum(s);
+# An entangled start (DR_WARM): from the product state the first step's O(dt^{p+1}) error dominates a
+# short run (dr5d, A1 L = 12, T = 0.5: BUG slopes 4-5, TDVP2 3), which hides the global order. Every
+# run of a point evolves the same warm state (same steps, tolerances and maxdim, not DR_*), then
+# normalises it: t = 0 and log P0 = 0 are re-based there.
+if WARM > 0
+    let nw = max(1, round(Int, WARM / 0.0125))
+        for _ in 1:nw
+            keep = KEEPK > 0 && maximum(bond_dims(M.psi); init = 1) == 1 ?
+                   global_krylov_states(G, M.psi, KEEPK; tol_trunc = 1e-13, maxdim = MAXDIM) : Any[]
+            cbe_bug_step!(M.psi, G, ComplexF64(-im * WARM / nw); hermitian = false, order = 3,
+                          tol_basis = 1e-11, tol_root = 1e-13, tol_trunc = 1e-13, maxdim = MAXDIM,
+                          closure_checks = CLOSURE, keep_states = keep)
+        end
+        canonical!(M.psi, 1)
+        M.psi[1] = to_concrete(M.psi[1] / norm(M.psi[1]))
+    end
+end
+
+centre_entropy(p) =(s = abs2.(bond_spectrum(copy(p), L ÷ 2)); s ./= sum(s);
                      -sum(x * log(x) for x in s if x > 1e-300; init = 0.0))
 centre_sectors(p) = length(p[L ÷ 2].spaces[3])
 
@@ -212,6 +232,7 @@ if MODE === :no_jump
     result["logp"] = tr.logp
     result["records"] = tr.obs
     result["checks"] = tr.checks
+    result["steps"] = tr.steps
     result["nreject"] = tr.nreject
     result["flags"] = [Dict("t" => f.t, "kind" => string(f.kind), "value" => f.value) for f in tr.flags]
 else
@@ -235,7 +256,7 @@ result["config"] = Dict("model" => string(MODEL), "L" => L, "mode" => string(MOD
                         "dt" => DT, "T" => TF, "every" => EVERY, "order" => ORDER, "tol_basis" => TOLB,
                         "tol_root" => TOLR, "tol_trunc" => TOLT, "maxdim" => MAXDIM,
                         "closure_checks" => CLOSURE, "keep_krylov" => KEEPK, "keep_every" => KEEP_EVERY, "exact" => EXACT,
-                        "start" => string(START),
+                        "start" => string(START), "warm" => WARM,
                         "target" => TARGET === nothing ? "none" : TARGET, "check_every" => CHECK,
                         "ntraj" => NTRAJ, "seed" => SEED, "ref" => REF, "params" => M.par,
                         "threads" => Threads.nthreads())
