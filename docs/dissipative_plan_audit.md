@@ -536,8 +536,13 @@ cutoff of 1e-14. Its frames stayed at a defect of about 1e-7 in every replay, so
 The dr6q B2 runs predate the fix. Every step after the first ran the maximum 6 closure sweeps at
 the work ceiling (`D_stage` = 1024, `basis_limited` and `work_limited` in 49 of 50 steps), with a
 local Krylov defect of 0.1-2.8, even at L = 24, where D_final settled at 378 with zero discarded
-weight. That is consistent with fake columns inflating the frames, so B2 L = 24 is rerun on the
-fixed code (dr6u).
+weight. That looked like fake columns inflating the frames, so B2 L = 24 was rerun on the fixed
+code (dr6u row 3). **The hypothesis is refuted:** the rerun is identical. log P0 agrees to 1e-8,
+and the bonds, the 6 closure sweeps per step and the work-ceiling flags are all the same; wall
+4115 s against 3885 s, MaxRSS 4.8 G. It is a cost property of the closure for collective `Q` at
+finite density, not a defect. The state needs D = 378 with zero discarded weight, yet the frames
+sit at the 1024 ceiling every step. The closure runs its maximum 6 sweeps because the local Krylov
+defect stays at 0.1-1.7, so it never converges.
 
 ## Task 6 results on the fixed code (`4a76d77`)
 
@@ -582,3 +587,15 @@ A1 L = 12, κ = 2, maxdim 512, tol_trunc 1e-9).**
 - At equal maxdim, BUG's capacity is set by the working ceiling, a "tuned policy, not a theorem"
   (adaptive_budget.jl). The plan's Task 1 asks for a centralised peak-working-rank cap separate
   from maxdim. It is centralised, but fixed at a factor of 2 and not exposed to callers.
+- **USER 2026-10-25: report as is.** The solver is unchanged. BUG is marked work-limited from the
+  step its working ceiling binds, and BUG and TDVP2 are compared at matched error and cost, never
+  at equal maxdim alone.
+
+**Run bookkeeping.** dr6u rows 1-2 (A2 L = 32) and both dr6d references were OOM-killed at their
+10 G and 8 G requests (sampled MaxRSS 10.0 G and 8.0-8.3 G). They were resubmitted as dr6v
+17496930 (16 G) and dr6d 17496931 (12 G; row 2 resumes from its checkpoint). The A2 stability
+rows run at maxdim 512 (dr6w 17496935), the class B2 L = 24 just profiled; at 1024 the cost would
+be about 4-8 times as high. The stability array reused this morning's smoke directory name
+(`2026-10-25-dr6s`); it overwrote the smoke's four JSONs, which no figure or table used, and the
+smoke logs remain. The fixture tests missing from dt6t (wrong file name `test_dissipative_t3.jl`)
+run as dt6u 17496932 (`t3_a1`, `t3_a2`, `t2_g12`).
