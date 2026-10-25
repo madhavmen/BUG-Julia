@@ -40,6 +40,7 @@ def load(rundirs):
             line = cfg[k - 1].split()
             r["E"] = next((x[2:] for x in line if x.startswith("E=")), "")
             r["k"] = (d, k)
+            r["dir"] = os.path.basename(os.path.normpath(rundir))
             runs.append(r)
     return sorted(runs, key=lambda r: r["k"])
 
@@ -54,10 +55,28 @@ def obs_matrix(r):
     return np.array([x["obs"] for x in r["records"]])
 
 
-def error(r, ref):
-    """(log P0 error, observable error) over the common output times."""
+def capped_at(r):
+    """End time of the first fixed step that was rank-limited, or None: for BUG, the ledger missed
+    its tolerance (`budget_met` = 0: the working-rank ceiling 2 maxdim bound); for TDVP2, which has
+    no ledger, a bond reached `maxdim`. Plan U12 / §4.4: such a run is marked, not fitted silently
+    (dr5e: the warm A1 L = 12 BUG errors were all capped steps)."""
+    s = r.get("steplog", {})
+    if "budget_met" in s:
+        flags = [not b for b in s["budget_met"]]
+    else:
+        flags = [d >= r["config"]["maxdim"] for d in s.get("D_final", [])]
+    t = 0.0
+    for h, f in zip(s.get("h", []), flags):
+        t += h
+        if f:
+            return t
+    return None
+
+
+def error(r, ref, tmax=None):
+    """(log P0 error, observable error) over the common output times (before `tmax` if given)."""
     t, tr = np.round(r["times"], 9), np.round(ref["times"], 9)
-    common = [x for x in t if x in set(tr)]
+    common = [x for x in t if x in set(tr) and (tmax is None or x < tmax - 1e-9)]
     i = [list(t).index(x) for x in common]
     j = [list(tr).index(x) for x in common]
     lp = np.max(np.abs(np.array(r["logp"])[i] - np.array(ref["logp"])[j]))
@@ -73,13 +92,21 @@ def references(runs):
     return refs
 
 
-def ref_error(r, refs):
+def ref_error(r, refs, window=False):
+    """Error against the reference; `window`: only the output times before the first capped step of
+    the run or of its reference (None if no time after t = 0 is left)."""
     if "err_state" in r["records"][-1]:
         return r["records"][-1]["err_state"], abs(r["logp"][-1] - r["records"][-1]["logp_exact"])
     ref = refs.get(key(r))
     if ref is None or ref is r:
         return None
-    return error(r, ref)
+    if not window:
+        return error(r, ref)
+    caps = [c for c in (capped_at(r), capped_at(ref)) if c is not None]
+    tmax = min(caps, default=None)
+    if tmax is not None and sum(1 for x in r["times"] if 1e-9 < x < tmax - 1e-9) == 0:
+        return None
+    return error(r, ref, tmax)
 
 
 def label(r):
@@ -99,15 +126,27 @@ def fig_order(runs, refs, out):
     rows = []
     for ax, (g, rs) in zip(axs[0], sorted(groups.items())):
         for integ, mk in (("bug", "o-"), ("tdvp2", "s--")):
-            pts = sorted((r["config"]["dt"], ref_error(r, refs)) for r in rs if r["config"]["int"] == integ)
-            pts = [(dt, e) for dt, e in pts if e is not None]
-            if not pts:
+            sel = sorted((r for r in rs if r["config"]["int"] == integ), key=lambda r: r["config"]["dt"])
+            sel = [r for r in sel if ref_error(r, refs) is not None]
+            if not sel:
                 continue
-            dt = np.array([p[0] for p in pts])
-            e = np.array([max(p[1]) for p in pts])
-            ax.loglog(dt, e, mk, label=integ)
+            dt = np.array([r["config"]["dt"] for r in sel])
+            e = np.array([max(ref_error(r, refs)) for r in sel])
+            cap = [capped_at(r) for r in sel]
+            ln, = ax.loglog(dt, e, mk, label=integ)
+            hollow = [i for i, c in enumerate(cap) if c is not None]
+            ax.loglog(dt[hollow], e[hollow], "o", mfc="white", color=ln.get_color(),
+                      label=f"{integ} rank-limited" if hollow else None)
             sl = np.diff(np.log2(e)) / np.diff(np.log2(dt))
-            rows.append((f"F{'01' if g[0] == '1' else '04'} {label(rs[0])} {integ}", list(zip(dt, e)), list(sl)))
+            name = f"F{'01' if g[0] == '1' else '04'} {label(rs[0])} {integ}"
+            capnote = "" if not hollow else "  RANK-LIMITED from t = " + str(
+                {float(dt[i]): round(cap[i], 4) for i in hollow})
+            rows.append((name + capnote, list(zip(dt, e)), list(sl)))
+            win = [ref_error(r, refs, window=True) for r in sel]
+            if hollow or any(capped_at(refs[key(r)]) is not None for r in sel if key(r) in refs):
+                wpts = [(d, max(w)) for d, w in zip(dt, win) if w is not None]
+                wsl = list(np.diff(np.log2([p[1] for p in wpts])) / np.diff(np.log2([p[0] for p in wpts])))
+                rows.append((name + "  (before the first capped step)", wpts, wsl))
         d = np.array(sorted({r["config"]["dt"] for r in rs}))
         e0 = ax.get_ylim()[1] / 10
         ax.loglog(d, e0 * (d / d[-1]) ** 3, "k:", lw=0.8, label="dt^3")
@@ -216,7 +255,9 @@ def fig_control(runs, refs, out):
         ch = r.get("checks", [])
         st = r.get("steps", [])                   # (t, h) of every accepted step
         e = ref_error(r, refs)
-        lab = f"{c['model']}{' warm' if c.get('warm', 0) else ''} tau={c['target']} check {c['check_every']}"
+        unmet = sum(1 for b in r["steplog"].get("budget_met", []) if not b)
+        lab = (f"{c['model']}{' warm' if c.get('warm', 0) else ''} tau={c['target']} "
+               f"check {c['check_every']} [{r['dir']}]")
         ln, = axs[0].step([x[0] for x in st], [x[1] for x in st], where="post", label=lab)
         rej = [x for x in ch if not x["accepted"]]
         axs[0].plot([x["t"] for x in rej], [x["h"] for x in rej], "x", color=ln.get_color())
@@ -225,6 +266,7 @@ def fig_control(runs, refs, out):
                                      ("checks", len(ch)), ("accepted", len(st)),
                                      ("h range", (min(x[1] for x in st), max(x[1] for x in st)) if st else None),
                                      ("estimates", [x["err"] for x in ch]),
+                                     ("rank-limited steps (incl. check substeps)", unmet),
                                      ("wall", sum(r["steplog"]["wall"]))], []))
     axs[0].set_xlabel("t")
     axs[0].set_ylabel("accepted step (x: rejected attempt)")
@@ -286,7 +328,8 @@ def fig_cost(runs, refs, out):
             pts = sorted((max(ref_error(r, refs) or (np.nan,)), sum(r["steplog"]["wall"])) for r in sel
                          if r["config"]["int"] == integ)
             ax.loglog([p[0] for p in pts], [p[1] for p in pts], mk, label=integ)
-            rows.append((f"F10 {g[0]} L={g[1]} {integ}", pts, []))
+            capd = sorted(r["config"]["dt"] for r in sel if r["config"]["int"] == integ and capped_at(r) is not None)
+            rows.append((f"F10 {label(sel[0])} {integ}" + (f"  RANK-LIMITED at dt {capd}" if capd else ""), pts, []))
         ax.set_xlabel("error")
         ax.set_ylabel("integrator wall [s]")
         ax.set_title(f"cost at matched error, {g[0]} L={g[1]}", fontsize=8)
