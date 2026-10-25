@@ -9,7 +9,7 @@
 #       the eq. (7) estimate of the first step's error matches the dense error
 #   C3  `jump_trajectory`: the first step is rejected and shrunk, a check is accepted exactly when its
 #       estimate is within τ, the step grows once the steps are exact, and the final state beats the
-#       fixed step (CONTROL) by far
+#       fixed step (CONTROL) by far; with `check_every = 4` the first step is still checked
 
 using Test
 using LinearAlgebra
@@ -113,6 +113,13 @@ end
     # CONTROL: the fixed step is visibly off (dt5u: 6.4e-7, C2's first-step error 5.4e-7)
     @test efix > 1e-7
     @test ectl < 1e-7 && ectl < efix / 100
+    # occasional checks still check the first step, which carries the error (dr5e: unchecked at
+    # check_every = 4, the run kept the fixed step's error)
+    tr4, v4 = segment(target_step_error = tau, check_every = 4)
+    ectl4 = final_error(v4)
+    @info "C3 check_every = 4: final error $ectl4, checks at t = $([c.t for c in tr4.checks])"
+    @test tr4.checks[1].t == 0 && !tr4.checks[1].accepted
+    @test ectl4 < 1e-7 && ectl4 < efix / 100
 end
 
 end

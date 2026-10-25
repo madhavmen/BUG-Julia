@@ -112,8 +112,11 @@ STEP CONTROL (plan eq. 7, Task 5): with `target_step_error = τ`, every `check_e
 calibration: the full step is compared with two half steps from the same state
 ([`step_doubling_error`](@ref)), the two-half-step state is kept, and the step size becomes
 [`next_step_size`](@ref) within `[dt_min, dt_max]`; a check above `τ` is rejected and redone at the
-smaller step. The other steps are plain. A jump resets the step size to `dt` and the check counter
-(no history survives a jump). `nothing` (default) is the fixed step `dt`.
+smaller step. The other steps are plain. The first step, and the first after every jump, is always a
+check: it starts from a fresh, weakly entangled state and carries the largest step error (dr5e: with
+`check_every = 4` counted from 0, the product-state first step went unchecked and the run kept the
+fixed step's error). A jump also resets the step size to `dt` (no history survives a jump).
+`nothing` (default) is the fixed step `dt`.
 
 Returns `times`, `obs`, `logp` (log survival since the last jump, at each grid time), `njumps`
 (cumulative, at each grid time), `events` (`t`, `channel`, `weights`, `evals`, `resid`,
@@ -143,7 +146,7 @@ function jump_trajectory(psi0::SymMPS, G::MPO, channels::AbstractVector{JumpChan
     logp, logu = 0.0, draw()
     t, nj, nsteps, nevals = 0.0, 0, 0, 0
     ctl = target_step_error !== nothing
-    hcur, since, nreject = Float64(dt), 0, 0
+    hcur, since, nreject = Float64(dt), check_every - 1, 0
     steps, checks = Tuple{Float64, Float64}[], NamedTuple[]
     events, flags = NamedTuple[], NamedTuple[]
     obs, logps, njs = Any[], Float64[], Int[]
@@ -223,7 +226,7 @@ function jump_trajectory(psi0::SymMPS, G::MPO, channels::AbstractVector{JumpChan
             push!(events, (t = t, channel = channels[mu].name, weights = w, evals = ev,
                            resid = fb, discarded = disc))
             logp, logu = 0.0, draw()
-            hcur, since = Float64(dt), 0
+            hcur, since = Float64(dt), check_every - 1
         end
         t = tnext
         record!(psi)
