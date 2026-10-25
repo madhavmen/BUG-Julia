@@ -402,9 +402,44 @@ The scale consists of:
 | §3 per trajectory: RNG seed, events | `traj[].seed`, `traj[].events` (t, channel) | **added**: `seed` |
 | Task 4/6 B1: currents on both sides of the sink, lead imbalance | `jup/jdn_left/right` (`hub4_current_mpo` on bonds j0-1 and j0), `imb_up/dn` | **added** |
 | Task 4 B1: preparation convergence | `params.prep` (β, status, energy, residual of each ITE step) | **added** |
-| §4.3 checkpoint / restart | none | **gap**, needed before Task 7 (its scheduler smoke job tests restart) |
+| §4.3 checkpoint / restart | `jump_trajectory` / `jump_ensemble` `checkpoint`, `resume`; driver `DR_CKPT`, `DR_CKPT_SEC`, `DR_STOP_AT` (`1787e44`) | **added**, see below; tests dt6r, driver check dr6x |
 | B2: dark-state overlap | none | optional, not added |
 
 Two Julia scope traps were avoided while adding these. Local methods of one function share a name
 space, so B1's `lead(n, s)`, which builds the start state, would have been replaced by a new
 `lead(n, r)`. The A1/B1 observable is `hub_obs`, not a second `obs(p)`.
+
+## Checkpoint / restart (plan §4.3, `1787e44`)
+
+The plan asks for the MPS and charge sector, the controller history, the trajectory RNG and jump
+threshold, the accumulated log survival, and the observables and diagnostics. It also asks that a
+restart be refused if the MPO or the solver semantics changed. Mapping:
+
+| plan item | implementation |
+|---|---|
+| MPS, charge sector | the normalised `psi` (its tensors carry the sectors) |
+| controller history | `hcur`, `since`, `nreject`, `steps`, `checks` |
+| RNG, jump threshold, log survival | the `MersenneTwister` itself (the threshold `logu` is already drawn from it), `logu`, `logp` |
+| observables, diagnostics | `obs`, `logp_grid`, `njumps`, `events`, `flags`; the driver adds its step log |
+| ensembles | `(done, current)`: the finished trajectories plus the running one's state |
+| refuse an inconsistent restart | the driver's header is the run configuration (operator hash, MPO widths, tolerances, integrator) without `T`, plus a hash of the solver source; `jump_trajectory` refuses another seed or a grid that does not extend the checkpoint's |
+
+A BUG step seeds its own sketch (`MersenneTwister(0x5EED)` per call), so it depends only on its
+input state. A resumed run should therefore reproduce the uninterrupted run exactly, and the
+tests check exact equality, with no tolerance.
+
+- **The hook:** the state is handed over as live references. A copy at every grid time would
+  double the memory of a maxdim-2048 run. The driver serialises it at most every `DR_CKPT_SEC`
+  (default 1800 s) and removes it once the JSON is written.
+- **Growing `T`:** `T` may grow on a resume, so a validated run can be extended. The plan asks
+  for this in A2: "validate ... to Jt ~ 20 before requesting longer runs".
+- **Tests (`test_dissipative_t6.jl`):**
+  - R1: a resume from a real serialisation round trip, with jumps and the controller, from the grid
+    time before the last jump; CONTROL: a fresh RNG draws different jumps.
+  - R2: another seed, a different grid and a truncated grid are each refused, and a longer grid
+    extends the run.
+  - R3: ensembles resumed inside a trajectory and between trajectories.
+- **Driver check (`benchmarks/dissipative_restart_check.sh`, the Task 7 "dry-run output and
+  restart"):** each run goes uninterrupted, then is stopped at checkpoint n and resumed. The two
+  JSONs must be equal apart from measurements. CONTROL: a resume with a changed `tol_trunc` must
+  be refused.
