@@ -118,6 +118,14 @@ check: it starts from a fresh, weakly entangled state and carries the largest st
 fixed step's error). A jump also resets the step size to `dt` (no history survives a jump).
 `nothing` (default) is the fixed step `dt`.
 
+CHECKPOINT (plan §4.3): `checkpoint(state)` is called after every grid time `k >= 2` with the whole
+loop state -- the normalised state, the RNG (the threshold `logu` already drawn), `logp`, the
+controller's `hcur`/`since`, and everything recorded so far -- as live references, valid during the
+call only (serialise or `deepcopy` it; a copy per grid time would double a large run's memory), and
+`resume = state` continues from it. Every BUG step seeds its own sketch, so a resumed trajectory
+reproduces the uninterrupted one exactly. A resume needs the same `seed` and the grid up to
+`state.k`; the grid may extend past it (a longer run from a shorter one).
+
 Returns `times`, `obs`, `logp` (log survival since the last jump, at each grid time), `njumps`
 (cumulative, at each grid time), `events` (`t`, `channel`, `weights`, `evals`, `resid`,
 `discarded`), `flags`, `nsteps` (accepted steps), `nevals` (extra event-location steps), `seed`,
@@ -131,7 +139,8 @@ function jump_trajectory(psi0::SymMPS, G::MPO, channels::AbstractVector{JumpChan
                          growth_tol::Float64 = 1e-10, tol_trunc::Float64 = 1e-10,
                          maxdim::Int = 256, jumps::Bool = true,
                          target_step_error::Union{Nothing, Real} = nothing, check_every::Int = 4,
-                         dt_min::Real = dt / 64, dt_max::Real = 4dt)
+                         dt_min::Real = dt / 64, dt_max::Real = 4dt, checkpoint = nothing,
+                         resume = nothing)
     isempty(channels) && throw(ArgumentError("jump_trajectory needs at least one channel"))
     (length(tgrid) >= 1 && tgrid[1] == 0 && issorted(tgrid)) || throw(ArgumentError(
         "tgrid must be sorted and start at 0"))
@@ -139,21 +148,42 @@ function jump_trajectory(psi0::SymMPS, G::MPO, channels::AbstractVector{JumpChan
     stepfn = step !== nothing ? step :
         (p, h) -> cbe_bug_step!(p, G, ComplexF64(-im * h); hermitian = false, order = 3,
                                 tol_trunc = tol_trunc, maxdim = maxdim, step_kw...)
-    rng = MersenneTwister(seed)
-    psi = copy(psi0)
-    _jt_normalise!(psi)
-    draw() = jumps ? log(rand(rng)) : -Inf
-    logp, logu = 0.0, draw()
-    t, nj, nsteps, nevals = 0.0, 0, 0, 0
     ctl = target_step_error !== nothing
-    hcur, since, nreject = Float64(dt), check_every - 1, 0
-    steps, checks = Tuple{Float64, Float64}[], NamedTuple[]
-    events, flags = NamedTuple[], NamedTuple[]
-    obs, logps, njs = Any[], Float64[], Int[]
+    if resume === nothing
+        rng = MersenneTwister(seed)
+        psi = copy(psi0)
+        _jt_normalise!(psi)
+        logp, logu = 0.0, jumps ? log(rand(rng)) : -Inf
+        t, nj, nsteps, nevals = 0.0, 0, 0, 0
+        hcur, since, nreject = Float64(dt), check_every - 1, 0
+        steps, checks = Tuple{Float64, Float64}[], NamedTuple[]
+        events, flags = NamedTuple[], NamedTuple[]
+        obs, logps, njs = Any[], Float64[], Int[]
+        k0 = 1
+    else
+        k0 = resume.k
+        resume.seed == seed || throw(ArgumentError(
+            "resume: the checkpoint is seed $(resume.seed), the run seed $seed"))
+        (length(tgrid) >= k0 && collect(Float64, tgrid[1:k0]) == resume.times) ||
+            throw(ArgumentError("resume: the grid does not extend the checkpoint's"))
+        rng, psi = copy(resume.rng), copy(resume.psi)
+        logp, logu, t, nj = resume.logp, resume.logu, resume.t, resume.nj
+        nsteps, nevals, hcur, since, nreject =
+            resume.nsteps, resume.nevals, resume.hcur, resume.since, resume.nreject
+        steps, checks, events, flags = copy.((resume.steps, resume.checks, resume.events,
+                                              resume.flags))
+        obs, logps, njs = copy.((resume.obs, resume.logp_grid, resume.njumps))
+    end
+    draw() = jumps ? log(rand(rng)) : -Inf
     record!(p) = (push!(obs, observe === nothing ? nothing : observe(p)); push!(logps, logp);
                   push!(njs, nj))
-    record!(psi)
-    for k in 2:length(tgrid)
+    save(k) = checkpoint === nothing || checkpoint((
+        k = k, times = collect(Float64, tgrid[1:k]), seed = seed, psi = psi, rng = rng, logp = logp,
+        logu = logu, t = t, nj = nj, nsteps = nsteps, nevals = nevals, hcur = hcur, since = since,
+        nreject = nreject, steps = steps, checks = checks, events = events, flags = flags,
+        obs = obs, logp_grid = logps, njumps = njs))
+    resume === nothing && record!(psi)
+    for k in (k0 + 1):length(tgrid)
         tnext = Float64(tgrid[k])
         while tnext - t > 1e-12 * max(1.0, tnext)
             h = min(hcur, tnext - t)
@@ -230,6 +260,7 @@ function jump_trajectory(psi0::SymMPS, G::MPO, channels::AbstractVector{JumpChan
         end
         t = tnext
         record!(psi)
+        save(k)
     end
     return (times = collect(Float64, tgrid), obs = obs, logp = logps, njumps = njs,
             events = events, flags = flags, nsteps = nsteps, nevals = nevals, seed = seed,
@@ -243,13 +274,28 @@ end
 [`jump_trajectory`](@ref). Returns the trajectories and, at each grid time, the ensemble mean and
 standard error of every component of `observe` and of the cumulative jump count, over the
 independent trajectories.
+
+`checkpoint(state)` is called with `(done, current)`: the finished trajectories and the running
+one's [`jump_trajectory`](@ref) state (`nothing` right after one finishes), live as there;
+`resume = state` continues from it.
 """
 function jump_ensemble(psi0::SymMPS, G::MPO, channels::AbstractVector{JumpChannel},
                        tgrid::AbstractVector{<:Real}; ntraj::Int, seed::Integer = 1,
-                       observe, kwargs...)
+                       observe, checkpoint = nothing, resume = nothing, kwargs...)
     ntraj >= 2 || throw(ArgumentError("jump_ensemble needs ntraj >= 2 for an error bar, got $ntraj"))
-    trajs = [jump_trajectory(psi0, G, channels, tgrid; seed = seed + r - 1, observe = observe,
-                             kwargs...) for r in 1:ntraj]
+    trajs = resume === nothing ? NamedTuple[] : copy(resume.done)
+    [tr.seed for tr in trajs] == seed .+ (0:(length(trajs) - 1)) || throw(ArgumentError(
+        "resume: the finished trajectories are not seeds $seed, $(seed + 1), ..."))
+    current = resume === nothing ? nothing : resume.current
+    save(st) = checkpoint === nothing || checkpoint((done = trajs, current = st))
+    for r in (length(trajs) + 1):ntraj
+        push!(trajs, jump_trajectory(psi0, G, channels, tgrid; seed = seed + r - 1,
+                                     observe = observe, resume = current,
+                                     checkpoint = checkpoint === nothing ? nothing : save,
+                                     kwargs...))
+        current = nothing
+        save(nothing)
+    end
     nt = length(tgrid)
     O = [reduce(hcat, [Float64.(tr.obs[k]) for tr in trajs]) for k in 1:nt]   # (ncomp, ntraj)
     N = [Float64[tr.njumps[k] for tr in trajs] for k in 1:nt]

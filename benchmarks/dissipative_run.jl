@@ -35,8 +35,14 @@
 #   A1/B1: DR_U (4), DR_KAPPA (1), DR_START (dbl_rich | low_dbl; B1: biased leads), DR_JLINK (1);
 #   A2/B2: DR_JZ (1), DR_GAMMA (1), DR_GM (= DR_GAMMA), DR_KA (pi/3), DR_NEXC (L/2 for A2,
 #   L/4 for B2), DR_START (block | alt | neel | bright | dark); DR_OUT (dissipative_<tag>.json)
+#
+# Checkpoint/restart (plan §4.3): DR_CKPT (DR_OUT.ckpt) is written at a grid time once DR_CKPT_SEC
+# (1800) seconds have passed since the last, with the jump_trajectory / jump_ensemble state (state,
+# RNG, threshold, log survival, controller, records), the step log and a header; a run that finds
+# it resumes, and refuses it if the header (config without T, solver source hash) differs. T may
+# grow. DR_STOP_AT = n writes the n-th checkpoint and exits (the restart test). Removed on success.
 
-using LinearAlgebra, Printf, JSON, Random
+using LinearAlgebra, Printf, JSON, Random, Serialization
 using LurCGT, Telum
 using BUGJulia, BUGJulia.BondUpdateBUG, BUGJulia.RSVDCBEBondUpdate
 
@@ -152,6 +158,9 @@ const TAG = @sprintf("%s_L%d_%s_%s_dt%g_b%g_r%g_t%g_%s%s%s%s%s_seed%d", MODEL, L
                      TOLR, TOLT, START, WARM > 0 ? "_warm$(WARM)" : "", TARGET === nothing ? "" : "_tau$(TARGET)",
                      KEEPK > 0 ? "_keep$(KEEPK)$(KEEP_EVERY ? "e" : "")" : "", EXACT ? "_exact" : "", SEED)
 const OUT = env("DR_OUT", "dissipative_$(TAG).json")
+const CKPT = env("DR_CKPT", OUT * ".ckpt")
+const CKPT_SEC = parse(Float64, env("DR_CKPT_SEC", 1800))
+const STOP_AT = parse(Int, env("DR_STOP_AT", 0))
 
 # ── the step ────────────────────────────────────────────────────────────────────────────────
 const LOG = Dict{String, Vector{Float64}}()
@@ -216,8 +225,8 @@ end
 # An entangled start (DR_WARM): from the product state the first step's O(dt^{p+1}) error dominates a
 # short run (dr5d, A1 L = 12, T = 0.5: BUG slopes 4-5, TDVP2 3), which hides the global order. Every
 # run of a point evolves the same warm state (same steps, tolerances and maxdim, not DR_*), then
-# normalises it: t = 0 and log P0 = 0 are re-based there.
-if WARM > 0
+# normalises it: t = 0 and log P0 = 0 are re-based there. A resumed run starts from its checkpoint.
+if WARM > 0 && !isfile(CKPT)
     let nw = max(1, round(Int, WARM / 0.0125))
         for _ in 1:nw
             keep = KEEPK > 0 && maximum(bond_dims(M.psi); init = 1) == 1 ?
@@ -247,14 +256,65 @@ if REF == "ed" && NONLOCAL
     global dense_amps = (flow = _ed_flow(-1im * em.Gd, v0), v0 = v0)
 end
 
+# ── the configuration, and a checkpoint to resume from ──────────────────────────────────────
+# the solver's source: with the commit it fixes the solver semantics a checkpoint was written under
+const SRC_HASH = let d = joinpath(pkgdir(BUGJulia), "src")
+    fs = sort([joinpath(r, f) for (r, _, files) in walkdir(d) for f in files if endswith(f, ".jl")])
+    string(hash([(relpath(f, d), read(f, String)) for f in fs]); base = 16)
+end
+const CONFIG = Dict("model" => string(MODEL), "L" => L, "mode" => string(MODE), "int" => string(INT),
+                    "dt" => DT, "T" => TF, "every" => EVERY, "order" => ORDER, "tol_basis" => TOLB,
+                    "tol_root" => TOLR, "tol_trunc" => TOLT, "maxdim" => MAXDIM,
+                    "closure_checks" => CLOSURE, "keep_krylov" => KEEPK, "keep_every" => KEEP_EVERY,
+                    "exact" => EXACT, "start" => string(START), "warm" => WARM,
+                    "target" => TARGET === nothing ? "none" : TARGET, "check_every" => CHECK,
+                    "ntraj" => NTRAJ, "seed" => SEED, "ref" => REF, "params" => M.par,
+                    "threads" => Threads.nthreads(), "src_hash" => SRC_HASH,
+                    # plan §3/§4.1: the operator definition (with the commit it fixes H, Q
+                    # exactly) and the MPO widths (Task 6 A2: the collective MPO's width)
+                    "mpo_dims" => Dict("H" => mpo_virtual_dims(M.H), "Q" => mpo_virtual_dims(M.Q),
+                                       "G" => mpo_virtual_dims(G)),
+                    "operator_hash" => string(hash((string(MODEL), L, string(START),
+                                                    JSON.json(filter(kv -> kv[1] != "prep", M.par))));
+                                              base = 16))
+# T may grow on a resume; B1's preparation diagnostics are recomputed, possibly to the last bit
+const HEADER = merge(filter(kv -> kv[1] != "T", CONFIG),
+                     Dict("params" => filter(kv -> kv[1] != "prep", M.par)))
+const CK = isfile(CKPT) ? deserialize(CKPT) : nothing
+const RESTARTS = CK === nothing ? 0 : CK.restarts + 1
+if CK !== nothing
+    CK.header == HEADER || error("inconsistent restart: $CKPT was written with a different " *
+                                 "configuration or solver source; remove it to start afresh\n  " *
+                                 "checkpoint: $(JSON.json(CK.header))\n  run:        $(JSON.json(HEADER))")
+    merge!(LOG, CK.log)
+    @printf("resuming from %s (checkpoint %d, %.1f s done)\n", CKPT, CK.n, CK.wall)
+end
+
 # ── the run ─────────────────────────────────────────────────────────────────────────────────
 tg = collect(0.0:EVERY:(TF + 1e-12))
 result = Dict{String, Any}()
-nrec = Ref(0)                     # observe runs once per grid time, in order
+nrec = Ref(CK === nothing ? 0 : CK.nrec)   # observe runs once per grid time, in order
 t_start = time()
+wall0 = CK === nothing ? 0.0 : CK.wall
+nck, last_ck = Ref(CK === nothing ? 0 : CK.n), Ref(time())
+function save_ckpt(state)
+    nck[] += 1
+    stop = nck[] == STOP_AT
+    (stop || time() - last_ck[] >= CKPT_SEC) || return
+    serialize(CKPT * ".tmp", (header = HEADER, state = state, log = LOG, nrec = nrec[], n = nck[],
+                              wall = wall0 + time() - t_start,
+                              restarts = RESTARTS))
+    mv(CKPT * ".tmp", CKPT; force = true)
+    last_ck[] = time()
+    stop || return
+    @printf("STOPPED-AT checkpoint %d (%s)\n", nck[], CKPT)
+    exit(0)
+end
+resume = CK === nothing ? nothing : CK.state
 if MODE === :no_jump
     tr = jump_trajectory(M.psi, G, M.ch, tg; dt = DT, seed = SEED, jumps = false,
                          step = step!, target_step_error = TARGET, check_every = CHECK,
+                         checkpoint = save_ckpt, resume = resume,
                          observe = p -> begin
                              P = real(overlap(p, p))
                              E = real(mpo_energy(p, M.H)) / P
@@ -283,7 +343,8 @@ if MODE === :no_jump
     result["flags"] = [Dict("t" => f.t, "kind" => string(f.kind), "value" => f.value) for f in tr.flags]
 else
     ens = jump_ensemble(M.psi, G, M.ch, tg; ntraj = NTRAJ, seed = SEED, observe = M.obs, dt = DT,
-                        step = step!, target_step_error = TARGET, check_every = CHECK)
+                        step = step!, target_step_error = TARGET, check_every = CHECK,
+                        checkpoint = save_ckpt, resume = resume)
     result["times"] = ens.times
     result["mean"] = ens.mean
     result["stderr"] = ens.stderr
@@ -295,27 +356,15 @@ else
                            "events" => [Dict("t" => e.t, "channel" => e.channel) for e in tr.events])
                       for tr in ens.trajs]
 end
-result["wall"] = time() - t_start
+result["wall"] = wall0 + time() - t_start
+result["restarts"] = RESTARTS
 result["names"] = M.names
 result["steplog"] = LOG
-result["peak_rss"] = Sys.maxrss()
-result["config"] = Dict("model" => string(MODEL), "L" => L, "mode" => string(MODE), "int" => string(INT),
-                        "dt" => DT, "T" => TF, "every" => EVERY, "order" => ORDER, "tol_basis" => TOLB,
-                        "tol_root" => TOLR, "tol_trunc" => TOLT, "maxdim" => MAXDIM,
-                        "closure_checks" => CLOSURE, "keep_krylov" => KEEPK, "keep_every" => KEEP_EVERY, "exact" => EXACT,
-                        "start" => string(START), "warm" => WARM,
-                        "target" => TARGET === nothing ? "none" : TARGET, "check_every" => CHECK,
-                        "ntraj" => NTRAJ, "seed" => SEED, "ref" => REF, "params" => M.par,
-                        "threads" => Threads.nthreads(),
-                        # plan §3/§4.1: the operator definition (with the commit it fixes H, Q
-                        # exactly) and the MPO widths (Task 6 A2: the collective MPO's width)
-                        "mpo_dims" => Dict("H" => mpo_virtual_dims(M.H), "Q" => mpo_virtual_dims(M.Q),
-                                           "G" => mpo_virtual_dims(G)),
-                        "operator_hash" => string(hash((string(MODEL), L, string(START),
-                                                        JSON.json(filter(kv -> kv[1] != "prep", M.par))));
-                                                  base = 16))
+result["peak_rss"] = Sys.maxrss()        # this process's: a resumed run's earlier peak is in steplog
+result["config"] = CONFIG
 open(OUT, "w") do io
     JSON.print(io, result)
 end
+isfile(CKPT) && rm(CKPT)
 @printf("wrote %s (%.1f s, %d steps logged, peak RSS %.2f GB)\n", OUT, result["wall"],
         length(get(LOG, "h", Float64[])), Sys.maxrss() / 2^30)
