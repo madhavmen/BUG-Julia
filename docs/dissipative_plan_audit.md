@@ -696,3 +696,16 @@ point at production size over a short window:
 
 Each check compares an uninterrupted run with one stopped at a checkpoint and resumed, plus the
 changed-tol_trunc refusal control. The memory budget is read from each run's printed peak RSS.
+
+**Fix regression tests complete.** dt6t 17496046 passed `test_dd_cbe` (with the new T2.4 test),
+`test_dd_cbe_controller` and `test_dissipative_t2`, `t4` and `t5`. dt6u 17496932 passed
+`test_dissipative_t3_a1`, `t3_a2` and `t2_g12` (U10 order). Every relevant test file passes on
+`a2d8c78` / `4a76d77`.
+
+**A1 references converged (dr6d 17496931).** Successive halvings differ by 2.2e-7 (dt 0.025 to
+0.0125) and then 1.4e-8 (0.0125 to 0.00625), a ratio of 15 (one-step order 4). The dt 0.00625
+reference is therefore good to about 1e-9; none of them was capped (peak D 1407). Against it,
+TDVP2 gives 4.6e-8, 3.7e-7, 3.0e-6 and 2.4e-5 at dt 0.0125-0.1 (slopes 3.0, 3.0, 2.98), and BUG
+gives 2.9e-6, 3.3e-5 and 6.7e-4 at dt 0.05-0.2. The final timing curve, dr6e 17497216, reruns
+every arm in one job and adds BUG dt 0.025 and 0.0125, so that BUG also reaches TDVP2's two most
+accurate arms.
