@@ -86,6 +86,45 @@ end
     end
 end
 
+@testset "T2.4: roundoff in a sector the frame fills is not a direction, both sides" begin
+    # The dissipative A2 L=32 crash (dr6z): an assembled frame is an isometry only to ~1e-13, so in
+    # a sector it fills `P^D Z` is cancellation noise; the absolute 100 eps floor of the second
+    # pass kept it as a unit column inside the frame.
+    mpo, psi, f, lenv, renv = _hb_bond()
+    rng = Random.MersenneTwister(17)
+    for side in (:left, :right)
+        left = side === :left
+        fl = left ? 3 : 1
+        perp = left ? perp_component : perp_component_right
+        ovl(A, X) = norm(to_concrete(left ? contract(A', (1, 2), X, (1, 2)) :
+                                            contract(X, (2, 3), A', (2, 3))))
+        F = full_local_basis(left ? f.U0 : f.V0, side; tag = "tstF")
+        dims = Dict(q => d for (q, d) in F.spaces[fl])
+        qfull = argmax(q -> dims[q], collect(keys(dims)))           # filled; the others keep 2
+        U = to_concrete((1.0 + 0.0im) *
+            RC._trim_per_sector(F, fl, Dict(q => q == qfull ? d : max(d - 2, 0) for (q, d) in dims)))
+        frame = to_concrete(setitag(to_concrete(U + 1e-12 * RC._randomize_like(U, rng)), fl, "tstW"))
+        Z = RC._trim_per_sector(RC._randomize_like(full_local_basis(left ? f.U0 : f.V0, side;
+                                                                    tag = "tstG"), rng),
+                                fl, Dict(q => min(d, 2) for (q, d) in dims))
+        # CONTROL: the old absolute floor on the second pass keeps an in-frame column here
+        Y = perp(frame, Z)
+        ref, nz, ny = frame.inds[fl], norm(Z), norm(Y)
+        Q1 = RC._thin_qr(Y, fl, ref, "tstQ", RC._CBE_EPS * max(nz, ny))
+        Qold = RC._thin_qr(perp(frame, Q1), fl, ref, "tstQ", RC._CBE_EPS)
+        @test ovl(frame, Qold) > 0.5
+        Q, _ = RC._dd_select(frame, Z, side, KernelCounters())
+        @test Q !== nothing
+        k = leg_dim(Q, fl)
+        G = left ? to_concrete(contract(Q', (1, 2), Q, (1, 2))) :
+                   to_concrete(contract(Q, (2, 3), Q', (2, 3)))
+        @test abs(norm(Q)^2 - k) < 1e-10 && abs(norm(G)^2 - k) < 1e-10   # Q'Q = I
+        @test ovl(frame, Q) < 1e-9                                       # nothing inside the frame
+        @test all(q != qfull for (q, _) in Q.spaces[fl])                 # the filled sector adds none
+        @test norm(perp(Q, Y)) < 1e-9 * nz                               # the genuine range is kept
+    end
+end
+
 @testset "T2.3: a reachable sector the frame does not hold is found" begin
     for side in (:left, :right)
         mpo, psi, f, lenv, renv = _hb_bond(; steps = 0)            # Neel: rank-1 frames

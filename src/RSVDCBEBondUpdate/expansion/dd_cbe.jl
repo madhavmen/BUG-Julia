@@ -333,14 +333,28 @@ function _thin_qr(Y, fl::Int, ref::TLIndex, tag::AbstractString, thr::Float64)
 end
 
 """
+Plan T2.4 "twice is enough", read as the DGKS/Kahan-Parlett acceptance test: a unit column of `Q1`
+is a direction only if it keeps at least this fraction of its norm through the second `P^D`. A
+genuine direction keeps ~1. Roundoff that cleared the first floor collapses to the frame's own
+orthogonality level, which an absolute `100 eps` floor does not reject: in a sector the frame
+fills, that column is `P^D`'s cancellation noise renormalised, i.e. a unit vector INSIDE the frame.
+MEASURED (dissipative A2 L=32 finite density, closure frontier sweep, dr6z): pass-1 residuals
+3.0e-14 against a floor of 2.65e-14 in the filled sectors, kept by pass 2 with `|frame'Q| = 1`; the
+controller's working frame absorbed them, the next selections projected against a non-isometric
+frame, and the grown frame reached a defect of 14 at site 13 and 1e26 at the root.
+"""
+const _REORTH_KEEP = 1 / sqrt(2)
+
+"""
     _dd_select(frame, Z, side, kc) -> (Q, backend)
 
 Output DD projection and the two-pass thin QR of plan T2.4: `Y = P^D Z`, `Q1 = qr(Y)` at the
 floor `100 eps max(||Z||, ||Y||)` (the cancellation noise `P^D` leaves when most of `Z` lies in
 the frame), then `Q = qr(P^D Q1)` -- reorthogonalisation against the old frame, "twice is
-enough". Returns `nothing` when `Y` is numerically zero. Under SU(2) the sector blocks are not
-plain matrices, so the existing numerical-rank SVD orthonormalisation (`_preselect_*` at
-`stol = 0`, no ranking) is used and reported as backend `:svd_orth`, never silently.
+enough", keeping the pivots `>= _REORTH_KEEP`. Returns `nothing` when `Y` is numerically zero.
+Under SU(2) the sector blocks are not plain matrices, so the existing numerical-rank SVD
+orthonormalisation (`_preselect_*` at `stol = 0`, no ranking) is used and reported as backend
+`:svd_orth`, never silently.
 """
 function _dd_select(frame, Z, side::Symbol, kc::KernelCounters)
     left = side === :left
@@ -364,7 +378,7 @@ function _dd_select(frame, Z, side::Symbol, kc::KernelCounters)
     tag = left ? _TAG_DD_L : _TAG_DD_R
     Q, dt, db = _measure(() -> begin
         Q1 = _thin_qr(Y, fl, ref, tag, _CBE_EPS * max(nz, ny))
-        Q1 === nothing ? nothing : _thin_qr(perp(frame, Q1), fl, ref, tag, _CBE_EPS)
+        Q1 === nothing ? nothing : _thin_qr(perp(frame, Q1), fl, ref, tag, _REORTH_KEEP)
     end)
     kc.t_qr += dt
     kc.b_qr += db
