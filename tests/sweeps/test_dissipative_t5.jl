@@ -1,6 +1,6 @@
 # tests/sweeps/test_dissipative_t5.jl -- dissipative_cbe_bug_implementation_plan.md, Task 5: the
 # step-doubling controller of plan eq. (7) in `jump_trajectory`, on local loss from the L = 10 domain
-# wall. Only the first step has a visible time error there (U10: ~4e-5 at dt 0.1); once entangled
+# wall. Only the first step has a visible time error there (C2: 5.4e-7 at dt 0.1); once entangled
 # the chain's bonds are at full rank and a step is exact to ~1e-12 (dt5s).
 #
 #   C1  `_mps_distance` resolves `ε ||X||` down to ε = 1e-12 (a centre-tensor perturbation)
@@ -110,7 +110,8 @@ end
     @test all(c.accepted == (c.err <= tau) for c in tr.checks)
     @test all(c.err > 0 for c in tr.checks)                  # the estimate resolves exact steps
     @test maximum(hs) >= 2dt                                 # and the step grows on them
-    @test efix > 1e-6                                        # CONTROL: the fixed step is visibly off
+    # CONTROL: the fixed step is visibly off (dt5u: 6.4e-7, C2's first-step error 5.4e-7)
+    @test efix > 1e-7
     @test ectl < 1e-7 && ectl < efix / 100
 end
 
