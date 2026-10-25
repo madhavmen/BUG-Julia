@@ -48,22 +48,24 @@ kw = (dt = 0.1, observe = obs, target_step_error = 1e-6,
 tg = collect(0.0:0.5:4.0)
 
 @testset "R1: a resumed trajectory is the uninterrupted one" begin
+    # a fine grid: seed 7 jumps at t = 0.18 and 0.50 (dt6r), both inside the first 0.5 interval
+    tg1 = collect(0.0:0.05:2.0)
     snaps = Dict{Int, Any}()
-    full = jump_trajectory(f.psi0, f.G, f.ch, tg; seed = 7, kw...,
+    full = jump_trajectory(f.psi0, f.G, f.ch, tg1; seed = 7, kw...,
                            checkpoint = st -> (snaps[st.k] = _roundtrip(st); nothing))
-    @test sort(collect(keys(snaps))) == collect(2:length(tg))
+    @test sort(collect(keys(snaps))) == collect(2:length(tg1))
     @test !isempty(full.events) && !isempty(full.checks)
     # the last grid time before the last jump: the resumed part draws a channel and a threshold
-    k = findlast(t -> t < full.events[end].t, tg)
-    @info "R1: $(length(full.events)) jumps at $([e.t for e in full.events]), resumed from t = $(tg[k])"
+    k = findlast(t -> t < full.events[end].t, tg1)
+    @info "R1: $(length(full.events)) jumps at $([e.t for e in full.events]), resumed from t = $(tg1[k])"
     @test k >= 2
-    res = jump_trajectory(f.psi0, f.G, f.ch, tg; seed = 7, kw..., resume = snaps[k])
+    res = jump_trajectory(f.psi0, f.G, f.ch, tg1; seed = 7, kw..., resume = snaps[k])
     @test _same(res, full)
     # the checkpoint survives a second resume (resume copies it)
-    @test _same(jump_trajectory(f.psi0, f.G, f.ch, tg; seed = 7, kw..., resume = snaps[k]), full)
+    @test _same(jump_trajectory(f.psi0, f.G, f.ch, tg1; seed = 7, kw..., resume = snaps[k]), full)
     # CONTROL: without the RNG's state the resumed jumps differ
     bad = merge(snaps[k], (rng = Random.MersenneTwister(7),))
-    tbad = jump_trajectory(f.psi0, f.G, f.ch, tg; seed = 7, kw..., resume = bad)
+    tbad = jump_trajectory(f.psi0, f.G, f.ch, tg1; seed = 7, kw..., resume = bad)
     @test [e.t for e in tbad.events] != [e.t for e in full.events]
 end
 

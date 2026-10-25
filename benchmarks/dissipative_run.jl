@@ -41,6 +41,8 @@
 # RNG, threshold, log survival, controller, records), the step log and a header; a run that finds
 # it resumes, and refuses it if the header (config without T, solver source hash) differs. T may
 # grow. DR_STOP_AT = n writes the n-th checkpoint and exits (the restart test). Removed on success.
+# A run that throws writes DR_OUT.partial (error, step log, config) and, with DR_CRASH_STATE = 1,
+# DR_OUT.crash (the failing step's input state and step size, for a replay).
 
 using LinearAlgebra, Printf, JSON, Random, Serialization
 using LurCGT, Telum
@@ -170,7 +172,13 @@ logv!(k, v) = push!(get!(LOG, k, Float64[]), Float64(v))
 # Krylov vectors are kept on such a step (plan U10, dt5m); on any later step they change nothing.
 keep_now(psi) = KEEPK > 0 && (KEEP_EVERY || maximum(bond_dims(psi); init = 1) == 1)
 
+# DR_CRASH_STATE = 1: keep each step's input, written to DR_OUT.crash if a step throws (one state copy
+# per step; dr6q: A2 L = 32 finite density died in a step after 45 min, nothing left to replay)
+const KEEP_PRE = env("DR_CRASH_STATE", 0) == "1"
+const PRE = Ref{Any}(nothing)
+
 function step!(psi, h)
+    KEEP_PRE && (PRE[] = (psi = copy(psi), h = h, nstep = length(get(LOG, "h", Float64[]))))
     t0 = time_ns()
     if INT === :bug
         keep = keep_now(psi) ? global_krylov_states(G, psi, KEEPK; tol_trunc = TOLT, maxdim = MAXDIM) :
@@ -311,6 +319,7 @@ function save_ckpt(state)
     exit(0)
 end
 resume = CK === nothing ? nothing : CK.state
+try                                          # a failed run leaves its step log and the error
 if MODE === :no_jump
     tr = jump_trajectory(M.psi, G, M.ch, tg; dt = DT, seed = SEED, jumps = false,
                          step = step!, target_step_error = TARGET, check_every = CHECK,
@@ -355,6 +364,16 @@ else
                            "nreject" => tr.nreject, "flags" => length(tr.flags),
                            "events" => [Dict("t" => e.t, "channel" => e.channel) for e in tr.events])
                       for tr in ens.trajs]
+end
+catch e
+    open(OUT * ".partial", "w") do io   # not *.json: a crashed run must not read as complete
+        JSON.print(io, Dict("error" => sprint(showerror, e), "steplog" => LOG, "config" => CONFIG,
+                            "wall" => wall0 + time() - t_start, "peak_rss" => Sys.maxrss()))
+    end
+    PRE[] === nothing || serialize(OUT * ".crash", PRE[])
+    @printf("FAILED after %d steps: partial log %s.partial%s\n", length(get(LOG, "h", Float64[])),
+            OUT, PRE[] === nothing ? "" : ", input state of the failing step $(OUT).crash")
+    rethrow()
 end
 result["wall"] = wall0 + time() - t_start
 result["restarts"] = RESTARTS
