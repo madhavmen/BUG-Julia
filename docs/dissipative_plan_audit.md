@@ -653,3 +653,46 @@ above the reference floor.
 - There is no reference beyond Jt = 1, so after t = 1 the accuracy at the cap is read only from
   the discarded norms. Before t = 1, the dr6b comparison above applies: BUG is work-limited
   earlier and less accurate.
+
+**A2 time-to-accuracy point (USER 2026-10-25).** A2 at L = 32 and finite density (8 excitations)
+reaches maxdim 1024 by Jt ≈ 0.25 under both integrators: TDVP2 dr6q row 2 took 7.1 h to Jt = 2
+and discarded up to 1.8e-4 per step after the cap. A non-binding curve there is not feasible. The
+A2 curve uses A2 at L = 24, ν = 1/4 (6 excitations), maxdim 512, where the state needs D = 378
+(dr6u row 3). The dr6w accuracy ladder fixes the arms, and the matched arms rerun as one
+sequential timing job, as dr6a did for A1.
+
+**Pilots submitted:**
+
+- dr6j 17496962, B1 L = 12: U ∈ {-4, +4} × κ ∈ {0.5, 2, 10}, 20 trajectories each, maxdim 256.
+- dr6k 17496964, B2 L = 24: ν ∈ {1/8, 1/4} × Γ ∈ {0.5, 2}, 20 trajectories plus a conditional
+  no-jump run each.
+
+# Task 7 (G4): scheduler smoke and the tol_trunc study
+
+USER 2026-10-25 chose "G4 essentials" (about 400 CPU-h) over the plan's grid. The grid (A1
+L = 24-40, A2 L = 48-96, B1 L = 24-40 with CI-resolving ensembles, B2 L = 48-64, each at three
+tol_trunc) is far beyond the measured costs: B1 L = 20 costs 0.5 CPU-h per trajectory, and A2 at
+L = 32 and finite density is cap-bound at once.
+
+The scale is the scheduler smoke, then the three-point study tol_trunc ∈ {1e-5, 1e-7, 1e-9} at one
+validated point per model. tol_basis, tol_root and the time step are held fixed and tighter than
+the differences compression causes. The points are:
+
+- A1 L = 24, κ near the Zeno crossover;
+- A2 L = 48, dilute (2 excitations), to Jt ≈ 20;
+- B1 L = 20, at the pilots' transport extremum, 20-40 trajectories;
+- B2 L = 32, ν = 1/8, conditional plus 20 trajectories.
+
+BUG and TDVP2 both run the deterministic (no-jump) points.
+
+**Scheduler smoke (dr7s 17496996, `4a76d77`; plan: "one short trajectory, dry-run output and
+restart, memory budget check").** `benchmarks/dissipative_restart_check.sh` runs at each production
+point at production size over a short window:
+
+- A1 L = 24 κ = 8, maxdim 1024;
+- A2 L = 48 with 2 excitations, maxdim 256;
+- B1 L = 20, two trajectories;
+- B2 L = 32 ν = 1/8, two trajectories.
+
+Each check compares an uninterrupted run with one stopped at a checkpoint and resumed, plus the
+changed-tol_trunc refusal control. The memory budget is read from each run's printed peak RSS.
