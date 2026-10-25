@@ -329,7 +329,8 @@ def fig_stability(runs, refs, out):
         lab = f"{c['model']} {json.dumps(c['params'])[:40]} {c['int']} dt={c['dt']}"
         n2 = np.array(r["steplog"].get("norm2", []))
         p0_up = int(np.sum(n2 > 1 + 1e-12))                   # a step that raised P0
-        item = [("backward amp", amp), ("P0 growth flags", len(r.get("flags", []))),
+        item = [("wall", round(sum(r["steplog"]["wall"]))),
+                ("backward amp", amp), ("P0 growth flags", len(r.get("flags", []))),
                 ("steps raising P0", p0_up), ("first capped step ends", capped_at(r))]
         if ref is not None and ref is not r:
             t, e = error_vs_time(r, ref)
@@ -345,7 +346,7 @@ def fig_stability(runs, refs, out):
         if c["int"] == "tdvp2":
             axs[0].semilogy(c["dt"], amp, "s", label=lab)
     for (g, integ), pts in sorted(best.items()):
-        for tol in (1e-3, 1e-4, 1e-6):
+        for tol in (1e-3, 1e-4, 1e-6, 1e-8):
             ok = [d for d, e, cap in pts if e <= tol]
             rows.append((f"F04 largest dt with error <= {tol:g}: {g[0]} L={g[1]} {g[3]} {integ}",
                          [("dt", max(ok) if ok else None),

@@ -1,7 +1,7 @@
 """dissipative_t6_figures.py -- the Task 6 (G3) figures of dissipative_cbe_bug_implementation_plan.md
 from the JSON runs of benchmarks/dissipative_run.jl. The time-to-accuracy curves (E 1 / ref, F01 and
-F10 cost), the tol_trunc ladder (E 2t against E 2base, F02) and the controller pilot (E 3, F03) are
-dissipative_figures.py's; this script runs those and adds:
+F10 cost), the tol_trunc ladder (E 2t against E 2base, F02), the controller pilot (E 3, F03) and the
+stability runs (E 4, F04) are dissipative_figures.py's; this script runs those and adds:
 
   F09  bond growth at a binding cap (E 6b, 6p, 6c): D_final(t) and BUG's working D against t, the
        cap, and the accumulated discarded norm, BUG and TDVP2 of one point in one panel
@@ -236,6 +236,7 @@ def main():
     rows = []
     for f in (lambda: t5.fig_order(nojump, refs, out), lambda: t5.fig_tolerances(nojump, refs, out),
               lambda: t5.fig_control(nojump, refs, out), lambda: t5.fig_cost(nojump, refs, out),
+              lambda: t5.fig_stability(nojump, refs, out),
               lambda: fig_bonds(runs, out), lambda: fig_scaling(runs, out), lambda: fig_b1(runs, out),
               lambda: fig_b2(runs, out), lambda: fig_samples(runs, out)):
         rows += f() or []

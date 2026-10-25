@@ -599,3 +599,57 @@ be about 4-8 times as high. The stability array reused this morning's smoke dire
 (`2026-10-25-dr6s`); it overwrote the smoke's four JSONs, which no figure or table used, and the
 smoke logs remain. The fixture tests missing from dt6t (wrong file name `test_dissipative_t3.jl`)
 run as dt6u 17496932 (`t3_a1`, `t3_a2`, `t2_g12`).
+
+**A1 stability run (dr6s 17496308; A1 L = 12, U = 4, κ = 20, warm start t_w = 0.2, Jt = 4,
+maxdim 1024, tol_trunc 1e-9; figures `figures/dissipative_t6/a1_stability`).** The reference is
+BUG at dt 0.025 with tolerances 1e-10/1e-12/1e-11. The walls come from an accuracy array, so
+they are indicative only.
+
+| arm | dt | max error | wall [s] | TDVP2 backward amp | note |
+|---|---|---|---|---|---|
+| BUG | 0.05 / 0.1 / 0.2 / 0.4 | 4.1e-9 / 3.3e-10 / 1.1e-10 / 2.0e-7 | 1186 / 672 / 643 / 406 | - | dt 0.2 and 0.4 work-limited from t = 0.4 |
+| TDVP2 | 0.025 / 0.05 / 0.1 / 0.2 / 0.4 | 1.8e-9 / 2.6e-8 / 2.9e-8 / 8.6e-7 / 1.6e-6 | 2248 / 1446 / 799 / 610 / 497 | 0.35 / 0.69 / 1.3 / 2.5 / 4.7 | never capped |
+
+- **No instability in either integrator:** no step raised P0, there are no P0-growth flags, and
+  the error against t grows at most slowly. TDVP2's backward amplification is κ dt / 1.7, yet it
+  stays bounded up to κ dt = 8.
+- **Largest dt per target:** at an error of 1e-8, BUG reaches dt 0.2 (0.1 uncapped) and TDVP2
+  dt 0.025, about 3.5 times the wall. At 1e-6, BUG reaches 0.4 (work-limited) and TDVP2 0.2.
+- **BUG's error is set by truncation, not by dt:** it falls as dt grows (4e-9 at 0.05, 1e-10 at
+  0.2) because fewer steps accumulate fewer truncations at tol_trunc 1e-9.
+- **Energy balance:** the excess over the reference tracks the state error (BUG dt 0.4 3.4e-7,
+  TDVP2 dt 0.4 4.4e-6). The reference's own fine-grid residual peaks in the fast transient
+  (t < 0.7) and then stays at 3e-3, so no violation accumulates.
+- **Controller (τ = 1e-6):** the step grows from 0.1 to 0.4 with no rejections; final error
+  2.7e-9, 13 accepted steps, of which 12 (with check substeps) are work-limited.
+- **Reading:** under strong loss (κ dt up to 8) TDVP2 does not go unstable; it loses accuracy
+  instead. BUG keeps 1e-8 to 1e-10 accuracy at steps 4-8 times larger. The A2 counterpart (Γ = 5)
+  is dr6w.
+
+**A1 time-to-accuracy (dr6a 17496168: one job, every arm in sequence on th-cl-dell06, a Xeon
+Gold 6130, with JIT warm-up 2; A1 L = 12, U = 4, κ = 2, product start, Jt = 1, maxdim 2048,
+tol_trunc 1e-9; figures `a1_tta`).** Neither integrator is capped. Errors are measured against the
+dr6b reference, whose own error of about 2e-7 floors TDVP2's finest arm; dr6d refines it.
+
+| arm | dt | error | wall [s] |
+|---|---|---|---|
+| BUG | 0.05 / 0.1 / 0.2 | 2.7e-6 / 3.3e-5 / 6.7e-4 | 332 / 350 / 433 |
+| TDVP2 | 0.0125 / 0.025 / 0.05 / 0.1 | (2.6e-7) / 4.5e-7 / 3.0e-6 / 2.3e-5 | 605 / 368 / 300 / 307 |
+
+At matched error (3e-6 and 3e-5) TDVP2 is about 10% cheaper on this point. BUG's error is its
+first step out of the product state (one-step order 4). Its wall hardly changes with dt, because a
+larger step carries a larger D (1108 at dt 0.2 against 854 at 0.05). TDVP2's slope is 2.7-3.0
+above the reference floor.
+
+**Binding cap (dr6c 17496162, figures `a1_bindcap`).**
+
+| point | BUG capped from | TDVP2 capped from | discarded total BUG / TDVP2 | wall BUG / TDVP2 [s] | MaxRSS BUG / TDVP2 |
+|---|---|---|---|---|---|
+| L = 12, κ = 2 | t = 0.4 (work) | t = 0.75 | 0.040 / 0.150 | 948 / 2024 | 4.5 / 2.6 G |
+| L = 16, κ = 8 | t = 0.45 (work) | t = 0.95 | 9.0e-6 / 2.0e-5 | 2990 / 6308 | 7.8 / 2.9 G |
+
+- The DD sketch time scales as D^2.2 (L = 12) and D^1.4 (L = 16) for D ≥ maxdim/4, close to the
+  plan's "quadratic-in-D fixed-width regime". TDVP2's step time scales as D^1.0.
+- There is no reference beyond Jt = 1, so after t = 1 the accuracy at the cap is read only from
+  the discarded norms. Before t = 1, the dr6b comparison above applies: BUG is work-limited
+  earlier and less accurate.
