@@ -51,7 +51,9 @@ RC._jt_normalise!(warm)
         b = copy(a)
         b[c] = to_concrete(a[c] + to_concrete(ComplexF64(eps_) * X))
         d = RC._mps_distance(a, b)
-        @test abs(d - eps_ * norm(X)) <= 1e-3 * eps_ * norm(X)
+        # + ~20 eps of ||a|| = 1: backward-stable SVDs leave an absolute roundoff (dt5t: 1.1e-15 at
+        # ε = 1e-12), still ~1% of the perturbation there, where the overlap form reads 0 or 1.5e-8
+        @test abs(d - eps_ * norm(X)) <= 1e-3 * eps_ * norm(X) + 5e-15
     end
 end
 
@@ -86,11 +88,14 @@ end
 @testset "C3: the controller in jump_trajectory" begin
     dt, tau, T = 0.1, 1e-9, 1.0
     final_error(tr_psi) = norm(tr_psi / norm(tr_psi) - normalize(exp(-im * T * Gd) * v0))
+    # `local`: the testset's own `tr` would otherwise be captured, and the second call's result
+    # overwrote the first's (dt5t: the controlled run's `tr` came back as the fixed run's)
     segment(; kw...) = begin
-        final = Ref{Any}(nothing)
-        tr = jump_trajectory(psi0, G, ch, [0.0, T]; dt = dt, seed = 1, jumps = false, step = step!,
-                             observe = p -> (final[] = dense_state(p); [0.0]), kw...)
-        tr, final[]
+        local final = Ref{Any}(nothing)
+        local seg = jump_trajectory(psi0, G, ch, [0.0, T]; dt = dt, seed = 1, jumps = false,
+                                    step = step!, observe = p -> (final[] = dense_state(p); [0.0]),
+                                    kw...)
+        seg, final[]
     end
     tr, v = segment(target_step_error = tau, check_every = 1)
     _, vf = segment()
