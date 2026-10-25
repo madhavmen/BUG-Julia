@@ -317,7 +317,7 @@ DR_EVERY = dt = 0.1 capped every step at 0.1. dr5e reruns the controller with on
 | dt5u 17491733 | `0aea55d` | t5.jl | 21/22: C3 control threshold |
 | dt5v 17491774 | `bbeade2` | t5.jl | **22/22**: the controller tests pass (MaxRSS 1.7G of 2.5G) |
 | dr5e 17491590 (24 runs) | `bf4cf5f` | warm-start F01 (A1 L = 12, A2 L = 20), F03 rerun | below; peak MaxRSS 12.3G (reference), most runs ~5G (seffx: 39% of the 16G requests wasted) |
-| dt5w 17492054 | `e45bf94` | t5.jl + check_every = 4 first-step check | pending |
+| dt5w 17492054 | `e45bf94` | t5.jl + check_every = 4 first-step check | **24/24**: with check_every = 4 the first check is at t = 0 and is rejected 3 times; final error 2.9e-11 (unchecked: 1.4e-5); MaxRSS 1.8G |
 
 ## dr5e results (`bf4cf5f`, figures `figures/dissipative_t5/dr5e`, `e45bf94`)
 
@@ -353,16 +353,16 @@ output times before the first capped step (the run's own or its reference's).
 - **Tolerances:** monotone, each ladder in its own tolerance (dr5d F02). **Ablation:** no component
   lowers the order. **Stability:** no P0 growth flags; TDVP2's backward amplification reaches 1.5 at
   dt κ = 1 and BUG has none.
-- **Controller:** C1-C3 pass (dt5v). The τ ladder is monotone with errors below τ. The first-step fix
-  is pending dt5w.
+- **Controller:** C1-C3 pass (dt5w 24/24, including the first-step check). The τ ladder is monotone
+  with errors below τ.
 - **Cost:** BUG and TDVP2 are comparable at matched error on A1 L = 12 (dr5d F10, an accuracy array).
   TDVP2's dt 0.05 and 0.025 points are capped there.
 - **G3 constraint found here:** BUG at order 3 stays uncapped only while D_final ≲ 0.65 maxdim, because
   the working ceiling is 2 maxdim. TDVP2 only needs D_final < maxdim. Pilot runs must pick maxdim
   from BUG's working rank, and report `budget_met` and TDVP2's cap hits.
 
-G2 passes on this reading of the order criterion, once dt5w confirms the first-step check.
-USER 2026-10-25: G2 accepted on this reading.
+**G2 passes** on this reading of the order criterion (USER 2026-10-25), with dt5w confirming the
+first-step check. Task 5 is on `plan/dissip-task-5` (head `eaf8a1f`) and is not merged to main.
 
 # Task 6 (G3): pilots and profiling
 
