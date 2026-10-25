@@ -90,8 +90,8 @@ frames of `order = 1`; `order > 1` uses the same `_project_root` path (not re-te
 | T2.3 adaptive extra probes where DD residual is large | DONE | `_certified_range` Test B targets sectors by holdout residual (`_target_sectors!`) with DD-projected holdouts |
 | T2.3 split mixed-charge sketch columns before QR | DONE (structural) | probe columns carry one fused charge each (block-sparse); `_thin_qr` works per sector |
 | T2.4 sectorwise thin Householder QR, numerical rank | DONE (abelian) | `_thin_qr`: `qr(M, ColumnNorm())` per sector, keep `|R_kk| > 100 eps max(‖Z‖,‖Y‖)` |
-| T2.4 reorthogonalisation against old frame | DONE | second `P^D` + QR pass in `_dd_select`; test U03 `A'Q ≈ 0`, `BQ_R ≈ 0` |
-| T2.4 no physics cutoff | DONE | only the machine-precision floor; nothing ranked |
+| T2.4 reorthogonalisation against old frame | DONE (fixed a2d8c78) | second `P^D` + QR pass in `_dd_select`, accepted DGKS-style: a column must keep `>= _REORTH_KEEP = 1/√2` of its norm (was an absolute `100 eps` floor, which kept pass-1 roundoff in filled sectors as in-frame unit vectors: dissipative A2 L=32 crash). Tests U03 `A'Q ≈ 0`, `BQ_R ≈ 0`; "T2.4: roundoff in a sector the frame fills" |
+| T2.4 no physics cutoff | DONE | only the machine-precision floor on pass 1 and the scale-free 1/√2 acceptance on pass 2; nothing ranked |
 | T2.4 `Q'Q ≈ I`, range kept | DONE | test U03 |
 | T2.4 SU(2) | PARTIAL | non-abelian blocks are not plain matrices: falls back to `_preselect_*` at `stol = 0` (numerical-rank SVD orthonormalisation), reported as `record.qr_backend = :svd_orth` |
 | T2.4 right QR a mirror, one QR per orientation | DONE | `dd_cbe_expand(..., :left)` in the K-sweep, `:right` in the L-sweep; the other frame is returned untouched (test "T2.3") |

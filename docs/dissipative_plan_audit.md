@@ -475,4 +475,53 @@ tests check exact equality, with no tolerance.
     `Q` is large (‖Q‖ ~ Γ L²/4).
   - TDVP2 on the same point and B2 at L = 24 run normally.
   - The driver now writes `DR_OUT.partial` and, with `DR_CRASH_STATE`, the failing step's input.
-    Being diagnosed: rp6z replays it with an instrumented `arnoldi_expv`.
+- **A1, L = 12, maxdim 2048, Jt = 1, tol_trunc 1e-12 (dr6p):** BUG (dt 0.1) 868 s, TDVP2
+  (dt 0.05) 1628 s. Both reach the cap: TDVP2 at Jt ≈ 0.6, after which its discarded norm grows
+  from 8e-13 to 2.7e-11 per step; BUG at Jt = 1.0. log P0 agrees to 3.7e-5. MaxRSS 4.9 G / 3.7 G.
+  At this tolerance the point is borderline-binding, so the Task 6 curve uses tol_trunc 1e-9 arms
+  and separate tight references.
+
+## The A2 crash: `_dd_select` admitted in-frame roundoff (fixed, `a2d8c78`)
+
+Replays of the two crash states localised it in steps. The replays (rp6z to rp6v) are scripts that
+include the driver with `DR_T = 0` and redefine solver functions with instrumentation; they are
+kept with the crash states in `$SCRATCH/rsvd_adaptive/2026-10-25-dr6z`.
+
+1. The root's Arnoldi start vector already had norm 5e76, so the root frames were not isometric.
+2. The half-sweep frames are fine (defect ‖F'F − I‖ ≈ 1e-7). The first bad frame is a
+   `dd_cbe_expand` result in a closure frontier sweep (`_frontier_left`, `closure_checks = true`)
+   at site 13, width 637 of a local space of 814, defect 14. The frontier embeds the old frame as
+   `Pm·W[i]`, so one non-isometric frame compounds site by site, to 1e26 at the root.
+3. The first selection whose `Q` overlaps its frame (frontier sweep, site 10; serialised as
+   `out/1.json.crash.sel`): `‖frame'Q‖ = 1.41` = two unit columns inside the frame. Pass 1 of
+   `_dd_select` saw `Y = P^D Z` with residuals 3.0e-14 in sectors the frame fills (its blocks
+   there are full: 36 × 45, 9 × 10), against a floor `100 eps · max(‖Z‖, ‖Y‖)` of 2.65e-14. QR
+   normalised that roundoff to unit columns. Pass 2, the "twice is enough" reprojection, then
+   compared their residual with an ABSOLUTE `100 eps` and kept them; renormalised, they lie in the
+   frame.
+
+The plan's T2.4 reprojection is the classical DGKS / Kahan-Parlett test, which accepts a
+reorthogonalised column only if it keeps a fixed fraction of its norm (1/√2). `_dd_select` now does
+exactly that (`_REORTH_KEEP`): a genuine direction keeps ≈ 1, while roundoff that cleared the first
+floor collapses to the frame's orthogonality level. Nothing physical is cut, since the test is
+scale-free. Test "T2.4: roundoff in a sector the frame fills is not a direction, both sides"
+(`test_dd_cbe.jl`) builds such a case on both sides. Its CONTROL asserts that the old floor keeps
+an in-frame column; the new selection must be isometric, orthogonal to the frame, keep `Y`'s range
+and touch no filled sector.
+
+**Confirmed on the crash states (rp6u 17496050, `a2d8c78`, frame checks after every frame-producing
+call):** both failing steps now complete, in 20-21 min. Before the fix they ran about 45 min and
+then failed. Every frame stays at a defect of at most 1.2e-6, which is the measurement floor
+√(k eps) of the defect formula at widths k of 1400-2048; before the fix the defect was 14, and 1e26
+at the root. In that one step at dt 0.1 the centre bonds grow from 74 to the 1024 cap, so A2 L = 32
+at finite density is cap-bound from step 2 at tol_trunc 1e-12. MaxRSS 8.4 G. `test_dd_cbe.jl`
+passes, including the new test (dt6t 17496046).
+
+`_reortho` (`cbe_expand.jl`, the RSVD-CBE path) has the same single-pass shape with a relative SVD
+cutoff of 1e-14. Its frames stayed at a defect of about 1e-7 in every replay, so it is unchanged.
+
+The dr6q B2 runs predate the fix. Every step after the first ran the maximum 6 closure sweeps at
+the work ceiling (`D_stage` = 1024, `basis_limited` and `work_limited` in 49 of 50 steps), with a
+local Krylov defect of 0.1-2.8, even at L = 24, where D_final settled at 378 with zero discarded
+weight. That is consistent with fake columns inflating the frames, so B2 L = 24 is rerun on the
+fixed code (dr6u).
