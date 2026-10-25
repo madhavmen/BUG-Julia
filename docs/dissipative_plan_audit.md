@@ -293,8 +293,16 @@ form ‖a‖² + ‖b‖² − 2Re⟨a,b⟩ cancels to about eps, and a converge
   error within a factor 3.
 - **C3:** in `jump_trajectory`, the first step is rejected and shrunk, never forced through at
   dt_min. A check is accepted exactly when err ≤ τ, every estimate is > 0, and the step grows to
-  ≥ 2dt. The final error is < 1e-7 and below 1/100 of the fixed step's, which must be > 1e-6 (the
-  control). Job dt5t 17491550: pending.
+  ≥ 2dt. The final error is < 1e-7 and below 1/100 of the fixed step's, which must be > 1e-7 (the
+  control).
+
+The first two runs failed for test reasons, not code. dt5t: C1's relative bound sat below the SVD
+roundoff (1.1e-15 at ε = 1e-12), so `0aea55d` adds a 5e-15 absolute floor. C3's `segment` closure
+also captured the testset's own `tr`, so the controlled result came back as the fixed run's; it is
+now `local`. dt5u (21/22): the controller rejects the domain-wall step three times (0.1 → 0.05 →
+0.025 → 0.0158, err 5.8e-7 → 4.2e-10). Once the steps are exact (err ~4e-12) it doubles every check
+to 0.4. Final error: 2.8e-11 in 8 steps vs 6.4e-7 for the fixed step. The control threshold of 1e-6
+was a guess; C2 measures the first-step error at 5.4e-7, so `bbeade2` sets it to 1e-7.
 
 dr5d's controller design was also wrong. `jump_trajectory` lands on every output time, and
 DR_EVERY = dt = 0.1 capped every step at 0.1. dr5e reruns the controller with one output at T = 0.5:
@@ -305,5 +313,7 @@ DR_EVERY = dt = 0.1 capped every step at 0.1. dr5e reruns the controller with on
 | job | commit | content | result |
 |---|---|---|---|
 | dt5s 17481834 | `b051384` | distance diagnosis | above |
-| dt5t 17491550 | `feb64a9` | t5.jl C1-C3 | pending |
+| dt5t 17491550 | `feb64a9` | t5.jl C1-C3 | 14/16: test defects (C1 floor, C3 capture) |
+| dt5u 17491733 | `0aea55d` | t5.jl | 21/22: C3 control threshold |
+| dt5v 17491774 | `bbeade2` | t5.jl | **22/22**: the controller tests pass (MaxRSS 1.7G of 2.5G) |
 | dr5e 17491590 (24 runs) | `bf4cf5f` | warm-start F01 (A1 L = 12, A2 L = 20), F03 rerun | pending |
