@@ -155,6 +155,16 @@ function step!(psi, h)
         logv!("discarded", lg.discarded); logv!("closure_sweeps", lg.n_closure_sweeps)
         logv!("D_stage", rc.D_stage); logv!("D_work", rc.D_work); logv!("D_final", rc.D_final)
         logv!("bytes", rc.bytes_step); logv!("budget_met", budget_status(lg) === :met ? 1 : 0)
+        # plan Task 6 "measure before scaling": the phase timers and kernel counters of the step
+        for k in (:t_cbe, :t_kry, :t_root, :t_trunc, :t_frame, :t_env, :t_step)
+            logv!(string(k), getfield(info, k))
+        end
+        kc = rc.counters
+        logv!("matvecs", info.krylov_dims)
+        logv!("t_dd",kc.t_input_dd + kc.t_output_dd); logv!("t_qr", kc.t_qr)
+        for k in (:n_stream, :n_stream_cols, :n_one_site, :n_root, :n_qr, :n_sector_new)
+            logv!(string(k), getfield(kc, k))
+        end
     else
         amp = Ref(0.0)
         info = tdvp2_step!(psi, G, ComplexF64(-im * h); hermitian = false, maxdim = MAXDIM,

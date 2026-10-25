@@ -182,7 +182,7 @@ run, because the parallel backend is not used in production (plan §1.2).
 | U06 contractivity, hazard | 6/6 | `P0` never grows before or after the recorded compression; `-Δ log P0` against `∫⟨Q⟩_c dt` |
 | U09 balances | 5/5 | eq. (2), (3) against ED finite differences at dt 0.01 (at 0.05 the FD error was above the tolerance) |
 | U10 local loss | 3/3 | from the L = 10 domain wall (HQ T5.5 method: slopes only where error ≥ 10× floor): global 4.3e-5 → 2.7e-6 → 1.7e-7 (slope 4.0), one-step 3.76, order-1 control 2.04 |
-| U10 collective | **1/3, open** | global 2.2e-2 → 5.4e-3 → 1.0e-3 (slopes 2.0, 2.4), see below |
+| U10 collective | 1/3 in dt2f; **passes in dt5n** after `6f34c9f` | dt2f: global 2.2e-2 → 5.4e-3 → 1.0e-3 (slopes 2.0, 2.4). dt5n 17477888: global 1.1e-4 → 8.7e-6 → 6.2e-7 (slopes 3.65, 3.82); without the kept vectors (control) the one-step slopes are 2.48, 2.73. See below |
 | U11 ladders | 17/17 | each tolerance moves its own error and cost |
 | U16 fairness | 31/32 | the lossy arm's BUG floor was `tol_trunc`'s: `fb152fb` sets 1e-10 (to be confirmed) |
 
@@ -202,7 +202,14 @@ out of their frames' charge sectors at once, and every window projects that away
 therefore stops on "nothing added" while the global vector still leaks. Keeping the exact global
 vectors (`apply_mpo`, the existing `keep_states`) supplies them. Passing more than one kept state
 exposed a crash: a later union widened the frame after an earlier carry was taken. That is fixed
-in `67eff34`. dt5m measures whether the defect is first-step only, and the asymptotic slopes.
+in `67eff34`.
+
+dt5m 17477143 found that the defect is confined to the first step. Keeping G..G³ψ on step 1 only
+gives the same errors as keeping them on every step, and from an entangled start the step is exact.
+`6f34c9f` adds `global_krylov_states` (`operators/mpo_apply.jl`). U10 collective keeps those vectors
+on the product-state step, at dt 0.1, 0.05 and 0.025, and runs a control without them. The driver
+keeps them by default on product-state steps of A2/B2 (`DR_KEEP_KRYLOV`, ablation
+`DR_KEEP_EVERY`). In dt5n (`6f34c9f`), `test_dissipative_t2_g12.jl` passes 67/67.
 
 # Task 4 (G1 → G2): the quantum-jump engine, B1/B2 smoke
 
@@ -223,3 +230,80 @@ Branch `plan/dissip-task-4`, cut from `plan/dissip-task-3`.
 | dt4g 17474462 | `d205a4a` | t4.jl | 50/52: J0 (spin, pair loss with signs), U07, U13 (event 0.18173997222066 vs ED …6403, residual 1e-14; channel draw 120 vs 110.8 ± 5.6), U14 A2 L = 4, A1 L = 2, 4 vs Lindblad. The 2 fails: the pair-loss STRING CONTROL could not fail (site 1 still ~1e-4 from doubly occupied at t = 0.6) → `1ab7d0e` (t = 3, asserts the string is not a global sign) |
 | dt4g | `d205a4a` | t4_conv.jl | 6/7: U15b weak convergence 1.2e-7 → 7.0e-9 → 3.2e-9. U15a: located (errors 1.1e-5, 8.5e-7, 5.8e-8, order 3.7-3.9, vs snapping 0.31, 0.11, 0.008) but the absolute 1e-8 bound was a wrong premise: the remainder is the segment's time error in P0 → `9de020d` |
 | dt4g MaxRSS | | | 2.5 G, 55 min |
+| dt4h | `d566af8` | t4_b.jl | 443/452. **B1 current sign:** the MPO and the Fock reference both measured the flow b+1 → b, so they agreed and were both wrong → `618b9a6` (j = iJ(c'_{b+1} c_b − h.c.)). B1 smoke L = 4 deviated 3.6 from Lindblad, with the ensemble closer to the no-jump control. A pathwise ED replica (dt5p, `67eff34`) showed the engine is exact path by path. The deviation was the test's error model: the ensemble error was floored by the jump count's Poisson error → `2a54806` |
+| dt5n 17477888 | `6f34c9f` | t4.jl | 50/54: the J0 string control still cannot fail at t = 3 from (N↑, N↓) = (1, 1), because there (−1)^{n_1↑} is a global sign → `7aad6f5` starts at (2, 2) |
+| dt5n | `6f34c9f` | t4_conv.jl | 8/8 (U15a with `9de020d`) |
+| **dt5q 17481802** | `09af23e` | t4_b.jl | **452/452**: B1 currents MPO = Fock to 1e-16; B1 L = 4 worst deviation 0.37 (observables) and 0.34 (jumps) in units of 4 se + 2e-3, against 1.90 for the no-jump control; B1 conditional L = 6 7.0e-7; B2 MPS vs ED ≤ 7e-14; counts [32, 209, 59] vs master equation [39.0, 202.5, 58.5]. 79 min |
+| **dt5r 17481814** | `b051384` | t4.jl | **54/54**: J0 with the (2, 2) start; U13 event 0.18173997222066 vs ED …6403; U14 A2 L = 4, A1 L = 2, 4 within 0.70 (4 se + 2e-3), no-jump controls 6.6-17.8. 60 min |
+
+**Task 4 status: G1 → G2 passes** for `t4.jl`, `t4_b.jl` and `t4_conv.jl` (dt5r, dt5q, dt5n).
+seffx reports no wasted allocation for dt5q or dt5r.
+
+# Task 5 (G2): order, tolerances, step control vs TDVP2
+
+Branch `plan/dissip-task-5`, which has Tasks 2 and 4 merged in. The driver is `benchmarks/dissipative_run.jl`
+(one run per call, JSON out) and the figures come from `benchmarks/dissipative_figures.py` (F01-F04, F10).
+The runs live in `figures/dissipative_t5/runs*/` (configs, commit, sbatch, JSON).
+
+## Arrays and why the first three were not valid
+
+| array | point | finding |
+|---|---|---|
+| dr5a (96 runs) | A1 L = 10/12, A2 L ≤ 16, maxdim 256 | **invalid.** A1: maxdim 256 binds (a cap that prevents the tolerance is a failed gate, plan §1.3). A2: the closure grows the root space to the full sector, so BUG is exact vs ED (1e-10) and the order is vacuous. The A2 ladders are valid and monotone |
+| dr5b | A1 L = 8, maxdim 1024 | **degenerate:** the bonds reach full rank at once, so BUG steps are exact (step doubling 0) and order, controller and ladders are vacuous |
+| dr5c | A2 L = 12 bright, ED, closure off / keep 3 | **degenerate**, as dr5b |
+| dr5d 17478244 (46 runs) | A1 L = 12 dbl_rich U = 4, maxdim 1024 (not binding: peak 748), T = 0.5 | valid. Results below |
+
+## dr5d results (`68a0db8`)
+
+The error is the largest |Δ log P0| or observable difference over the output times, against a BUG
+reference at dt 0.003125 with tolerances 1e-11/1e-13/1e-13.
+
+| item | result |
+|---|---|
+| F01 order, κ = 1 | BUG 1.4e-5, 4.4e-7, 2.7e-8, 1.7e-9 at dt 0.1 … 0.0125: slopes 4.98, 4.02, 3.95. TDVP2 2.3e-6 … 4.4e-9 at dt 0.05 … 0.00625: slopes 3.00, 3.00, 3.00 |
+| F01 ablation | lossless (exact DD) 4.02 below dt 0.1; tol_basis 1e-6, tol_root 1e-8 and tol_trunc 1e-7 each leave the slopes at 3.95-4.04. No single component lowers the order |
+| F04 strong loss | κ = 8: BUG 4.08, 4.06, TDVP2 3.0. κ = 20: BUG 3.39, 3.75, TDVP2 3.0. TDVP2's backward-substep amplification is 0.15-1.5 (∝ dt κ); BUG has none. No P0 growth flags |
+| F02 ladders (vs a same-dt tight run) | tol_basis 1e-8/1e-6/1e-4: 1.3e-10, 2.1e-9, 1.7e-7. tol_root 1e-10/1e-8/1e-6: 8e-14, 1.3e-11, 2.9e-10. tol_trunc 1e-9/1e-7/1e-5: 1e-11, 6.4e-10, 1.8e-7. Each is monotone in its own tolerance |
+| F10 cost | at 2.7e-8, BUG 346 s vs TDVP2 (3.5e-8) 387 s; at 4.4e-7, BUG 342 s vs TDVP2 (2.8e-7) 462 s. These walls come from an accuracy array, so they are indicative only |
+| F03 controller | **defective**, see below |
+
+**The slopes are one order above the global orders.** BUG (order 3) shows about 4 and TDVP2 (order 2)
+shows 3.0. That is the one-step signature: from the product state, the first step's O(dt^{p+1})
+error dominates a 5-to-40-step run (U10 local loss has the same pattern, global 4.0). So the plan's
+global-order criterion (2.7-3.3) has not actually been tested here. `bf4cf5f` adds `DR_WARM`: the
+run starts from the state evolved to t_w by tight BUG steps, and every run of a point uses the same
+warm state. dr5e repeats F01 from t_w = 0.2 for A1 L = 12 and for A2 L = 20 (block start,
+closure_checks plus first-step keep, maxdim 1024).
+
+## The eq. (7) controller estimated 0
+
+In dr5d the checks reported err = 0.0 at t = 0.1 and 0.3, with no rejections. dt5s 17481834 traced
+this to the distance, not the control flow. The dense distances between the full and doubled steps
+were 2.1e-12, 3.1e-12 and 3.8e-12. `_mps_distance` returned 0, 0 and 1.49e-8, because the overlap
+form ‖a‖² + ‖b‖² − 2Re⟨a,b⟩ cancels to about eps, and a converged step-doubling estimate sits below
+√eps. `feb64a9` computes ‖a − b‖ from the direct-sum MPS of a − b (block-diagonal bonds, as
+`mpo_sum`), swept to the last site by backward-stable SVDs.
+
+`tests/sweeps/test_dissipative_t5.jl`, on L = 10 local loss from the domain wall:
+
+- **C1:** the distance resolves ε‖X‖ down to ε = 1e-12.
+- **C2:** on real steps it equals the dense distance. The old formula is replayed as a control and
+  must fail by more than 50%. The eq. (7) estimate of the first step's error matches the dense
+  error within a factor 3.
+- **C3:** in `jump_trajectory`, the first step is rejected and shrunk, never forced through at
+  dt_min. A check is accepted exactly when err ≤ τ, every estimate is > 0, and the step grows to
+  ≥ 2dt. The final error is < 1e-7 and below 1/100 of the fixed step's, which must be > 1e-6 (the
+  control). Job dt5t 17491550: pending.
+
+dr5d's controller design was also wrong. `jump_trajectory` lands on every output time, and
+DR_EVERY = dt = 0.1 capped every step at 0.1. dr5e reruns the controller with one output at T = 0.5:
+τ ∈ {1e-5, 1e-7, 1e-9} with checks every step, plus τ = 1e-7 checking every 4 steps, and τ ∈
+{1e-7, 1e-9} from the warm start. The fixed-step reference is dr5d's (product start) or dr5e's
+(warm start).
+
+| job | commit | content | result |
+|---|---|---|---|
+| dt5s 17481834 | `b051384` | distance diagnosis | above |
+| dt5t 17491550 | `feb64a9` | t5.jl C1-C3 | pending |
+| dr5e 17491590 (24 runs) | `bf4cf5f` | warm-start F01 (A1 L = 12, A2 L = 20), F03 rerun | pending |
