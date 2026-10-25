@@ -61,7 +61,9 @@ def capped_at(r):
     no ledger, a bond reached `maxdim`. Plan U12 / §4.4: such a run is marked, not fitted silently
     (dr5e: the warm A1 L = 12 BUG errors were all capped steps)."""
     s = r.get("steplog", {})
-    if "budget_met" in s:
+    if "work_limited" in s:                       # runs that log StepRecord.limits: caps only
+        flags = [bool(w or k) for w, k in zip(s["work_limited"], s["rank_limited"])]
+    elif "budget_met" in s:                       # older runs: any missed budget
         flags = [not b for b in s["budget_met"]]
     else:
         flags = [d >= r["config"]["maxdim"] for d in s.get("D_final", [])]

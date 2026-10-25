@@ -11,7 +11,8 @@
 # energy balance (3) is checked offline), the model's observables, the centre entropy, the bond
 # dimensions and the centre bond's charge sectors; per step: the step size, wall seconds and, for
 # BUG, the ledger (frame width, root iterations, probes, selected and Krylov directions, discarded
-# norm, closure passes) and the step record (D_stage, D_work, D_final, bytes); for TDVP2 its
+# norm, closure passes), the step record (D_stage, D_work, D_final, bytes) and its limit flags
+# (basis/root/truncation/rank/work_limited, StepRecord.limits); for TDVP2 its
 # discarded norm, Krylov applications and backward-substep amplification. With DR_TARGET the
 # step-doubling controller of plan eq. (7) sets the step (jump_trajectory with jumps = false).
 # For L small enough an ED reference is computed here and the errors recorded.
@@ -155,6 +156,11 @@ function step!(psi, h)
         logv!("discarded", lg.discarded); logv!("closure_sweeps", lg.n_closure_sweeps)
         logv!("D_stage", rc.D_stage); logv!("D_work", rc.D_work); logv!("D_final", rc.D_final)
         logv!("bytes", rc.bytes_step); logv!("budget_met", budget_status(lg) === :met ? 1 : 0)
+        # which limit held the step (dr5e: a missed budget was the work ceiling; dr6t: also at full
+        # rank, far below it) -- a cap (work/rank) is marked rank-limited, a tolerance miss is not
+        for lim in (:basis_limited, :root_limited, :truncation_limited, :rank_limited, :work_limited)
+            logv!(string(lim), lim in rc.limits ? 1 : 0)
+        end
         # plan Task 6 "measure before scaling": the phase timers and kernel counters of the step
         for k in (:t_cbe, :t_kry, :t_root, :t_trunc, :t_frame, :t_env, :t_step)
             logv!(string(k), getfield(info, k))

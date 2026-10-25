@@ -316,4 +316,49 @@ DR_EVERY = dt = 0.1 capped every step at 0.1. dr5e reruns the controller with on
 | dt5t 17491550 | `feb64a9` | t5.jl C1-C3 | 14/16: test defects (C1 floor, C3 capture) |
 | dt5u 17491733 | `0aea55d` | t5.jl | 21/22: C3 control threshold |
 | dt5v 17491774 | `bbeade2` | t5.jl | **22/22**: the controller tests pass (MaxRSS 1.7G of 2.5G) |
-| dr5e 17491590 (24 runs) | `bf4cf5f` | warm-start F01 (A1 L = 12, A2 L = 20), F03 rerun | pending |
+| dr5e 17491590 (24 runs) | `bf4cf5f` | warm-start F01 (A1 L = 12, A2 L = 20), F03 rerun | below; peak MaxRSS 12.3G (reference), most runs ~5G (seffx: 39% of the 16G requests wasted) |
+| dt5w 17492054 | `e45bf94` | t5.jl + check_every = 4 first-step check | pending |
+
+## dr5e results (`bf4cf5f`, figures `figures/dissipative_t5/dr5e`, `e45bf94`)
+
+**Rank limits were not marked, and they decide the warm A1 slopes.** In an order-3 BUG step the
+augmented basis grows to about 3r. The internal working-rank ceiling `work_ceiling` = max(2 maxdim,
+2r) = 2048 therefore binds once D_final passes about 700 at maxdim 1024. From then on the ledger
+reports the tolerance as missed (`budget_met` = 0). The solver flags this (plan U12), but
+`dissipative_figures.py` fitted slopes through such runs. `e45bf94` marks them, as plan §4.4
+requires: for BUG the first step with `budget_met` = 0, for TDVP2 the first step with a bond at
+maxdim. Capped points are drawn open, and every row with a cap also reports the error over the
+output times before the first capped step (the run's own or its reference's).
+
+| item | result |
+|---|---|
+| warm A1 L = 12 BUG (t_w = 0.2) | before the first capped step, the error is 5-9e-13 for every dt from 0.1 to 0.0125: **no time error accumulates after the first step**. Step doubling agrees (estimate 1.4e-11 at h = 0.1 and 0.2). The full-window errors 6.2e-6 (dt 0.1) and 5.8e-7 (dt 0.05) appear only after the cap binds (t = 0.4 and 0.5) |
+| warm A1 L = 12 TDVP2 | 5e-13 to 4e-12 (dt 0.05 is capped from t = 0.4) |
+| A2 L = 20 block (both) | **degenerate**: every bond is 1024 = 2^10, the full rank (and maxdim), so every step is exact (3e-13). TDVP2's cap marks here are the full rank, not truncation |
+| dr5d product start, re-marked | BUG is never capped: slopes 4.98, 4.02, 3.95. TDVP2 at dt 0.05 and 0.025 hits maxdim; before the cap its slopes are 3.0, 2.5, 2.06, falling toward order 2 |
+| F04, re-marked | BUG is uncapped: κ = 8 slopes 4.08, 4.06; κ = 20 slopes 3.75, 3.39. TDVP2 before its cap: κ = 8 1.49, 2.01; κ = 20 1.82, 1.91 |
+| F03 product start | τ = 1e-5, 1e-7, 1e-9 give final errors 5.6e-9, 1.0e-10, 6.4e-12 (fixed dt 0.1: 1.4e-5), with 2, 3 and 5 rejections; the step grows to 0.17-0.23. **check_every = 4 is defective**: the first check came at step 4, the product-state step went unchecked, and the run kept the fixed step's 1.4e-5. `89e59e7`: the first step of a segment (and after each jump) is always a check; test C3 asserts it (dt5w) |
+| F03 warm start | τ = 1e-7 and 1e-9: final errors 7.4e-13 and 8.4e-13. The rejections fall exactly on the capped steps (estimates 9e-5 at h = 0.2): shrinking h lowers the working rank a step needs below the ceiling |
+
+## G2 assessment
+
+- **Order.** BUG's only visible time error is the first step from a weakly entangled state. Every
+  later step is exact to the 1e-12 tolerances whenever the basis budget is met, even at dt 0.1. So a
+  run's global error is its first step's error, and the measured slopes are the one-step slopes:
+  3.95-4.08 at κ = 1 and 8 (3.39-3.75 at κ = 20, where dt κ ≥ 0.25). That meets "one-step slope
+  compatible with 4". The plan's global criterion asks for e ∝ dt³ **before error floors**; after
+  the first step the error is already at the floor for every dt, so no dt³ regime exists to fit.
+  This is the same finding as U10 local loss (global 4.0, Task 2) and HQ T5.5. TDVP2 shows its order
+  2 once its capped steps are excluded.
+- **Tolerances:** monotone, each ladder in its own tolerance (dr5d F02). **Ablation:** no component
+  lowers the order. **Stability:** no P0 growth flags; TDVP2's backward amplification reaches 1.5 at
+  dt κ = 1 and BUG has none.
+- **Controller:** C1-C3 pass (dt5v). The τ ladder is monotone with errors below τ. The first-step fix
+  is pending dt5w.
+- **Cost:** BUG and TDVP2 are comparable at matched error on A1 L = 12 (dr5d F10, an accuracy array).
+  TDVP2's dt 0.05 and 0.025 points are capped there.
+- **G3 constraint found here:** BUG at order 3 stays uncapped only while D_final ≲ 0.65 maxdim, because
+  the working ceiling is 2 maxdim. TDVP2 only needs D_final < maxdim. Pilot runs must pick maxdim
+  from BUG's working rank, and report `budget_met` and TDVP2's cap hits.
+
+G2 passes on this reading of the order criterion, once dt5w confirms the first-step check.
