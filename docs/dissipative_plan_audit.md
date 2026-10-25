@@ -538,3 +538,47 @@ the work ceiling (`D_stage` = 1024, `basis_limited` and `work_limited` in 49 of 
 local Krylov defect of 0.1-2.8, even at L = 24, where D_final settled at 378 with zero discarded
 weight. That is consistent with fake columns inflating the frames, so B2 L = 24 is rerun on the
 fixed code (dr6u).
+
+## Task 6 results on the fixed code (`4a76d77`)
+
+**References and the tol_trunc ladder (dr6b 17496157; A1 L = 12, U = 4, κ = 2, T = 1, maxdim 3072).**
+None of the runs hit a cap; the peak D_final was 1579.
+
+- The tol_trunc ladder at dt 0.05, measured against the same-dt tight run, gives 2.0e-10, 1.6e-8
+  and 3.6e-6 for tol_trunc 1e-9, 1e-7 and 1e-5. It is monotone in its own tolerance, so it is not
+  hidden by tol_basis (1e-10) or the root solve. This is the G3 condition. Against the dt 0.025
+  reference all three are flat at 2.7e-6, which is the dt 0.05 time error.
+- At tol_trunc 1e-5 the ledger marks 7 steps `work_limited` + `basis_limited` at D_final 44-180.
+  That flag comes from the DD controller's probe budget (`streamed >= wcap` or `n >= ncap`), not
+  from maxdim. With tol_basis held at 1e-10, each step's truncation discards about 7e-6, and the
+  basis budget asks for more than the sketch is allowed to stream. It is an honest flag on a
+  deliberately mismatched point.
+- The dt 0.025 and dt 0.05 references differ by 2.7e-6 in log P0. With the first step dominating
+  (one-step order 4), the reference error is about 2e-7, which would floor TDVP2's finest arms.
+  dr6d 17496371 adds BUG references at dt 0.0125 and dt 0.00625.
+- MaxRSS 6.7 G against 16 G requested (§7 one-off over-request); later references request 8 G.
+
+**Binding cap: BUG's working-rank ceiling binds far below maxdim (dr6c row 1 against dr6t row 1;
+A1 L = 12, κ = 2, maxdim 512, tol_trunc 1e-9).**
+
+- The fix changes nothing here before the cap binds: pre-fix and post-fix BUG agree to their own
+  error up to t = 1. After that both are truncation-dominated and drift apart, reaching 0.16 in
+  log P0 at Jt = 4.
+- BUG's order-3 working basis is 5-9 times its input rank for d = 4 (input rank 76 gives D_stage
+  620). `work_ceiling` = max(2 maxdim, 2r) = 1024 therefore binds at D_final = 195 (step 4), which
+  is 0.38 maxdim. From that step on the basis budget is unmet (`basis_limited`, `work_limited`).
+  maxdim itself binds from t = 0.7.
+- Against the dr6b reference:
+
+  | t | BUG error (log P0 / obs) | TDVP2 error (log P0 / obs) |
+  |---|---|---|
+  | 0.6 | 3e-5 / 5e-4 | 2.5e-6 / 3e-6 |
+  | 1.0 | 6e-3 / 4.7e-2 | 2e-6 / 1.9e-6 |
+
+  TDVP2 needs only D_final < maxdim, and it is at D = 294 at t = 0.6.
+- Both integrators apply the same per-cut rule (discarded 2-norm `weight_tol ||Θ|| / _cut_divisor`:
+  `truncate_recursive!` for BUG, `_budget_svd` for TDVP2). Before the cap, BUG simply carries
+  about 1.5 times TDVP2's rank (t = 0.4: 197 against 146).
+- At equal maxdim, BUG's capacity is set by the working ceiling, a "tuned policy, not a theorem"
+  (adaptive_budget.jl). The plan's Task 1 asks for a centralised peak-working-rank cap separate
+  from maxdim. It is centralised, but fixed at a factor of 2 and not exposed to callers.
