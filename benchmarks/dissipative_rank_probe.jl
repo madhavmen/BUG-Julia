@@ -39,6 +39,16 @@ function normalise!(psi)
 end
 dist(a, b) = sqrt(abs(real(overlap(a, a)) + real(overlap(b, b)) - 2 * real(overlap(a, b)))) /
              sqrt(real(overlap(b, b)))
+# `dist` floors at ~1e-8 (cancellation of overlaps, rp7e): the local observables and log P0 resolve
+# far below it, as the driver's errors do
+const Q4 = hub4_space()
+const NUP = to_concrete(lock(Q4.Fu', 2) * Q4.Fu)
+const NDN = to_concrete(lock(Q4.Fd', 2) * Q4.Fd)
+const DBL = to_concrete(lock(NUP, 1) * NDN)
+obs(p) = vcat([real(site_expval(p, j, DBL)) for j in 1:L], [real(site_expval(p, j, NUP)) for j in 1:L],
+              [real(site_expval(p, j, NDN)) for j in 1:L])
+obserr(a, b) = max(maximum(abs.(obs(a) .- obs(b))),
+                   abs(log(real(overlap(a, a))) - log(real(overlap(b, b)))))
 function tails(psi)
     n = norm(psi)
     return [[count(>(x), bond_spectrum(copy(psi), b) ./ n) for x in THRESH] for b in 1:(L - 1)]
@@ -90,9 +100,11 @@ for t0 in T0S
         p, rec = arm(psi0, name)
         rec["t0"] = t0
         rec["dist"] = dist(p, ex)
+        rec["obserr"] = obserr(p, ex)
         rec["bonds"] = bond_dims(p)
         rec["tails"] = tails(p)
-        @printf("-- %-10s dist %.3e  wall %.1f s  bonds %s\n", name, rec["dist"], rec["wall"], rec["bonds"])
+        @printf("-- %-10s dist %.3e  obs/logP0 err %.3e  wall %.1f s  bonds %s\n", name, rec["dist"],
+                rec["obserr"], rec["wall"], rec["bonds"])
         haskey(rec, "frames") && @printf("   frames %s root_right %d D_stage %d D_work %d limits %s\n",
                                          rec["frames"], rec["root_right"], rec["D_stage"], rec["D_work"],
                                          rec["limits"])
