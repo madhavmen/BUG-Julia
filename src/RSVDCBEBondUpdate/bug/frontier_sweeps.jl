@@ -20,8 +20,11 @@ function _polar_frame(F, side::Symbol)
     res = svd(F, side === :left ? (1, 2) : (1,), _TAG_POL_A, _TAG_POL_B; cutoff = 0.0)
     # `U S^0 Vd`: S with unit singular values carries the tags and arrows that join U to Vd
     S0 = res.S
+    unit(x) = iszero(x) ? zero(x) : one(x)
     for k in eachindex(S0.RMTs)
-        S0.isdefined[k] && (S0.RMTs[k] = map(x -> iszero(x) ? zero(x) : one(x), S0.RMTs[k]))
+        S0.isdefined[k] || continue
+        r = S0.RMTs[k]
+        r isa Telum.DiagRMT ? (r.diag .= unit.(r.diag)) : (S0.RMTs[k] = map(unit, r))
     end
     return to_concrete(res.U * (S0 * res.Vd))
 end
