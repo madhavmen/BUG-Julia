@@ -222,11 +222,18 @@ def traj_diff(r, ref):
 
 
 def traj_cost(r):
-    s = r["steplog"]
+    s, nt = r["steplog"], len(r["traj"])
     n = len(s["h"])
-    return [("ntraj", len(r["traj"])), ("steps", n), ("D_final max", max(s["D_final"])),
-            ("rank-limited steps", int(sum(s["rank_limited"]))), ("work-limited steps", int(sum(s["work_limited"]))),
-            ("wall", round(sum(s["wall"]))), ("peak_rss GB", round(r["peak_rss"] / 2**30, 2))]
+    item = [("ntraj", nt), ("steps", n), ("D_final max", max(s["D_final"]))]
+    if "work_limited" in s:                 # TDVP2 has no ledger; capped_at falls back to D_final >= maxdim
+        item += [("rank-limited steps", int(sum(s["rank_limited"]))), ("work-limited steps", int(sum(s["work_limited"])))]
+    # the steplog runs the trajectories in sequence, each n / nt fixed steps: the earliest capped step
+    # over the trajectories is where the run's accuracy gate fails (plan §4.4)
+    if n % nt == 0:
+        caps = [t5.capped_at({"config": r["config"], "steplog": {k: v[i * (n // nt):(i + 1) * (n // nt)]
+                                                                 for k, v in s.items()}}) for i in range(nt)]
+        item += [("first capped step ends (min over trajectories)", min((c for c in caps if c is not None), default=None))]
+    return item + [("wall", round(sum(s["wall"]))), ("peak_rss GB", round(r["peak_rss"] / 2**30, 2))]
 
 
 def traj_physics(r):
