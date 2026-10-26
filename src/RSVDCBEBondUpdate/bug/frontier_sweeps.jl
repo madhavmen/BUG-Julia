@@ -17,11 +17,13 @@ then 16-17 in the root frames; at A2 L = 32 it reached 7.5e5, the root solve ret
 root split found no singular values (dr6v, dr7s, dr6k).
 """
 function _polar_frame(F, side::Symbol)
-    left = side === :left
-    res = svd(F, left ? (1, 2) : (1,), _TAG_POL_A, _TAG_POL_B; cutoff = 0.0)
-    ul = left ? 3 : 2                                   # U's new leg
-    Vd = to_concrete(setitag(res.Vd, 1, res.U.inds[ul].itags))
-    return to_concrete!(contract(res.U, (ul,), Vd, (1,)))
+    res = svd(F, side === :left ? (1, 2) : (1,), _TAG_POL_A, _TAG_POL_B; cutoff = 0.0)
+    # `U S^0 Vd`: S with unit singular values carries the tags and arrows that join U to Vd
+    S0 = res.S
+    for k in eachindex(S0.RMTs)
+        S0.isdefined[k] && (S0.RMTs[k] = map(x -> iszero(x) ? zero(x) : one(x), S0.RMTs[k]))
+    end
+    return to_concrete(res.U * (S0 * res.Vd))
 end
 
 """
