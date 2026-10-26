@@ -8,6 +8,7 @@
 #   UT3  order moments (dense), and the step's local error order against exp(-iH dt) (MPS)
 #   UT4  a projected Krylov breakdown is not accepted
 #   UT5  frame invariants after every frontier sweep: nesting, isometry, carries, environments
+#   UT5b the frontier embedding carries a frame's defect instead of squaring it (polar frames)
 #
 # ⛔ THE DENSE TESTS DRIVE THE PRODUCTION LOOP (`_closure_loop!`) AND FRONTIER RECURSION
 # (`_projected_frontiers`); only the space is a matrix. Everything MPS-shaped runs the production
@@ -285,6 +286,62 @@ end
             fr, psi, mpo, RC.KrylovFrontier(F, j, fr.gen - 1), tau, alloc, ckw)
     end
     @test grew > 0                                       # non-vacuous: frames did grow
+end
+
+@testset "UT5b: the frontier embedding does not square a frame's defect (both sides)" begin
+    L, c = 8, 4
+    mpo, psi = _xx_warm(L, 2)
+    rng = Random.MersenneTwister(5)
+    fr = RC.frames_from_state(psi, mpo, c)
+    gram(F, left) = to_concrete(left ? contract(F', (1, 2), F, (1, 2)) : contract(F, (2, 3), F', (2, 3)))
+    defect(F, left) = sqrt(max(norm(gram(F, left))^2 - 2 * norm(F)^2 + leg_dim(F, left ? 3 : 1), 0.0))
+    for (F0, left) in ((fr.W[c - 1], true), (fr.Z[c + 1], false))
+        F = to_concrete(F0 + 1e-7 * RC._randomize_like(F0, rng))
+        d = defect(F, left)
+        @test d > 1e-9                                     # premise: a non-isometric frame
+        P = RC._polar_frame(F, left ? :left : :right)
+        @test defect(P, left) < 1e-13
+        perp = left ? perp_component : perp_component_right
+        @test norm(perp(P, F)) < 1e-12 * norm(F)           # same span
+        # the transfer map: old `Pm = F'F` against `Pm = P'F` (a quiet bond keeps the frame)
+        G = gram(F, left)
+        Pold = G
+        Pnew = to_concrete(left ? contract(P', (1, 2), F, (1, 2)) : contract(F, (2, 3), P', (2, 3)))
+        k = leg_dim(F, left ? 3 : 1)
+        pdef(X) = left ? sqrt(max(norm(to_concrete(contract(X', (1,), X, (1,))))^2 -
+                                  2 * norm(X)^2 + k, 0.0)) :
+                         sqrt(max(norm(to_concrete(contract(X, (2,), X', (2,))))^2 -
+                                  2 * norm(X)^2 + k, 0.0))
+        @test pdef(Pnew) < 1.2 * d                         # Pm'Pm = G: the defect is carried
+        @test pdef(Pold) > 1.6 * d                         # CONTROL: Pm'Pm = G^2, squared
+    end
+    # a sweep over seeded frames hands back isometric ones
+    mpo, psi = _xx_warm(L, 2)
+    tau = ComplexF64(-0.1im)
+    alloc = basis_allocation(AdaptiveBudget(1e-8, 0.0, 1.0), L - 1; tau = tau, nrm = 1.0,
+                             nfront = 3)
+    ckw = _kc_ckw(alloc, 64; exact = false)
+    fr = RC.frames_from_state(psi, mpo, c)
+    for i in 1:c
+        fr.W[i] = to_concrete(fr.W[i] + 1e-8 * RC._randomize_like(fr.W[i], rng))
+    end
+    for k in c:(L - 1)
+        fr.Z[k] = to_concrete(fr.Z[k] + 1e-8 * RC._randomize_like(fr.Z[k], rng))
+    end
+    @test maximum(left_isometry_defect(fr.W[i]) for i in 1:c) > 1e-10      # premise
+    r = nothing
+    for j in (0, 1, 2)                                     # the first frontier that grows the frames
+        S = RC._project_root(psi, fr)
+        H0 = RC._root_generator(mpo, fr)
+        F = j == 0 ? S : RC._projected_frontiers(x -> apply_zero_site(H0, x), S, tau, j)[j]
+        r = RC._frontier_sweep!(fr, psi, mpo, RC.KrylovFrontier(F, j, fr.gen), tau, alloc, ckw;
+                                workcap = 64, nrm = 1.0, rng = Random.MersenneTwister(j))
+        r.added > 0 && break
+    end
+    @test r.added > 0                                      # non-vacuous: the frames were replaced
+    @test all(left_isometry_defect(fr.W[i]) < 1e-12 for i in 1:c)
+    @test all(right_isometry_defect(fr.Z[k]) < 1e-12 for k in c:(L - 1))
+    @test abs(norm(RC._project_root(psi, fr)) - norm(psi[psi.center])) < 1e-6
 end
 
 @testset "projection miss: direct, no sqrt(eps) floor, any gauge" begin

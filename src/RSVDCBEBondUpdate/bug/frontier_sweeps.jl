@@ -1,6 +1,29 @@
 # frontier_sweeps.jl: the frontier half-sweeps and their measurements (from `krylov_closure.jl`,
 # included right after it).
 
+const _TAG_POL_A, _TAG_POL_B = "cbePol,A", "cbePol,B"
+
+"""
+    _polar_frame(F, side) -> the orthonormal frame nearest `F`
+
+`U V'` from `F = U S V'`, which has the same span, width and outgoing leg as `F`. The frontier
+sweeps carry the old frame into each grown bond as `U0 = Pm W[i]` with `Pm = Wn'U0`, and that is
+the transfer map only when `Wn` is orthonormal. A bond that adds nothing keeps `Wn = U0`, so with
+Gram `G = I + E` the map is `G` itself and the next frame's Gram is about `G^2`: the defect
+doubles to triples per site and again in every closure generation. With the polar factor,
+`Pm = G^{1/2}`, so the defect is passed on, not squared. MEASURED (A2 L = 48, 2 excitations,
+closure_checks, generation 10): ×2.9-3.0 per site, from 2.5e-5 at site 31 to 0.015 at site 25,
+then 16-17 in the root frames; at A2 L = 32 it reached 7.5e5, the root solve returned NaN and the
+root split found no singular values (dr6v, dr7s, dr6k).
+"""
+function _polar_frame(F, side::Symbol)
+    left = side === :left
+    res = svd(F, left ? (1, 2) : (1,), _TAG_POL_A, _TAG_POL_B; cutoff = 0.0)
+    ul = left ? 3 : 2                                   # U's new leg
+    Vd = to_concrete(setitag(res.Vd, 1, res.U.inds[ul].itags))
+    return to_concrete!(contract(res.U, (ul,), Vd, (1,)))
+end
+
 """
     _frontier_left(Fm, mpo, fr, tau, alloc, ckw; enrich, gen, workcap, amp, rng, nsample)
 
@@ -69,7 +92,7 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
             nskip += 1
             U0
         end
-        Wn[i] = enrich ? to_concrete(setitag(Wi, 3, _tagWg(i, gen))) : U0
+        Wn[i] = enrich ? _polar_frame(to_concrete(setitag(Wi, 3, _tagWg(i, gen))), :left) : U0
         _check_frame(Wn[i], :left, "frontier Wn[$i] (gen $gen)")
         nadd = leg_dim(Wn[i], 3) - leg_dim(U0, 3)
         nsec = _new_sectors(U0, Wn[i], 3)
@@ -147,7 +170,7 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
             nskip += 1
             V0
         end
-        Zn[j] = enrich ? to_concrete(setitag(Zj, 1, _tagZg(j, gen))) : V0
+        Zn[j] = enrich ? _polar_frame(to_concrete(setitag(Zj, 1, _tagZg(j, gen))), :right) : V0
         _check_frame(Zn[j], :right, "frontier Zn[$j] (gen $gen)")
         nadd = leg_dim(Zn[j], 1) - leg_dim(V0, 1)
         nsec = _new_sectors(V0, Zn[j], 1)
