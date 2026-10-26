@@ -849,3 +849,44 @@ lifetimes (subradiance).
 
 B1 and B2 Task 7 points wait for the last pilots: dr6j2 rows 2-3 (U = −4, κ = 2, 10) and dr6k3
 rows 5 and 7 (B2 ν = 1/4 trajectories).
+
+## A2 stability (dr6w2 17499263, `c3a6765`, figure `a2_stability/F04_stability.png`)
+
+The point is A2 L = 24, 6 excitations (block start, warm 0.2), Jz = 1, Γ = 5, maxdim 512, Jt = 4,
+with tol_basis = 1e-8 and tol_trunc = 1e-9. The reference (row 10, 3h31, MaxRSS 5.6 G) is BUG
+dt 0.025 at 1e-10/1e-12/1e-11.
+
+| dt | BUG max error | TDVP2 max error | TDVP2 backward amp | TDVP2 steps raising P0 |
+|---|---|---|---|---|
+| 0.025 | (reference) | 4.4e-6 | 2.6e-4 | 0 |
+| 0.05 | 5.0e-10 | 3.3e-5 | 5.4e-4 | 0 |
+| 0.1 | 4.8e-6 | **6.1e2** | 5.5 | 40 / 40 |
+| 0.2 | 6.3e-5 | **9.3e3** | 27.7 | 20 / 20 |
+| 0.4 | 2.3e-4 | **2.2e3** | 58.1 | 0 / 10 |
+
+- **BUG is stable over the whole dt range.** No step raised P0, and the energy-balance excess over
+  the reference is ≤ 2.3e-4.
+- **TDVP2 is unstable from dt = 0.1.** The backward half-step amplifies by 5.5-58, and the error
+  reaches 10²-10⁴ by the first record (t = 0.4). At dt = 0.4 P0 does not rise, but the state is
+  wrong by 2.2e3.
+- **Largest dt at a fixed error (plan Task 5 stability item):**
+
+  | error ≤ | BUG dt | TDVP2 dt |
+  |---|---|---|
+  | 1e-3 | 0.4 | 0.05 |
+  | 1e-4 | 0.2 | 0.05 |
+  | 1e-6 | 0.05 | none |
+
+- **Wall times, indicative only** (concurrent jobs): BUG dt 0.2 reaches 6.3e-5 in 2200 s, and TDVP2
+  dt 0.05 reaches 3.3e-5 in 4168 s. The fair single-node time-to-accuracy job is still to run.
+
+**The "capped" mark on every BUG run is the working-rank ceiling, not a truncation.**
+- `work_limited` = 1 on every BUG step, because D_work reaches 2·maxdim = 1024.
+- The state's bond dimension is 378 in every run, BUG and TDVP2 alike. That is the exact maximal
+  Schmidt rank of the 6-excitation sector at the middle cut (Σ_k min(C(12,k), C(12,6−k)) = 378), so
+  maxdim 512 never binds on the state.
+- The held-out estimate of the missed weight is ≤ 1.7e-25 and the discarded weight is ≤ 7e-11 per step.
+- The uncapped TDVP2 runs converge to the BUG reference at about third order (4.4e-6 at dt 0.025).
+
+So the ceiling limits only the number of redundant working columns, and the errors above are not
+cap errors. The figure keeps the conservative mark (`capped_at`), as the plan requires (U12 / §4.4).
