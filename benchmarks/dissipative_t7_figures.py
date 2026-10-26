@@ -1,6 +1,8 @@
 """dissipative_t7_figures.py -- the Task 7 (G4) truncation study of dissipative_cbe_bug_implementation_plan.md
 from the JSON runs of benchmarks/dissipative_run.jl: tol_trunc in {1e-5, 1e-7, 1e-9} (E 7) at one point
-per model with tol_basis, tol_root and dt fixed, plus a dt-halved arm at 1e-7 (E 7dt), for BUG and TDVP2.
+per model with tol_basis, tol_root and dt fixed, plus a dt-halved arm at 1e-7 (E 7dt), for BUG and TDVP2,
+and where the maxdim cap binds a larger-maxdim arm at 1e-7 (E 7cap) that measures the cap error.
+Differences are also reported before the first capped step of either run.
 
   F09  per point: D_final(t) (solid) and BUG's trial frame D_stage (dotted) for the three tol_trunc, the
        accumulated discarded norm, the conditional rate <Q>_c(t) = -d log P0/dt, and the differences
@@ -36,6 +38,19 @@ def diff(r, ref):
     lp = np.abs(np.array(r["logp"])[i] - np.array(ref["logp"])[j])
     ob = np.max(np.abs(t5.obs_matrix(r)[i] - t5.obs_matrix(ref)[j]), axis=1)
     return np.array(common), lp, ob
+
+
+def window(r, ref):
+    """The output times before the first capped step of either run (plan Task 7: a capped curve is
+    marked, and its agreement with another is not truncation convergence)."""
+    caps = [c for c in (t5.capped_at(r), t5.capped_at(ref)) if c is not None]
+    return min(caps, default=np.inf)
+
+
+def maxdiff(r, ref, tmax=np.inf):
+    t, lp, ob = diff(r, ref)
+    m = t < tmax - 1e-9
+    return (float(lp[m].max()), float(ob[m].max())) if m.any() else None
 
 
 def physics(r):
@@ -91,6 +106,9 @@ def fig_point(g, sel, out, idx):
             axs[3].semilogy(t, np.maximum(np.maximum(lp, ob), 1e-16), "-" if integ == "bug" else "--",
                             label=f"{integ} tolT {tol:g} vs {TOLS[-1]:g}")
             item.append((f"tolT {tol:g} vs {TOLS[-1]:g} (logP0, obs)", (float(lp.max()), float(ob.max()))))
+            w = window(r, tight)
+            if np.isfinite(w):
+                item.append((f"  same, before the first cap (t < {w:g})", maxdiff(r, tight, w)))
         chk, base = checks.get(integ), ladder.get((integ, 1e-7))
         if chk is not None and base is not None:
             t, lp, ob = diff(chk, base)
@@ -106,10 +124,22 @@ def fig_point(g, sel, out, idx):
                     m = tc <= t[-1] + 1e-9
                     comp[tol] = max(float(lpc[m].max()), float(obc[m].max()))
             item += [("dt-halved vs dt at 1e-7 (logP0, obs)", (float(lp.max()), float(ob.max()))),
+                     ("  same, before the first cap", (window(chk, base), maxdiff(chk, base, window(chk, base)))),
                      ("dt check window T", float(t[-1])),
                      ("compression diffs in that window", comp),
                      # a tol_trunc whose difference sits below the dt error has converged to within it
                      ("compression diff resolved above the dt error", {k: v > dt_err for k, v in comp.items()})]
+        # cap refinement (E 7cap): a larger maxdim at the same tol_trunc and dt measures the cap error
+        for r in sel:
+            if r["E"] == "7cap" and r["config"]["int"] == integ:
+                base = ladder.get((integ, r["config"]["tol_trunc"]))
+                if base is not None:
+                    t, lp, ob = diff(r, base)
+                    axs[3].semilogy(t, np.maximum(np.maximum(lp, ob), 1e-16), "-.", lw=1.5,
+                                    label=f"{integ} maxdim {r['config']['maxdim']} vs {base['config']['maxdim']}")
+                    item += [(f"maxdim {r['config']['maxdim']} vs {base['config']['maxdim']} at tolT "
+                              f"{r['config']['tol_trunc']:g} (logP0, obs)", (float(lp.max()), float(ob.max()))),
+                             (f"  maxdim {r['config']['maxdim']} first capped step ends", t5.capped_at(r))]
         rows.append((f"F09 {g[0]} L={g[1]} {integ} truncation study", item, []))
     # integrators against each other at matched tol_trunc
     for tol in TOLS:
@@ -118,6 +148,7 @@ def fig_point(g, sel, out, idx):
             t, lp, ob = diff(b, d)
             rows.append((f"F09 {g[0]} L={g[1]} BUG vs TDVP2 at tolT {tol:g}",
                          [("max (logP0, obs)", (float(lp.max()), float(ob.max()))),
+                          ("before the first cap of either", (window(b, d), maxdiff(b, d, window(b, d)))),
                           ("wall BUG / TDVP2", round(sum(b["steplog"]["wall"]) / sum(d["steplog"]["wall"]), 2))], []))
             if tol == TOLS[-1]:
                 axs[3].semilogy(t, np.maximum(np.maximum(lp, ob), 1e-16), "k-", lw=0.8, label=f"BUG vs TDVP2 tolT {tol:g}")
@@ -140,7 +171,7 @@ def main():
     here = os.path.dirname(os.path.abspath(__file__))
     out = sys.argv[2] if len(sys.argv) > 2 else os.path.join(here, "..", "figures", "dissipative_t7")
     os.makedirs(out, exist_ok=True)
-    runs = [r for r in t5.load(rundirs) if r["E"] in ("7", "7dt") and r["config"]["mode"] == "no_jump"]
+    runs = [r for r in t5.load(rundirs) if r["E"] in ("7", "7dt", "7cap") and r["config"]["mode"] == "no_jump"]
     groups = {}
     for r in runs:
         groups.setdefault(point(r), []).append(r)

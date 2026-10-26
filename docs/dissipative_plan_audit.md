@@ -926,7 +926,7 @@ Accumulated discarded norm, by tol_trunc:
   concurrent jobs, so the ratio is indicative.
 - **Physics, all six runs agreeing to 1e-5:**
   - log P0(20) = −0.0557, so 5.4% of the norm was lost;
-  - ⟨Q⟩_c falls from 6.5e-3 to 2.1e-3 by Jt = 20, with a slow oscillation of period ≈ 2.5;
+  - ⟨Q⟩_c falls from 6.6e-3 to 2.1e-3 by Jt = 20, with a slow oscillation of period ≈ 2.5;
   - late ⟨Q⟩_c = 2.42e-3 and S(20) = 1.54.
 
   The conditional decay is slow, the dark-state (subradiant) regime the plan selects. ⟨Q⟩_c keeps
