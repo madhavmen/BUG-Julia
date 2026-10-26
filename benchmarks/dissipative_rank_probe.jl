@@ -8,11 +8,14 @@
 #   bug512u / bug2048u     the same with truncate = false: the evolved state before the compression
 #   bug512o1u              order 1, maxdim 512, untruncated: is it the frontier closure?
 #   tdvp512                TDVP2, two steps of dt/2, maxdim 512
+#   bug2048b10 / ...b10u   tol_basis 1e-10 instead of 1e-8 (suffix bN = tol_basis 1e-N): is the excess
+#                          the Galerkin error of tol_basis kept by a tighter tol_trunc?
 # Printed per arm: distance to psi_ex, bond dims, per-bond counts of normalised Schmidt values above
 # 1e-2 .. 1e-10, frame widths per bond (BUG) and the step's limits. A spurious tail shows as counts at
 # 1e-6 .. 1e-10 above psi_ex's at the same bonds.
 #
-# Env: RP_L (12), RP_T0 ("0.2,0.4"), RP_DT (0.1), RP_TOLT (1e-9), RP_OUT (rank_probe.json)
+# Env: RP_L (12), RP_T0 ("0.2,0.4"), RP_DT (0.1), RP_TOLT (1e-9), RP_OUT (rank_probe.json),
+#      RP_ARMS (comma list, default the six arms above without the bN ones)
 
 using LinearAlgebra, Printf, JSON
 using LurCGT, Telum
@@ -25,6 +28,7 @@ const DT = parse(Float64, env("RP_DT", 0.1))
 const TOLT = parse(Float64, env("RP_TOLT", 1e-9))
 const OUT = env("RP_OUT", "rank_probe.json")
 const THRESH = (1e-2, 1e-4, 1e-6, 1e-8, 1e-10)
+const ARMS = split(env("RP_ARMS", "tdvp512,bug512,bug2048,bug512u,bug2048u,bug512o1u"), ",")
 
 set_symmetry!(:U1)
 const G = no_jump_mpo(hubbard_aa_mpo_d4(L; J = 1.0, U = 4.0), doublon_loss_mpo(L; kappa = 2.0))
@@ -64,8 +68,11 @@ function arm(psi0, name)
         end
     else
         md = occursin("2048", name) ? 2048 : 512
+        mb = match(r"b(\d+)", name)
+        tb = mb === nothing ? 1e-8 : 10.0^(-parse(Int, mb[1]))
+        rec["tol_basis"] = tb
         info = cbe_bug_step!(psi, G, ComplexF64(-im * DT); hermitian = false,
-                             order = occursin("o1", name) ? 1 : 3, tol_basis = 1e-8, tol_root = 1e-12,
+                             order = occursin("o1", name) ? 1 : 3, tol_basis = tb, tol_root = 1e-12,
                              tol_trunc = TOLT, maxdim = md, truncate = !endswith(name, "u"))
         rec["frames"] = info.expanded
         rec["root_right"] = info.root_right
@@ -96,7 +103,7 @@ for t0 in T0S
     println("   psi_ex tails (>", join(THRESH, ","), ") per bond: ", tex)
     push!(results, Dict("t0" => t0, "arm" => "psi_ex", "bonds" => bond_dims(ex), "tails" => tex,
                         "psi0_bonds" => bond_dims(psi0)))
-    for name in ("tdvp512", "bug512", "bug2048", "bug512u", "bug2048u", "bug512o1u")
+    for name in ARMS
         p, rec = arm(psi0, name)
         rec["t0"] = t0
         rec["dist"] = dist(p, ex)
