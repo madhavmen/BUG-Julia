@@ -791,3 +791,61 @@ of 3. BUG's slopes are about 4 (one-step order from the product state), but the 
 step hardly falls with dt, so halving dt nearly doubles its wall. The strong-loss stability point
 (κ = 20, warm start) goes the other way, with BUG about 3.5 times cheaper at 1e-8. As plan §4.5
 asks, the comparison is parameter- and model-dependent.
+
+## Task 7 inputs on the fixed code (2026-10-26)
+
+**Smoke passed (dr7t 17499266, `c3a6765`).** All four checks print five `RESTART-CHECK PASS` lines and
+`EXIT-CHECK = 0`: the uninterrupted run, the stopped run (checkpoint, no JSON), the changed-tol_trunc
+refusal control, the resumed run, and resumed JSON equal to the uninterrupted one.
+
+| check | steps | wall [s] | peak RSS | D_final |
+|---|---|---|---|---|
+| A1 L = 24 κ = 8, BUG maxdim 1024 | 4 × 0.1 | 168 / 379 / 692 / 891 per step | 9.5 G | 73 → 224 |
+| A2 L = 48, 2 exc., maxdim 256 | 6 × 0.1 | 152 (JIT), then 8-11 per step | 2.6 G | 11 → 16 |
+| B1 L = 20, 2 trajectories | 20 × 0.05 | 1.5-20 per step | 3.2 G | 30 → 73 |
+| B2 L = 32 ν = 1/8, 2 trajectories | 23 (adaptive) | 1.5-533 per step | 4.8 G | 27 → 103 |
+
+The A1 step cost grows faster than D (×5.3 in wall for ×3.1 in D), so A1 L = 24 is run at maxdim
+512 and Jt = 2, with tol_trunc = 1e-9 expected to be capped (plan: "mark it capped").
+
+**The A1 point: κ = 2 (dr7k 17499438, figure `a1_kappa/F05_kappa.png`).** A1 L = 12, U = 4, TDVP2
+dt 0.05 to Jt = 4, κ ∈ {0.5, 1, 2, 4, 8, 16, 32}. The late (t ≥ 2) conditional loss rate
+⟨Q⟩_c = −d log P0/dt is 2.00, 3.18, **3.47**, 2.49, 2.40, 2.29, 2.12. Late ⟨Q⟩_c / doublons = κ in
+every run, as it must. The late doublon count falls monotonically (4.0 → 0.07), so the crossover
+from loss-limited to Zeno-suppressed decay is at κ ≈ 2 (between 1 and 4), not at the strong-coupling
+estimate 2U = 8: at U = 4 and L = 12 the late-time state is not in the isolated-doublon limit. The
+κ ≤ 8 runs hit maxdim 1024 at t ≈ 1-1.4, so the late values carry a cap error. The peak's
+location is set by differences of 10-40%. κ = 2 is also the Task 6 point with converged references,
+so the Task 7 A1 point is validated.
+
+**B2 conditional identity (dr6k3 17499313).** The F08 check compares −Δ log P0 / Δt with the
+trapezoid mean of ⟨Q⟩_c on each record interval. At t ≥ 1 it agrees to ≤ 0.83% in all four
+conditional runs, which is the 0.25 grid's quadrature error. Before t ≈ 0.75 it misses by 10-80%,
+because the bright burst (⟨Q⟩_c from Γ·nexc = 3-24 down to about 0.01) lies inside one or two record
+intervals. The earlier "max |⟨Q⟩_c + d log P0/dt|" of up to 21 was that burst; the figure now
+reports the two regimes apart (`684940a`). Physics: after the burst the dark rate is slow,
+λ(T) = 0.0076 at ν = 1/8, Γ = 2 against 0.027 at Γ = 0.5. Stronger collective coupling gives longer
+lifetimes (subradiance).
+
+**Task 7 submission design.** All runs use `0a4fc8f` (PKG c03c42a01db0, the solver as `c3a6765`).
+
+- Each deterministic point starts from the same warm state (DR_WARM = 0.2: 16 BUG steps of 0.0125
+  at tol 1e-11/1e-13/1e-13). Without it the product state's first-step error (3.3e-5 for BUG at
+  dt 0.1, dr6e) would swamp the tol_trunc differences.
+- tol_basis = 1e-8 and tol_root = 1e-12 are fixed (Task 6 ladders).
+- Each integrator also runs a dt-halved arm at tol_trunc = 1e-7, so the timestep error is measured
+  against the compression differences at the production point itself.
+- tol_trunc means the per-cut discarded 2-norm rule `weight_tol·‖Θ‖/_cut_divisor`, the same for BUG
+  and TDVP2.
+- Wall times are from concurrent jobs on mixed v3 nodes: indicative only. The fair timings are the
+  Task 6 single-node curves.
+
+| array | point | arms |
+|---|---|---|
+| dr7a 17500798 | A1 L = 24 U = 4 κ = 2, dbl_rich, maxdim 512, Jt = 2 | BUG dt 0.1 × tol_trunc {1e-5, 1e-7, 1e-9}; BUG dt 0.05 at 1e-7 to Jt = 1 |
+| dr7c 17500799 | same | TDVP2 dt 0.05 × {1e-5, 1e-7, 1e-9}; TDVP2 dt 0.025 at 1e-7 to Jt = 1 |
+| dr7b 17500800 | A2 L = 48, 2 exc. (block), Γ = 1, maxdim 256, Jt = 20, closure_checks on | BUG dt 0.1 and TDVP2 dt 0.05 × {1e-5, 1e-7, 1e-9}; dt-halved arms at 1e-7 |
+| dr6w3 17500801 | dr6w2 row 11 (A2 L = 24 controller, E = 3) | rerun at 16 G after an OOM at 8.3 G |
+
+B1 and B2 Task 7 points wait for the last pilots: dr6j2 rows 2-3 (U = −4, κ = 2, 10) and dr6k3
+rows 5 and 7 (B2 ν = 1/4 trajectories).
