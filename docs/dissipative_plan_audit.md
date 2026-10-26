@@ -881,7 +881,8 @@ dt 0.025 at 1e-10/1e-12/1e-11.
   dt 0.05 reaches 3.3e-5 in 4168 s. The fair single-node time-to-accuracy job is still to run.
 
 **The "capped" mark on every BUG run is the working-rank ceiling, not a truncation.**
-- `work_limited` = 1 on every BUG step, because D_work reaches 2·maxdim = 1024.
+- `work_limited` = 1 on every BUG step, because the trial frame D_stage reaches the working-rank
+  ceiling D_work = 2·maxdim = 1024.
 - The state's bond dimension is 378 in every run, BUG and TDVP2 alike. That is the exact maximal
   Schmidt rank of the 6-excitation sector at the middle cut (Σ_k min(C(12,k), C(12,6−k)) = 378), so
   maxdim 512 never binds on the state.
@@ -890,3 +891,44 @@ dt 0.025 at 1e-10/1e-12/1e-11.
 
 So the ceiling limits only the number of redundant working columns, and the errors above are not
 cap errors. The figure keeps the conservative mark (`capped_at`), as the plan requires (U12 / §4.4).
+
+## Task 7 A2 L = 48 (dr7b 17500800, `0a4fc8f`, figure `dissipative_t7/a2_L48/F09_t7_A2_L48.png`)
+
+The point is A2 L = 48, 2 excitations (block start, warm 0.2), Jz = 1, Γ = 1, ka = π/3, maxdim 256,
+Jt = 20, closure_checks on, with tol_basis = 1e-8 and tol_root = 1e-12. Script:
+`benchmarks/dissipative_t7_figures.py`.
+
+**Nothing is capped.** D_final ≤ 26, BUG's trial frame D_stage is 53-55 against the ceiling 512, and
+no step is work- or rank-limited. Peak RSS is 2.3-2.5 G, and each run took 21-42 min.
+
+| | tol_trunc 1e-5 vs 1e-9 | 1e-7 vs 1e-9 | dt-halved vs dt (1e-7) |
+|---|---|---|---|
+| BUG dt 0.1, max obs (log P0) | 1.2e-6 (1.5e-8) | 7.6e-9 (1.2e-10) | 4.8e-7 (5.1e-8) |
+| TDVP2 dt 0.05 | 2.5e-5 (3.0e-6) | 1.4e-6 (8.4e-8) | **4.1e-4** (9.7e-6) |
+
+Accumulated discarded norm, by tol_trunc:
+
+| | 1e-5 | 1e-7 | 1e-9 |
+|---|---|---|---|
+| BUG | 3.3e-4 | 1.6e-6 | 9.6e-9 |
+| TDVP2 | 1.2e-3 | 4.8e-6 | 4.0e-9 |
+
+- **BUG.** The truncation ladder is monotone. The tol_trunc = 1e-5 difference is resolved above the
+  time-step difference. The 1e-7 vs 1e-9 difference (7.6e-9) lies below it, so these two settings
+  agree to within the time error. That is genuine convergence, not a collapse at a cap: the
+  discarded norms differ by 160× and no step is limited.
+- **TDVP2 at dt 0.05 is limited by its time step.** Halving dt moves the observables by 4.1e-4,
+  which is 16× its largest compression difference. With TDVP2's second-order error, that puts its
+  dt 0.05 time error at about 5.5e-4.
+- **BUG and TDVP2 agree to 5.4e-4** at every tol_trunc, which is TDVP2's time error. BUG at dt 0.1 is
+  therefore about 1000× more accurate than TDVP2 at dt 0.05.
+- **Wall ratio BUG / TDVP2** is 1.17, 1.07 and 1.54 at tol_trunc 1e-5, 1e-7 and 1e-9. These ran as
+  concurrent jobs, so the ratio is indicative.
+- **Physics, all six runs agreeing to 1e-5:**
+  - log P0(20) = −0.0557, so 5.4% of the norm was lost;
+  - ⟨Q⟩_c falls from 6.5e-3 to 2.1e-3 by Jt = 20, with a slow oscillation of period ≈ 2.5;
+  - late ⟨Q⟩_c = 2.42e-3 and S(20) = 1.54.
+
+  The conditional decay is slow, the dark-state (subradiant) regime the plan selects. ⟨Q⟩_c keeps
+  falling to Jt = 20, so the time window is too short to read off an asymptotic rate.
+
