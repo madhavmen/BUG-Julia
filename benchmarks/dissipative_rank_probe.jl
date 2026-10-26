@@ -82,6 +82,15 @@ function arm(psi0, name)
         rec["limits"] = string.(info.record.limits)
         rec["D_stage"] = info.record.D_stage
         rec["D_work"] = info.record.D_work
+        # who filled the frame: DD-QR CBE (`n_selected`) vs Krylov C/D per half-sweep bond, then
+        # what each frontier sweep added and whether the ceiling stopped it
+        rec["bond_log"] = [Dict("bond" => e.bond, "side" => string(e.side), "width" => e.width,
+                                "n_selected" => e.n_selected, "n_krylov" => e.n_krylov,
+                                "workcap" => e.workcap, "pass" => get(e, :pass, 0),
+                                "frontier" => get(e, :frontier, 0))
+                           for e in info.ledger.bond_log]
+        rec["closure_log"] = [Dict(string(k) => (v isa Number || v isa Bool ? v : string(v))
+                                   for (k, v) in pairs(e)) for e in info.ledger.closure_log]
     end
     rec["wall"] = (time_ns() - t0) / 1e9
     return psi, rec
@@ -118,6 +127,19 @@ for t0 in T0S
         haskey(rec, "frames") && @printf("   frames %s root_right %d D_stage %d D_work %d limits %s\n",
                                          rec["frames"], rec["root_right"], rec["D_stage"], rec["D_work"],
                                          rec["limits"])
+        if haskey(rec, "bond_log")
+            for e in rec["bond_log"]
+                e["pass"] == 0 || continue
+                @printf("   half %-5s bond %2d width %5d cbe %5d krylov %5d workcap %s\n", e["side"],
+                        e["bond"], e["width"], e["n_selected"], e["n_krylov"], e["workcap"])
+            end
+            for e in rec["closure_log"]
+                println("   frontier ", get(e, "frontier", -1), " pass ", get(e, "pass", -1),
+                        " added ", get(e, "added", 0), " width ", get(e, "width_before", "-"), "->",
+                        get(e, "width_after", "-"), " capped ", get(e, "capped", false),
+                        " leak ", get(e, "leak", NaN))
+            end
+        end
         println("   tails: ", rec["tails"])
         push!(results, rec)
         open(OUT, "w") do io
