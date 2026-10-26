@@ -183,24 +183,141 @@ def fig_point(g, sel, out, idx):
     return rows
 
 
+def same_record(a, b, tol):
+    """Two trajectories of one seed took the same jumps: same channels in order, times within `tol`."""
+    ea, eb = a["events"], b["events"]
+    return len(ea) == len(eb) and all(x["channel"] == y["channel"] and abs(x["t"] - y["t"]) <= tol
+                                      for x, y in zip(ea, eb))
+
+
+def traj_diff(r, ref):
+    """Ensemble and pathwise differences of two trajectory runs on their common times and seeds:
+    max |mean - mean| over observables and the jump count, the same in units of the combined standard
+    error, and over the seeds whose jump records agree (so the paths are comparable) max |obs - obs|.
+    A different truncation or step can move a jump past a grid point; those seeds are only counted."""
+    t, tr = np.round(r["times"], 9), np.round(ref["times"], 9)
+    common = [x for x in t if x in set(tr)]
+    i = [list(t).index(x) for x in common]
+    j = [list(tr).index(x) for x in common]
+
+    byseed = {x["seed"]: x for x in ref["traj"]}
+    pairs = [(x, byseed[x["seed"]]) for x in r["traj"] if x["seed"] in byseed]
+
+    def ens(trajs, k):
+        # on the COMMON seeds only: a 5-trajectory cap arm against the first 5 of a 20-trajectory run
+        a = np.array([np.column_stack([np.array(x["obs"])[k], np.array(x["njumps_t"])[k]]) for x in trajs])
+        return a.mean(axis=0), a.std(axis=0, ddof=1) / np.sqrt(len(trajs)) if len(trajs) > 1 else 0 * a[0]
+    (ma, sa), (mb, sb) = ens([x for x, _ in pairs], i), ens([y for _, y in pairs], j)
+    d = np.abs(ma - mb)
+    se = np.hypot(sa, sb)
+    # t = 0 and conserved observables are deterministic: their spread is roundoff and carries no z
+    z = d[se > 1e-10] / se[se > 1e-10]
+    tol = max(r["config"]["dt"], ref["config"]["dt"]) + 1e-9
+    match = [(x, y) for x, y in pairs if same_record(x, y, tol)]
+    path = max((float(np.max(np.abs(np.array(x["obs"])[i] - np.array(y["obs"])[j]))) for x, y in match),
+               default=None)
+    return np.array(common), d.max(axis=1), {"max |d mean|": float(d.max()),
+                                            "max z": float(z.max()) if z.size else None,
+                                            "seeds matched": f"{len(match)}/{len(pairs)}", "max |d path|": path}
+
+
+def traj_cost(r):
+    s = r["steplog"]
+    n = len(s["h"])
+    return [("ntraj", len(r["traj"])), ("steps", n), ("D_final max", max(s["D_final"])),
+            ("rank-limited steps", int(sum(s["rank_limited"]))), ("work-limited steps", int(sum(s["work_limited"]))),
+            ("wall", round(sum(s["wall"]))), ("peak_rss GB", round(r["peak_rss"] / 2**30, 2))]
+
+
+def traj_physics(r):
+    c, t = r["config"], np.array(r["times"])
+    late = t >= 0.5 * t[-1]
+    m, s = np.array(r["jumps_mean"]), np.array(r["jumps_stderr"])
+    f = 2.0 if c["model"] == "B1" else 1.0           # B1 loses a pair per jump
+    item = [("T", float(t[-1])), ("lost/emitted at T", (f * float(m[-1]), f * float(s[-1])))]
+    if c["model"] == "B1":
+        mean, se = np.array(r["mean"]), np.array(r["stderr"])
+        for side in ("left", "right"):
+            k = [r["names"].index(f"j{x}_{side}") for x in ("up", "dn")]
+            jc, sc = mean[:, k].sum(axis=1), np.hypot(se[:, k[0]], se[:, k[1]])
+            item.append((f"late j_c {side}", (float(jc[late].mean()), float(sc[late].mean()))))
+    return item
+
+
+def fig_traj(g, sel, out):
+    """Task 7 on a trajectory ensemble (B1, B2 traj): the same ladder, dt and cap comparisons as
+    `fig_point`, graded against the sampling error: a difference is resolved only above ~2 combined
+    standard errors, and the pathwise difference on matched seeds measures it below that."""
+    fig, axs = plt.subplots(1, 3, figsize=(17, 4.2))
+    rows = []
+    ladder = {(r["config"]["int"], r["config"]["tol_trunc"]): r for r in sel if r["E"] == "7"}
+    checks = {r["config"]["int"]: r for r in sel if r["E"] == "7dt"}
+    caps = [r for r in sel if r["E"] == "7cap"]
+    for r in sorted(sel, key=lambda r: (r["config"]["int"], r["E"], r["config"]["tol_trunc"])):
+        c = r["config"]
+        lab = f"{c['int']} {r['E']} dt={c['dt']} tolT={c['tol_trunc']:g} maxdim {c['maxdim']}"
+        t, m, s = np.array(r["times"]), np.array(r["jumps_mean"]), np.array(r["jumps_stderr"])
+        ln, = axs[0].plot(t, m, "-" if c["int"] == "bug" else "--", label=lab)
+        axs[0].fill_between(t, m - 2 * s, m + 2 * s, color=ln.get_color(), alpha=0.15)
+        axs[2].plot(np.arange(len(r["steplog"]["D_final"])), r["steplog"]["D_final"], ",", color=ln.get_color())
+        rows.append((f"F09 {t5.label(r)} traj {lab}", traj_cost(r) + traj_physics(r), []))
+
+    def compare(name, a, b, ls):
+        t, d, item = traj_diff(a, b)
+        axs[1].semilogy(t, np.maximum(d, 1e-16), ls, label=name)
+        rows.append((f"F09 {g[0]} L={g[1]} traj {name}", list(item.items()), []))
+    for integ in ("bug", "tdvp2"):
+        tight = ladder.get((integ, TOLS[-1]))
+        for tol in TOLS[:-1]:
+            if tight is not None and (integ, tol) in ladder:
+                compare(f"{integ} tolT {tol:g} vs {TOLS[-1]:g}", ladder[(integ, tol)], tight, "-")
+        base = ladder.get((integ, 1e-7))
+        if base is not None and integ in checks:
+            compare(f"{integ} dt {checks[integ]['config']['dt']} vs {base['config']['dt']}", checks[integ], base, ":")
+        for r in caps:
+            if r["config"]["int"] == integ and base is not None:
+                compare(f"{integ} maxdim {r['config']['maxdim']} vs {base['config']['maxdim']}", r, base, "-.")
+    for tol in TOLS:
+        if ("bug", tol) in ladder and ("tdvp2", tol) in ladder:
+            compare(f"BUG vs TDVP2 tolT {tol:g}", ladder[("bug", tol)], ladder[("tdvp2", tol)], "k-")
+    axs[0].set_title(f"{g[0]} L={g[1]}: mean jumps (+-2 se)", fontsize=8)
+    axs[1].set_title("max |difference of ensemble means| (observables, jumps)", fontsize=8)
+    axs[2].set_title("D_final per step (all trajectories in sequence)", fontsize=8)
+    for ax in axs[:2]:
+        ax.legend(fontsize=5)
+    axs[0].set_xlabel("t")
+    axs[1].set_xlabel("t")
+    axs[2].set_xlabel("step")
+    fig.tight_layout()
+    fig.savefig(os.path.join(out, f"F09_t7_{g[0]}_L{g[1]}_traj.png"), dpi=130)
+    plt.close(fig)
+    return rows
+
+
 def main():
     rundirs = sys.argv[1].split(",")
     here = os.path.dirname(os.path.abspath(__file__))
     out = sys.argv[2] if len(sys.argv) > 2 else os.path.join(here, "..", "figures", "dissipative_t7")
     os.makedirs(out, exist_ok=True)
-    runs = [r for r in t5.load(rundirs) if r["E"] in ("7", "7dt", "7cap") and r["config"]["mode"] == "no_jump"]
-    groups = {}
+    allruns = [r for r in t5.load(rundirs) if r["E"] in ("7", "7dt", "7cap")]
+    runs = [r for r in allruns if r["config"]["mode"] == "no_jump"]
+    groups, tgroups = {}, {}
     for r in runs:
         groups.setdefault(point(r), []).append(r)
+    for r in allruns:
+        if r["config"]["mode"] == "traj":
+            tgroups.setdefault(point(r), []).append(r)
     rows = []
     for idx, (g, sel) in enumerate(sorted(groups.items())):
         rows += fig_point(g, sel, out, idx)
+    for g, sel in sorted(tgroups.items()):
+        rows += fig_traj(g, sel, out)
     with open(os.path.join(out, "summary.txt"), "w") as io:
         for name, pts, _ in rows:
             line = f"{name}: {pts}"
             print(line)
             io.write(line + "\n")
-    print(f"{len(runs)} runs, figures in {os.path.abspath(out)}")
+    print(f"{len(allruns)} runs, figures in {os.path.abspath(out)}")
 
 
 if __name__ == "__main__":
