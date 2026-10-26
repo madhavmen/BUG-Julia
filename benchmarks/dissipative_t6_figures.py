@@ -11,6 +11,8 @@ stability runs (E 4, F04) are dissipative_figures.py's; this script runs those a
        average over the second half of the run against kappa, +-2 standard errors
   F08  B2 pilot: conditional decay rate lambda(t) = -d log P0/dt (E 6n, no_jump) and the mean jump
        count (E 6t, traj)
+  F05  A1 kappa scan (E 7k): late-time conditional loss rate and doublon number against kappa, which
+       locates the Zeno crossover for the Task 7 A1 point
   F11  trajectory-count convergence (E 6t): the running mean and its 95% interval of the final lost
        particles (B1: 2 x jumps) or emitted quanta (B2: jumps) against the number of trajectories
 
@@ -198,6 +200,45 @@ def fig_b2(runs, out):
     return rows
 
 
+def fig_kappa(runs, out):
+    """F05 pilot (E 7k): the A1 conditional loss rate <Q>_c(t) per kappa, and its late-time average
+    (second half) and the conditional doublon number against kappa. The late rate peaks at the
+    crossover from rapid doublon decay to Zeno-like slow dynamics, the Task 7 A1 point."""
+    rs = sorted((r for r in runs if r["E"] == "7k" and r["config"]["model"] == "A1"),
+                key=lambda r: r["config"]["params"]["kappa"])
+    if not rs:
+        return []
+    fig, axs = plt.subplots(1, 2, figsize=(11, 4))
+    rows, ks, late, dlate = [], [], [], []
+    for r in rs:
+        c, rec = r["config"], r["records"]
+        t = np.array([x["t"] for x in rec])
+        Q = np.array([x["Q"] for x in rec])
+        nd = [i for i, n in enumerate(r["names"]) if n.startswith("dbl_")]
+        dbl = np.array([sum(x["obs"][i] for i in nd) for x in rec])
+        axs[0].semilogy(t, Q, "-", label=f"kappa={c['params']['kappa']}")
+        m = t >= 0.5 * t[-1]
+        ks.append(c["params"]["kappa"]); late.append(Q[m].mean()); dlate.append(dbl[m].mean())
+        rows.append((f"F05 A1 L={c['L']} U={c['params']['U']} kappa={c['params']['kappa']} {c['int']} maxdim {c['maxdim']}",
+                     [("late <Q>_c", float(late[-1])), ("<Q>_c(T)", float(Q[-1])), ("late doublons", float(dlate[-1])),
+                      ("log P0(T)", float(r["logp"][-1])), ("first capped step ends", t5.capped_at(r)),
+                      ("wall", round(sum(r["steplog"]["wall"])))], []))
+    axs[1].loglog(ks, late, "o-", label="late <Q>_c")
+    axs[1].loglog(ks, dlate, "s--", label="late conditional doublons")
+    k = int(np.argmax(late))
+    rows.append(("F05 A1 kappa scan", [("kappa of the largest late <Q>_c", ks[k])], []))
+    axs[0].set_xlabel("t")
+    axs[0].set_ylabel("conditional loss rate <Q>_c = -d log P0/dt")
+    axs[1].set_xlabel("kappa")
+    axs[1].set_ylabel("average over the second half")
+    for ax in axs:
+        ax.legend(fontsize=6)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out, "F05_kappa.png"), dpi=130)
+    plt.close(fig)
+    return rows
+
+
 def fig_samples(runs, out):
     rs = [r for r in runs if r["E"] == "6t" and r["traj"] and "njumps_t" in r["traj"][0]]
     if not rs:
@@ -238,7 +279,7 @@ def main():
               lambda: t5.fig_control(nojump, refs, out), lambda: t5.fig_cost(nojump, refs, out),
               lambda: t5.fig_stability(nojump, refs, out),
               lambda: fig_bonds(runs, out), lambda: fig_scaling(runs, out), lambda: fig_b1(runs, out),
-              lambda: fig_b2(runs, out), lambda: fig_samples(runs, out)):
+              lambda: fig_b2(runs, out), lambda: fig_kappa(runs, out), lambda: fig_samples(runs, out)):
         rows += f() or []
     with open(os.path.join(out, "summary.txt"), "w") as io:
         for name, pts, sl in rows:
