@@ -709,3 +709,53 @@ TDVP2 gives 4.6e-8, 3.7e-7, 3.0e-6 and 2.4e-5 at dt 0.0125-0.1 (slopes 3.0, 3.0,
 gives 2.9e-6, 3.3e-5 and 6.7e-4 at dt 0.05-0.2. The final timing curve, dr6e 17497216, reruns
 every arm in one job and adds BUG dt 0.025 and 0.0125, so that BUG also reaches TDVP2's two most
 accurate arms.
+
+## Second A2/B2 failure: the frontier embedding squared the frame defect (fix `3fa0e78`)
+
+**Symptom.** `svd produced no CGTSVD classes` at the root split (`cbe_bug.jl`, `cutoff = 0`)
+appeared in dr7s A2 L = 48 with 2 excitations (step 2), dr6v row 2 (A2 L = 32 with the
+controller, step 20, h shrunk to 7.8e-4) and dr6k rows 5 and 7 (B2 L = 24, ν = 1/4, trajectories,
+steps 58-60). Only collective `Q` was affected.
+
+**Diagnosis (rp7a 17497555, scratchpad `crash_replay7.jl`).** The replay calls `cbe_bug_step!`
+directly, with `root_report` and `frames_report` and a frame-isometry check.
+
+- dr6v crash state (reproduced): the frontier embedding `V0 = Z[16] Pm` reaches a defect of
+  7.5e5. The root solve then starts from a norm of 1e9 and returns NaN after one iteration, and
+  the split finds no singular values.
+- A2 L = 48 from the start: on the right the defect grows by ×2.9-3.0 per site, from 2.5e-5 at
+  site 31 to 0.015 at site 25, then jumps to 16-17 in the root frames. In this replay the step
+  completed.
+
+**Cause.** `_frontier_left/right` carry the old frame into each grown bond as `U0 = Pm W[i]` with
+`Pm = Wn'U0`. That is the transfer map only when `Wn` is orthonormal. A bond that adds nothing
+keeps `Wn = U0` (retagged), so with Gram `G = I + E` the map is `G` itself, and the next frame's
+Gram is about `G^2`: the defect doubles to triples per site and again in every generation. The
+seeds are roundoff: 3^17 × 2e-13 ≈ 2.5e-5 at site 31. Only collective `Q` runs enough generations
+over long enough chains to blow up (closure_checks, generation 10 here).
+
+**Fix.** Every frame an enriching frontier sweep writes is replaced by its polar factor
+(`_polar_frame`: `U V'` from `F = U S V'`, the same span, width and outgoing leg, and the nearest
+orthonormal frame). Then `Pm = G^{1/2}` and `Pm'Pm = G`, so the defect is carried, not squared.
+Frames are replaced only when a sweep added something (unchanged), so a quiet sweep stays
+bit-identical.
+
+**Test** "UT5b" (`test_krylov_closure.jl`), both sides:
+
+- the polar factor of a frame with a 1e-7 defect is isometric to 1e-13 and has the same span;
+- `P'F` carries the defect (`Pm'Pm = G`). CONTROL: the old `F'F` squares it (more than 1.6 times
+  the defect);
+- an enriching sweep over frames seeded with 1e-8 non-isometry (premise asserted) hands back
+  frames isometric to 1e-12, with `psi` inside.
+
+**Scope of affected results.**
+
+- Every A2/B2 run on earlier commits is suspect, crashed or not: dr6u, dr6w, dr6k, the B2 smoke
+  check, and the Task 5 A2 runs, where the closure stayed short (L ≤ 20, few generations); the
+  bound below applies there.
+- A single generation per step amplifies by at most about 3^L × 1e-16 per step. That is 5e-11 at
+  L = 12, so the A1/B1 L = 12 results of Task 6 stand (dr6a/e, dr6b/d, dr6c row 1-2, dr6j). At
+  L = 16 it is 4e-9; at L = 24 it is 3e-5, so every Task 7 production run uses `3fa0e78`.
+- Cancelled: dr6w, dr6k, dr6vb and dr7s (A1 and B1 checks had passed). They are rerun on
+  `3fa0e78` after dt7a 17497637 (`test_krylov_closure` with UT5b, `test_krylov_closure_steps`,
+  `test_adaptive_krylov`, `t3_a2`, `t2_g12`, `t5`) and the replay rp7b 17497639 confirm it.
