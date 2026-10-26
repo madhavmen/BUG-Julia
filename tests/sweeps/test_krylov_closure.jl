@@ -293,27 +293,22 @@ end
     mpo, psi = _xx_warm(L, 2)
     rng = Random.MersenneTwister(5)
     fr = RC.frames_from_state(psi, mpo, c)
+    # direct measures only: sqrt(||G||^2 - 2||F||^2 + k) cancels to ~sqrt(k eps) ~ 5e-8 (dt7c)
     gram(F, left) = to_concrete(left ? contract(F', (1, 2), F, (1, 2)) : contract(F, (2, 3), F', (2, 3)))
-    defect(F, left) = sqrt(max(norm(gram(F, left))^2 - 2 * norm(F)^2 + leg_dim(F, left ? 3 : 1), 0.0))
+    isodef(F, left) = left ? left_isometry_defect(F) : right_isometry_defect(F)
     for (F0, left) in ((fr.W[c - 1], true), (fr.Z[c + 1], false))
         F = to_concrete(F0 + 1e-7 * RC._randomize_like(F0, rng))
-        d = defect(F, left)
-        @test d > 1e-9                                     # premise: a non-isometric frame
+        @test isodef(F, left) > 1e-9                       # premise: a non-isometric frame
         P = RC._polar_frame(F, left ? :left : :right)
-        @test defect(P, left) < 1e-13
+        @test isodef(P, left) < 1e-13
         perp = left ? perp_component : perp_component_right
         @test norm(perp(P, F)) < 1e-12 * norm(F)           # same span
-        # the transfer map: old `Pm = F'F` against `Pm = P'F` (a quiet bond keeps the frame)
+        # the transfer map of a bond that keeps its frame: `Pm = P'F` now, `Pm = F'F` before
         G = gram(F, left)
-        Pold = G
         Pnew = to_concrete(left ? contract(P', (1, 2), F, (1, 2)) : contract(F, (2, 3), P', (2, 3)))
-        k = leg_dim(F, left ? 3 : 1)
-        pdef(X) = left ? sqrt(max(norm(to_concrete(contract(X', (1,), X, (1,))))^2 -
-                                  2 * norm(X)^2 + k, 0.0)) :
-                         sqrt(max(norm(to_concrete(contract(X, (2,), X', (2,))))^2 -
-                                  2 * norm(X)^2 + k, 0.0))
-        @test pdef(Pnew) < 1.2 * d                         # Pm'Pm = G: the defect is carried
-        @test pdef(Pold) > 1.6 * d                         # CONTROL: Pm'Pm = G^2, squared
+        sq(X) = to_concrete(left ? contract(X', (1,), X, (1,)) : contract(X, (2,), X', (2,)))
+        @test norm(to_concrete(sq(Pnew) - G)) < 1e-12      # Pm'Pm = G: the defect is carried
+        @test norm(to_concrete(sq(G) - G)) > 1e-9          # CONTROL: Pm'Pm = G^2 = G + O(defect)
     end
     # a sweep over seeded frames hands back isometric ones
     mpo, psi = _xx_warm(L, 2)
