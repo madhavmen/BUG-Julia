@@ -177,9 +177,17 @@ def fig_b2(runs, out):
         ln, = axs[0].plot(t, Qc, "-", label=f"L={c['L']} nexc={c['params']['nexc']} G={c['params']['gamma_plus']} {c['int']}")
         axs[0].plot(t, lam, "x", color=ln.get_color(), ms=3)
         cap = t5.capped_at(r)
+        # identity per record interval: -dlogP0 / dt against the trapezoid mean of <Q>_c. The first
+        # intervals hold the bright burst (<Q>_c drops from G*nexc to ~1e-2 by t ~ 0.5, dr6k3), which
+        # the record grid cannot resolve (mismatch 10-80% there, <= 0.8% from t = 1 on).
+        fd, trap = -np.diff(lp) / np.diff(t), 0.5 * (Qc[1:] + Qc[:-1])
+        rel = np.abs(fd - trap) / np.maximum(np.abs(trap), 1e-300)
+        late = t[:-1] >= 1.0
         rows.append((f"F08 B2 conditional L={c['L']} nexc={c['params']['nexc']} {json.dumps(c['params'])}",
                      [("lambda(T)", float(Qc[-1])), ("log P0(T)", float(lp[-1])),
-                      ("max |<Q>_c + dlogP0/dt|", float(np.max(np.abs(Qc - lam)))), ("first capped step ends", cap)], []))
+                      ("first-interval -dlogP0/dt vs trapezoid <Q>_c", (float(fd[0]), float(trap[0]))),
+                      ("max rel identity mismatch for t >= 1", float(np.max(rel[late])) if late.any() else None),
+                      ("first capped step ends", cap)], []))
     for r in tj:
         c, t = r["config"], np.array(r["times"])
         m, s = np.array(r["jumps_mean"]), np.array(r["jumps_stderr"])
