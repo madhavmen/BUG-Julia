@@ -1015,3 +1015,34 @@ tol_basis = 1e-8 kept by the tighter tol_trunc = 1e-9.**
 - Its observables err by 3e-14-2e-13.
 - This is a setting, not a defect.
 
+### Looser tol_basis does not lift the A1 failure (dr7a5 17512340, dr7m5 17512342, `86d7e9c`)
+
+B1 needed tol_basis 1e-5 to stay under the ceiling (dr7z, B1 section below). dr7a5 reruns the four dr7a rows at
+tol_basis 1e-5 with all else equal (runs `dissipative_t7/runs_dr7a5`). The A1 gate still fails.
+
+| tol_basis 1e-5 arm | work-limited steps | D_final step 1 (1e-8) | vs TDVP2 maxdim 1024 (log P0, obs) | wall s (1e-8) |
+|---|---|---|---|---|
+| maxdim 512, tol_trunc 1e-5 | 20 / 20 | 30 (30) | 0.094 / 0.36 | 2017 (1654) |
+| maxdim 512, tol_trunc 1e-7 | 19 / 20 | 155 (51) | 2.4 / 0.51 | 1624 (1842) |
+| maxdim 512, tol_trunc 1e-9 | 20 / 20 | 463 (140) | 0.68 / 0.60 | 1724 (2412) |
+| maxdim 512, 1e-7, dt 0.05 | 17 / 20 | 153 (49) | 0.34 / 0.31 | 1516 (1462) |
+| maxdim 1024, 1e-7 (dr7m5) | 17 / 20 | 149 (51) | 0.55 / 0.37 | 6496 (8725) |
+
+Figure `dissipative_t7/a1_L24_tolb5/F09_t7_A1_L24.png`.
+
+- At maxdim 1024 the first frame is 1025 of 2048. The frame reaches the ceiling at step 4, and the
+  first capped step ends at 0.4 instead of 0.3. Before the cap it agrees with TDVP2 to 7e-10 / 2.5e-9.
+  After the cap it is no closer than the 1e-8 run, with which it differs by 0.21 / 0.06. It is 1.34×
+  cheaper (16.0 G peak vs 20.9 G), but at matched error that buys nothing.
+- D_stage is 1024 from the first step in every maxdim 512 row, as at 1e-8. The ladder is still not converged:
+  1e-5 vs 1e-7 differ by 0.27 in the observables, 1e-7 vs 1e-9 by 0.33.
+- This is what the rank probe predicts. The frame is filled by the local Krylov stage (~900 directions
+  at dt 0.1), and tol_basis sets the DD-QR CBE width, not the Krylov width. In B1 the CBE was what
+  over-filled the frame, so loosening it worked there.
+- tol_basis looser than tol_trunc raises the kept rank: at tol_trunc 1e-9 the first step keeps 463
+  instead of 140. This is the Galerkin error of the looser basis kept by the tighter cut, as in the
+  rp7h paragraph above.
+- The verdict does not change: at A1 L = 24, BUG fails the accuracy gate at maxdim 512 because of
+  the work ceiling, and TDVP2 is the result. Agreement with TDVP2 is graded only before the first
+  capped step (4e-10 at maxdim 1024; 9e-11 / 8e-10 for the dt-halved 1e-5 arm, capped at t = 0.2).
+
