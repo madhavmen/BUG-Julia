@@ -152,6 +152,23 @@ def fig_point(g, sel, out, idx):
                           ("wall BUG / TDVP2", round(sum(b["steplog"]["wall"]) / sum(d["steplog"]["wall"]), 2))], []))
             if tol == TOLS[-1]:
                 axs[3].semilogy(t, np.maximum(np.maximum(lp, ob), 1e-16), "k-", lw=0.8, label=f"BUG vs TDVP2 tolT {tol:g}")
+    # USER 10-26: a work-limited BUG step is a failed accuracy gate, so A1 is compared at matched error,
+    # i.e. each cap-refinement arm against every arm of the other integrator at its tol_trunc
+    caps = [r for r in sel if r["E"] == "7cap"]
+    for r in caps:
+        c = r["config"]
+        rows.append((f"F09 {t5.label(r)} {c['int']} maxdim {c['maxdim']} dt={c['dt']} tolT={c['tol_trunc']:g}",
+                     cost(r) + physics(r), []))
+        other = [d for d in sel if d["config"]["int"] != c["int"] and d["E"] in ("7", "7cap")
+                 and d["config"]["tol_trunc"] == c["tol_trunc"]]
+        for d in other:
+            t, lp, ob = diff(r, d)
+            w = window(r, d)
+            rows.append((f"F09 {g[0]} L={g[1]} {c['int']} maxdim {c['maxdim']} vs {d['config']['int']} maxdim "
+                         f"{d['config']['maxdim']} at tolT {c['tol_trunc']:g}",
+                         [("max (logP0, obs)", (float(lp.max()), float(ob.max()))),
+                          ("before the first cap of either", (w, maxdiff(r, d, w))),
+                          ("wall ratio", round(sum(r["steplog"]["wall"]) / sum(d["steplog"]["wall"]), 2))], []))
     axs[0].axhline(sel[0]["config"]["maxdim"], color="k", lw=0.6)
     axs[0].set_title(f"{g[0]} L={g[1]} {g[2]}: D_final (solid BUG, dashed TDVP2), BUG D_stage dotted", fontsize=8)
     axs[1].set_title("accumulated discarded norm", fontsize=8)

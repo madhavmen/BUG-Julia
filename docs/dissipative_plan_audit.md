@@ -932,3 +932,67 @@ Accumulated discarded norm, by tol_trunc:
   The conditional decay is slow, the dark-state (subradiant) regime the plan selects. ⟨Q⟩_c keeps
   falling to Jt = 20, so the time window is too short to read off an asymptotic rate.
 
+## Task 7 A1 L = 24 (dr7a/dr7c/dr7m/dr7n, `0a4fc8f`, figure `dissipative_t7/a1_L24/F09_t7_A1_L24.png`)
+
+The point is A1 L = 24, U = 4, κ = 2, dbl_rich, warm 0.2, Jt = 2, with tol_basis = 1e-8 and
+tol_root = 1e-12. BUG runs at dt 0.1 and TDVP2 at dt 0.05, each at maxdim 512 (tol_trunc ladder plus a
+dt-halved arm) and at maxdim 1024 (tol_trunc 1e-7, E 7cap).
+
+**BUG fails the accuracy gate at this point. Its steps are work-limited (USER 10-26: a work-limited
+step is a failed gate, plan §2 / §4.4).**
+
+| arm | first capped step ends | work-limited steps | vs TDVP2 maxdim 1024 (log P0, obs) | before the first cap |
+|---|---|---|---|---|
+| BUG maxdim 512, tol_trunc 1e-5 / 1e-7 / 1e-9 | 0.1 | 20 / 20 | 0.54 / 0.33 (1e-5) | — |
+| BUG maxdim 1024, 1e-7 | 0.3 | 18 / 20 | 0.36 / 0.34 | 4.0e-10 / 3.4e-10 |
+| TDVP2 maxdim 512, 1e-7 | 0.9 (maxdim) | — | 1.3e-4 / 2.5e-5 | — |
+
+- Before the ceiling binds, BUG and TDVP2 agree to 4e-10. Once it binds, BUG's observables are wrong
+  by O(0.3-0.6): the BUG tol_trunc ladder at maxdim 512 is non-monotone and 0.28-0.68 apart.
+- **TDVP2 is converged** to the precision its maxdim allows:
+  - tol_trunc 1e-7 vs 1e-9 differ by 4.6e-6;
+  - the dt-halved arm differs by 6.5e-8;
+  - maxdim 512 vs 1024 differ by 1.3e-4, which is its cap error.
+
+  TDVP2 is therefore the result at this point (plan §4.5: a regime where TDVP2 wins is a result).
+- **Physics (TDVP2, maxdim 1024):** log P0(2) = −26.72, ⟨Q⟩_c(2) = 9.72, late ⟨Q⟩_c = 11.55,
+  doublons(2) = 4.86, S(2) = 3.15.
+- **Cost.** BUG maxdim 1024 took 8725 s at a peak of 20.9 G; TDVP2 maxdim 1024 took 8309 s at 7.5 G.
+  A BUG arm whose ceiling would not bind needs about 2× the trial frame again (below), so it was not
+  run.
+
+**Why the ceiling binds (rank probe `benchmarks/dissipative_rank_probe.jl`, A1 L = 12, dt 0.1,
+t0 = 0.6).** rp7i (17508974, `e378111`) logs each stage's share of the root frame. Entering rank is
+354.
+
+| arm | DD-QR CBE | local Krylov (Tests C/D) | frame | final rank | obs error |
+|---|---|---|---|---|---|
+| maxdim 2048 (uncapped) | +397 | +928 | 1679 | 342 | 1.3e-12 |
+| maxdim 512 (ceiling 1024) | +397 | +273 | 1024 | 377 | 2.2e-4 |
+| order 1, maxdim 512 | +398 | +272 | 1024 | — | 6.4e-4 |
+| order 1, maxdim 2048 | +398 | +775 | 1527 | — | 2.2e-12 |
+
+- The local Krylov stage needs about 900 directions at dt 0.1. The ceiling `work_ceiling = 2·maxdim`
+  gives it 30% of them, and the frontier sweeps then add nothing (frontier-2 leak 1.5e-2, capped).
+- The final rank is not the limit: uncapped, the step compresses to 342, as TDVP2 does (330).
+- TDVP2's two-site trial space at the same maxdim is d·maxdim = 2048 per side for d = 4. For d = 2 it
+  equals BUG's ceiling, which is why A2 never hit this.
+- USER 10-26 kept the ceiling at 2·maxdim instead of making it d·maxdim. A1 BUG vs TDVP2 is
+  compared only at matched error.
+
+**The `cap_order` knob (`e37d267`) does not act on this failure.**
+- `cap_order = :weight` ranks the DD-QR CBE directions across sectors when that expansion alone
+  exceeds the ceiling. The alternative, `_trim_total`, keeps them in storage order, the latent trap
+  of PLAN-tolerance-control.md §1.
+- Test T2.5 (test_dd_cbe_controller) shows it lowers the residual 31-57×.
+- In the real step the expansion never exceeds its room, since Krylov is what fills the frame.
+  rp7g (17507473) is bit-identical between `:weight` and `:sector`.
+- The knob is kept with default `:sector`.
+
+**The unsaturated rank excess (15-40% above TDVP2 without a binding cap) is the Galerkin error of
+tol_basis = 1e-8 kept by the tighter tol_trunc = 1e-9.**
+- rp7h (17507474) at tol_basis 1e-9 gives flat bonds of 83 against TDVP2's 79 at t0 0.2, and
+  177-181 against 163-177 at t0 0.4.
+- Its observables err by 3e-14-2e-13.
+- This is a setting, not a defect.
+
