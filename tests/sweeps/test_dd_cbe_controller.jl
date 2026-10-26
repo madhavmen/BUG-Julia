@@ -127,6 +127,35 @@ end
     @test st3 === :empty && Q3 === nothing && c3.kc.n_stream_cols == 0
 end
 
+# A binding work ceiling keeps `cap` of the controller's directions. `:sector` (`_trim_total`)
+# fills sectors in storage order; `:weight` keeps the heaviest across sectors, so it must hold at
+# least as much of the exact DD range and sit near its best rank-`cap` subspace (rp7f: the
+# sector cut dropped whole sectors, obs error 2.2e-4 against 1.3e-12 uncut).
+@testset "T2.5: a binding work ceiling keeps the heaviest directions, $side" for side in
+        (:left, :right)
+    mpo, psi, f, lenv, renv = _hb_wide()
+    left = side === :left
+    G = _dd_closures(f, mpo, lenv, renv, side; rng = Random.MersenneTwister(1)).G
+    perp = left ? perp_component : perp_component_right
+    r = f.old_rank
+    alloc = RC.BasisAllocation(1.0, 1e-300, 1.0, 1.0, 1.0)      # unreachable: the ceiling binds
+    run(order) = dd_cbe_expand(f, mpo, 6, lenv, renv, side; alloc = alloc, workcap = r + 4,
+                               ledger = RC.AdaptiveLedger(), rng = Random.MersenneTwister(51),
+                               cap_order = order)
+    es, ew = run(:sector), run(:weight)
+    Us, Uw = left ? (es.U_ex, ew.U_ex) : (es.V_ex, ew.V_ex)
+    fl = left ? 3 : 1
+    @test leg_dim(Us, fl) == leg_dim(Uw, fl) == r + 4
+    res_s, res_w = norm(perp(Us, G)), norm(perp(Uw, G))
+    best = svd(G, left ? (1, 2) : (2, 3); cutoff = 0.0, Nkeep = 4, get_lists = true)
+    res_opt = sqrt(RC._sq_weight(best.trunc_list))
+    @info("T2.5 binding ceiling: residual of the exact DD range", side, res_s, res_w, res_opt,
+          norm_G = norm(G))
+    @test res_w <= res_s * (1 + 1e-10)
+    @test res_w <= 2 * res_opt + 1e-12 * norm(G)
+    @test_throws ArgumentError dd_cbe_expand(f, mpo, 6, lenv, renv, side; cap_order = :bogus)
+end
+
 @testset "T3.2: the linear budget sums to tol_basis, and the step records its rule" begin
     b = RC.AdaptiveBudget(1e-6, 1e-8, 1e-8)
     for nb in (1, 7, 15), nf in (1, 3)

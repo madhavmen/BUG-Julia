@@ -10,6 +10,7 @@
 #   tdvp512                TDVP2, two steps of dt/2, maxdim 512
 #   bug2048b10 / ...b10u   tol_basis 1e-10 instead of 1e-8 (suffix bN = tol_basis 1e-N): is the excess
 #                          the Galerkin error of tol_basis kept by a tighter tol_trunc?
+#   bug512w / bug512wu     cap_order = :weight: the capped frame keeps its heaviest directions
 # Printed per arm: distance to psi_ex, bond dims, per-bond counts of normalised Schmidt values above
 # 1e-2 .. 1e-10, frame widths per bond (BUG) and the step's limits. A spurious tail shows as counts at
 # 1e-6 .. 1e-10 above psi_ex's at the same bonds.
@@ -71,9 +72,11 @@ function arm(psi0, name)
         mb = match(r"b(\d+)", name)
         tb = mb === nothing ? 1e-8 : 10.0^(-parse(Int, mb[1]))
         rec["tol_basis"] = tb
+        rec["cap_order"] = occursin("w", name) ? "weight" : "sector"
         info = cbe_bug_step!(psi, G, ComplexF64(-im * DT); hermitian = false,
                              order = occursin("o1", name) ? 1 : 3, tol_basis = tb, tol_root = 1e-12,
-                             tol_trunc = TOLT, maxdim = md, truncate = !endswith(name, "u"))
+                             tol_trunc = TOLT, maxdim = md, truncate = !endswith(name, "u"),
+                             cap_order = Symbol(rec["cap_order"]))
         rec["frames"] = info.expanded
         rec["root_right"] = info.root_right
         rec["limits"] = string.(info.record.limits)

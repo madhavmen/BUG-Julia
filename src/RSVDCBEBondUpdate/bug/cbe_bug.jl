@@ -100,6 +100,10 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # plan §1.2), except under `exact`: the folded leak is sampled, and the debug
                        # reference draws no random numbers. `false` keeps the exact `H*Theta` leak.
                        fold_omega::Union{Nothing, Bool} = nothing,
+                       # Which DD-QR CBE directions survive when the work ceiling binds:
+                       # `:weight` the heaviest across all sectors, `:sector` the first sectors in
+                       # storage order (`dd_cbe_expand`). Below the ceiling both are identical.
+                       cap_order::Symbol = :sector,
                        rng::AbstractRNG = MersenneTwister(0x5EED))
     L = length(psi)
     length(mpo) == L || throw(DimensionMismatch(
@@ -162,7 +166,8 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     # ONCE, globally, before anything widens.
     wcap_step = work_ceiling(maxdim, maximum(bond_dims(psi); init = 0))
     # The expansion settings every DD-QR CBE of the step takes, half-sweeps and frontier sweeps.
-    exkw = (growth = ADAPTIVE_GROWTH, exact = exact, alloc = alloc, workcap = wcap_step)
+    exkw = (growth = ADAPTIVE_GROWTH, exact = exact, alloc = alloc, workcap = wcap_step,
+            cap_order = cap_order)
 
     # ⛔ THE LEDGER AND THE RNG ARE PER HALF-SWEEP, because under `parallel = true` the two run
     # concurrently: a shared `AdaptiveLedger` loses `+=` updates, and a shared `MersenneTwister`

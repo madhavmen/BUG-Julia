@@ -97,6 +97,29 @@ end
 
 # ── T2.5: one side of the bond expansion ──────────────────────────────────────────────────
 
+const _TAG_W, _TAG_WR = "cbeW,L", "cbeW,R"
+
+"""
+    _trim_by_weight(Q, B, side, n) -> Q or nothing
+
+Keep the `n` directions of `Q` (orthonormal, outside the frame) that carry the most of the DD
+action `M = P^D X P^D`, given `B = Q' M` (rows `(g, site_r, link_r)` for `:left`, columns
+`(link_l, site_l, g)` for `:right`, `g` = `Q`'s leg): Telum's SVD ranks them across ALL sectors
+(`Nkeep`), as the final selection of `cbe_expand` does. `_trim_total` instead fills sectors in
+storage order, so at a binding work ceiling whole charge sectors lose their expansion (the latent
+trap of PLAN-tolerance-control.md §1). MEASURED (dissipative A1 L = 12, dt 0.1, rank probe rp7f):
+frame cut at 1024 against 1679 needed, obs error 2.2e-4 against 1.3e-12 uncut, the spurious
+components then forcing the compressed rank to maxdim off the root.
+"""
+function _trim_by_weight(Q, B, side::Symbol, n::Int)
+    n <= 0 && return nothing
+    left = side === :left
+    leg_dim(Q, left ? 3 : 1) <= n && return Q
+    U = svd(B, left ? (1,) : (3,), _TAG_W, _TAG_WR; cutoff = 0.0, Nkeep = n).U    # (g, k)
+    return left ? to_concrete(contract(Q, (3,), U, (1,))) :     # (link, site, k)
+                  to_concrete(contract(U, (1,), Q, (1,)))       # (k, site, link)
+end
+
 """
     dd_cbe_expand(f, mpo, i, lenv, renv, side; alloc, ledger, workcap, growth,
                   exact, rng, kc) -> CBEExpansion
@@ -104,7 +127,9 @@ end
 Grows ONE frame at bond `(i, i+1)`: `U0` for `side = :left` (K-sweep), `V0` for `:right` (L-sweep).
 The other frame is returned unchanged. Rank comes from the QR; the probe width from
 [`_dd_controller`](@ref), or from the numerical rank alone when `alloc === nothing` or `exact`.
-Retained directions are bounded by the local room and the work ceiling.
+Retained directions are bounded by the local room and the work ceiling; past the ceiling
+`cap_order = :weight` keeps the heaviest ([`_trim_by_weight`](@ref)), `:sector` the first sectors
+in storage order (`_trim_total`).
 """
 function dd_cbe_expand(f::BondFrame, mpo::MPO, i::Int, lenv::MPOLink, renv::MPOLink,
                        side::Symbol; alloc::Union{Nothing, BasisAllocation} = nothing,
@@ -113,8 +138,11 @@ function dd_cbe_expand(f::BondFrame, mpo::MPO, i::Int, lenv::MPOLink, renv::MPOL
                        exact::Bool = false,
                        rng::AbstractRNG = MersenneTwister(0x5EED),
                        kc::KernelCounters = KernelCounters(), version::Int = 0,
-                       holdout_width::Int = _DD_HOLDOUT, audit::Bool = false)
+                       holdout_width::Int = _DD_HOLDOUT, audit::Bool = false,
+                       cap_order::Symbol = :sector)
     side in (:left, :right) || throw(ArgumentError("side must be :left or :right"))
+    cap_order in (:sector, :weight) || throw(ArgumentError(
+        "cap_order must be :sector or :weight, got $cap_order"))
     left = side === :left
     U0, V0 = f.U0, f.V0
     r = f.old_rank
@@ -165,7 +193,16 @@ function dd_cbe_expand(f::BondFrame, mpo::MPO, i::Int, lenv::MPOLink, renv::MPOL
     end
     Q === nothing && return none()
     if n > cap
-        Q = _trim_total(Q, fl, cap)
+        Q = if cap_order === :weight
+            # B = Q' M exactly: the opposite sketch applied to the `n` directions themselves
+            opT = TwoSiteSketchOp(f, mpo, i, lenv, renv; adjoint = left, version = version,
+                                  counters = kc)
+            B = (apply_two_site_sketch!(out, Q, opT); out[])
+            _trim_by_weight(Q, left ? perp_component_right(V0, B) : perp_component(U0, B),
+                            side, cap)
+        else
+            _trim_total(Q, fl, cap)
+        end
         Q === nothing && return none()
     end
     ledger === nothing || (wbind && n >= cap && (ledger.workcap_reached = true))
