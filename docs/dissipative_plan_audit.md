@@ -759,3 +759,35 @@ bit-identical.
 - Cancelled: dr6w, dr6k, dr6vb and dr7s (A1 and B1 checks had passed). They are rerun on
   `3fa0e78` after dt7a 17497637 (`test_krylov_closure` with UT5b, `test_krylov_closure_steps`,
   `test_adaptive_krylov`, `t3_a2`, `t2_g12`, `t5`) and the replay rp7b 17497639 confirm it.
+
+**Second defect fixed and confirmed (`599516a` + test `c3a6765`).** `_polar_frame` took two
+attempts: Telum's U and Vd new legs share an arrow, and its S blocks are `DiagRMT`. The final form
+is `U S^0 Vd` with unit singular values set in place.
+
+- dt7d 17497771 passes `test_krylov_closure` (with UT5b), `test_krylov_closure_steps`,
+  `test_adaptive_krylov`, `test_dissipative_t3_a2`, `t2_g12`, `t5` and `test_dd_cbe`.
+- UT5b originally measured the defect as √(‖G‖² - 2‖F‖² + k), which floors at √(k eps) ≈ 4e-8
+  (dt7c). It now uses `left/right_isometry_defect` and ‖Pm'Pm - G‖ directly, at the same 1e-13
+  and 1e-12 thresholds.
+- Replay rp7d 17497772: both crash steps complete, no frame crosses 1e-5, and the root energies
+  barely move (10.698 → 10.692 and 6.749 → 6.748; before the fix the starting energy was 15.7 and
+  1e9). The root frames are also smaller (A2 L = 48: 30 + 23 + 1 columns, against 103 + 23 + 1),
+  because the non-isometric frames had carried spurious directions.
+- Rerun on `c3a6765`: dr6w2 17499263 (A2 stability), dr6k2 17499264 (B2 pilots), dr6v2 17499265
+  (A2 L = 32) and dr7t 17499266 (the full Task 7 smoke).
+
+**A1 time-to-accuracy, final (dr6e 17497216, every arm on th-cl-dell09, a Xeon Gold 6130;
+arm 5 rerun as 17497698 on the same node and code after an OOM at 6 G; reference dt 0.00625,
+good to about 1e-9; figures `a1_tta`).**
+
+| arm | dt | error | wall [s] |
+|---|---|---|---|
+| BUG | 0.0125 / 0.025 / 0.05 / 0.1 / 0.2 | 1.4e-8 / 2.3e-7 / 2.9e-6 / 3.3e-5 / 6.7e-4 | 1494 / 780 / 443 / 457 / 579 |
+| TDVP2 | 0.0125 / 0.025 / 0.05 / 0.1 | 4.6e-8 / 3.7e-7 / 3.0e-6 / 2.4e-5 | 759 / 482 / 389 / 396 |
+
+On this point (κ = 2, product start, Jt = 1) TDVP2 is 1.1-1.6 times cheaper at matched error:
+1.14 at 3e-6, about 1.6 at 3e-7, and about 1.4 at 1e-8 against TDVP2 interpolated along its slope
+of 3. BUG's slopes are about 4 (one-step order from the product state), but the cost of a BUG
+step hardly falls with dt, so halving dt nearly doubles its wall. The strong-loss stability point
+(κ = 20, warm start) goes the other way, with BUG about 3.5 times cheaper at 1e-8. As plan §4.5
+asks, the comparison is parameter- and model-dependent.
