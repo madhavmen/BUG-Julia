@@ -892,6 +892,25 @@ dt 0.025 at 1e-10/1e-12/1e-11.
 So the ceiling limits only the number of redundant working columns, and the errors above are not
 cap errors. The figure keeps the conservative mark (`capped_at`), as the plan requires (U12 / §4.4).
 
+**The step-size controller at this point (dr6w3 17500801, `0a4fc8f`, figure `a2_stability/F03_control.png`).**
+The run is BUG with τ = 1e-6, checking every 4 steps from h = 0.1. It took 8516 s at 8.5 G
+(seffx 8.2/16 G).
+
+- **It meets its target.** The error against the dt = 0.025 reference is 1.02e-6, from 52 accepted
+  steps with h between 0.039 and 0.116.
+- **It is wasteful here.** 13 of its 26 checks reject:
+  - every check at h ≈ 0.093 estimates ~2e-5 and rejects;
+  - the retry at h/2 estimates ~2e-8 and is accepted;
+  - the growth after it returns to 0.093.
+
+  A 1000× drop per halving is what the fixed steps show at this stiff point (Γ·nexc = 30): dt 0.1 →
+  4.8e-6 and dt 0.05 → 5.0e-10. The controller's h^(p+1) growth model therefore over-predicts the
+  safe step.
+- **Net effect.** The controlled run costs as much as fixed dt 0.05 (8715 s), which is 2000× more
+  accurate.
+- **Verdict.** The controller is validated for accuracy (plan G3). It is not a cost win at a
+  non-asymptotic stiff point, which is a finding, not a defect.
+
 ## Task 7 A2 L = 48 (dr7b 17500800, `0a4fc8f`, figure `dissipative_t7/a2_L48/F09_t7_A2_L48.png`)
 
 The point is A2 L = 48, 2 excitations (block start, warm 0.2), Jz = 1, Γ = 1, ka = π/3, maxdim 256,
