@@ -248,11 +248,22 @@ end
     @test_throws ErrorException ite_step!(copy(psi), _IT_MPO, 0.3; order = 1, tol_trunc = 1e-10,
                                           maxdim = 2, outside_residual = false, retries = 0,
                                           on_fail = :error)
-    # a root tolerance the solve cannot reach: an implicit root has one stage and no substeps
-    q = ite_step!(neel_state(_IT_L), _IT_MPO, 3.0; order = 1, root_method = :radau2,
+    # a root tolerance the solve cannot reach: an implicit root has one stage and no substeps.
+    # It needs a root wider than the Krylov space: since the DD-QR CBE (d717376) Neel's order-1
+    # root is 4-dimensional, Krylov exhausts it and 1e-30 is met honestly (err 3e-68, u6bis). A
+    # warmed state's root is not exhaustible; Neel stays as the control that is NOT flagged.
+    warm = neel_state(_IT_L)
+    for _ in 1:3
+        ite_step!(warm, _IT_MPO, 0.2; order = 2, maxdim = 64, outside_residual = false)
+    end
+    q = ite_step!(warm, _IT_MPO, 3.0; order = 1, root_method = :radau2,
                   tol_root = 1e-30, outside_residual = false, retries = 0)
     @test q.status === :failed
     @test :expv in q.unmet
+    qn = ite_step!(neel_state(_IT_L), _IT_MPO, 3.0; order = 1, root_method = :radau2,
+                   tol_root = 1e-30, outside_residual = false, retries = 0)
+    @info "IT-U6 root tolerance 1e-30: warmed $(q.status) $(q.unmet) root_err $(q.root_err); Neel control $(qn.status) $(qn.unmet) root_err $(qn.root_err)"
+    @test !(:expv in qn.unmet)                     # control: an exhausted root meets any tol_root
     # never silent: an accepted record carries no reasons, a failed one carries some
     for rec in (q, ite_step!(neel_state(_IT_L), _IT_MPO, 0.1; order = 2, retries = 0))
         rec.status === :failed ? @test(!isempty(rec.unmet)) : @test(isempty(rec.unmet))
