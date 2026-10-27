@@ -109,12 +109,18 @@ end
         @test norm(outs[k][1] - outs[1][1]) < 1e-10
     end
     @test norm(first(step(kls = :concurrent)) - outs[end][1]) < 1e-12   # reproducible
-    vs, is = step()
-    vh, ih = step(parallel = :half_sweeps)
-    vf, iff = step(parallel = :full)
+    # As test_adaptive_parallel.jl: `exact = true` draws no random numbers, so the concurrent
+    # half-sweeps are the serial step to round-off. With RSVD the right sweep draws its own seeded
+    # stream, so the states agree to the tolerance and repeated parallel runs agree exactly.
+    vs, is = step(exact = true)
+    vh, ih = step(exact = true, parallel = :half_sweeps)
+    vf, iff = step(exact = true, parallel = :full)
     @test ih.record.parallel === :half_sweeps && iff.record.parallel === :full
     @test norm(vh - vs) < 1e-10                    # concurrent half-sweeps: the serial step
-    @test norm(vf - outs[end][1]) < 1e-10          # :full = concurrent half-sweeps + K/L/S
+    @test norm(vf - first(step(exact = true, kls = :concurrent))) < 1e-10  # :full = both
+    rh = [first(step(parallel = :half_sweeps)) for _ in 1:2]
+    @test norm(rh[1] - rh[2]) < 1e-12              # independent tasks, not a race
+    @test norm(rh[1] - first(step())) < kw.tol_basis
     k = iff.ledger.kls
     @info "U18c" Threads.nthreads() k
     # no new direction outside the root frames: the four-block core is the standard root solve
