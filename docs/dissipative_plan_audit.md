@@ -874,6 +874,24 @@ reports the two regimes apart (`684940a`). Physics: after the burst the dark rat
 λ(T) = 0.0076 at ν = 1/8, Γ = 2 against 0.027 at Γ = 0.5. Stronger collective coupling gives longer
 lifetimes (subradiance).
 
+**B2 trajectory pilots (dr6k3 rows 1/3/5/7, figures `pilots_b/F08_b2.png`, `F11_samples.png`).**
+Each trajectory row is graded against its own no-jump run (rows 2/4/6/8): the fraction of the 20
+trajectories with no jump by T = 5 estimates P0(T).
+
+| ν, Γ | zero-jump fraction | P0(T) ± binomial σ | z | jumps mean | wall [s] | peak RSS |
+|---|---|---|---|---|---|---|
+| 1/8, 0.5 | 11/20 = 0.55 | 0.66 ± 0.11 | −1.1 | 0.45 | 2998 | 2.8 G |
+| 1/8, 2 | 14/20 = 0.70 | 0.73 ± 0.10 | −0.3 | 0.30 | 4404 | 2.7 G |
+| 1/4, 0.5 | 3/20 = 0.15 | 0.24 ± 0.10 | −0.9 | 1.40 | 111594 | 9.8 G |
+| 1/4, 2 | 9/20 = 0.45 | 0.37 ± 0.11 | +0.7 | 0.80 | 136124 | 6.4 G |
+
+- All four agree with P0(T) within 1.1 σ. No step was rejected.
+- Row 7 timed out at 36 h and finished from its checkpoint (dr6k3r7 17541520, 2h24, MaxRSS 5.9 G),
+  so its JSON reports one restart.
+- The ν = 1/4 rows cost 31-37× the ν = 1/8 rows. At 20 trajectories the emitted-count 95%
+  half-width is 29-69% of the mean, and a 5% half-width needs about 700-3800 trajectories (F11).
+  For its trajectories the Task 7 B2 point therefore stays at ν = 1/8 (L = 32, 4 excitations).
+
 **Task 7 submission design.** All runs use `0a4fc8f` (PKG c03c42a01db0, the solver as `c3a6765`).
 
 - Each deterministic point starts from the same warm state (DR_WARM = 0.2: 16 BUG steps of 0.0125
@@ -894,8 +912,8 @@ lifetimes (subradiance).
 | dr7b 17500800 | A2 L = 48, 2 exc. (block), Γ = 1, maxdim 256, Jt = 20, closure_checks on | BUG dt 0.1 and TDVP2 dt 0.05 × {1e-5, 1e-7, 1e-9}; dt-halved arms at 1e-7 |
 | dr6w3 17500801 | dr6w2 row 11 (A2 L = 24 controller, E = 3) | rerun at 16 G after an OOM at 8.3 G |
 
-B1 and B2 Task 7 points wait for the last pilots: dr6j2 rows 2-3 (U = −4, κ = 2, 10) and dr6k3
-rows 5 and 7 (B2 ν = 1/4 trajectories).
+B1 and B2 Task 7 points waited for the last pilots: dr6j2 rows 2-3 (U = −4, κ = 2, 10) and dr6k3
+rows 5 and 7 (B2 ν = 1/4 trajectories). All have finished; see "B2 trajectory pilots" above.
 
 ## A2 stability (dr6w2 17499263, `c3a6765`, figure `a2_stability/F04_stability.png`)
 
