@@ -19,8 +19,8 @@
 #        with Q ≠ 0 both converge to ED under the same cap and per-cut discard rule, in the start's
 #        U(1) sector
 #
-# U07, U13-U15 test the jump engine (plan Task 4). U18 (full parallel K/L/S) is optional and not the
-# production integrator (plan §1.2), so it waits until that backend is proposed for production.
+# U07, U13-U15 test the jump engine (plan Task 4). U18 (full parallel K/L/S, optional) is
+# test_dissipative_u18.jl, the prerequisite of Task 7's efficiency/parallel subset.
 
 using Test
 using LinearAlgebra
@@ -38,18 +38,6 @@ include(joinpath(@__DIR__, "..", "common", "dissipative_fixtures.jl"))
 # tolerances well below the time errors measured here
 const _G12_BUG = (hermitian = false, order = 3, tol_basis = 1e-10, tol_root = 1e-12,
                   tol_trunc = 1e-12, maxdim = 256)
-
-"""
-Local loss: `_lossy_xx` (loss 1.0 / 0.2 on odd / even sites) from Neel warmed by two TDVP2 steps,
-or (`start = :dw`) from the domain wall, where the frames start small enough that the step's
-time error is visible (as in `_dw_errors`).
-"""
-function _g12_local(L; delta = 0.5, gamma = _loss_rates(L), start = :warm)
-    set_symmetry!(:U1)
-    H, Q, G, Gd, Qd = _lossy_xx(L; delta = delta, gamma = gamma)
-    psi0 = start === :dw ? domain_wall_state(L) : _xx_warm(L, 2; delta = delta)[2]
-    return (; H, Q, G, Gd = Matrix(Gd), Qd = Matrix(Qd), Hd = Matrix(Gd + 0.5im * Qd), psi0)
-end
 
 "Collective emission (A2): XXZ in a staggered field, `L_±` at `ka = π/3`, from Neel warmed by `H`
 or (`start = :dw`) from the domain wall."
@@ -71,30 +59,6 @@ function _g12_emission(L; Jz = 1.0, g = 1.0, k = π / 3, start = :warm)
     return (; H, Q, G = no_jump_mpo(H, Q), Gd = Hd - 0.5im * Qd, Qd, Hd, psi0)
 end
 
-"""
-`_dw_errors` on `G`: order-`p` steps of each `dt` from `f.psi0` against the dense flow, one step
-(`T = nothing`) or `T/dt` steps, and the floor the step's other errors may account for (per step
-`tol_basis` plus the ledger's root, compression and projection figures). `kw` is a NamedTuple.
-`first_keep = m` keeps `G psi .. G^m psi` (`global_krylov_states`) on the first step only.
-"""
-function _g12_errors(f, p, dts, kw; T = nothing, first_keep = 0)
-    v0 = dense_state(f.psi0)
-    errs, floors = Float64[], Float64[]
-    for dt in dts
-        n = T === nothing ? 1 : round(Int, T / dt)
-        psi, floor = copy(f.psi0), 0.0
-        for s in 1:n
-            keep = s == 1 && first_keep > 0 ? global_krylov_states(f.G, psi, first_keep) : Any[]
-            lg = cbe_bug_step!(psi, f.G, ComplexF64(-1im * dt); kw..., order = p,
-                               keep_states = keep).ledger
-            floor += kw.tol_basis + lg.expv_err + lg.discarded + lg.proj_err
-        end
-        push!(errs, _g12_err(psi, f.Gd, n * dt, v0))
-        push!(floors, floor)
-    end
-    return errs, floors
-end
-
 _P0(psi) = norm(psi)^2
 _qc(psi, Q) = real(mpo_energy(psi, Q)) / _P0(psi)
 
@@ -108,9 +72,6 @@ function _g12_run(step!, psi0, n)
     end
     return psi, vs
 end
-
-"`||psi - exp(T G) v0|| / ||v0||` in the dense basis."
-_g12_err(psi, Gd, T, v0) = norm(dense_state(psi) - exp(-1im * T * Gd) * v0) / norm(v0)
 
 @testset "dissipative Task 2 (G1/G2): U06, U09, U10, U11, U16" begin
 

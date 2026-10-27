@@ -24,21 +24,6 @@ import Random
 include(joinpath(@__DIR__, "..", "common", "adaptive_fixtures.jl"))
 include(joinpath(@__DIR__, "..", "common", "dense_reference.jl"))
 
-"The step's root integrator at `tol`, as `cbe_bug_step!` hands it to the K/L/S stages."
-_stage(tau; tol = 1e-12) = (apply, x, rep) -> BUGJulia.BondUpdateBUG.expv(apply, tau, x;
-    maxiter = RC._ROOT_MAXITER, tol = 1e-15, conv_tol = tol, substeps = 0, report = rep)
-
-"`psi`'s frames with the one-site tensor `X` at site `at` (`c` for K, `c+1` for L)."
-function _site_mps(psi, fr, X, at)
-    T = Any[i == at ? X : i <= fr.c ? fr.W[i] : fr.Z[i - 1] for i in 1:length(psi)]
-    return SymMPS(Any[RC._relink(T[i], psi[i].inds[1].itags, psi[i].inds[3].itags)
-                      for i in eachindex(T)], at)
-end
-
-"`fr` with the root frames replaced."
-_with_root(fr, Wc, Zc) = (W = copy(fr.W); Z = copy(fr.Z); W[fr.c] = Wc; Z[fr.c] = Zc;
-                          RC.KLFrames(W, Z, fr.c, fr.lenv, fr.renv, 0))
-
 "The preliminary frames of a real order-`p` step from the warmed XX chain."
 function _prelim(L, steps, tau; order = 1, tol_basis = 1e-8)
     mpo, psi0 = _xx_warm(L, steps)

@@ -116,6 +116,22 @@ function _root_basis(psi0, mpo, fr; mmax = 3, rng = Random.MersenneTwister(5))
                        X -> dense_state(RC._frontier_mps(psi0, fr, X)); mmax = mmax, rng = rng)
 end
 
+"The step's root integrator at `tol`, as `cbe_bug_step!` hands it to the K/L/S stages."
+_stage(tau; tol = 1e-12, hermitian = true) = (apply, x, rep) -> BUGJulia.BondUpdateBUG.expv(
+    apply, tau, x; hermitian = hermitian, maxiter = RC._ROOT_MAXITER, tol = 1e-15, conv_tol = tol,
+    substeps = 0, report = rep)
+
+"`psi`'s frames with the one-site tensor `X` at site `at` (`c` for K, `c+1` for L)."
+function _site_mps(psi, fr, X, at)
+    T = Any[i == at ? X : i <= fr.c ? fr.W[i] : fr.Z[i - 1] for i in 1:length(psi)]
+    return SymMPS(Any[RC._relink(T[i], psi[i].inds[1].itags, psi[i].inds[3].itags)
+                      for i in eachindex(T)], at)
+end
+
+"`fr` with the root frames replaced."
+_with_root(fr, Wc, Zc) = (W = copy(fr.W); Z = copy(fr.Z); W[fr.c] = Wc; Z[fr.c] = Zc;
+                          RC.KLFrames(W, Z, fr.c, fr.lenv, fr.renv, 0))
+
 """
     _dw_errors(p, dts; T = nothing, L = 10, kw...) -> (errs, floors)
 

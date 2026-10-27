@@ -1,6 +1,6 @@
 # tests/common/dissipative_fixtures.jl -- the lossy generators and small exact references of the
-# dissipative plan's tests (test_dissipative_t1.jl, _t2.jl, _t3_a1.jl, _t3_a2.jl): the Fock-space
-# Hubbard ED (full or one sector) and its basis phases, product-basis amplitudes, observables and
+# dissipative plan's tests (test_dissipative_t1.jl, _t2.jl, _t2_g12.jl, _u18.jl, _t3_a1.jl,
+# _t3_a2.jl): the G1/G2 order ladder (`_g12_errors`), the Fock-space Hubbard ED (full or one sector) and its basis phases, product-basis amplitudes, observables and
 # sector ranks. Needs `adaptive_fixtures.jl`, `dense_reference.jl` and `dd_fixtures.jl`.
 
 # Stdlib-only Fock-space sign conventions (`hub_mode`, `hub_occ`, `hub_sign`), shared with the
@@ -36,6 +36,45 @@ function _lossy_bond(; L = 8, i = 4, steps = 2, maxdim = 4)
     return G, psi, f, lenv, renv, H
 end
 _lossy_wide() = _lossy_bond(; L = 12, i = 6, steps = 4, maxdim = 16)
+
+"""
+Local loss: `_lossy_xx` (loss 1.0 / 0.2 on odd / even sites) from Neel warmed by two TDVP2 steps,
+or (`start = :dw`) from the domain wall, where the frames start small enough that the step's
+time error is visible (as in `_dw_errors`).
+"""
+function _g12_local(L; delta = 0.5, gamma = _loss_rates(L), start = :warm)
+    set_symmetry!(:U1)
+    H, Q, G, Gd, Qd = _lossy_xx(L; delta = delta, gamma = gamma)
+    psi0 = start === :dw ? domain_wall_state(L) : _xx_warm(L, 2; delta = delta)[2]
+    return (; H, Q, G, Gd = Matrix(Gd), Qd = Matrix(Qd), Hd = Matrix(Gd + 0.5im * Qd), psi0)
+end
+
+"`||psi - exp(T G) v0|| / ||v0||` in the dense basis."
+_g12_err(psi, Gd, T, v0) = norm(dense_state(psi) - exp(-1im * T * Gd) * v0) / norm(v0)
+
+"""
+`_dw_errors` on `G`: order-`p` steps of each `dt` from `f.psi0` against the dense flow, one step
+(`T = nothing`) or `T/dt` steps, and the floor the step's other errors may account for (per step
+`tol_basis` plus the ledger's root, compression and projection figures). `kw` is a NamedTuple.
+`first_keep = m` keeps `G psi .. G^m psi` (`global_krylov_states`) on the first step only.
+"""
+function _g12_errors(f, p, dts, kw; T = nothing, first_keep = 0)
+    v0 = dense_state(f.psi0)
+    errs, floors = Float64[], Float64[]
+    for dt in dts
+        n = T === nothing ? 1 : round(Int, T / dt)
+        psi, floor = copy(f.psi0), 0.0
+        for s in 1:n
+            keep = s == 1 && first_keep > 0 ? global_krylov_states(f.G, psi, first_keep) : Any[]
+            lg = cbe_bug_step!(psi, f.G, ComplexF64(-1im * dt); kw..., order = p,
+                               keep_states = keep).ledger
+            floor += kw.tol_basis + lg.expv_err + lg.discarded + lg.proj_err
+        end
+        push!(errs, _g12_err(psi, f.Gd, n * dt, v0))
+        push!(floors, floor)
+    end
+    return errs, floors
+end
 
 # ── Hubbard: the d = 4 MPO against the Fock space, in the interleaved mode order ↑₁ ↓₁ ↑₂ … ──
 

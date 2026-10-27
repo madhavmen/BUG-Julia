@@ -34,6 +34,8 @@
 #   DR_WARM (0; t_w > 0 = start from the state evolved to t_w by tight BUG steps, see below),
 #   DR_TARGET (none), DR_CHECK (4), DR_NTRAJ (100), DR_SEED (1), DR_REF (auto: ed when small),
 #   DR_JIT_WARMUP (0; n = n unlogged steps on a copy first, for timing runs),
+#   DR_PARALLEL (serial | half_sweeps | full: cbe_bug_step!'s `parallel`, Task 7's parallel subset;
+#   needs julia -t 2 / -t 3; the DR_WARM start stays serial, so every arm starts from one state),
 #   A1/B1: DR_U (4), DR_KAPPA (1), DR_START (dbl_rich | low_dbl; B1: biased leads), DR_JLINK (1);
 #   A2/B2: DR_JZ (1), DR_GAMMA (1), DR_GM (= DR_GAMMA), DR_KA (pi/3), DR_NEXC (L/2 for A2,
 #   L/4 for B2), DR_START (block | alt | neel | bright | dark); DR_OUT (dissipative_<tag>.json)
@@ -68,6 +70,7 @@ const CLOSURE = env("DR_CLOSURE", NONLOCAL ? 1 : 0) == "1"
 const KEEPK = parse(Int, env("DR_KEEP_KRYLOV", NONLOCAL ? ORDER : 0))
 const KEEP_EVERY = env("DR_KEEP_EVERY", 0) == "1"
 const EXACT = env("DR_EXACT", 0) == "1"
+const PARALLEL = Symbol(env("DR_PARALLEL", "serial"))
 const WARM = parse(Float64, env("DR_WARM", 0))
 const TARGET = (x = env("DR_TARGET", "none"); x == "none" ? nothing : parse(Float64, x))
 const CHECK = parse(Int, env("DR_CHECK", 4))
@@ -158,9 +161,10 @@ end
 
 const M = build_model()
 const G = no_jump_mpo(M.H, M.Q)
-const TAG = @sprintf("%s_L%d_%s_%s_dt%g_b%g_r%g_t%g_%s%s%s%s%s_seed%d", MODEL, L, MODE, INT, DT, TOLB,
+const TAG = @sprintf("%s_L%d_%s_%s_dt%g_b%g_r%g_t%g_%s%s%s%s%s%s_seed%d", MODEL, L, MODE, INT, DT, TOLB,
                      TOLR, TOLT, START, WARM > 0 ? "_warm$(WARM)" : "", TARGET === nothing ? "" : "_tau$(TARGET)",
-                     KEEPK > 0 ? "_keep$(KEEPK)$(KEEP_EVERY ? "e" : "")" : "", EXACT ? "_exact" : "", SEED)
+                     KEEPK > 0 ? "_keep$(KEEPK)$(KEEP_EVERY ? "e" : "")" : "", EXACT ? "_exact" : "",
+                     PARALLEL === :serial ? "" : "_par$(PARALLEL)", SEED)
 const OUT = env("DR_OUT", "dissipative_$(TAG).json")
 const CKPT = env("DR_CKPT", OUT * ".ckpt")
 const CKPT_SEC = parse(Float64, env("DR_CKPT_SEC", 1800))
@@ -187,8 +191,15 @@ function step!(psi, h)
                Any[]
         info = cbe_bug_step!(psi, G, ComplexF64(-im * h); hermitian = false, order = ORDER,
                              tol_basis = TOLB, tol_root = TOLR, tol_trunc = TOLT, maxdim = MAXDIM,
-                             closure_checks = CLOSURE, exact = EXACT, keep_states = keep)
+                             closure_checks = CLOSURE, exact = EXACT, keep_states = keep,
+                             parallel = PARALLEL)
         lg, rc = info.ledger, info.record
+        # Task 7 parallel subset: the K/L/S step's omitted new-new block and its fallback
+        if lg.kls !== nothing
+            logv!("kls_missing", lg.kls.missing); logv!("kls_fallback", lg.kls.fallback ? 1 : 0)
+            logv!("kls_new", lg.kls.n_new_l + lg.kls.n_new_r)
+            logv!("t_K", lg.kls.t_K); logv!("t_L", lg.kls.t_L)
+        end
         logv!("r_aug", lg.r_aug); logv!("expv_iters", lg.expv_iters); logv!("n_probes", lg.n_probes)
         # plan §3 / Task 6: holdout columns, DD holdout estimate, local Krylov defect, root
         # residual, reused (kept) Krylov vectors, peak memory
@@ -295,7 +306,7 @@ const CONFIG = Dict("model" => string(MODEL), "L" => L, "mode" => string(MODE), 
                     "exact" => EXACT, "start" => string(START), "warm" => WARM,
                     "target" => TARGET === nothing ? "none" : TARGET, "check_every" => CHECK,
                     "ntraj" => NTRAJ, "seed" => SEED, "ref" => REF, "params" => M.par,
-                    "jit_warmup" => JIT_WARMUP,
+                    "jit_warmup" => JIT_WARMUP, "parallel" => string(PARALLEL),
                     "threads" => Threads.nthreads(), "src_hash" => SRC_HASH,
                     # plan §3/§4.1: the operator definition (with the commit it fixes H, Q
                     # exactly) and the MPO widths (Task 6 A2: the collective MPO's width)
