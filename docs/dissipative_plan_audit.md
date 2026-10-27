@@ -792,6 +792,51 @@ step hardly falls with dt, so halving dt nearly doubles its wall. The strong-los
 (κ = 20, warm start) goes the other way, with BUG about 3.5 times cheaper at 1e-8. As plan §4.5
 asks, the comparison is parameter- and model-dependent.
 
+**A2 time-to-accuracy, final (dr6ta 17500918, `c3a6765`, every arm in sequence on th-cl-dell09, a
+Xeon Gold 6130, 1 thread, JIT warm-up 2 steps; figure `a2_tta/F10_cost.png`).** The point is the
+A2 stability point: L = 24, 6 excitations (block, warm 0.2), Jz = 1, Γ = 5, maxdim 512, Jt = 4, and
+tol_basis / tol_root / tol_trunc = 1e-8 / 1e-12 / 1e-9. seffx reports 16h16 at 5.8 / 8 G.
+
+| arm | dt | error (obs) | wall [s] |
+|---|---|---|---|
+| BUG | 0.05 / 0.1 / 0.2 / 0.4 | (reference) / 4.8e-6 / 6.2e-5 / 2.3e-4 | 6979 / 3969 / 2488 / 1198 |
+| TDVP2 | 0.0125 / 0.025 / 0.05 | 1.1e-6 / 4.4e-6 / 3.3e-5 | 13292 / 9071 / 5730 |
+
+- **The reference is the job's own BUG dt 0.05 arm.** dr6ta's warm state differs from the dr6w2
+  jobs' warm state by 2.1e-6 at t = 0. dell09 is the only x86-64-v4 node among them, and every dr6w2
+  row (edger731, hua*) is bitwise equal at t = 0. Graded against dr6w2's reference, the three finest
+  arms would floor at 3.2e-6, which is an artefact of the start state. dr6w2 measured BUG dt 0.05
+  within 5e-10 of its tight reference on the identical config. Against it, every dr6ta arm
+  reproduces the error dr6w2 measured for the same arm to two digits. The figure reads the
+  self-referenced copy `runs_dr6ta_selfref` (row 4 tagged `ref`; `runs_dr6ta` is unchanged).
+  The Task 7 sets are unaffected: every row of a point agrees at t = 0 to 2e-14 or better.
+- **BUG is 1.9-2.3× cheaper at matched error.**
+  - At about 4.5e-6: BUG dt 0.1 takes 3969 s, TDVP2 dt 0.025 takes 9071 s (2.3×).
+  - At 3.3e-5: BUG interpolated along its dt 0.1-0.2 segment to dt ≈ 0.17 takes about 2800 s,
+    TDVP2 dt 0.05 takes 5730 s (2.1×).
+  - At 1.1e-6: TDVP2 dt 0.0125 takes 13292 s. BUG dt 0.05, which is about 2000× more accurate,
+    takes 6979 s (≥ 1.9×).
+  - TDVP2 cannot trade accuracy for a larger step here, since it is unstable from dt 0.1 (dr6w2).
+- **Every BUG step is work-limited and is marked so** (D_stage reaches the ceiling 2·maxdim = 1024;
+  USER 10-26 rule). At this point the ceiling does not cost accuracy:
+  - the state's rank is 378, the exact maximal Schmidt rank of the sector;
+  - TDVP2, which has no ceiling, converges to the BUG reference at its own order (slopes 2.9, 2.0)
+    with no floor down to 1.1e-6.
+
+  The A2 verdict under the 10-26 rule (stated for A1 and B1) is left to USER.
+- **Cost structure.** The closure checks take 34-63% of BUG's wall, rising as dt shrinks. A BUG step
+  costs 87-124 s against 42-72 s for a TDVP2 step. BUG's advantage is a 3-4× larger step at the
+  same error.
+
+**A2 L = 32 at finite density does not fit the Task 6 budget (dr6v2 17499265, dr6v3 17500978).**
+The controller run at the dr6v crash configuration (8 excitations, maxdim 1024, tol_trunc 1e-12,
+DR_CRASH_STATE) was OOM-killed at 24 G after 3h55 and again at 40 G after 15h37 (seffx 39.9 / 40 G).
+Neither left a checkpoint, because with DR_EVERY = 1 and Jt = 1 there is no record time before the end.
+- The memory is the environments at working rank 2048, which is sizing, not a defect.
+- The crash itself is fixed: the crash-state replays (rp6u, rp7b) complete.
+- This is the documented memory constraint G3 asks for. A rerun needs more than 40 G and
+  DR_EVERY ≤ 0.1, so that it checkpoints.
+
 ## Task 7 inputs on the fixed code (2026-10-26)
 
 **Smoke passed (dr7t 17499266, `c3a6765`).** All four checks print five `RESTART-CHECK PASS` lines and

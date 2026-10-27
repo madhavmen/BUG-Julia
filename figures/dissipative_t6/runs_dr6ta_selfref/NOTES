@@ -1,0 +1,4 @@
+Copy of runs_dr6ta with row 4 (BUG dt 0.05) tagged E=ref, so dissipative_figures.py grades the timing
+arms against a run from the SAME start state. dr6ta ran on th-cl-dell09 (x86-64-v4); its DR_WARM state
+differs from the dr6w2 reference job's (v3 nodes) by 2.1e-6 at t = 0. dr6w2 measured BUG dt 0.05 within
+5e-10 of the tight reference on the identical config, so row 4 is a reference good to about 5e-10.
