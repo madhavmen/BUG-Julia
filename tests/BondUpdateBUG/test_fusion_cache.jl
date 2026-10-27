@@ -95,6 +95,53 @@ end
         @test fusion_stats().keys > n1
         set_symmetry!(:U1)
     end
+
+    # The key holds the legs' exact spaces, so an adaptive run adds keys nearly every step; without
+    # a bound the memo grows with the run. The budget empties it when an insert would pass it.
+    @testset "the memo stays inside its element budget" begin
+        frames, _ = sample_frames()
+        nel(t) = sum(length(r) for r in t.RMTs; init = 0)
+        cold = map(frames) do t
+            clear_fusion_cache!()
+            fusion_basis(t, 1, 2; tag = "cbeG")
+        end
+        # the stored count is exact: the distinct keys' elements
+        clear_fusion_cache!()
+        old = set_fusion_budget!(nothing)
+        try
+            seen = Dict{Any, Int}()
+            for (t, c) in zip(frames, cold)
+                fusion_basis(t, 1, 2; tag = "cbeG")
+                seen[(BondUpdateBUG._leg_key(t, 1), BondUpdateBUG._leg_key(t, 2))] = nel(c)
+            end
+            st = fusion_stats()
+            @test st.keys == length(seen) && st.elems == sum(values(seen))
+            full = st.elems
+            # a budget below the total: the memo is emptied and never holds more than the budget
+            cap = maximum(nel, cold) + 1
+            @test cap < full                               # the bound is exercised
+            clear_fusion_cache!()
+            @test set_fusion_budget!(cap) === nothing
+            warm = map(frames) do t
+                b = fusion_basis(t, 1, 2; tag = "cbeG")
+                @test fusion_stats().elems <= cap
+                b
+            end
+            @test fusion_stats().keys < length(seen)
+            for (c, w) in zip(cold, warm)                  # eviction never changes a result
+                @test c.spaces == w.spaces
+                @test norm_diff(c, w) < 1e-12
+            end
+            # `nothing` is the unbounded memo
+            set_fusion_budget!(nothing)
+            clear_fusion_cache!()
+            foreach(t -> fusion_basis(t, 1, 2; tag = "cbeG"), frames)
+            @test fusion_stats().elems == full
+            @test_throws ArgumentError set_fusion_budget!(0)
+        finally
+            set_fusion_budget!(old)
+        end
+    end
 end
 
 # ── THE REGRESSION GUARD ─────────────────────────────────────────────────────────────────────

@@ -37,6 +37,8 @@
 #   DR_JIT_WARMUP (0; n = n unlogged steps on a copy first, for timing runs),
 #   DR_PARALLEL (serial | half_sweeps | full: cbe_bug_step!'s `parallel`, Task 7's parallel subset;
 #   needs julia -t 2 / -t 3; the DR_WARM start stays serial, so every arm starts from one state),
+#   DR_FUSION_BUDGET (default | none | n: the fusion_basis memo's element budget, set_fusion_budget!;
+#   none = unbounded, the memo before 2026-10-27; every step logs the memo, live heap and RSS),
 #   A1/B1: DR_U (4), DR_KAPPA (1), DR_START (dbl_rich | low_dbl; B1: biased leads), DR_JLINK (1);
 #   A2/B2: DR_JZ (1), DR_GAMMA (1), DR_GM (= DR_GAMMA), DR_KA (pi/3), DR_NEXC (L/2 for A2,
 #   L/4 for B2), DR_START (block | alt | neel | bright | dark); DR_OUT (dissipative_<tag>.json)
@@ -79,6 +81,9 @@ const CHECK = parse(Int, env("DR_CHECK", 4))
 const NTRAJ = parse(Int, env("DR_NTRAJ", 100))
 const SEED = parse(Int, env("DR_SEED", 1))
 const START = Symbol(env("DR_START", MODEL in (:A1,) ? "dbl_rich" : MODEL === :B1 ? "biased" : "block"))
+const FUSION_BUDGET = env("DR_FUSION_BUDGET", "default")
+FUSION_BUDGET == "default" ||
+    set_fusion_budget!(FUSION_BUDGET == "none" ? nothing : parse(Int, FUSION_BUDGET))
 
 set_symmetry!(:U1)
 
@@ -176,6 +181,9 @@ const STOP_AT = parse(Int, env("DR_STOP_AT", 0))
 # ── the step ────────────────────────────────────────────────────────────────────────────────
 const LOG = Dict{String, Vector{Float64}}()
 logv!(k, v) = push!(get!(LOG, k, Float64[]), Float64(v))
+# the current resident set (Sys.maxrss is the peak only); -1 where /proc is absent
+rss_now() = isfile("/proc/self/statm") ?
+    4096 * parse(Int, split(read("/proc/self/statm", String))[2]) : -1
 
 # From a U(1) product state the closure cannot see a nonlocal Q's long-range hops, so the global
 # Krylov vectors are kept on such a step (plan U10, dt5m); on any later step they change nothing.
@@ -242,6 +250,12 @@ function step!(psi, h)
         logv!("peak_rss", Sys.maxrss())
     end
     logv!("h", h); logv!("wall", (time_ns() - t0) / 1e9)
+    # what is resident after the step: the fusion_basis memo, the live Julia heap and the process
+    # (B1 BUG trajectories grew to 40 G against a 5 G step, TDVP2 at the same point stayed at 3 G)
+    fs = fusion_stats()
+    logv!("fusion_keys", fs.keys); logv!("fusion_elems", fs.elems)
+    logv!("fusion_calls", fs.calls); logv!("fusion_misses", fs.misses)      # since the start
+    logv!("gc_live", Base.gc_live_bytes()); logv!("rss_now", rss_now())
     # plan §3: the unnormalised norm after the step (log survival increment) and centre sectors
     logv!("norm2", norm(psi)^2); logv!("sectors", centre_sectors(psi))
     return psi
@@ -312,6 +326,7 @@ const CONFIG = Dict("model" => string(MODEL), "L" => L, "mode" => string(MODE), 
                     "target" => TARGET === nothing ? "none" : TARGET, "check_every" => CHECK,
                     "ntraj" => NTRAJ, "seed" => SEED, "ref" => REF, "params" => M.par,
                     "jit_warmup" => JIT_WARMUP, "parallel" => string(PARALLEL),
+                    "fusion_budget" => FUSION_BUDGET,
                     "threads" => Threads.nthreads(), "src_hash" => SRC_HASH,
                     # plan §3/§4.1: the operator definition (with the commit it fixes H, Q
                     # exactly) and the MPO widths (Task 6 A2: the collective MPO's width)

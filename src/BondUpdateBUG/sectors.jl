@@ -53,10 +53,28 @@ const _FUSION_CACHE = Dict{Any, Any}()
 const _FUSION_LOCK = ReentrantLock()
 const _FUSION_CALLS = Ref(0)
 const _FUSION_MISSES = Ref(0)
+const _FUSION_ELEMS = Ref(0)
 
-"Calls, misses and distinct keys since the last `reset_fusion_stats!`."
+"""
+Element budget of the memo. The key holds the legs' exact spaces, which an adaptive run changes
+nearly every step, so an unbounded memo grows with the run. An insert that would pass the budget
+empties the memo first; within a step the same legs recur, so the reuse the memo exists for
+survives. `nothing` = unbounded (the memo before 2026-10-27). 2^28 elements (2-4 GB) holds one
+step's legs at D ~ 1024, d = 4 (~200 keys of up to ~6e5 elements), so a step does not thrash it.
+"""
+const _FUSION_BUDGET = Ref{Union{Nothing, Int}}(2^28)
+
+"Set the memo's element budget (`nothing` = unbounded); returns the previous one."
+function set_fusion_budget!(n::Union{Nothing, Integer})
+    n === nothing || n > 0 || throw(ArgumentError("fusion budget must be positive, got $n"))
+    old = _FUSION_BUDGET[]
+    _FUSION_BUDGET[] = n === nothing ? nothing : Int(n)
+    return old
+end
+
+"Calls and misses since the last `reset_fusion_stats!`; distinct keys and stored elements now."
 fusion_stats() = (calls = _FUSION_CALLS[], misses = _FUSION_MISSES[],
-                  keys = length(_FUSION_CACHE))
+                  keys = length(_FUSION_CACHE), elems = _FUSION_ELEMS[])
 
 "Zero the counters (NOT the cache) so a step can be attributed on its own."
 function reset_fusion_stats!()
@@ -68,6 +86,7 @@ end
 "Drop the memo entirely -- for tests that switch symmetry mode under one process."
 function clear_fusion_cache!()
     empty!(_FUSION_CACHE)
+    _FUSION_ELEMS[] = 0
     reset_fusion_stats!()
     return nothing
 end
@@ -100,7 +119,14 @@ function fusion_basis(t, leg_a::Int = 1, leg_b::Int = 2; tag::AbstractString = "
     # distinct tags to avoid colliding with a frame's `svdL` bond leg.
     out = to_concrete(setitag(U, 3, tag))
     # Store, then hand out a copy -- see the memo's note on caller ownership.
+    n = sum(length(r) for r in out.RMTs; init = 0)
     lock(_FUSION_LOCK) do
+        cap = _FUSION_BUDGET[]
+        if cap !== nothing && _FUSION_ELEMS[] + n > cap
+            empty!(_FUSION_CACHE)
+            _FUSION_ELEMS[] = 0
+        end
+        haskey(_FUSION_CACHE, key) || (_FUSION_ELEMS[] += n)   # a concurrent miss stored it already
         _FUSION_CACHE[key] = out
     end
     return to_concrete(out)
