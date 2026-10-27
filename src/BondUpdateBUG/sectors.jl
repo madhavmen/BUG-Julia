@@ -57,9 +57,10 @@ const _FUSION_ELEMS = Ref(0)
 
 """
 Element budget of the memo. The key holds the legs' exact spaces, which an adaptive run changes
-nearly every step, so an unbounded memo grows with the run. An insert that would pass the budget
-empties the memo first; within a step the same legs recur, so the reuse the memo exists for
-survives. `nothing` = unbounded (the memo before 2026-10-27). 2^28 elements (2-4 GB) holds one
+nearly every step, so an unbounded memo grows with the run (dm7a 17541077, B1 L = 20 BUG, 107
+steps: memo 8 GB, live heap 8.7 GB, RSS 12.3 GB unbounded; RSS 5.0 GB bounded, results bitwise
+equal). An insert that would pass the budget empties the memo first; within a step the same legs
+recur, so the reuse the memo exists for survives. `nothing` = unbounded (before 2026-10-27). 2^28 elements (2-4 GB) holds one
 step's legs at D ~ 1024, d = 4 (~200 keys of up to ~6e5 elements), so a step does not thrash it.
 """
 const _FUSION_BUDGET = Ref{Union{Nothing, Int}}(2^28)

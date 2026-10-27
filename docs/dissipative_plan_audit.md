@@ -1207,3 +1207,48 @@ and `parallel_B2_L32`, runs `runs_dp7a`, `runs_dp7b`):
 
 Two points bracket the turnover; locating it would need a maxdim scan at one point. It is not run.
 
+## BUG memory growth: the `fusion_basis` memo (fix `3a12dca`, diagnostic dm7a 17541077)
+
+**Symptom.** The B1 L = 20 BUG trajectory rows were OOM-killed repeatedly:
+
+- dr7xr4 at 26 G after 15 h, then its resume dr7xr4b at 40 G after 5.7 h;
+- dr7xr1 at 40 G after 10 h;
+- dr7xr2 and dr7xr3 at 35-38 G while still running.
+
+The smoke run dr7v reached D_stage 1024 at 4.9 G. TDVP2 at the same point (dr7y) stays at 2.4-3 G for 24 h.
+
+**Cause.** `fusion_basis` (`src/BondUpdateBUG/sectors.jl`), which every CBE expansion calls
+(`dd_cbe.jl`, `cbe_sketch.jl`, `cbe_core.jl`), memoised its result in a process-wide Dict. The memo
+was never evicted. Its key holds the legs' exact spaces, and an adaptive run changes those nearly
+every step, so each step stored new bases of up to ~600k elements.
+
+**Fix.** The memo has an element budget: default 2^28, `set_fusion_budget!`, `nothing` = the old
+unbounded memo. When an insert would pass the budget, the memo is emptied first. The driver knob is
+`DR_FUSION_BUDGET`, and every step logs the memo, the live heap (`gc_live`) and the current RSS. Test:
+`test_fusion_cache.jl` "the memo stays inside its element budget" (dm7t 17540768: 92/92).
+
+**Diagnostic (dm7a, `runs_dm7a`).** The B1 row-1 point (U = −4, κ = 2, BUG maxdim 512, tol_basis
+1e-5, tol_trunc 1e-5, dt 0.05), 2 trajectories to T = 2.5, 107 steps, both arms on one node:
+
+| step | memo, unbounded | live heap | RSS | memo, budget 2^28 | live heap | RSS |
+|---|---|---|---|---|---|---|
+| 26 | 0.84 GB | 1.5 GB | 4.0 GB | 0.84 GB | 1.8 GB | 3.9 GB |
+| 53 | 4.6 | 6.4 | 8.0 | 0.69 (emptied) | 1.5 | 4.9 |
+| 106 | 8.0 | 8.7 | 12.3 | 0.61 | 1.4 | 5.0 |
+
+- **The growth is live memo entries.** It is not GC laziness or allocator retention: the live heap
+  tracks the memo.
+- **The bounded memo levels off at 5 G.**
+- **The results are bitwise equal.** The ensemble means differ by 0.0, with the same jumps.
+- **Cost.** The budget costs 32% more memo misses (8005 against 6076) and 6% more step wall (1651
+  against 1556 s).
+
+**Consequences.**
+
+- Checkpoints written by the old source cannot run the new one: the solver source hash differs. So
+  the running B1 rows (`86d7e9c`) keep the old memo and are resumed from their checkpoints after each
+  OOM; a restart empties the memo. `MALLOC_MMAP_THRESHOLD_` (dr7xr1b, dr7xr4c) cannot help, because
+  the memory is live.
+- The earlier BUG OOMs are consistent with the same mechanism, but their memory was not logged:
+  A2 L = 32 dr6v2 at 24 G and dr6v3 at 40 G, and B2 dr7w row 1 at 8 G.
+
