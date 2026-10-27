@@ -197,7 +197,8 @@ function step!(psi, h)
         # Task 7 parallel subset: the K/L/S step's omitted new-new block and its fallback
         if lg.kls !== nothing
             logv!("kls_missing", lg.kls.missing); logv!("kls_fallback", lg.kls.fallback ? 1 : 0)
-            logv!("kls_new", lg.kls.n_new_l + lg.kls.n_new_r)
+            # per side: the omitted new-new block exists only when both sides grow
+            logv!("kls_new_l", lg.kls.n_new_l); logv!("kls_new_r", lg.kls.n_new_r)
             logv!("t_K", lg.kls.t_K); logv!("t_L", lg.kls.t_L)
         end
         logv!("r_aug", lg.r_aug); logv!("expv_iters", lg.expv_iters); logv!("n_probes", lg.n_probes)
