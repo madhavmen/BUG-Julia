@@ -170,6 +170,21 @@ end
     mpo, psi0, _, _, _ = _hb_bond()
     kw = (tol_basis = 1e-7, maxdim = 32)
     @test cbe_bug_step!(copy(psi0), mpo, -0.05im; kw...).record.budget_rule === :linear
+    # USER 2026-10-27: the recycled local Krylov share (Tests C/D) is set on its own, `tol_krylov`;
+    # only that share moves, and `tol_krylov = tol_basis` is the default allocation exactly
+    for rule in (:linear, :rss)
+        a = RC.basis_allocation(b, 7; tau = 0.1, rule = rule)
+        @test RC.basis_allocation(b, 7; tau = 0.1, rule = rule, krylov = 1e-6) === a
+        ak = RC.basis_allocation(b, 7; tau = 0.1, rule = rule, krylov = 1e-3)
+        @test ak.krylov ≈ 1e3 * a.krylov
+        @test (ak.per_bond, ak.sample, ak.tail, ak.scale) == (a.per_bond, a.sample, a.tail, a.scale)
+    end
+    @test_throws ArgumentError RC.basis_allocation(b, 7; krylov = 0.0)
+    step(; skw...) = cbe_bug_step!(copy(psi0), mpo, -0.05im; kw..., skw...).ledger
+    l0, l1, l2 = step(), step(tol_krylov = 1e-7), step(tol_krylov = 1e-3)
+    @test l1.n_krylov == l0.n_krylov && l1.r_aug == l0.r_aug
+    @test l0.n_krylov > 0                                       # non-vacuous
+    @test l2.n_krylov < l0.n_krylov
 end
 
 # Plan T3.5: eta_m = h^m/m! ||(I - P) H^m v|| / ||v|| for the root space P of the step's frames.

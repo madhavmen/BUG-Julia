@@ -4,7 +4,7 @@
 One step of the CBE-BUG sweep, in place. `tau = -im*dt` is real time, `tau = -dt` imaginary; the
 caller renormalises. Only the root bond evolves; both half-sweeps just generate bases.
 
-Keywords: `tol_basis`, `tol_trunc`, `tol_expv` (alias `tol_root`) and `maxdim` (the resource limit,
+Keywords: `tol_basis` (its local Krylov share separately: `tol_krylov`), `tol_trunc`, `tol_expv` (alias `tol_root`) and `maxdim` (the resource limit,
 `adaptive_budget.jl`); `order` (temporal order `p`, see `krylov_closure.jl`); `root` (the Galerkin
 bond, default `L/2`); `reorth` (re-orthogonalisation in the root solve).
 """
@@ -17,6 +17,10 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # The plan's name for `tol_expv` (cbe_bug_high_order_rsvd_parallel_tasks.md
                        # invariant 1); naming both is refused.
                        tol_root::Union{Nothing, Float64} = nothing,
+                       # The share of `tol_basis` the recycled local Krylov stage (Tests C/D, half-
+                       # and frontier sweeps) is held to, set on its own (`basis_allocation`);
+                       # `nothing` is `tol_basis`, the plan's one-knob default.
+                       tol_krylov::Union{Nothing, Float64} = nothing,
                        # The temporal order `p` -- a METHOD choice, not a fourth tolerance.
                        # `p > 1` closes the global Krylov frontiers `j = 1..p-1` of the root
                        # generator before the one root solve (`krylov_closure.jl`); `1` is the
@@ -144,7 +148,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     _nrm = (1 <= psi.center <= L) ? norm(psi[psi.center]) : 1.0
     # Plan T3.2: DD-QR spends `tol_basis` as a linear sum of shares.
     alloc  = basis_allocation(budget, L - 1; tau = tau, nrm = _nrm, nfront = order,
-                              rule = :linear)
+                              rule = :linear, krylov = tol_krylov)
     ledger = AdaptiveLedger()
     ledger.order = order
     bd0 = bond_dims(psi)                 # per-bond `r_old` for the bond log (plan §8)

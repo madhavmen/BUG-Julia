@@ -44,31 +44,38 @@ BasisAllocation(per_bond, sample, tail, krylov, scale) =
     BasisAllocation(per_bond, sample, tail, krylov, scale, :rss)
 
 """
-    basis_allocation(budget, nbonds; tau, nrm, nfront = 1) -> BasisAllocation
+    basis_allocation(budget, nbonds; tau, nrm, nfront = 1, krylov = nothing) -> BasisAllocation
 
 Apportion `budget.basis` over `nbonds` bonds, `nfront` frontiers and the four tests, and fix the
 scale the residuals are measured in. The scale is `|tau| / ||psi||`: the residuals enter the step
 through `exp(tau*H)` at O(tau), so omitting `|tau|` over-expands at small steps. Dividing by
 `||psi||` keeps `tol_basis` meaningful for unnormalised states. `tau = 0` (basis-only sweeps) gives
 scale 1, a pure closure question.
+
+`krylov` is the tolerance Tests C/D (the recycled local Krylov directions) are apportioned from, by
+the same rule; `nothing` is `budget.basis`. On a nonlocal generator the Krylov stage alone fills the
+trial frame to the work ceiling (dr6ta: ~4000 Krylov vs ~0 DD directions per step), so it is tuned
+on its own (USER 2026-10-27).
 """
 function basis_allocation(budget::AdaptiveBudget, nbonds::Int;
                           tau::Number = 0, nrm::Real = 1.0, nfront::Int = 1,
-                          rule::Symbol = :rss)
+                          rule::Symbol = :rss, krylov::Union{Nothing, Real} = nothing)
     nb = max(nbonds, 1)
     nf = max(nfront, 1)
     rule in (:rss, :linear) || throw(ArgumentError("rule must be :rss or :linear, got $rule"))
+    kr = krylov === nothing ? 1.0 : Float64(krylov) / budget.basis
+    kr > 0 || throw(ArgumentError("tol_krylov must be positive, got $krylov"))
     at = abs(tau)
     scale = iszero(at) ? 1.0 : at / max(Float64(nrm), eps(Float64))
     if rule === :linear
         per_test = budget.basis / (2 * (nb + 1) * nf)
-        return BasisAllocation(2 * per_test, per_test, per_test, per_test, scale, :linear)
+        return BasisAllocation(2 * per_test, per_test, per_test, kr * per_test, scale, :linear)
     end
     per_bond = budget.basis / sqrt(nb * nf)
     # Four tests (A, B-left/right counted as one sampling decision, C/D as one closure
     # decision) -> sqrt(4) = 2. Kept as an explicit `sqrt(4)` so the count is visible.
     per_test = per_bond / sqrt(4)
-    return BasisAllocation(per_bond, per_test, per_test, per_test, scale, :rss)
+    return BasisAllocation(per_bond, per_test, per_test, kr * per_test, scale, :rss)
 end
 
 """

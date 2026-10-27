@@ -27,6 +27,7 @@
 #
 # Env (defaults): DR_MODEL (A2), DR_L (8), DR_MODE (no_jump), DR_INT (bug), DR_DT (0.05), DR_T (1),
 #   DR_EVERY (= DR_DT), DR_ORDER (3), DR_TOLB (1e-8), DR_TOLR (1e-12), DR_TOLT (1e-10),
+#   DR_TOLK (none = DR_TOLB: cbe_bug_step!'s `tol_krylov`, the recycled local Krylov stage's share),
 #   DR_MAXDIM (256), DR_CLOSURE (1 for A2/B2, else 0: USER 2026-10-24),
 #   DR_KEEP_KRYLOV (DR_ORDER for A2/B2, else 0: G psi..G^m psi kept on steps from a product state,
 #   dt5m), DR_KEEP_EVERY (0; 1 = on every step, the ablation),
@@ -64,6 +65,7 @@ const ORDER = parse(Int, env("DR_ORDER", 3))
 const TOLB = parse(Float64, env("DR_TOLB", 1e-8))
 const TOLR = parse(Float64, env("DR_TOLR", 1e-12))
 const TOLT = parse(Float64, env("DR_TOLT", 1e-10))
+const TOLK = (x = env("DR_TOLK", "none"); x == "none" ? nothing : parse(Float64, x))
 const MAXDIM = parse(Int, env("DR_MAXDIM", 256))
 const NONLOCAL = MODEL in (:A2, :B2)
 const CLOSURE = env("DR_CLOSURE", NONLOCAL ? 1 : 0) == "1"
@@ -161,8 +163,9 @@ end
 
 const M = build_model()
 const G = no_jump_mpo(M.H, M.Q)
-const TAG = @sprintf("%s_L%d_%s_%s_dt%g_b%g_r%g_t%g_%s%s%s%s%s%s_seed%d", MODEL, L, MODE, INT, DT, TOLB,
-                     TOLR, TOLT, START, WARM > 0 ? "_warm$(WARM)" : "", TARGET === nothing ? "" : "_tau$(TARGET)",
+const TAG = @sprintf("%s_L%d_%s_%s_dt%g_b%g_r%g_t%g_%s%s%s%s%s%s%s_seed%d", MODEL, L, MODE, INT, DT, TOLB,
+                     TOLR, TOLT, START, TOLK === nothing ? "" : "_k$(TOLK)",
+                     WARM > 0 ? "_warm$(WARM)" : "", TARGET === nothing ? "" : "_tau$(TARGET)",
                      KEEPK > 0 ? "_keep$(KEEPK)$(KEEP_EVERY ? "e" : "")" : "", EXACT ? "_exact" : "",
                      PARALLEL === :serial ? "" : "_par$(PARALLEL)", SEED)
 const OUT = env("DR_OUT", "dissipative_$(TAG).json")
@@ -191,7 +194,7 @@ function step!(psi, h)
                Any[]
         info = cbe_bug_step!(psi, G, ComplexF64(-im * h); hermitian = false, order = ORDER,
                              tol_basis = TOLB, tol_root = TOLR, tol_trunc = TOLT, maxdim = MAXDIM,
-                             closure_checks = CLOSURE, exact = EXACT, keep_states = keep,
+                             tol_krylov = TOLK, closure_checks = CLOSURE, exact = EXACT, keep_states = keep,
                              parallel = PARALLEL)
         lg, rc = info.ledger, info.record
         # Task 7 parallel subset: the K/L/S step's omitted new-new block and its fallback
@@ -303,6 +306,7 @@ end
 const CONFIG = Dict("model" => string(MODEL), "L" => L, "mode" => string(MODE), "int" => string(INT),
                     "dt" => DT, "T" => TF, "every" => EVERY, "order" => ORDER, "tol_basis" => TOLB,
                     "tol_root" => TOLR, "tol_trunc" => TOLT, "maxdim" => MAXDIM,
+                    "tol_krylov" => TOLK === nothing ? "none" : TOLK,
                     "closure_checks" => CLOSURE, "keep_krylov" => KEEPK, "keep_every" => KEEP_EVERY,
                     "exact" => EXACT, "start" => string(START), "warm" => WARM,
                     "target" => TARGET === nothing ? "none" : TARGET, "check_every" => CHECK,
