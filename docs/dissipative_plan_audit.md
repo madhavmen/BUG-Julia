@@ -174,8 +174,8 @@ root grows to the whole sector and the step is exact.
 # Task 2 (G1/G2): U06, U09, U10, U11, U16
 
 Branch `plan/dissip-task-2` (`fadedf8`, `85e9916`, `fb152fb`), `tests/sweeps/test_dissipative_t2_g12.jl`.
-U07, U13-U15 test the jump engine and are in Task 4's files; U18 (optional parallel K/L/S) is not
-run, because the parallel backend is not used in production (plan §1.2).
+U07, U13-U15 test the jump engine and are in Task 4's files. U18 (optional parallel K/L/S) was
+added for Task 7's parallel subset: see "Task 7 parallel subset" below.
 
 | test | dt2f 17473173 (`85e9916`) | note |
 |---|---|---|
@@ -823,7 +823,9 @@ tol_basis / tol_root / tol_trunc = 1e-8 / 1e-12 / 1e-9. seffx reports 16h16 at 5
   - TDVP2, which has no ceiling, converges to the BUG reference at its own order (slopes 2.9, 2.0)
     with no floor down to 1.1e-6.
 
-  The A2 verdict under the 10-26 rule (stated for A1 and B1) is left to USER.
+  **USER 10-27: A2 is not a failed gate.** The ceiling is reached by the recycled local Krylov
+  directions alone (about 3500-4000 per step, against about 0 DD-CBE directions), so their tolerance
+  is tuned on its own, `tol_krylov` (below).
 - **Cost structure.** The closure checks take 34-63% of BUG's wall, rising as dt shrinks. A BUG step
   costs 87-124 s against 42-72 s for a TDVP2 step. BUG's advantage is a 3-4× larger step at the
   same error.
@@ -1143,4 +1145,65 @@ Accumulated discarded norm, by tol_trunc:
   rate is the same order as the dr6k3 pilot's λ(T) = 0.0076 at ν = 1/8, Γ = 2, but the window is too
   short for a lifetime fit. The 20-trajectory rows (9-10, BUG dt 0.1 and TDVP2 dt 0.05 at 1e-7) give the
   F08/F11 lifetime and sampling error and are still running.
+
+## Task 7 parallel subset (U18; dp7a 17524530, dp7b 17531341; `benchmarks/dissipative_t7_parallel.py`)
+
+USER 10-27: "We should also do the parallel bug variants", and "for higher bond dimension there will be
+a turn over for efficiency". The arms are `cbe_bug_step!`'s `parallel` (driver `DR_PARALLEL`):
+
+- `serial` runs with `julia -t 1`.
+- `half_sweeps` runs with `-t 2`. The two half-sweeps run concurrently, and so do the two halves of
+  every frontier sweep of the closure (`frontier_sweeps.jl`).
+- `full` runs with `-t 3` and is a different integrator: half-sweeps and closure as `half_sweeps`,
+  then the K/L/S step, whose K and L stages run beside the root solve S.
+
+**U18 (`tests/sweeps/test_dissipative_u18.jl`, `90ed33e` + `048eca6`; dt18b 17524085: 35/35).** U18a:
+the K and L stages integrate the complex generator `G`. U18b: block assembly and the omitted new-new
+block on `G`. U18c: under `exact = true`, both parallel modes equal the serial step to 1e-10, because
+no random numbers are drawn. Under RSVD the right half-sweep draws its own seeded stream, so it
+agrees with serial to `tol_basis` and repeated runs agree exactly; this is
+`test_adaptive_parallel.jl`'s convention. U18d: the K/L/S step's observed order is 4.0 for local
+loss and 3.6-3.8 for collective loss, with errors no larger than serial's.
+
+**Runs.** Each job runs all its arms in sequence on one node, BLAS on one thread, with a JIT
+warm-up step that is not logged. Process wall, CPU time and MaxRSS come from `/usr/bin/time -v`.
+Step wall excludes start-up, the warm state and observation.
+
+| job | point | frame | arms |
+|---|---|---|---|
+| dp7a (`048eca6`) | A2 L = 48, 2 exc. (block), Γ = 1, maxdim 256, tol_trunc 1e-7, Jt = 20 | D_final ≤ 26 | 3 arms × dt {0.2, 0.1, 0.05} |
+| dp7b (`c75b983`) | B2 L = 32, 4 exc., Γ = 2, maxdim 512, tol_trunc 1e-7, Jt = 2 (dr7w's point) | D_stage ≈ 550, D_final 148 | 3 arms at dt 0.1 + serial dt 0.05 |
+
+**Results, each arm against serial at the same dt** (summaries `figures/dissipative_t7/parallel_A2_L48`
+and `parallel_B2_L32`, runs `runs_dp7a`, `runs_dp7b`):
+
+| | step-wall speedup | process-wall speedup | CPU amplification | MaxRSS amplification | max \|x − x_serial\| | serial dt-halving difference |
+|---|---|---|---|---|---|---|
+| A2 L48 `half_sweeps` | 0.91-0.99 | 0.92-0.97 | 2.7-3.3 | 0.96-1.01 | ≤ 1.3e-13 | 7.9e-6 (dt 0.2), 4.3e-7 (0.1) |
+| A2 L48 `full` | 0.83-0.91 | 0.84-0.88 | 2.7-3.0 | 0.90-0.96 | 1.6e-6, 2.4e-8, 4.2e-9 (dt 0.2, 0.1, 0.05) | same |
+| B2 L32 `half_sweeps` | **1.52** | 1.32 | 1.51 | 1.09 | 1.6e-10 | 3.5e-8 (dt 0.1) |
+| B2 L32 `full` | **1.56** | 1.30 | 1.66 | 1.05 | 1.7e-10 | same |
+
+- **The turnover with D is there.** At D ≤ 26 each step is too small to share: the parallel arms
+  take 1-20% longer and burn 2.7-3.3× the CPU. At D_stage ≈ 550 both are about 1.5× faster per step
+  for 1.5-1.7× the CPU. The closure is 85% of B2's serial step wall (1382 of 1623 s), and running its
+  frontier halves concurrently is where the gain comes from (`half_sweeps` closure 903 s).
+- **The process speedup is smaller (1.3×)** because loading, the warm state, JIT and observation
+  run serially and are about 45% of a 2-hour B2 run. In production runs to Jt = 10 that share
+  falls.
+- **Neither arm costs accuracy.** Every parallel arm sits far below serial's dt-halving difference
+  at its dt. On A2, `full`'s own difference from serial falls with dt (1.6e-6 → 4.2e-9), and all
+  three arms have the same observed order, 4.2.
+- **`full` vs `half_sweeps`.** At this size the K/L stages are 8% of `full`'s B2 step wall (t_K + t_L
+  78 of 1040 s), so their concurrency with S adds little: 1.56 against 1.52, for one more thread. `half_sweeps` is the
+  better use of cores.
+- **The omitted new-new block is exactly 0 on every step** (A2: 700 steps; B2: 24), with no fallback.
+  On B2 both sides gain new directions on every step (17 each), so the block is measured, and it
+  comes out exactly 0.0, not at round-off. A symmetric tensor's norm is exactly zero only when the
+  contraction finds no matching charge block, so here the new left and right directions share no
+  allowed block of `U_+' H Θ V_+'`. The kernel does measure a nonzero block when one exists: T6.3
+  (`test_parallel_kls.jl`) gets an O(h) block with an h² remainder on a truncated XXZ state.
+- **Memory.** Parallel peak RSS is 0.9-1.09× serial, so sharing a node costs nothing in memory.
+
+Two points bracket the turnover; locating it would need a maxdim scan at one point. It is not run.
 
