@@ -1046,3 +1046,56 @@ Figure `dissipative_t7/a1_L24_tolb5/F09_t7_A1_L24.png`.
   the work ceiling, and TDVP2 is the result. Agreement with TDVP2 is graded only before the first
   capped step (4e-10 at maxdim 1024; 9e-11 / 8e-10 for the dt-halved 1e-5 arm, capped at t = 0.2).
 
+## Task 7 B2 L = 32, no-jump (dr7w 17510877 + dr7wr1 17516365, `86d7e9c`, figure `dissipative_t7/b2_L32/F09_t7_B2_L32.png`)
+
+The point is B2 L = 32, 4 excitations (ν = 1/8, alt start, warm 0.2), Jz = 1, Γ = 2, ka = π/3,
+maxdim 512, Jt = 10, closure_checks on, with tol_basis = 1e-8 and tol_root = 1e-12. BUG runs at dt
+0.1 and TDVP2 at dt 0.05, each with the tol_trunc ladder and a dt-halved arm at 1e-7 to Jt = 5
+(runs `dissipative_t7/runs_dr7w`). Row 1 (BUG 1e-5) was OOM-killed at 8 G after 3 h, then resumed
+from its checkpoint at 14 G (dr7wr1, checkpoint 3, peak 9.1 G).
+
+**Nothing is capped.** D_final ≤ 154 in every run. BUG's trial frame D_stage is 540-890 against the
+ceiling 1024, and no step is work- or rank-limited.
+
+| | tol_trunc 1e-5 vs 1e-9 | 1e-7 vs 1e-9 | dt-halved vs dt (1e-7) |
+|---|---|---|---|
+| BUG dt 0.1, max obs (log P0) | 6.2e-7 (1.0e-8) | 9.6e-8 (1.6e-9) | 9.3e-7 (1.3e-8) |
+| TDVP2 dt 0.05 | 9.0e-5 (5.3e-6) | 5.8e-5 (2.9e-6) | **1.5e-4** (2.4e-5) |
+
+Accumulated discarded norm, by tol_trunc:
+
+| | 1e-5 | 1e-7 | 1e-9 |
+|---|---|---|---|
+| BUG | 2.8e-4 | 1.0e-6 | 3.9e-9 |
+| TDVP2 | 9.6e-4 | 1.4e-6 | 1.0e-9 |
+
+- **The time error dominates both integrators, so the ladder is converged, not resolved.** Every
+  compression difference lies below its own dt-halving difference. That is convergence within the
+  time error, not a collapse at a cap: BUG's discarded norms differ by 7×10⁴ and no step is limited.
+- **BUG at dt 0.1 is time-converged to about 1e-6.** For a third-order method the dt-halving
+  difference 9.3e-7 puts the dt 0.1 error near 1.1e-6.
+- **TDVP2 is limited by its time step.** The dt-halving difference 1.5e-4 puts its dt 0.05 error at
+  about 2e-4 and its dt 0.025 error at about 5e-5. BUG at dt 0.1 sits 4.4e-5 from TDVP2 dt 0.025 and
+  4.3e-4 from TDVP2 dt 0.05, which are TDVP2's time errors.
+- **Cost (indicative, concurrent jobs).** At the same tol_trunc, BUG took 6.3-9.1× TDVP2's wall
+  (20746-25220 s against 2772-3297 s to Jt = 10).
+  - Of BUG's time, 81-89% is the closure checks (`t_closure`, 886-1268 closure sweeps per run),
+    which USER 10-24 requires for a nonlocal Q. Without them a BUG run would cost about 2800-4200 s,
+    comparable to TDVP2.
+  - The loosest cut costs the most. At tol_trunc 1e-5 the closure re-enriches more (1268 sweeps
+    against 972 at 1e-9) and the frame peaks at 892 against 639.
+  - At matched error the comparison turns over. TDVP2 reaches 5e-5 at dt 0.025 for about 4650 s to
+    Jt = 10 (2325 s to Jt = 5). Reaching BUG's ~1e-6 would need dt ≈ 0.0035 at second order, about
+    33000 s, against BUG's 21858 s at tol_trunc 1e-7. That is a projection from TDVP2's measured
+    order, not a run.
+- **Physics, all BUG runs agreeing to 1e-6 (TDVP2 within its time error):**
+  - log P0(10) = −0.0748, so 7.2% of the norm was lost;
+  - late ⟨Q⟩_c = 7.32e-3 (TDVP2 7.35e-3) and ⟨Q⟩_c(10) = 8.22e-3;
+  - S(10) = 1.455.
+
+  ⟨Q⟩_c rises from 3.9e-3 (the alt start is nearly dark) to a peak of 1.4e-2 at Jt ≈ 1.2. It then
+  oscillates between 5.5e-3 and 8.3e-3 with a period of about 2.5 and no net decay by Jt = 10. The
+  rate is the same order as the dr6k3 pilot's λ(T) = 0.0076 at ν = 1/8, Γ = 2, but the window is too
+  short for a lifetime fit. The 20-trajectory rows (9-10, BUG dt 0.1 and TDVP2 dt 0.05 at 1e-7) give the
+  F08/F11 lifetime and sampling error and are still running.
+
