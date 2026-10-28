@@ -20,7 +20,9 @@
 #      RP_ARMS (comma list, default the six arms above without the bN ones),
 #      RP_PREP_TOL (1e-11) / RP_PREP_MD (2048): the start state's TDVP2 cut and cap,
 #      RP_EX_TOL (1e-12) / RP_EX_MD (2048) / RP_EX_N (32): psi_ex's cut, cap and substeps
-#      (L = 24 cannot afford the L = 12 defaults: maxdim 2048 at 1e-12 there is the whole budget)
+#      (L = 24 cannot afford the L = 12 defaults: maxdim 2048 at 1e-12 there is the whole budget),
+#      RP_WARM (0; the driver's DR_WARM start), RP_PREP_INT (tdvp | bug: psi0 from BUG's own
+#      trajectory at RP_DT/RP_TOLT/RP_PREP_TOLB/RP_PREP_MD, graded against fine TDVP2 at each t0)
 
 using LinearAlgebra, Printf, JSON
 using LurCGT, Telum
@@ -39,7 +41,10 @@ const PREP_MD = parse(Int, env("RP_PREP_MD", 2048))
 const EX_TOL = parse(Float64, env("RP_EX_TOL", 1e-12))
 const EX_MD = parse(Int, env("RP_EX_MD", 2048))
 const EX_N = parse(Int, env("RP_EX_N", 32))
-armdim(name) = parse(Int, match(r"^(?:bug|tdvp)(\d+)", name)[1])
+const PREP_INT = env("RP_PREP_INT", "tdvp")
+const PREP_TOLB = parse(Float64, env("RP_PREP_TOLB", 1e-8))
+const WARM = parse(Float64, env("RP_WARM", 0.0))
+armdim(name) =parse(Int, match(r"^(?:bug|tdvp)(\d+)", name)[1])
 
 set_symmetry!(:U1)
 const G = no_jump_mpo(hubbard_aa_mpo_d4(L; J = 1.0, U = 4.0), doublon_loss_mpo(L; kappa = 2.0))
@@ -108,12 +113,49 @@ end
 
 results = Any[]
 psi = hub4_product_state([isodd(j) ? :both : :empty for j in 1:L])
-t = 0.0
+# The production start (dissipative_run.jl DR_WARM): tight BUG steps to RP_WARM, normalised, t re-based.
+if WARM > 0
+    let nw = max(1, round(Int, WARM / 0.0125))
+        for _ in 1:nw
+            cbe_bug_step!(psi, G, ComplexF64(-im * WARM / nw); hermitian = false, order = 3,
+                          tol_basis = 1e-11, tol_root = 1e-13, tol_trunc = 1e-13, maxdim = PREP_MD)
+        end
+    end
+    normalise!(psi)
+end
+# RP_PREP_INT = bug: psi0 is BUG's OWN trajectory (production steps of RP_DT at RP_TOLT, RP_PREP_TOLB,
+# maxdim RP_PREP_MD, normalised per step as jump_trajectory does), graded at each t0 against `ref`,
+# fine TDVP2 (0.0125, RP_PREP_TOL, cap RP_EX_MD) from the same start: does the rank excess build up
+# along the trajectory, beyond what one step from a clean state shows?
+ref = PREP_INT == "bug" ? copy(psi) : nothing
+t, tr = 0.0, 0.0
 for t0 in T0S
-    global psi, t
-    while t < t0 - 1e-12                         # the start state: fine TDVP2, tight cut
-        tdvp!(psi, 0.0125; maxdim = PREP_MD, tolt = PREP_TOL)
-        t += 0.0125
+    global psi, t, tr
+    if PREP_INT == "bug"
+        while t < t0 - 1e-12
+            cbe_bug_step!(psi, G, ComplexF64(-im * DT); hermitian = false, order = 3,
+                          tol_basis = PREP_TOLB, tol_root = 1e-12, tol_trunc = TOLT, maxdim = PREP_MD)
+            normalise!(psi)
+            t += DT
+        end
+        while tr < t0 - 1e-12
+            tdvp!(ref, 0.0125; maxdim = EX_MD, tolt = PREP_TOL)
+            tr += 0.0125
+        end
+        a, b = copy(psi), normalise!(copy(ref))
+        ta, tb = tails(a), tails(b)
+        @printf("== t0 = %.2f  BUG trajectory vs fine TDVP2: dist %.3e  obs err %.3e\n", t0, dist(a, b),
+                obserr(a, b))
+        println("   traj_bug bonds ", bond_dims(a), "\n   traj_ref bonds ", bond_dims(b))
+        println("   traj_bug tails ", ta, "\n   traj_ref tails ", tb)
+        push!(results, Dict("t0" => t0, "arm" => "traj_bug", "bonds" => bond_dims(a), "tails" => ta,
+                            "dist" => dist(a, b), "obserr" => obserr(a, b)))
+        push!(results, Dict("t0" => t0, "arm" => "traj_ref", "bonds" => bond_dims(b), "tails" => tb))
+    else
+        while t < t0 - 1e-12                     # the start state: fine TDVP2, tight cut
+            tdvp!(psi, 0.0125; maxdim = PREP_MD, tolt = PREP_TOL)
+            t += 0.0125
+        end
     end
     psi0 = normalise!(copy(psi))
     ex = copy(psi0)
