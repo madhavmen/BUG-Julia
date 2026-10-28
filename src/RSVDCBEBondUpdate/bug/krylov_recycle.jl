@@ -107,10 +107,10 @@ function _recycle_transport(e, side::Symbol, Pm, Fnew, E, i::Int)
         X = Ek === nothing ? Fold : to_concrete!(contract(Fold, (3,), Ek, (2,)))
         M = to_concrete!(contract(to_concrete(Fn)', (2, 3), X, (2, 3)))      # (new*, old)
         tag = Fnew.inds[1].itags
-        return Any[begin
+        return map(e.basis) do v
             w = Pm === nothing ? v : to_concrete!(contract(Pm, (2,), v, (1,)))
             to_concrete(setitag(to_concrete!(contract(w, (3,), M, (2,))), 3, tag))
-        end for v in e.basis]
+        end
     end
     Ek = E[i]                                       # opposite frame: (link_{i-1}, site_i, bond)
     Fn = setitag(Fnew, 3, "RCb")
@@ -118,11 +118,11 @@ function _recycle_transport(e, side::Symbol, Pm, Fnew, E, i::Int)
     X = Ek === nothing ? Fold : to_concrete!(contract(Ek, (2,), Fold, (1,)))
     M = to_concrete!(contract(to_concrete(Fn)', (1, 2), X, (1, 2)))          # (new*, old)
     tag = Fnew.inds[3].itags
-    return Any[begin
+    return map(e.basis) do v
         w = to_concrete!(contract(M, (2,), v, (1,)))
         Pm === nothing || (w = to_concrete!(contract(w, (3,), Pm, (1,))))
         to_concrete(setitag(w, 1, tag))
-    end for v in e.basis]
+    end
 end
 
 "`x` minus its projection on the orthonormal `B`, CGS2 (`_krylov_enrich`'s orthogonalisation)."
