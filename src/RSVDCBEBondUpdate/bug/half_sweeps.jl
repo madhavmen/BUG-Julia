@@ -43,9 +43,10 @@ end
 
 What both half-sweeps of one step READ and never write: the operator, `tau`, the generator shift,
 the root bond `c`, the step's allocation and DD-QR expansion settings (`exkw`), the work ceiling,
-the `krylov_reuse` ablation and the states the trial space must contain (`keep_states`).
+the `krylov_reuse` ablation, the states the trial space must contain (`keep_states`) and the
+`krylov_recycle` cache (`nothing` when off), which round 1 fills.
 """
-struct _HalfSweepCtx{M, E, A, K, S}
+struct _HalfSweepCtx{M, E, A, K, S, R}
     mpo::M
     tau::ComplexF64
     eshift::E
@@ -55,6 +56,7 @@ struct _HalfSweepCtx{M, E, A, K, S}
     wcap::Int
     krylov_reuse::Bool
     keep_states::S
+    recycle::R
 end
 
 """
@@ -116,6 +118,7 @@ environment pushed through it immediately -- the reference's own ordering
 function _half_left!(psiL, W, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_HalfSweepCtx)
     mpo, c = cx.mpo, cx.c
     canonical!(psiL, 1)
+    _recycle_begin!(cx.recycle, :left, psiL, 0)
     rstack = _env_timed!(acc, right_env_stack, psiL, mpo; downto = 3)
     lch = boundary_channels(mpo)
     lroot = lch
@@ -142,6 +145,7 @@ function _half_left!(psiL, W, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_Ha
                                    cx.krylov_reuse ? ex.U_ex : _fr.U0, :left, cx.tau, cx.alloc;
                                    workcap = cx.wcap)
         cx.krylov_reuse || (Wkry = _merge_frame(Wkry, ex.U_ex, :left))
+        _recycle_store!(cx.recycle, :left, i, kst, ex.V_ex, cx.alloc.krylov)
         acc.tkry += (time_ns() - tk0) / 1e9
         _record_krylov!(bondlg, kst, cx.alloc)
         _peak!(acc, held + _state_stored(psiL), Wkry)
@@ -167,6 +171,7 @@ function _half_left!(psiL, W, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_Ha
         i == c && (lroot = lch)         # captured BEFORE pushing through the root frame
         i < c && (lch = _env_timed!(acc, push_left_channels, lch, mpo, W[i], i))
     end
+    _recycle_commit!(cx.recycle, :left, true)
     return lroot
 end
 
@@ -185,6 +190,8 @@ function _half_right!(psiR, Z, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_H
     mpo, c = cx.mpo, cx.c
     L = length(psiR)
     canonical!(psiR, L)
+    # a shallow copy: the assembly later replaces `psi`'s slots, the cache must keep these
+    _recycle_begin!(cx.recycle, :right, cx.recycle === nothing ? nothing : copy(psiR), 0)
     lstack = _env_timed!(acc, left_env_stack, psiR, mpo; upto = L - 2)
     rch = boundary_channels(mpo)
     rroot = rch
@@ -210,6 +217,7 @@ function _half_right!(psiR, Z, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_H
                                    cx.krylov_reuse ? ex.V_ex : _fr.V0, :right, cx.tau, cx.alloc;
                                    workcap = cx.wcap)
         cx.krylov_reuse || (Zkry = _merge_frame(Zkry, ex.V_ex, :right))
+        _recycle_store!(cx.recycle, :right, j, kst, ex.U_ex, cx.alloc.krylov)
         acc.tkry += (time_ns() - tk0) / 1e9
         _record_krylov!(bondlg, kst, cx.alloc)
         _peak!(acc, held + _state_stored(psiR), Zkry)
@@ -231,5 +239,6 @@ function _half_right!(psiR, Z, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_H
         j == c && (rroot = rch)
         j > c && (rch = _env_timed!(acc, push_right_channels, rch, mpo, Z[j], j + 1))
     end
+    _recycle_commit!(cx.recycle, :right, true)
     return (rroot, D)                   # `D` is (link_{c+1}, b_R)
 end

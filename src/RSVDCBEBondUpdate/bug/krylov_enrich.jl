@@ -118,10 +118,12 @@ function _krylov_enrich(v0, applyH, Q0, side::Symbol, tau::ComplexF64,
     eta_c, eta_d, added, added_d, nh = 0.0, 0.0, 0, 0, 0
     capped, closed = false, false
     b0 = norm(v0)
+    vs, ws = Any[], Float64[]          # the basis and each vector's weight (`krylov_recycle`)
     if b0 > 0
         # `tau = 0` asks the unit-time closure question, as `basis_allocation` does.
         teff = iszero(tau) ? one(tau) : tau
-        vs = Any[to_concrete((1.0 / b0) * v0)]
+        push!(vs, to_concrete((1.0 / b0) * v0))
+        push!(ws, amp)
         Hm = zeros(ComplexF64, maxdepth + 1, maxdepth + 1)
         for k in 1:maxdepth
             w = applyH(vs[end])
@@ -146,6 +148,7 @@ function _krylov_enrich(v0, applyH, Q0, side::Symbol, tau::ComplexF64,
             v = to_concrete((1.0 / b) * w)
             push!(vs, v)
             weight = amp * _kry_weight(Hm, k, teff; state_seed = state_seed)
+            push!(ws, weight)
             R = to_concrete(perp(Q, v))
             eta = weight * norm(R)
             k == 1 ? (eta_c = eta) : (eta_d = max(eta_d, eta))
@@ -167,7 +170,8 @@ function _krylov_enrich(v0, applyH, Q0, side::Symbol, tau::ComplexF64,
     end
     return (Q, (eta_c = eta_c, eta_d = eta_d, added = added, n_h1 = nh,
                 d_after_c = eta_c <= alloc.krylov && added_d > 0,
-                capped = capped, met = closed && !capped))
+                capped = capped, met = closed && !capped, basis = vs, weights = ws,
+                n_recycled = 0))
 end
 
 """

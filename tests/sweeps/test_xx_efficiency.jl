@@ -123,10 +123,13 @@ end
     f = RC._frame_from(psi[6], psi[7])
     lch, rch = _envs(psi, mpo, 6, 12)
     tau = ComplexF64(-0.1im)
-    # the step's own allocation at tol_basis 1e-5: a DD frame that leaves the DK part to Krylov
-    alloc = basis_allocation(AdaptiveBudget(1e-5, 1e-7, 1e-10), 11; tau = tau, nrm = 1.0,
+    # a loose CBE share and a tight Krylov one (as T4.1): at one share the rank-8 DD frame already
+    # held the response (xe1 17580834: eps_K 7e-7 against a guard of 4e-5), nothing left to test
+    alloc = basis_allocation(AdaptiveBudget(1e-7, 1e-9, 1e-10), 11; tau = tau, nrm = 1.0,
                              rule = :linear)
-    ex = dd_cbe_expand(f, mpo, 6, lch, rch, side; alloc = alloc, rng = Random.MersenneTwister(8))
+    acbe = basis_allocation(AdaptiveBudget(1e-2, 1e-9, 1e-10), 11; tau = tau, nrm = 1.0,
+                            rule = :linear)
+    ex = dd_cbe_expand(f, mpo, 6, lch, rch, side; alloc = acbe, rng = Random.MersenneTwister(8))
     kl = _kl_stage(side, mpo, 6, psi[6], psi[7], lch, rch, ex)
     kry = alloc.krylov
     e0 = eps_k(kl.Q0, kl.applyH, kl.seed, tau, side)
@@ -143,6 +146,48 @@ end
     end
     @info "S4 $side: allowance $kry, eps_K CBE $e0 -> adaptive $ek with $(st.n_h1) H1 " *
           "applications; fixed depths" fixed
+
+    # S5 kernel: the recycled recurrence with nothing cached IS the production one (Saad weight),
+    # and with this round's own basis cached under the same operator it adds no new direction.
+    Q0r, s0 = RC._krylov_enrich_recycled(kl.seed, kl.applyH, kl.Q0, side, tau, alloc, Any[])
+    @test s0.n_h1 == st.n_h1 && s0.added == st.added && s0.n_recycled == 0
+    @test isapprox(s0.weights, st.weights; rtol = 1e-8, atol = 1e-14)
+    P = side === :left ? perp_component : perp_component_right
+    @test norm(P(Q, Q0r)) < 1e-8 * norm(Q0r) && norm(P(Q0r, Q)) < 1e-8 * norm(Q)
+    Q1r, s1 = RC._krylov_enrich_recycled(kl.seed, kl.applyH, kl.Q0, side, tau, alloc,
+                                         st.basis[2:end])
+    @test s1.n_new == 0 && s1.n_refresh == length(st.basis) && s1.met
+    @test eps_k(Q1r, kl.applyH, kl.seed, tau, side) <= 10 * kry
+end
+
+@testset "S5: recycled Krylov rounds, changed gauge and operator, order 3 vs exact" begin
+    L = 12
+    Hs, basis = spin_xx_sector(L, 1)
+    tau = ComplexF64(-0.1im)
+    akw = (tol_basis = 1e-8, tol_trunc = 1e-10, tol_expv = 1e-12, maxdim = 64, order = 3)
+    arms = Dict{Bool, Any}()
+    for rc in (false, true)
+        psi, v = copy(snap), xx_sector_amplitudes(snap, basis)
+        logs, nh, errs = Any[], 0, Float64[]
+        for _ in 1:3
+            rep = Ref{Any}(nothing)
+            info = cbe_bug_step!(psi, mpo, tau; akw..., krylov_recycle = rc, recycle_report = rep,
+                                 rng = Random.MersenneTwister(4))
+            v = spin_ed_propagate(Hs, v, 0.1)                   # the exact step of the same input
+            push!(errs, norm(xx_sector_amplitudes(psi, basis) - v))
+            nh += info.ledger.n_h1                              # half-sweep and frontier stages
+            rep[] === nothing || push!(logs, rep[])
+        end
+        arms[rc] = (errs = errs, n_h1 = nh, logs = logs)
+    end
+    F, R = arms[false], arms[true]
+    nrec = sum(r -> r.recycled, vcat((vcat(l[:left], l[:right]) for l in R.logs)...); init = 0)
+    @info "S5 order 3, 3 steps from the rank-8 snapshot" fresh_err = F.errs recycled_err = R.errs fresh_h1 = F.n_h1 recycled_h1 = R.n_h1 recycled_vectors = nrec
+    @test isempty(F.logs)                                        # off means off
+    @test nrec > 0                                               # the arm really recycled
+    @test maximum(F.errs) < 1e-3 && maximum(R.errs) < 1e-3       # both integrate (sanity) ...
+    # ... to the same accuracy: the arms differ by less than a tenth of the step's own error
+    @test all(abs.(R.errs .- F.errs) .<= 0.1 .* F.errs .+ 1e-9)
 end
 
 end

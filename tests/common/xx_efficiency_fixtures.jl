@@ -81,7 +81,7 @@ function xx_bond_content(psi, mpo, i::Int)
     XK = to_concrete(X - XD)
     Gdd, Gkd = pr(XD), pr(XK)
     nrm(T) = norm(T)
-    sv = svd(Gdd, (1, 2); cutoff = 0.0, get_lists = true).kept_list
+    sv = first.(svd(Gdd, (1, 2); cutoff = 0.0, get_lists = true).kept_list)   # (value, ...) tuples
     rank_dd = isempty(sv) ? 0 : count(>(1e-12 * maximum(sv)), sv)
     fused_l = leg_dim(f.U0, 1) * leg_dim(f.U0, 2)
     fused_r = leg_dim(f.V0, 2) * leg_dim(f.V0, 3)

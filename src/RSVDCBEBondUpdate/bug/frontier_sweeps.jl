@@ -58,6 +58,10 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
     lch = boundary_channels(mpo)
     lenv = lch
     lchs = Vector{Any}(undef, L - 1)
+    rec = enrich ? get(ckw, :recycle, nothing) : nothing
+    rcur = _recycle_entries(rec, :left, fr.gen)
+    Eov = rcur === nothing ? nothing : _tail_overlaps(Fm, rcur.tail, :left)
+    _recycle_begin!(rec, :left, Fm, gen)
     C, Pm = nothing, nothing
     Wn = Vector{Any}(undef, c)
     lg = AdaptiveLedger()
@@ -88,9 +92,14 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
             H1 = shift_h(one_site_h(mpo, i, lch, push_right_channels(rch, mpo, ex.V_ex, i + 1)),
                          fr.eshift)
             reuse = get(ckw, :krylov_reuse, true)
-            Q, st = _krylov_enrich(Kex, x -> (nh1[] += 1; apply_one_site(H1, x)),
-                                   reuse ? ex.U_ex : U0, :left, tau, alloc; workcap = workcap,
-                                   amp = amp, state_seed = false)
+            e = rcur === nothing ? nothing : get(rcur.entries, i, nothing)
+            Pmi = Pm
+            Q, st = _recycled_or_fresh(rec, :left, i, e,
+                                       () -> _recycle_transport(e, :left, Pmi, ex.V_ex, Eov, i),
+                                       Kex, x -> (nh1[] += 1; apply_one_site(H1, x)),
+                                       reuse ? ex.U_ex : U0, tau, alloc; round = gen + 1,
+                                       workcap = workcap, amp = amp, state_seed = false)
+            _recycle_store!(rec, :left, i, st, ex.V_ex, alloc.krylov)
             _record_krylov!(bl, st, alloc)
             reuse ? Q : _merge_frame(Q, ex.U_ex, :left)
         else
@@ -136,6 +145,10 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
     rch = boundary_channels(mpo)
     renv = rch
     rchs = Vector{Any}(undef, L - 1)
+    rec = enrich ? get(ckw, :recycle, nothing) : nothing
+    rcur = _recycle_entries(rec, :right, fr.gen)
+    Eov = rcur === nothing ? nothing : _tail_overlaps(Fm, rcur.tail, :right)
+    _recycle_begin!(rec, :right, Fm, gen)
     D, Pm = nothing, nothing
     Zn = Vector{Any}(undef, L - 1)
     lg = AdaptiveLedger()
@@ -166,9 +179,14 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
             H1 = shift_h(one_site_h(mpo, j + 1, push_left_channels(lch, mpo, ex.U_ex, j), rch),
                          fr.eshift)
             reuse = get(ckw, :krylov_reuse, true)
-            Q, st = _krylov_enrich(Bex, x -> (nh1[] += 1; apply_one_site(H1, x)),
-                                   reuse ? ex.V_ex : V0, :right, tau, alloc; workcap = workcap,
-                                   amp = amp, state_seed = false)
+            e = rcur === nothing ? nothing : get(rcur.entries, j, nothing)
+            Pmj = Pm
+            Q, st = _recycled_or_fresh(rec, :right, j, e,
+                                       () -> _recycle_transport(e, :right, Pmj, ex.U_ex, Eov, j),
+                                       Bex, x -> (nh1[] += 1; apply_one_site(H1, x)),
+                                       reuse ? ex.V_ex : V0, tau, alloc; round = gen + 1,
+                                       workcap = workcap, amp = amp, state_seed = false)
+            _recycle_store!(rec, :right, j, st, ex.U_ex, alloc.krylov)
             _record_krylov!(bl, st, alloc)
             reuse ? Q : _merge_frame(Q, ex.V_ex, :right)
         else
@@ -258,6 +276,11 @@ function _frontier_sweep!(fr::KLFrames, psi::SymMPS, mpo, F::KrylovFrontier, tau
           all(indicator(alloc, x) <= alloc.per_bond for x in vcat(rl.leak, rr.leak))
     added = rl.added + rr.added
     wbefore = _frame_width(fr, L)
+    if enrich           # the sweep's recycle entries live in its frames: usable only if committed
+        rec = get(ckw, :recycle, nothing)
+        _recycle_commit!(rec, :left, added > 0)
+        _recycle_commit!(rec, :right, added > 0)
+    end
     if enrich && added > 0
         for i in 1:c
             fr.W[i] = rl.frames[i]

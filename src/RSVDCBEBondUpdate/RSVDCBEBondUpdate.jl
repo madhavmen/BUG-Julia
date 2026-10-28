@@ -93,6 +93,7 @@ include("baselines/tdvp_cbe1s.jl")
 # its record type before it; the order-p closure, the parallel K/L/S step and imaginary time
 # build on the step.
 include("bug/krylov_enrich.jl")
+include("bug/krylov_recycle.jl")
 include("bug/half_sweeps.jl")
 include("bug/cbe_bug_info.jl")
 include("bug/cbe_bug.jl")

@@ -44,6 +44,12 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # from `U0` alone and the CBE directions are merged afterwards
                        # (`_merge_frame`) -- the reuse-off arm of P07.
                        krylov_reuse::Bool = true,
+                       # ⚠ ABLATION, NOT A METHOD CHOICE (xx-efficiency plan Fig. 3). `true`: each
+                       # order-p round's local Krylov stage starts from the previous round's basis,
+                       # transported into its gauge with every image refreshed (`krylov_recycle.jl`);
+                       # unitary steps only. A `Ref` in `recycle_report` receives the per-bond log.
+                       krylov_recycle::Bool = false,
+                       recycle_report::Union{Nothing, Base.RefValue} = nothing,
                        # ── IMAGINARY TIME (plan: cbe_bug_imaginary_open_benchmark, Task 1) ──
                        # The root integrator (`ROOT_METHODS`): `:exp` is the Saad-converged
                        # exponential (the reference); `:trapezoid`/`:radau2`/`:radau3` apply that
@@ -180,7 +186,9 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     # folded into the step's after the join.
     ledgerL, ledgerR = AdaptiveLedger(), AdaptiveLedger()
     rngR = parallel ? MersenneTwister(rand(rng, UInt64)) : rng
-    cx = _HalfSweepCtx(mpo, tau, eshift, c, alloc, exkw, wcap_step, krylov_reuse, keep_states)
+    rec = krylov_recycle && order > 1 ? KrylovRecycle() : nothing
+    cx = _HalfSweepCtx(mpo, tau, eshift, c, alloc, exkw, wcap_step, krylov_reuse, keep_states,
+                       rec)
 
     troot = Ref(0.0); ttrunc = Ref(0.0)
     _t0step = time_ns()
@@ -240,7 +248,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     if order > 1
         fr = KLFrames(W, Z, c, lenv_root, renv_root, 0, nothing, nothing, Float64(eshift))
         # Plan T4.1: the frontier sweeps expand by the same DD-QR CBE as the half-sweeps.
-        ckw = merge(exkw, (krylov_reuse = krylov_reuse,))
+        ckw = merge(exkw, (krylov_reuse = krylov_reuse, recycle = rec))
         cl = _krylov_closure!(fr, psi, mpo, S0, tau, alloc, ckw; order = order,
                               workcap = wcap_step, nrm = _nrm, parallel = parallel, rng = rng,
                               ledger = ledger, fold = fold_omega, checks = closure_checks)
@@ -252,6 +260,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             expanded[j] = leg_dim(Z[j], 1)
         end
         nclose = cl.n_h1 + cl.n_root
+        recycle_report === nothing || rec === nothing || (recycle_report[] = rec.log)
     elseif closure_probe > 0
         # A copied `rng` and untouched frames: the step itself stays bit-identical.
         pr = _measure_frontiers(KLFrames(W, Z, c, lenv_root, renv_root, 0, nothing, nothing,
