@@ -51,7 +51,7 @@ function _dd_closures(f, mpo, lenv, renv, side; i = 6, rng)
     fused(t) = left ? leg_dim(t, 1) * leg_dim(t, 2) : leg_dim(t, 2) * leg_dim(t, 3)
     wcap = left ? leg_dim(opp, 2) * leg_dim(opp, 3) : leg_dim(opp, 1) * leg_dim(opp, 2)
     perpQ(Q, X) = Q === nothing ? X : left ? perp_component(Q, X) : perp_component_right(Q, X)
-    return (; side, frame, kc, draw, sketch, project, G, perpQ, wcap,
+    return (; side, frame, opp, oside, kc, draw, sketch, project, G, perpQ, wcap,
             ncap = fused(frame) - f.old_rank, fl = left ? 3 : 1, wleg = left ? 1 : 3)
 end
 
