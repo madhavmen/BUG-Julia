@@ -818,10 +818,18 @@ tol_basis / tol_root / tol_trunc = 1e-8 / 1e-12 / 1e-9. seffx reports 16h16 at 5
     takes 6979 s (≥ 1.9×).
   - TDVP2 cannot trade accuracy for a larger step here, since it is unstable from dt 0.1 (dr6w2).
 - **Every BUG step is work-limited and is marked so** (D_stage reaches the ceiling 2·maxdim = 1024;
-  USER 10-26 rule). At this point the ceiling does not cost accuracy:
+  USER 10-26 rule). At dt ≤ 0.05 the ceiling does not cost accuracy:
   - the state's rank is 378, the exact maximal Schmidt rank of the sector;
   - TDVP2, which has no ceiling, converges to the BUG reference at its own order (slopes 2.9, 2.0)
-    with no floor down to 1.1e-6.
+    with no floor down to 1.1e-6;
+  - BUG dt 0.05 is within 5.0e-10 of BUG dt 0.025 (dk7b).
+
+  **Correction (dk7a/dk7b, 2026-10-28): at dt 0.1 it does.** BUG dt 0.1's 4.8e-6 is not time-step
+  error. From dt 0.05 to dt 0.1 the error grows from 5.0e-10 to 4.8e-6, a factor of about 10⁴, which
+  no time-step order explains. It is the ceiling's cut of the trial frame. With `tol_krylov` = 1e-6
+  the same step is within 9.0e-8 of the reference. The matched-error comparison above stands as
+  measured (an error is an error), but BUG dt 0.1's point on F10 is ceiling-limited, not
+  step-limited. See "The recycled local Krylov tolerance" below.
 
   **USER 10-27: A2 is not a failed gate.** The ceiling is reached by the recycled local Krylov
   directions alone (about 3500-4000 per step, against about 0 DD-CBE directions), so their tolerance
@@ -1270,3 +1278,51 @@ unbounded memo. When an insert would pass the budget, the memo is emptied first.
 - The earlier BUG OOMs are consistent with the same mechanism, but their memory was not logged:
   A2 L = 32 dr6v2 at 24 G and dr6v3 at 40 G, and B2 dr7w row 1 at 8 G.
 
+## The recycled local Krylov tolerance (`tol_krylov`, `ef6c30d`; dk7a 17526941, dk7b 17546228; figure `dissipative_t7/tol_krylov/F12_tol_krylov.png`)
+
+USER 10-27 asked to tune the tolerance of the recycled local Krylov directions on its own.
+`tol_krylov` scales only the local Krylov share of the basis allocation (Tests C/D, the half-sweeps'
+and frontier sweeps' Krylov enrichment). `nothing`, the default, is `tol_basis` and is bit-identical
+to the solver before `ef6c30d` (test dk7t 17526723 passed).
+
+**The point.** It is dr6ta's A2 point: L = 24, 6 excitations (block, warm 0.2), Γ = 5, maxdim 512
+(ceiling 1024), Jt = 4, tol_basis / tol_root / tol_trunc = 1e-8 / 1e-12 / 1e-9, closure checks on.
+- Each job runs its arms in sequence, 1 thread, on one node: dk7a on an E5-2680 v4, dk7b on an
+  E5-4627 v3.
+- The default dt 0.05 arm is bitwise equal between the two jobs, so all arms share one start state.
+- The reference is the default at dt 0.025. Only 5 of its 160 steps are work-limited.
+- Analysis: `benchmarks/dissipative_t7_tolk.py runs_dk7a,runs_dk7b`, which writes `summary.txt` and F12.
+
+| tol_krylov | dt | max error vs ref | Krylov dirs / step | work-limited steps | step wall [s] | closure [s] | MaxRSS |
+|---|---|---|---|---|---|---|---|
+| default (1e-8) | 0.1 | 4.8e-6 | 3932 | 40 / 40 | 4131 | 2448 | 5.7 G |
+| 1e-7 | 0.1 | 1.5e-6 | 3803 | 40 / 40 | 3973 | 2381 | 6.1 G |
+| 1e-6 | 0.1 | 9.0e-8 | 3637 | 40 / 40 | 3693 | 2235 | 5.9 G |
+| 1e-5 | 0.1 | 8.6e-8 | 3461 | 40 / 40 | 3751 | 2342 | 6.2 G |
+| 1e-4 | 0.1 | 3.4e-8 | 3246 | 14 / 40 | 4668 | 3503 | 7.2 G |
+| default (1e-8) | 0.05 | 5.0e-10 | 3543 | 80 / 80 | 5021 † | 3189 † | 5.8 G |
+| 1e-6 | 0.05 | 6.8e-10 | 3147 | 6 / 80 | 5496 † | 3925 † | 6.7 G |
+| default (reference) | 0.025 | — | 3128 | 5 / 160 | 9950 † | 7164 † | 6.3 G |
+
+† dk7b's node. The dt 0.1 walls are dk7a's node; dk7a's default dt 0.05 took 6074 s there.
+
+- **At dt 0.1 the default's error is the ceiling's, not the time step's.** The default's error is
+  5.0e-10 at dt 0.05 and 4.8e-6 at dt 0.1, a factor of about 10⁴. No time-step order explains that
+  (order 4 would give about 16). The difference grows smoothly in t and is spread over every
+  observable, so no single step is responsible.
+- **Loosening `tol_krylov` removes most of it, although the frame still reaches the ceiling.**
+  - 1e-6 keeps about 300 fewer Krylov directions per step (the ledger's `n_krylov`, a step total) and
+    is 54× more accurate.
+  - It costs 11% less step wall: 3693 s against 4131 s.
+  - Every step up to 1e-5 still reaches D_stage 1024, so the gain comes from which directions fill
+    the ceiling, not from lifting it. The selection order at the cut was not traced; `cap_order` is
+    not involved, since it acts on DD-CBE directions and those are about 0 here.
+- **1e-4 overshoots.** It lifts the ceiling on 26 of 40 steps but needs 8 closure sweeps per step
+  instead of 6 (20 on the first step): +13% step wall.
+- **At dt 0.05 the choice does not matter for accuracy.** 1e-6 agrees with the default to 6.8e-10
+  and lifts the ceiling on 74 of 80 steps. It costs 9% more step wall (closure 3925 s against 3189 s,
+  same node).
+- **The default is unchanged.** `tol_krylov = nothing` stays the default and every Task 7 run used it.
+  Whether to make 1e-6 the default, or to recompute dr6ta's matched-error comparison with it, is
+  left to the USER. On the evidence here, BUG's dt 0.1 point on F10 would move from 4.8e-6 to
+  9e-8 at slightly lower cost, widening BUG's lead.

@@ -1,0 +1,23 @@
+	Command being timed: "timeout -k 60 14400 julia -t 1 --startup-file=no --project=/home/m/Madhav.Menon/bugjl/pkg/399af190c4f2 benchmarks/dissipative_run.jl"
+	User time (seconds): 5796.60
+	System time (seconds): 74.42
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:38:41
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 6193456
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 1776
+	Minor (reclaiming a frame) page faults: 37559256
+	Voluntary context switches: 8037
+	Involuntary context switches: 15294
+	Swaps: 0
+	File system inputs: 430856
+	File system outputs: 64
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
