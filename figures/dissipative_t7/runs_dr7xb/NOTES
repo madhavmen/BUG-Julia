@@ -1,0 +1,4 @@
+B1 BUG array dr7xb (17511924, 86d7e9c, TOLB 1e-5 from the dr7z probe). Every row OOM-killed at least once
+(unbounded fusion memo, fixed later in 3a12dca) and resumed from its checkpoint in another directory:
+row 1 = 2026-10-27-dr7xr1b/out/1.json, row 2 = 2026-10-27-dr7xr2/out/1.json,
+row 3 = 2026-10-27-dr7xr3/out/1.json, row 4 = 2026-10-27-dr7xr4c/out/1.json.

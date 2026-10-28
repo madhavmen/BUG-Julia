@@ -190,13 +190,50 @@ def same_record(a, b, tol):
                                       for x, y in zip(ea, eb))
 
 
-def traj_diff(r, ref):
-    """Ensemble and pathwise differences of two trajectory runs on their common times and seeds:
-    max |mean - mean| over observables and the jump count, the same in units of the combined standard
-    error, and over the seeds whose jump records agree (so the paths are comparable) max |obs - obs|.
-    A different truncation or step can move a jump past a grid point; those seeds are only counted."""
+def traj_capped_at(r, rank_only=False):
+    """End time of the first capped step over the trajectories (plan §4.4), or None. The steplog runs
+    the trajectories in sequence, one entry per step plus, at a jump, its `evals` event-location trials
+    (jump_trajectory): those all start where the crossing step did and together advance only to the jump
+    time, so each trajectory's segment is passed to `capped_at` with the time it really advanced. The
+    run JSON keeps only each trajectory's total `nevals`; a jump's trials end where the step from the
+    jump time begins, h = min(dt, next grid time - jump time) (the step size resets at a jump).
+    `rank_only` drops BUG's work-limited steps (the working-rank ceiling) and keeps the maxdim cap."""
+    s, a, caps = r["steplog"], 0, []
+    grid, dt = np.array(r["times"]), r["config"]["dt"]
+    for x in r["traj"]:
+        n = x["nsteps"] + x["nevals"]
+        seg = {k: list(v[a:a + n]) for k, v in s.items()}
+        if rank_only and "work_limited" in seg:
+            seg["work_limited"] = [0] * n
+        t, i, h, left = 0.0, 0, seg["h"], x["nevals"]
+        for m, e in enumerate(x["events"]):
+            while t + h[i] < e["t"] - 1e-12:      # steps before the one that crosses the jump
+                t += h[i]
+                i += 1
+            if m == len(x["events"]) - 1:
+                ev = left
+            else:
+                hn = min(dt, grid[grid > e["t"] + 1e-12 * max(1.0, e["t"])][0] - e["t"])
+                ev = next(j for j in range(i + 1, n) if abs(h[j] - hn) < 1e-9) - i - 1
+            h[i:i + 1 + ev] = [e["t"] - t] + [0.0] * ev
+            t, i, left = e["t"], i + 1 + ev, left - ev
+        if left != 0 or abs(sum(h) - grid[-1]) > 1e-9:
+            raise ValueError(f"seed {x['seed']}: the steps do not rebuild the trajectory's time")
+        caps.append(t5.capped_at({"config": r["config"], "steplog": seg}))
+        a += n
+    if a != len(s["h"]):
+        raise ValueError(f"steplog has {len(s['h'])} steps, the trajectories account for {a}")
+    return min((c for c in caps if c is not None), default=None)
+
+
+def traj_diff(r, ref, tmax=np.inf):
+    """Ensemble and pathwise differences of two trajectory runs on their common times (before `tmax`)
+    and seeds: max |mean - mean| over observables and the jump count, the same in units of the combined
+    standard error, and over the seeds whose jump records agree (so the paths are comparable) max
+    |obs - obs|. A different truncation or step can move a jump past a grid point; those seeds are only
+    counted."""
     t, tr = np.round(r["times"], 9), np.round(ref["times"], 9)
-    common = [x for x in t if x in set(tr)]
+    common = [x for x in t if x in set(tr) and x < tmax - 1e-9]
     i = [list(t).index(x) for x in common]
     j = [list(tr).index(x) for x in common]
 
@@ -227,12 +264,9 @@ def traj_cost(r):
     item = [("ntraj", nt), ("steps", n), ("D_final max", max(s["D_final"]))]
     if "work_limited" in s:                 # TDVP2 has no ledger; capped_at falls back to D_final >= maxdim
         item += [("rank-limited steps", int(sum(s["rank_limited"]))), ("work-limited steps", int(sum(s["work_limited"])))]
-    # the steplog runs the trajectories in sequence, each n / nt fixed steps: the earliest capped step
-    # over the trajectories is where the run's accuracy gate fails (plan §4.4)
-    if n % nt == 0:
-        caps = [t5.capped_at({"config": r["config"], "steplog": {k: v[i * (n // nt):(i + 1) * (n // nt)]
-                                                                 for k, v in s.items()}}) for i in range(nt)]
-        item += [("first capped step ends (min over trajectories)", min((c for c in caps if c is not None), default=None))]
+    # the earliest capped step over the trajectories is where the run's accuracy gate fails (plan §4.4)
+    item += [("first capped step ends (min over trajectories)", traj_capped_at(r)),
+             ("first maxdim-capped step ends", traj_capped_at(r, rank_only=True))]
     return item + [("wall", round(sum(s["wall"]))), ("peak_rss GB", round(r["peak_rss"] / 2**30, 2))]
 
 
@@ -272,6 +306,13 @@ def fig_traj(g, sel, out):
     def compare(name, a, b, ls):
         t, d, item = traj_diff(a, b)
         axs[1].semilogy(t, np.maximum(d, 1e-16), ls, label=name)
+        # a capped curve is marked: agreement after either run's first cap is not convergence. No z
+        # here: before the first jumps the trajectories share one state, and their spread is roundoff
+        for key, rank_only in (("before the first cap of either", False), ("before the first maxdim cap of either", True)):
+            w = min((c for c in (traj_capped_at(a, rank_only), traj_capped_at(b, rank_only)) if c is not None), default=np.inf)
+            if np.isfinite(w):
+                tw = traj_diff(a, b, w)[2]
+                item[f"{key} (t < {w:.4g})"] = {k: tw[k] for k in ("max |d mean|", "max |d path|")}
         rows.append((f"F09 {g[0]} L={g[1]} traj {name}", list(item.items()), []))
     for integ in ("bug", "tdvp2"):
         tight = ladder.get((integ, TOLS[-1]))

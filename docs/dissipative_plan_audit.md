@@ -1172,6 +1172,104 @@ Accumulated discarded norm, by tol_trunc:
   short for a lifetime fit. The 20-trajectory rows (9-10, BUG dt 0.1 and TDVP2 dt 0.05 at 1e-7) give the
   F08/F11 lifetime and sampling error and are still running.
 
+## Task 7 B1 L = 20, trajectories (dr7xb 17511924 + resumes, dr7y 17511306; `86d7e9c`; figure `dissipative_t7/b1_L20/F09_t7_B1_L20_traj.png`)
+
+The point is B1 L = 20 at the pilots' transport extremum: U = −4, κ = 2 at the junction j0 = 10, J_link = 1,
+biased start (the ITE preparation met every step, residual ≤ 3e-10). There are 20 trajectories to T = 6 on
+a 0.25 grid, and tol_root = 1e-12.
+
+- BUG runs at maxdim 512 (ceiling 1024), dt 0.05 and tol_basis 1e-5.
+- TDVP2 runs at maxdim 256, dt 0.025 and tol_basis 1e-8.
+- Each has the tol_trunc ladder, plus a dt-halved arm at 1e-7 to T = 3. TDVP2 also has a maxdim 512 arm
+  (5 trajectories, T = 3).
+- Runs are in `dissipative_t7/runs_dr7xb` (BUG) and `runs_dr7y` (TDVP2).
+- Every BUG row was OOM-killed by the fusion memo (section below) and finished from its checkpoints,
+  3-4 restarts each (`runs_dr7xb/NOTES` names the directories).
+
+**tol_basis 1e-5 came from a probe (dr7z 17511336).** At tol_basis 1e-8 the smoke run dr7v hit the
+work ceiling (D_stage 1024) from step 13, at 49 s per step. USER 10-26 asked for looser tolerances to
+control BUG's bond growth. dr7z reran dr7v's two trajectories to t = 1 at three looser tol_basis and
+compared them path by path with dr7v:
+
+| tol_basis | max \|x − x(1e-8)\| | work-limited steps | D_stage max | s / step | RSS |
+|---|---|---|---|---|---|
+| 1e-8 (dr7v) | — | from step 13 | 1024 | 49 | 4.9 G |
+| 1e-7 | 1.3e-9 | 12 | 1024 | | |
+| 1e-6 | 8.4e-9 | 4 | 1024 | | |
+| 1e-5 | 8.4e-8 | 0 | 843 | 15 | 3.4 G |
+
+The CBE was what over-filled the frame, so loosening it lifted the ceiling 3.3× more cheaply, at an
+error of 8e-8. It was fixed at 1e-5 over the whole tol_trunc ladder.
+
+**Cap times.** The steplog runs the trajectories in sequence, and each jump adds its event-location
+trials. Those trials restart from the same state, so `traj_capped_at` (`dissipative_t7_figures.py`)
+rebuilds each trajectory's time from them before taking the first capped step. The rebuilt times
+add up to T on every trajectory of every run.
+
+| run | rank-limited / work-limited steps (of all) | first capped step ends (any / maxdim) | discarded total | wall s | peak RSS |
+|---|---|---|---|---|---|
+| BUG tol_trunc 1e-5 | 1541 / 2092 (2549) | 0.8 / 2.15 | 1.1 | 123253 | 33.9 G |
+| BUG 1e-7 | 1807 / 2084 (2545) | 0.85 / 1.6 | 0.94 | 137474 | 35.0 G |
+| BUG 1e-9 | 2099 / 2246 (2544) | 0.6 / 0.9 | 0.86 | 141941 | 24.7 G |
+| BUG 1e-7, dt 0.025, T = 3 | 965 / 1392 (2458) | 1.075 / 1.625 | 2.9e-3 | 78935 | 8.0 G |
+| TDVP2 1e-5 | D_final = 256 | 1.75 | 7.4 | 92461 | 3.0 G |
+| TDVP2 1e-7 | D_final = 256 | 1.125 | 7.6 | 87556 | 3.0 G |
+| TDVP2 1e-9 | D_final = 256 | 0.775 | 7.7 | 93957 | 2.9 G |
+| TDVP2 1e-7, dt 0.0125, T = 3 | D_final = 256 | 1.1875 | 0.08 | 49722 | 2.8 G |
+| TDVP2 1e-7, maxdim 512, 5 traj, T = 3 | D_final = 512 | 1.675 | 1.3e-3 | 15467 | 2.9 G |
+
+Both integrators are capped from about t = 1 on, so every curve after that is marked (plan §4.4).
+The two caps behave differently.
+
+The table gives the largest difference of the 20-trajectory means over the observables and the jump
+count, and in brackets the largest pathwise difference on seeds with identical jump records:
+
+| comparison | whole run | before the first maxdim cap of either |
+|---|---|---|
+| BUG vs TDVP2, tol_trunc 1e-5 | 0.14 (0.78) | 3.0e-5 (8.0e-5), t < 1.75 |
+| BUG vs TDVP2, 1e-7 | 0.15 (0.79) | 2.9e-5 (7.7e-5), t < 1.125 |
+| BUG vs TDVP2, 1e-9 | 0.18 (0.38) | 2.9e-5 (7.7e-5), t < 0.775 |
+| BUG 1e-5 vs 1e-9 | 0.10 (0.79) | 2.1e-7 (1.5e-6), t < 0.9 |
+| BUG 1e-7 vs 1e-9 | 0.052 (0.79) | 3.3e-8 (6.1e-8), t < 0.9 |
+| BUG dt 0.025 vs 0.05 (1e-7) | 1.5e-3 (1.3e-2) | 7.3e-6 (7.9e-5), t < 1.6 |
+| TDVP2 1e-5 vs 1e-9 | 4.8e-4 (2.3e-3) | 5.8e-7 (5.5e-6), t < 0.775 |
+| TDVP2 1e-7 vs 1e-9 | 4.9e-4 (2.9e-3) | 3.8e-8 (1.3e-7), t < 0.775 |
+| TDVP2 dt 0.0125 vs 0.025 (1e-7) | 2.2e-5 (5.7e-5) | 2.2e-5, t < 1.125 |
+| TDVP2 maxdim 512 vs 256 (1e-7, 5 traj) | 1.2e-5 (2.3e-6) | 0.0, t < 1.125 |
+
+- **Before BUG's cap, the two integrators agree to TDVP2's time error.** BUG vs TDVP2 is
+  2.2-3.0e-5 at every tol_trunc and every output time up to BUG's first maxdim-capped step. That
+  matches TDVP2's dt-halving difference (2.2e-5, so its dt 0.025 error is about 3e-5). BUG's own
+  dt-halving difference there is 7e-6, and its compression differences are ≤ 2e-7.
+- **After BUG's cap, BUG is wrong.** The BUG–TDVP2 difference leaves the 3e-5 floor within 0.25-0.5
+  of BUG's first maxdim-capped step: 2.8e-4 at t = 2.25 for 1e-5 (cap 2.15), 9.2e-5 at 1.75 for 1e-7
+  (cap 1.6), 1.2e-4 at 1.5 for 1e-9 (cap 0.9). It reaches 5-13e-3 at t = 3 and 0.14-0.18 at t = 6.
+  - It shows on the seeds without a jump too, so it is the deterministic flow, not the jump sampling.
+    The jump records stay the same: 15-19 of 20 seeds match, and every run loses 2.4 ± 0.28 pairs by T = 6.
+  - BUG's own ladder comes apart the same way: 1e-5 vs 1e-9 is 1.1e-2 at t = 3. The tighter tol_trunc
+    caps earlier and drifts from the earliest time.
+- **TDVP2 at its cap stays converged.** At maxdim 256 TDVP2 discards about 8× more weight than BUG
+  (7.6 against 0.9 in total). Still, its 512 arm is identical to it until t = 1.25, 1.3e-9 at 1.75
+  and 1.2e-5 at t = 3. Its tol_trunc ladder spreads 5.6e-6 at t = 3 and 4.8e-4 at t = 6.
+  - So BUG's error at the cap is not discarded weight. It is the projection error of a frame held at
+    512, the binding-cap finding of the adaptive plan (`ADAPTIVE_PLAN_AUDIT.md`), here on a
+    non-Hermitian generator.
+  - The work-limited steps that come first (D_stage 1024 from t ≈ 0.6-0.85) do not cost accuracy:
+    BUG still agrees with TDVP2 to its time error up to the maxdim cap.
+  - TDVP2 is validated against maxdim to T = 3 only. Past that, its tol_trunc spread (≤ 4.8e-4) is the
+    only check, and it is 300× below the BUG difference.
+- **Grading (plan §4.4).** B1 L = 20 is graded only before BUG's first maxdim-capped step. There BUG
+  reproduces TDVP2 to TDVP2's own time error, and its compression ladder is converged (≤ 2e-7, far
+  below the dt-halving difference). After the cap BUG fails the accuracy gate at maxdim 512, and
+  TDVP2 maxdim 256 is the B1 result: late j_c left 0.183 ± 0.019, right −0.214 ± 0.021, the same at
+  every tol_trunc.
+- **Cost.** The walls are not timing-grade: the jobs ran concurrently on mixed nodes, and BUG resumed
+  3-4 times on the unbounded-memo code. Even so, BUG at maxdim 512 took 1.3-1.6× TDVP2's wall at
+  maxdim 256 and dt 0.025, and 8-12× its memory.
+- **Open (USER).** A BUG arm at maxdim 1024 would measure where BUG's cap error falls off. At this
+  point the frame already fills the 1024 ceiling from t ≈ 0.6, so 1024 means a 2048 ceiling and more
+  than the 35 G and 39 h of the 512 rows. It is not run.
+
 ## Task 7 parallel subset (U18; dp7a 17524530, dp7b 17531341; `benchmarks/dissipative_t7_parallel.py`)
 
 USER 10-27: "We should also do the parallel bug variants", and "for higher bond dimension there will be
