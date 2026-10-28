@@ -121,6 +121,9 @@ include(joinpath(@__DIR__, "..", "common", "adaptive_fixtures.jl"))
         @test work_ceiling(128, 10) == 256
         @test work_ceiling(128, 200) == 400        # r > maxdim: the floor governs
         @test work_ceiling(0, 0) == 1              # never zero, which would admit nothing
+        # the factor is the local dimension: the whole one-site space of a d = 4 site
+        @test work_ceiling(128, 10, 4) == 512
+        @test work_ceiling(128, 200, 4) == 800
     end
 
     @testset "the ledger starts clean and merges conservatively" begin

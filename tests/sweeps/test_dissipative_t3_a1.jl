@@ -139,6 +139,16 @@ const _A1_SEC = Dict(L => _a1_sector(L, _A1_OCC[L]) for L in (2, 4, 6))
     end
 end
 
+@testset "A1 work ceiling: d = 4, so D_work = 4*maxdim" begin
+    psi = hub4_product_state(_A1_OCC[4])
+    @test local_dim(psi) == 4
+    md = 3
+    ops = _a1_ops(_A1_SEC[4]; U = 4.0, kappa = 1.0)
+    r = cbe_bug_step!(psi, ops.G, ComplexF64(-0.05im); merge(_A1_BUG, (maxdim = md,))...).record
+    @test r.D_work == work_ceiling(md, r.D_old, 4) == 4md   # D_old = 1: maxdim governs
+    @test r.D_stage <= r.D_work && r.D_final <= md
+end
+
 @testset "A1 smoke: L = $L, U = $U, κ = $κ, $start" for (L, U, κ, start) in
         [(L, U, κ, st) for L in (4, 6) for U in (0.0, 4.0) for κ in (0.0, 1.0, 8.0, 20.0)
          for st in (:product, :entangled) if st === :product || U == 4.0]

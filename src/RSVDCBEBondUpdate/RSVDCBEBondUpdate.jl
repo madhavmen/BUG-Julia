@@ -127,7 +127,7 @@ export XXZTerm, XXZChain, xxz_chain, heisenberg_su2_chain, hamiltonian_terms, bo
 # MULTIPLETS, so cross-symmetry comparisons at fixed rank must convert)
 export AdaptiveBudget, BasisAllocation, basis_allocation, indicator,
        AdaptiveLedger, merge_ledger!, work_ceiling, budget_status, budget_diagnostic,
-       state_dim, state_bond_dims, multiplet_ratio
+       state_dim, state_bond_dims, multiplet_ratio, local_dim
 
 # expansion/ -- RSVD CBE, the DD-QR CBE with its operator interface and step record, and the
 # per-bond expansion

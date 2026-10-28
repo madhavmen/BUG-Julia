@@ -332,18 +332,21 @@ function _log_bond!(ledger::AdaptiveLedger, bl::AdaptiveLedger, bond::Int, side:
 end
 
 """
-    work_ceiling(maxdim, r) -> Int
+    work_ceiling(maxdim, r, d = 2) -> Int
 
-The internal cap on temporary working rank at one bond, from the resource limit and the bond's
-current rank. Not a user setting.
+The internal cap on temporary working rank at one bond, from the resource limit, the bond's
+current rank and the local dimension `d` (`local_dim`). Not a user setting.
 
 Expansion may overshoot `maxdim` while the trial space is built, since that is how a rank-`r` state
 discovers rank-`r'` structure. It may not grow without bound, which an uncapped spectrum-driven rule
-does on bonds whose singular values never decay. The policy `max(2*maxdim, 2*r, 1)` gives headroom
-for the augmented rank-`2r` basis, and the `2r` floor stops a bond already above `maxdim` from being
-frozen. It is a tuned policy, not a theorem; `workcap_reached` in the ledger reports when it binds.
+does on bonds whose singular values never decay. The policy `max(d*maxdim, d*r, 1)` admits the
+whole one-site space a rank-`maxdim` frame reaches (`d*maxdim` directions, which is also the
+two-site space TDVP2 keeps), and the `d*r` floor stops a bond already above `maxdim` from being
+frozen. USER 10-28: `d`, not 2 -- at the d = 4 Hubbard site `2*maxdim` held A1 at the ceiling on
+every step whatever `tol_krylov` (dq7a). It is a tuned policy, not a theorem; `workcap_reached` in
+the ledger reports when it binds.
 """
-work_ceiling(maxdim::Int, r::Int) = max(2 * maxdim, 2 * r, 1)
+work_ceiling(maxdim::Int, r::Int, d::Int = 2) = max(d * maxdim, d * r, 1)
 
 """
 The adaptive search's STARTING width schedule (`budget = ceil(growth*dmax) - r`, probe `1.2x` that).

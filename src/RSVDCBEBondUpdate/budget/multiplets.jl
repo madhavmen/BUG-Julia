@@ -39,6 +39,15 @@ and is the right thing to log when a script may run in more than one mode.
 state_bond_dims(psi::SymMPS) = [state_dim(psi[i], 3) for i in 1:(length(psi) - 1)]
 
 """
+    local_dim(psi) -> Int
+
+The largest physical dimension over the sites, in states (`state_dim` of the site leg): 2 for
+spin-1/2, 4 for the d = 4 Hubbard site, under any symmetry. A frame of `r` multiplets fused with a
+site of `d` states holds at most `d*r` multiplets, so this is the factor of `work_ceiling`.
+"""
+local_dim(psi::SymMPS) = maximum(i -> state_dim(psi[i], 2), 1:length(psi); init = 1)
+
+"""
     multiplet_ratio(psi) -> Float64
 
 Mean states per multiplet over the interior bonds: `1.0` under an abelian symmetry, and how much

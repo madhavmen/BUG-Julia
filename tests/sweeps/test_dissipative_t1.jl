@@ -137,7 +137,8 @@ end
     r = cbe_bug_step!(copy(psi0), G, tau; hermitian = false, order = 3, tol_basis = 1e-8,
                       maxdim = md).record
     @test r.D_max == md
-    @test r.D_work == work_ceiling(md, r.D_old)
+    @test local_dim(psi0) == 2                       # spin-1/2: the ceiling stays 2*maxdim
+    @test r.D_work == work_ceiling(md, r.D_old, 2) == max(2md, 2r.D_old)
     @test r.D_stage <= r.D_work && r.D_final <= r.D_max
 end
 

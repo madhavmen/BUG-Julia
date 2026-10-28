@@ -91,7 +91,7 @@ function cbe_expand(f::BondFrame, skl, skr;
     # THE WORK CEILING IS THE ONE RESOURCE LIMIT, and it is what keeps the certified loop an
     # RSVD. Test B widens until the residual fits, and at a bond whose spectrum does not decay
     # that is satisfied only by the complete fused basis -- exactly the cost the sketch exists
-    # to avoid. `workcap` (`2*max(maxdim, rmax)`, set by the caller from `maxdim`) stops the
+    # to avoid. `workcap` (`work_ceiling`, set by the caller from `maxdim`) stops the
     # doubling there and the shortfall is REPORTED as `workcap_reached` rather than paid for.
     if alloc !== nothing && workcap > 0
         wcap_l, wcap_r = min(wcap_l, workcap), min(wcap_r, workcap)

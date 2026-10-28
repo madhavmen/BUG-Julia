@@ -168,7 +168,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
 
     # The ONE work ceiling, shared by the CBE sketch and the Krylov enrichment (plan §4/§5), read
     # ONCE, globally, before anything widens.
-    wcap_step = work_ceiling(maxdim, maximum(bond_dims(psi); init = 0))
+    wcap_step = work_ceiling(maxdim, maximum(bond_dims(psi); init = 0), local_dim(psi))
     # The expansion settings every DD-QR CBE of the step takes, half-sweeps and frontier sweeps.
     exkw = (growth = ADAPTIVE_GROWTH, exact = exact, alloc = alloc, workcap = wcap_step,
             cap_order = cap_order)
