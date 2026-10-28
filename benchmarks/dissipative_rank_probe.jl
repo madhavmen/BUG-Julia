@@ -4,7 +4,8 @@
 #
 # ONE dt step of each arm from the same state psi0 (A1 L = 12, U = 4, kappa = 2, dbl_rich, evolved to
 # t0 by fine TDVP2), against psi_ex = the same step by 32 TDVP2 substeps at tol_trunc 1e-12:
-#   bug512 / bug2048       BUG order 3, maxdim 512 (work ceiling 1024, binds) / 2048 (ceiling 4096)
+#   bug512 / bug2048       BUG order 3, maxdim 512 / 2048 (any bugN: maxdim N; work ceiling 2N before
+#                          6a8b742, d*N = 4N since)
 #   bug512u / bug2048u     the same with truncate = false: the evolved state before the compression
 #   bug512o1u              order 1, maxdim 512, untruncated: is it the frontier closure?
 #   tdvp512                TDVP2, two steps of dt/2, maxdim 512
@@ -16,7 +17,10 @@
 # 1e-6 .. 1e-10 above psi_ex's at the same bonds.
 #
 # Env: RP_L (12), RP_T0 ("0.2,0.4"), RP_DT (0.1), RP_TOLT (1e-9), RP_OUT (rank_probe.json),
-#      RP_ARMS (comma list, default the six arms above without the bN ones)
+#      RP_ARMS (comma list, default the six arms above without the bN ones),
+#      RP_PREP_TOL (1e-11) / RP_PREP_MD (2048): the start state's TDVP2 cut and cap,
+#      RP_EX_TOL (1e-12) / RP_EX_MD (2048) / RP_EX_N (32): psi_ex's cut, cap and substeps
+#      (L = 24 cannot afford the L = 12 defaults: maxdim 2048 at 1e-12 there is the whole budget)
 
 using LinearAlgebra, Printf, JSON
 using LurCGT, Telum
@@ -30,6 +34,12 @@ const TOLT = parse(Float64, env("RP_TOLT", 1e-9))
 const OUT = env("RP_OUT", "rank_probe.json")
 const THRESH = (1e-2, 1e-4, 1e-6, 1e-8, 1e-10)
 const ARMS = split(env("RP_ARMS", "tdvp512,bug512,bug2048,bug512u,bug2048u,bug512o1u"), ",")
+const PREP_TOL = parse(Float64, env("RP_PREP_TOL", 1e-11))
+const PREP_MD = parse(Int, env("RP_PREP_MD", 2048))
+const EX_TOL = parse(Float64, env("RP_EX_TOL", 1e-12))
+const EX_MD = parse(Int, env("RP_EX_MD", 2048))
+const EX_N = parse(Int, env("RP_EX_N", 32))
+armdim(name) = parse(Int, match(r"^(?:bug|tdvp)(\d+)", name)[1])
 
 set_symmetry!(:U1)
 const G = no_jump_mpo(hubbard_aa_mpo_d4(L; J = 1.0, U = 4.0), doublon_loss_mpo(L; kappa = 2.0))
@@ -65,10 +75,10 @@ function arm(psi0, name)
     rec = Dict{String, Any}("arm" => name)
     if startswith(name, "tdvp")
         for _ in 1:2
-            tdvp!(psi, DT / 2; maxdim = 512, tolt = TOLT)
+            tdvp!(psi, DT / 2; maxdim = armdim(name), tolt = TOLT)
         end
     else
-        md = occursin("2048", name) ? 2048 : 512
+        md = armdim(name)
         mb = match(r"b(\d+)", name)
         tb = mb === nothing ? 1e-8 : 10.0^(-parse(Int, mb[1]))
         rec["tol_basis"] = tb
@@ -102,13 +112,13 @@ t = 0.0
 for t0 in T0S
     global psi, t
     while t < t0 - 1e-12                         # the start state: fine TDVP2, tight cut
-        tdvp!(psi, 0.0125; maxdim = 2048, tolt = 1e-11)
+        tdvp!(psi, 0.0125; maxdim = PREP_MD, tolt = PREP_TOL)
         t += 0.0125
     end
     psi0 = normalise!(copy(psi))
     ex = copy(psi0)
-    for _ in 1:32
-        tdvp!(ex, DT / 32; maxdim = 2048, tolt = 1e-12)
+    for _ in 1:EX_N
+        tdvp!(ex, DT / EX_N; maxdim = EX_MD, tolt = EX_TOL)
     end
     @printf("== t0 = %.2f  psi0 bonds %s\n   psi_ex bonds %s\n", t0, bond_dims(psi0), bond_dims(ex))
     tex = tails(ex)
