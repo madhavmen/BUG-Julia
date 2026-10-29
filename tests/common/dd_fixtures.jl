@@ -35,9 +35,10 @@ _hb_wide() = _hb_bond(; L = 12, i = 6, steps = 4, maxdim = 16)
 
 """
 `_dd_controller`'s closures for one side of bond `i`, built as `dd_cbe_expand` builds them, and
-the exact DD range `G` (the complete discarded probe) its `Q` is graded against.
+the exact DD range `G` (the complete discarded probe) its `Q` is graded against; `audit = false`
+skips `G` (`nothing`), so a timed run does not pay for the offline audit.
 """
-function _dd_closures(f, mpo, lenv, renv, side; i = 6, rng)
+function _dd_closures(f, mpo, lenv, renv, side; i = 6, rng, audit::Bool = true)
     left = side === :left
     frame, opp = left ? (f.U0, f.V0) : (f.V0, f.U0)
     oside = left ? :right : :left
@@ -47,7 +48,8 @@ function _dd_closures(f, mpo, lenv, renv, side; i = 6, rng)
     draw(w, b) = RC._dd_probe(opp, oside, w; rng = rng, boost = b, kc = kc)
     sketch(Om) = (apply_two_site_sketch!(out, Om, op); out[])
     project = left ? (X -> perp_component(f.U0, X)) : (X -> perp_component_right(f.V0, X))
-    G = dd_reference_sketch(f, mpo, i, lenv, renv, full_local_basis(opp, oside), side)
+    G = audit ? dd_reference_sketch(f, mpo, i, lenv, renv, full_local_basis(opp, oside), side) :
+                nothing
     fused(t) = left ? leg_dim(t, 1) * leg_dim(t, 2) : leg_dim(t, 2) * leg_dim(t, 3)
     wcap = left ? leg_dim(opp, 2) * leg_dim(opp, 3) : leg_dim(opp, 1) * leg_dim(opp, 2)
     perpQ(Q, X) = Q === nothing ? X : left ? perp_component(Q, X) : perp_component_right(Q, X)
