@@ -218,6 +218,9 @@ if f4:
         b.plot(dts, ref, color=MUTED, lw=1, ls=ls, label=f"$h^{p}$ reference")
     b.set_xscale("log")
     b.set_yscale("log")
+    # label only the dt values run; log minor labels collide
+    b.set_xticks(dts, [f"{d:g}" for d in dts])
+    b.xaxis.set_minor_formatter(plt.NullFormatter())
     b.set_xlabel("dt")
     b.set_ylabel(r"$\|\psi - \psi_{ex}(T)\|$")
     b.set_title("B  dt convergence of the full method", fontsize=8)
