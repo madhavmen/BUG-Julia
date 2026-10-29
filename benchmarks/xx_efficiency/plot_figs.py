@@ -81,7 +81,7 @@ if f1:
     axs[0][0].legend(fontsize=7, loc="lower left")
     fig.suptitle("Fig. 1A  adaptive stopping vs one-shot fixed oversampling (same DD + QR); "
                  "hollow = a seed/side missed the target", fontsize=9)
-    save(fig, "fig1a_adaptive_vs_fixed")
+    save(fig, "figS1a_adaptive_vs_fixed")
 
     fig, axs = plt.subplots(1, 3, figsize=(10, 3.4), sharey=True)
     for ax, (case, title) in zip(axs, [("t4.0_r16_b8", "J t = 4, rank 16, bond 8"),
@@ -104,7 +104,45 @@ if f1:
     axs[0].legend(fontsize=7)
     fig.suptitle("Fig. 1B  DD vs one-sided projection at equal Gaussian width (2, 4, 8, 16), same QR",
                  fontsize=9)
-    save(fig, "fig1b_dd_vs_one_sided")
+    save(fig, "figS1b_dd_vs_one_sided")
+
+    # plan Fig. 1 (two panels): the active bond at the one tolerance that binds there; the
+    # looser targets lie above rho_DD = 1 and the quiet bonds are trivial (supplementary S1a/S1b)
+    case, tol = "t4.0_r16_b8", 1e-7
+    fig, (a, b) = plt.subplots(1, 2, figsize=(10, 3.8))
+    sel = [x for x in rows if x["figure"] == "1A" and x["case"] == case and x["tol"] == tol]
+    for arm, lab, col, mk in arms:
+        pts = [x for x in sel if x["arm"] == arm]
+        a.scatter([x["work"] for x in pts], [max(x["error"], 1e-17) for x in pts],
+                  marker=mk, s=28, label=lab, edgecolors=col, linewidths=1.2,
+                  facecolors=[col if x["pass"] else "none" for x in pts])
+    tgt = med([x["target"] for x in sel])
+    a.axhline(tgt, color=MUTED, lw=1, ls="--")
+    a.text(0.02, tgt, " target", color=MUTED, fontsize=7, va="bottom",
+           transform=a.get_yaxis_transform())
+    a.set_yscale("log")
+    a.set_xlabel("streamed MPO-channel columns (incl. holdout)")
+    a.set_ylabel(r"audited $\rho_{DD}$")
+    a.set_title(f"A  adaptive vs fixed oversampling, tol_basis = {tol:.0e}; hollow = missed",
+                fontsize=8)
+    a.legend(fontsize=7, loc="center left")
+    for arm, lab, col, mk in (("DD", r"DD  $P_L^D X P_R^D$", C1, "o"),
+                              ("one_sided", r"one-sided  $P_L^D X$", C2, "s")):
+        g = defaultdict(list)
+        for x in rows:
+            if x["figure"] == "1B" and x["case"] == case and x["arm"] == arm:
+                g[x["param"]].append(x)
+        ws = sorted(g, key=lambda p: int(p.split("=")[1]))
+        b.plot([med([x["columns"] for x in g[w]]) for w in ws],
+               [max(med([x["error"] for x in g[w]]), 1e-16) for w in ws],
+               color=col, marker=mk, label=lab)
+    b.set_yscale("log")
+    b.set_xlabel("selected new bond columns (median)")
+    b.set_ylabel(r"audited $\rho_{DD}$ (median)")
+    b.set_title("B  DD vs one-sided at equal Gaussian width, same QR", fontsize=8)
+    b.legend(fontsize=7)
+    fig.suptitle("Fig. 1  active XX bond (J t = 4, rank 16, bond 8)", fontsize=9)
+    save(fig, "fig1_rsvd_dd")
 
 # ── Fig. 2 ─────────────────────────────────────────────────────────────────────
 f2 = load("fig2_krylov.json")
@@ -144,7 +182,7 @@ if f2:
     b.set_title("B  applications selected by the stop vs fixed depths", fontsize=8)
     b.legend(fontsize=7, loc="center left")
     fig.suptitle("Fig. 2  time-weighted Krylov stopping vs fixed depth (no recycling)", fontsize=9)
-    save(fig, "fig2_krylov_stop")
+    save(fig, "fig2_krylov_stopping")
 
 # ── Fig. 3 ─────────────────────────────────────────────────────────────────────
 f3 = load("fig3_recycle.json")
@@ -187,7 +225,7 @@ if f3:
     b.legend(fontsize=7)
     fig.suptitle("Fig. 3  Krylov recycling (R) vs fresh (F), same adaptive DD-CBE and stop rule",
                  fontsize=9)
-    save(fig, "fig3_recycling")
+    save(fig, "fig3_krylov_recycling")
 
 # ── Fig. 4 ─────────────────────────────────────────────────────────────────────
 f4 = load("fig4_endtoend.json")
@@ -226,4 +264,4 @@ if f4:
     b.set_title("B  dt convergence of the full method", fontsize=8)
     b.legend(fontsize=7)
     fig.suptitle("Fig. 4  complete order-3 BUG solver, three settings", fontsize=9)
-    save(fig, "fig4_endtoend")
+    save(fig, "fig4_total_solver")
