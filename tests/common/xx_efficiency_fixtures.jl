@@ -5,9 +5,25 @@
 # timed or reachable from the solver. Needs `free_fermion.jl`, `spin_ed.jl`, `ramped_tdvp.jl`,
 # `adaptive_fixtures.jl` and `dd_fixtures.jl` included first.
 
-"`<e_k|psi>` for every product state of `basis` (`spin_xx_sector`'s): the MPS in the sector basis."
-xx_sector_amplitudes(psi, basis) =
-    ComplexF64[overlap(sector_product_state(spin_space(1), [((s,),) for s in b]), psi) for b in basis]
+"""
+`<e_k|psi>` for every product state of `basis` (`spin_xx_sector(L, twoS)`'s): the MPS in the
+sector basis. At `twoS > 1` this is phase-sensitive in the local basis convention, which S1 pins
+against the sector ED.
+"""
+xx_sector_amplitudes(psi, basis; twoS::Int = 1) =
+    ComplexF64[overlap(sector_product_state(spin_space(twoS), [((s,),) for s in b]), psi)
+               for b in basis]
+
+"""
+    xx_vector_error(a, ex) -> (err, err_phase, fid)
+
+`||a - ex||`, the same after the best global phase (plan Fig. 4B: phase-aligned) and `|<ex|a>|`.
+"""
+function xx_vector_error(a, ex)
+    ov = dot(ex, a)
+    return (err = norm(a - ex), err_phase = sqrt(max(norm(a)^2 + norm(ex)^2 - 2 * abs(ov), 0.0)),
+            fid = abs(ov))
+end
 
 """
     xx_state_error(psi, t, basis) -> (err, err_phase, fid)
@@ -15,26 +31,19 @@ xx_sector_amplitudes(psi, basis) =
 `||psi - psi_ex(t)||`, the same after the best global phase (plan Fig. 4B: phase-aligned) and
 `|<psi_ex|psi>|`, against the exact Slater state. Offline only: one overlap per basis state.
 """
-function xx_state_error(psi, t, basis)
-    a = xx_sector_amplitudes(psi, basis)
-    ex = xx_slater_amplitudes(length(basis[1]), t, basis)
-    ov = dot(ex, a)
-    return (err = norm(a - ex),
-            err_phase = sqrt(max(norm(a)^2 + norm(ex)^2 - 2 * abs(ov), 0.0)),
-            fid = abs(ov))
-end
+xx_state_error(psi, t, basis) =
+    xx_vector_error(xx_sector_amplitudes(psi, basis), xx_slater_amplitudes(length(basis[1]), t, basis))
 
 """
-    xx_reference_state(L, t; dt = 0.025, maxdim = 512) -> SymMPS
+    xx_reference_state(L, t; dt = 0.025, maxdim = 512, twoS = 1) -> SymMPS
 
-The high-accuracy domain wall at `J t`: the order-4 TDVP2 reference solver of `test_spin_xx.jl`
+The high-accuracy spin-`twoS/2` domain wall at `J t`: the order-4 TDVP2 reference solver of `test_spin_xx.jl`
 (first step ramped, `trunc_thresh = 1e-14`), NOT the integrator under study. Grade it with
 [`xx_state_error`](@ref) before use.
 """
-function xx_reference_state(L::Int, t::Real; dt::Real = 0.025, maxdim::Int = 512)
+function xx_reference_state(L::Int, t::Real; dt::Real = 0.025, maxdim::Int = 512, twoS::Int = 1)
     set_symmetry!(:U1)
-    mpo = xxz_mpo(L; J = 1.0, delta = 0.0)
-    psi = domain_wall_state(L)
+    mpo, psi = xx_model(L, twoS)
     n = round(Int, t / dt)
     abs(n * dt - t) < 1e-12 || throw(ArgumentError("t = $t is not a multiple of dt = $dt"))
     for k in 1:n
@@ -43,6 +52,10 @@ function xx_reference_state(L::Int, t::Real; dt::Real = 0.025, maxdim::Int = 512
     end
     return psi
 end
+
+"The spin-`twoS/2` XX MPO and domain wall (`xxz_mpo` / `domain_wall_state` at `twoS = 1`)."
+xx_model(L::Int, twoS::Int) = twoS == 1 ? (xxz_mpo(L; J = 1.0, delta = 0.0), domain_wall_state(L)) :
+                                          (spin_xx_mpo(L, twoS), spin_domain_wall_state(L, twoS))
 
 """
     xx_snapshot(psi_ref, rank) -> (psi, discarded)

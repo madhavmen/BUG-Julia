@@ -50,6 +50,9 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # unitary steps only. A `Ref` in `recycle_report` receives the per-bond log.
                        krylov_recycle::Bool = false,
                        recycle_report::Union{Nothing, Base.RefValue} = nothing,
+                       # `:images` refreshes and continues the cached recurrence; `:frame` only
+                       # seeds the next round's frame with the transported vectors (no images).
+                       recycle_mode::Symbol = :images,
                        # ⚠ ABLATION, NOT A METHOD CHOICE (xx-efficiency plan Fig. 4, conventional
                        # controls). `dd_width = l > 0`: every DD-QR CBE takes ONE probe of width
                        # `l` (no holdout, no adaptive growth). `krylov_depth = m > 0`: every local
@@ -192,7 +195,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     # folded into the step's after the join.
     ledgerL, ledgerR = AdaptiveLedger(), AdaptiveLedger()
     rngR = parallel ? MersenneTwister(rand(rng, UInt64)) : rng
-    rec = krylov_recycle && order > 1 ? KrylovRecycle() : nothing
+    rec = krylov_recycle && order > 1 ? KrylovRecycle(recycle_mode) : nothing
     cx = _HalfSweepCtx(mpo, tau, eshift, c, alloc, exkw, wcap_step, krylov_reuse, krylov_depth,
                        keep_states, rec)
 

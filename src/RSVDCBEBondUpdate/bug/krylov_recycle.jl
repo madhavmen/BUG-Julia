@@ -7,9 +7,12 @@
 # overlap of the old and the new tail state -- re-orthonormalises it against its seed, REFRESHES
 # every image with its own `H1` (a stale `H1 v` is never reused) and continues the Arnoldi
 # recurrence from that block under the same time-weighted stop. Off by default.
+# `mode = :frame` is the image-free variant: the transported vectors only join the starting frame
+# (each by its own weighted residual, as `_extend_frame` admits Krylov directions) and a FRESH
+# `_krylov_enrich` runs on top -- no image refresh, no continued recurrence.
 
 """
-    KrylovRecycle()
+    KrylovRecycle(mode = :images)
 
 One step's recycle cache, per side: the last committed round's entries `bond => (basis, weights,
 frame)`, the state whose tail the entries' opposite leg lives in, and the frame generation their
@@ -20,10 +23,14 @@ mutable struct KrylovRecycle
     cur::Dict{Symbol, Any}      # side => (entries, tail, gen)
     pend::Dict{Symbol, Any}
     log::Dict{Symbol, Vector{Any}}
+    mode::Symbol                # :images (refreshed block recurrence) or :frame (frame seeding)
 end
-KrylovRecycle() = KrylovRecycle(Dict{Symbol, Any}(:left => nothing, :right => nothing),
-                                Dict{Symbol, Any}(:left => nothing, :right => nothing),
-                                Dict{Symbol, Vector{Any}}(:left => Any[], :right => Any[]))
+function KrylovRecycle(mode::Symbol = :images)
+    mode in (:images, :frame) || throw(ArgumentError("recycle mode must be :images or :frame"))
+    return KrylovRecycle(Dict{Symbol, Any}(:left => nothing, :right => nothing),
+                         Dict{Symbol, Any}(:left => nothing, :right => nothing),
+                         Dict{Symbol, Vector{Any}}(:left => Any[], :right => Any[]), mode)
+end
 
 # The two half-sweeps (and the two halves of a frontier sweep) may run concurrently: each touches
 # only its own side's slots, which `Dict` assignment to an EXISTING key does not resize.
@@ -275,6 +282,21 @@ function _recycled_or_fresh(rec, side::Symbol, i::Int, e, transport, v0, applyH,
     t0 = time_ns()
     C = transport()
     tt = (time_ns() - t0) / 1e9
+    if rec.mode === :frame
+        perp = side === :left ? perp_component : perp_component_right
+        Q, nseed = Q0, 0
+        for (v, w) in zip(C, e.weights)
+            R = to_concrete(perp(Q, v))
+            w * norm(R) > alloc.krylov || continue
+            Q, n, _ = _extend_frame(Q, R, v, side, w, alloc.krylov)
+            nseed += n
+        end
+        Q, st = _krylov_enrich(v0, applyH, Q, side, tau, alloc; kw...)
+        push!(rec.log[side], (round = round, bond = i, cached = length(e.basis), recycled = nseed,
+                              n_refresh = 0, n_new = st.n_h1, added = st.added + nseed,
+                              t_transport = tt))
+        return Q, st
+    end
     Q, st = _krylov_enrich_recycled(v0, applyH, Q0, side, tau, alloc, C;
                                     workcap = get(kw, :workcap, 0),
                                     amp = get(kw, :amp, 1.0))
