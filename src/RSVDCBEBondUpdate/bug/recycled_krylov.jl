@@ -7,11 +7,12 @@
 # the allowance (A1 L = 24, rp7q: frontier 1 appended 1000-2500 local Krylov directions per bond
 # against 10-90 DD-QR CBE directions, 22k in all, and the frame outgrew the work ceiling).
 #
-# Here a round keeps, per bond, the Krylov vectors that carried weight above the allowance and its
-# last vector (the active frontier). The next committed round transports them into its own gauge
-# -- the frame leg by the map `Pm` its sweep already carries the frames with, the opposite leg by
-# the overlap of the old and new expanded frame and tail -- and augments its stage's chain with
-# them ([`_krylov_basis`](@ref)). Nothing survives the step: every step starts from the state.
+# Here a round keeps, per bond, its solve's input, the Krylov vectors that carried weight above the
+# allowance and its last vector (the active frontier). The next committed round transports them
+# into its own gauge -- the frame leg by the map `Pm` its sweep already carries the frames with, the
+# opposite leg by the overlap of the old and new expanded frame and tail -- and extends only the
+# complement of that input ([`_rk_complement`](@ref)). Nothing survives the step: every step starts
+# from the state.
 
 "Recycled vectors kept per bond, heaviest first (plan §1.2 work caps: a bounded recycled set)."
 const _RECYCLE_KEEP = 8
@@ -40,20 +41,21 @@ _rk_begin!(::Nothing, ::Symbol) = nothing
 _rk_begin!(rk::RecycledKrylov, side::Symbol) = (rk.pend[_rk_slot(side)] = Dict{Int, Any}(); nothing)
 
 """
-Keep bond `i`'s useful vectors of this round: those with weight above `keep` and the last one,
-at most `_RECYCLE_KEEP`, heaviest first; `frame` is the expanded opposite frame their opposite leg
-is written in (`V_ex` on the left, `U_ex` on the right).
+Keep bond `i`'s solve of this round: its input `st.basis[1]` first -- the next round extends only
+the complement of it ([`_rk_complement`](@ref)) -- then the last vector and those with weight above
+`keep`, at most `_RECYCLE_KEEP`, heaviest first; `frame` is the expanded opposite frame their
+opposite leg is written in (`V_ex` on the left, `U_ex` on the right).
 """
 _rk_keep!(::Nothing, args...) = nothing
 function _rk_keep!(rk::RecycledKrylov, side::Symbol, i::Int, st, frame, keep::Float64)
     p = rk.pend[_rk_slot(side)]
     (p === nothing || isempty(st.basis)) && return nothing
     n = length(st.basis)
-    sel = [k for k in 2:(n - 1) if st.weights[k] > keep]   # the seed is this round's own state
+    sel = [k for k in 2:(n - 1) if st.weights[k] > keep]
     sort!(sel; by = k -> -st.weights[k])
     sel = vcat(n >= 2 ? [n] : Int[], sel)                  # the active frontier first
     length(sel) > _RECYCLE_KEEP && (sel = sel[1:_RECYCLE_KEEP])
-    isempty(sel) || (p[i] = (vecs = st.basis[sel], frame = frame))
+    p[i] = (vecs = st.basis[vcat(1, sel)], frame = frame)
     return nothing
 end
 

@@ -4,14 +4,16 @@
 #
 #   R1  no recycled vectors: `_krylov_enrich_recycled` IS the fresh stage (same H1 count, same
 #       directions appended, same span)
-#   R2  the previous solve's own vectors: the joint basis closes before the chain extends;
-#       unrelated vectors cost at most their own count and never accuracy
+#   R2  the previous solve's own input and vectors: reused, nothing extended; an unrelated set
+#       is rejected by its defect and costs at most its own count, never accuracy
 #   R3  transport into an unchanged tail is the identity onto the new expanded frame
-#   R4  the store: what a round keeps (heaviest, frontier first, bounded) and when it is usable
+#   R4  the store: what a round keeps (its input, then frontier and heaviest, bounded) and when
+#       it is usable
 #   R5  end to end: order-3 A1 (doublon loss) agrees with recycling on and off, recycling ran;
 #       imaginary time never recycles
-#   R6  the recurrence on plain matrices (`_krylov_basis`): seed's own, perturbed-generator,
-#       related-seed and unrelated recycled sets against the fresh chain and `exp(tau H) v0`
+#   R6  the complement solve on plain matrices (`_krylov_basis`) with committed frames: inputs
+#       near and far from the previous one, generator unchanged or moved, against the fresh solve
+#       and `exp(tau H) v0`
 
 using Test
 using LinearAlgebra
@@ -61,12 +63,12 @@ end
         Y = expv(kl.applyH, tau, kl.seed; maxiter = 40, tol = 1e-15)
         _, sf = RC._krylov_enrich(kl.seed, kl.applyH, kl.Q0, side, tau, _kalloc(kry);
                                   state_seed = false)
-        rec = sf.basis[2:end]
+        rec = sf.basis                                  # its input first, then its vectors
         Q, st = RC._krylov_enrich_recycled(kl.seed, rec, kl.applyH, kl.Q0, side, tau,
                                            _kalloc(kry))
         @test st.n_recycled == length(rec)
-        @test st.rec_closed                             # the joint basis holds the evolution
-        @test st.n_h1 == 1 + st.n_recycled              # so the chain never extends
+        @test st.rec_closed                             # the block holds the input's evolution
+        @test st.n_h1 == st.n_recycled                  # and its complement is empty
         @test st.met
         @test norm(P(Q, Y)) / norm(kl.seed) <= 10 * kry
         @test norm(P(Q, kl.Q0)) < 1e-12                 # the CBE frame is kept whole
@@ -80,8 +82,9 @@ end
         @test sj.met
         @test norm(P(Qj, Y)) / norm(kl.seed) <= 10 * kry
         @test _isodef(Qj, side) < 1e-12
-        @test sj.n_recycled == length(junk)
-        @test sj.n_h1 <= sf.n_h1 + sj.n_recycled        # one image each, the chain no longer
+        @test !sj.rec_closed                            # rejected by its defect
+        @test sj.n_h1 <= sf.n_h1 + length(junk)         # one image each, the chain no longer
+        @test sj.added == sf.added                      # then exactly the fresh solve
         @test !sj.capped
         @info "R2 $side: fresh H1 $(sf.n_h1) added $(sf.added); recycled H1 $(st.n_h1) " *
               "added $(st.added); junk H1 $(sj.n_h1) added $(sj.added)"
@@ -122,15 +125,16 @@ end
     RC._rk_begin!(rk, :left)
     RC._rk_keep!(rk, :left, 3, (basis = Any[1, 2, 3, 4, 5], weights = [1, 0.5, 1e-9, 0.7, 0.2]),
                  :frame, 1e-6)
-    @test rk.pend[1][3].vecs == [5, 4, 2]               # frontier first, then by weight
+    @test rk.pend[1][3].vecs == [1, 5, 4, 2]            # input, frontier, then by weight
     RC._rk_keep!(rk, :left, 4, (basis = Any[1:20...], weights = ones(20)), :frame, 1e-6)
-    @test length(rk.pend[1][4].vecs) == RC._RECYCLE_KEEP && rk.pend[1][4].vecs[1] == 20
+    v4 = rk.pend[1][4].vecs
+    @test length(v4) == RC._RECYCLE_KEEP + 1 && v4[1] == 1 && v4[2] == 20
     RC._rk_commit!(rk, :left, :tail, 1, false)          # frames not replaced: nothing usable
     @test RC._rk_round(rk, :left, 1) === nothing && rk.pend[1] === nothing
     RC._rk_begin!(rk, :left)
     RC._rk_keep!(rk, :left, 3, (basis = Any[1, 2], weights = [1, 0.5]), :frame, 1e-6)
     RC._rk_commit!(rk, :left, :tail, 1, true)
-    @test RC._rk_round(rk, :left, 1).entries[3].vecs == [2]
+    @test RC._rk_round(rk, :left, 1).entries[3].vecs == [1, 2]
     @test RC._rk_round(rk, :left, 2) === nothing        # written in another generation
     @test RC._rk_round(rk, :right, 1) === nothing       # the halves are separate
     @test RC._rk_keep!(nothing, :left, 1, nothing, nothing, 0.0) === nothing
@@ -172,7 +176,7 @@ end
     @test all(get(e, :recycled, 0) == 0 for e in info.ledger.bond_log)
 end
 
-@testset "R6: the recurrence on plain matrices" begin
+@testset "R6: the complement solve on plain matrices" begin
     # a banded generator `H - (i/2) loss Q` and a localised seed, as a closure frontier is
     function model(n, loss, rng)
         H = zeros(ComplexF64, n, n)
@@ -182,54 +186,50 @@ end
         end
         H .+= diagm(0 => 3 .* randn(rng, n) .- 0.5im * loss .* abs.(randn(rng, n)))
         v0 = randn(rng, ComplexF64, n) .* exp.(-((1:n) .- n / 2) .^ 2 ./ (n / 7)^2)
-        return H, v0
+        return H, v0 / norm(v0)
     end
-    function chain(H, v0, m)                     # Arnoldi vectors 2..m+1 of `H` from `v0`
-        P = Vector{ComplexF64}[v0 / norm(v0)]
-        for _ in 1:m
-            w = H * P[end]
-            for _pass in 1:2, u in copy(P)
-                w -= dot(u, w) * u
-            end
-            push!(P, w / norm(w))
+    # the frame: a scored direction appends its out-of-frame part (`_extend_frame` in miniature)
+    function solve(H, v0, tau, rec, Q0, allow)
+        Q, nadd = Ref(Q0), Ref(0)
+        sc = function (v, w, first)
+            r = v - Q[] * (Q[]' * v)
+            r -= Q[] * (Q[]' * r)
+            nr = norm(r)
+            w * nr > allow && (Q[] = hcat(Q[], r / nr); nadd[] += 1)
+            return true
         end
-        return P[2:end]
-    end
-    function run(H, v0, tau, rec, allow)
-        nscored = Ref(0)
-        sc = (v, w, first) -> (w > allow && (nscored[] += 1); true)
         kb = RC._krylov_basis(v0, x -> H * x, tau, allow, sc; recycled = rec, state_seed = false)
         Y = exp(tau * H) * (v0 / norm(v0))
-        F = Matrix(qr(reduce(hcat, kb.basis)).Q)
-        return merge(kb, (nscored = nscored[], err = norm(Y - F * (F' * Y))))
+        return merge(kb, (added = nadd[], Q = Q[], err = norm(Y - Q[] * (Q[]' * Y))))
     end
     allow = 1e-7
     for (n, loss, tau) in ((120, 0.0, -0.1im), (200, 1.0, -0.2im), (200, 3.0, -0.05im))
         rng = Random.MersenneTwister(n + round(Int, 10 * loss))
-        H, v0 = model(n, loss, rng)
-        f = run(H, v0, ComplexF64(tau), Any[], allow)
-        @test f.closed && !f.capped && f.err <= 10 * allow && f.n_recycled == 0
-        m = f.n_h1
+        H, vprev = model(n, loss, rng)
+        tau = ComplexF64(tau)
+        prev = solve(H, vprev, tau, Any[], reshape(vprev, n, 1), allow)   # the previous round
+        @test prev.closed && prev.basis[1] ≈ vprev                         # input kept first
         E = randn(rng, ComplexF64, n, n)
         E ./= opnorm(E)
-        sets = Pair{String, Vector{Any}}[
-            "own" => Any[chain(H, v0, m)...],
-            "related seed" => Any[chain(H, v0 .+ 0.3 * norm(v0) / sqrt(n) .* randn(rng, n), 8)...],
-            "junk x3" => Any[randn(rng, ComplexF64, n) for _ in 1:3],
-            "junk x8" => Any[randn(rng, ComplexF64, n) for _ in 1:8]]
-        for dl in (1e-7, 1e-5, 1e-3, 1e-1)
-            push!(sets, "H moved $dl" => Any[chain(H .+ dl * opnorm(H) .* E, v0, 8)...])
-        end
-        for (name, rec) in sets
-            r = run(H, v0, ComplexF64(tau), rec, allow)
-            @info "R6 n=$n loss=$loss $name: fresh H1 $m scored $(f.nscored); recycled H1 " *
-                  "$(r.n_h1) ($(r.n_recycled) recycled, closed by them $(r.rec_closed)) " *
-                  "scored $(r.nscored) err $(r.err)"
+        for eps in (0.0, 1e-3, 1e-1, 1.0), dH in (0.0, 1e-6, 1e-3)
+            z = randn(rng, ComplexF64, n)
+            v0 = vprev .+ eps .* z ./ norm(z)
+            Hn = H .+ dH * opnorm(H) .* E                                  # this round's generator
+            Q0 = Matrix(qr(hcat(v0 / norm(v0), prev.Q)).Q)                 # committed frames
+            f = solve(Hn, v0, tau, Any[], Q0, allow)
+            r = solve(Hn, v0, tau, prev.basis, Q0, allow)
+            @info "R6 n=$n loss=$loss eps=$eps dH=$dH: fresh H1 $(f.n_h1) added $(f.added); " *
+                  "complement H1 $(r.n_h1) added $(r.added) err $(r.err) (reused $(r.rec_closed)," *
+                  " overlap $(r.rec_overlap), defect $(r.rec_defect))"
             @test r.closed && !r.capped                 # never runs to the depth bound
-            @test r.err <= 10 * allow                   # never at the expense of accuracy
-            @test r.n_h1 <= m + r.n_recycled            # one image per recycled vector at most
-            r.rec_closed || @test r.nscored == f.nscored    # chain closed: the fresh directions
-            name == "own" && @test r.rec_closed && r.n_h1 == 1 + r.n_recycled
+            @test r.err <= 10 * allow                   # the reused part is tested, never trusted
+            @test r.n_h1 <= f.n_h1 + r.n_recycled       # one image per recycled vector at most
+            @test r.basis[1] ≈ v0 / norm(v0)            # the next round's complement is of this
+            r.rec_closed || @test r.added == f.added    # rejected: exactly the fresh solve
+            if eps == 0 && dH == 0                      # the same input, the same generator
+                @test r.rec_closed && r.n_h1 == r.n_recycled && r.added == 0
+            end
+            dH >= 1e-6 && @test !r.rec_closed           # a moved generator is caught
         end
     end
 end
