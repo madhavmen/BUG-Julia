@@ -123,9 +123,15 @@ end
         ex = dd_cbe_expand(bc.frame, mpo, jc, bc.lenv, bc.renv, side; alloc = alloc, ledger = lg,
                            kc = kc, dd_width = l, rng = Random.MersenneTwister(2))
         nnew = side === :left ? ex.n_new_l : ex.n_new_r
-        @test kc.n_stream_cols == l == lg.n_probes                # one block, nothing else
+        # one block, nothing else; `_alloc_columns` rounds each sector's share UP, so the block is
+        # l to l + (number of sectors) wide (xe4 17582539: l = 2 -> 4, l = 6 -> 8 at 2s = 1)
+        # (the fused sectors of the opposite frame's link x site: at most d per link sector)
+        nsec = length((side === :left ? bc.frame.V0 : bc.frame.U0).spaces[side === :left ? 3 : 1]) *
+               leg_dim(bc.frame.U0, 2)
+        @test kc.n_stream_cols == lg.n_probes
+        @test l <= kc.n_stream_cols <= l + nsec
         @test lg.n_holdout == 0
-        @test 1 <= nnew <= l
+        @test 1 <= nnew <= kc.n_stream_cols
     end
 end
 
