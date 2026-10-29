@@ -54,13 +54,16 @@ end
 const CSV_COLS = ("figure", "case", "side", "arm", "param", "tol", "h", "seed", "work", "work_kind",
                   "columns", "error", "error_kind", "target", "pass", "status", "time_s", "bytes")
 
+# Fig 3's `param` ("step=1,round=2") holds a comma: unquoted, it shifted every later column.
+_csv_field(s) = occursin(r"[,\"\n]", s) ? "\"" * replace(s, "\"" => "\"\"") * "\"" : s
+
 "Append rows (Dicts keyed by `CSV_COLS`) to `OUT/raw_component_costs.csv`."
 function write_rows(rows; file = joinpath(OUT, "raw_component_costs.csv"))
     new = !isfile(file)
     open(file, "a") do io
         new && println(io, join(CSV_COLS, ","))
         for r in rows
-            println(io, join((string(get(r, k, "")) for k in CSV_COLS), ","))
+            println(io, join((_csv_field(string(get(r, k, ""))) for k in CSV_COLS), ","))
         end
     end
 end
