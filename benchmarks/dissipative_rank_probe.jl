@@ -44,7 +44,8 @@ const EX_N = parse(Int, env("RP_EX_N", 32))
 const PREP_INT = env("RP_PREP_INT", "tdvp")
 const PREP_TOLB = parse(Float64, env("RP_PREP_TOLB", 1e-8))
 const WARM = parse(Float64, env("RP_WARM", 0.0))
-armdim(name) =parse(Int, match(r"^(?:bug|tdvp)(\d+)", name)[1])
+armorder(name) = (m = match(r"o(\d)", name); m === nothing ? nothing : parse(Int, m[1]))   # oN: order N
+armdim(name) = parse(Int, match(r"^(?:bug|tdvp)(\d+)", name)[1])
 
 set_symmetry!(:U1)
 const G = no_jump_mpo(hubbard_aa_mpo_d4(L; J = 1.0, U = 4.0), doublon_loss_mpo(L; kappa = 2.0))
@@ -89,7 +90,7 @@ function arm(psi0, name)
         rec["tol_basis"] = tb
         rec["cap_order"] = occursin("w", name) ? "weight" : "sector"
         info = cbe_bug_step!(psi, G, ComplexF64(-im * DT); hermitian = false,
-                             order = occursin("o1", name) ? 1 : 3, tol_basis = tb, tol_root = 1e-12,
+                             order = something(armorder(name), 3), tol_basis = tb, tol_root = 1e-12,
                              tol_trunc = TOLT, maxdim = md, truncate = !endswith(name, "u"),
                              cap_order = Symbol(rec["cap_order"]))
         rec["frames"] = info.expanded
