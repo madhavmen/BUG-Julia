@@ -1169,8 +1169,37 @@ Accumulated discarded norm, by tol_trunc:
   ⟨Q⟩_c rises from 3.9e-3 (the alt start is nearly dark) to a peak of 1.4e-2 at Jt ≈ 1.2. It then
   oscillates between 5.5e-3 and 8.3e-3 with a period of about 2.5 and no net decay by Jt = 10. The
   rate is the same order as the dr6k3 pilot's λ(T) = 0.0076 at ν = 1/8, Γ = 2, but the window is too
-  short for a lifetime fit. The 20-trajectory rows (9-10, BUG dt 0.1 and TDVP2 dt 0.05 at 1e-7) give the
-  F08/F11 lifetime and sampling error and are still running.
+  short for a lifetime fit.
+
+### Task 7 B2 L = 32, trajectories (dr7w rows 9-10; row 9 resumed as dr7wr9 17577929)
+
+Rows 9 and 10 run 20 trajectories each to Jt = 10 from the alt product state (no warm start): BUG at dt
+0.1 and TDVP2 at dt 0.05, both at tol_trunc 1e-7. Row 9 hit the 48 h internal timeout and finished from
+its checkpoint 179 (218545 s in total, peak 6.95 G).
+
+**The two arms disagree, and TDVP2 is the one that is wrong.** With the same seeds (the same jump
+thresholds), TDVP2 jumps at t = 0.02-0.07 on seeds 5, 7, 10, 12, 13, 14 and 16, where BUG does not jump or
+jumps late (t = 1.3-5.5). Only 13 of 20 seeds have matching jump counts, and the mean jump count at T is
+0.35 (BUG) against 0.55 (TDVP2). The no-jump survival of the start state decides it:
+
+| t | exact P0 | BUG dt 0.1 | TDVP2 dt 0.05 |
+|---|---|---|---|
+| 0.05 | 0.7627 | — | 0.536 |
+| 0.1 | 0.7495 | 0.7488 | 0.408 |
+| 0.2 | 0.7483 | 0.747 | 0.389 |
+
+- The exact column is `benchmarks/dissipative_b2_sector_p0.py`: the no-jump generator conserves the
+  excitation number, so the 4-excitation sector (35960 states) is evolved sparsely.
+- The initial loss rate is ⟨Q⟩ = (Γ₊ + Γ₋) N = 16, but the state turns dark within t ≈ 0.05 and P0 levels
+  off at 0.75. BUG's first step captures this to 7e-4.
+- TDVP2's first steps from the product state over-decay: the collective loss needs coherences across the
+  whole chain, which a two-site update cannot build from a product state in one step. Its trajectories
+  therefore jump too early.
+- The no-jump rows above are unaffected: they start after the warm-up, where TDVP2 agrees with BUG within
+  its time error.
+
+**For B2 trajectories from a product state, BUG gives the correct jump statistics and TDVP2 does not** at
+the Task 7 step sizes.
 
 ## Task 7 B1 L = 20, trajectories (dr7xb 17511924 + resumes, dr7y 17511306; `86d7e9c`; figure `dissipative_t7/b1_L20/F09_t7_B1_L20_traj.png`)
 
