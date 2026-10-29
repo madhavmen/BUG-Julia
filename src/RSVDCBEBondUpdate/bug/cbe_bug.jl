@@ -44,6 +44,12 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # from `U0` alone and the CBE directions are merged afterwards
                        # (`_merge_frame`) -- the reuse-off arm of P07.
                        krylov_reuse::Bool = true,
+                       # `order > 1` (dissipative plan §1.2: "transport/reorthogonalize old useful
+                       # directions into the new gauge, and extend only from active frontiers"):
+                       # each closure round's local Krylov stage starts from the previous round's
+                       # weighted vectors at that bond (`recycled_krylov.jl`) instead of a fresh
+                       # sequence. Real-time and no-jump steps only. Off by default (USER decision).
+                       krylov_recycle::Bool = false,
                        # ── IMAGINARY TIME (plan: cbe_bug_imaginary_open_benchmark, Task 1) ──
                        # The root integrator (`ROOT_METHODS`): `:exp` is the Saad-converged
                        # exponential (the reference); `:trapezoid`/`:radau2`/`:radau3` apply that
@@ -180,7 +186,8 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     # folded into the step's after the join.
     ledgerL, ledgerR = AdaptiveLedger(), AdaptiveLedger()
     rngR = parallel ? MersenneTwister(rand(rng, UInt64)) : rng
-    cx = _HalfSweepCtx(mpo, tau, eshift, c, alloc, exkw, wcap_step, krylov_reuse, keep_states)
+    rk = krylov_recycle && order > 1 ? RecycledKrylov() : nothing
+    cx = _HalfSweepCtx(mpo, tau, eshift, c, alloc, exkw, wcap_step, krylov_reuse, keep_states, rk)
 
     troot = Ref(0.0); ttrunc = Ref(0.0)
     _t0step = time_ns()
@@ -240,7 +247,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     if order > 1
         fr = KLFrames(W, Z, c, lenv_root, renv_root, 0, nothing, nothing, Float64(eshift))
         # Plan T4.1: the frontier sweeps expand by the same DD-QR CBE as the half-sweeps.
-        ckw = merge(exkw, (krylov_reuse = krylov_reuse,))
+        ckw = merge(exkw, (krylov_reuse = krylov_reuse, recycle = rk))
         cl = _krylov_closure!(fr, psi, mpo, S0, tau, alloc, ckw; order = order,
                               workcap = wcap_step, nrm = _nrm, parallel = parallel, rng = rng,
                               ledger = ledger, fold = fold_omega, checks = closure_checks)

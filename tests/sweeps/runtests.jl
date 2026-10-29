@@ -68,6 +68,7 @@ include(joinpath(@__DIR__, "..", "common", "free_fermion.jl"))
     # ...and the general-order Krylov closure built on all of the above (`order = p`).
     include("test_krylov_closure.jl")
     include("test_krylov_closure_steps.jl")
+    include("test_krylov_recycle.jl")     # its closure rounds recycling local Krylov vectors
     # ...the root accuracy and orders 1-5 (plan Task 5), and the parallel K/L/S step (Task 6).
     include("test_hq_root.jl")
     include("test_parallel_kls.jl")

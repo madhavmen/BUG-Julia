@@ -45,6 +45,11 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
                         fold::Bool = false, bonds::Bool = false)
     c, L = fr.c, length(Fm)
     canonical!(Fm, 1)
+    # `krylov_recycle`: the last committed round's vectors are written in `fr`'s frames
+    rk = enrich ? get(ckw, :recycle, nothing) : nothing
+    prev = real(tau) == 0 ? _rk_round(rk, :left, fr.gen) : nothing
+    Eo = prev === nothing ? nothing : _rk_overlaps(Fm, prev.tail, :left)
+    _rk_begin!(rk, :left)
     chain, zst = _side_cache!(fr, Fm, mpo, :left)
     E = copy(zst)                                # links >= c+1: shared by every frontier
     env = E[c + 1]
@@ -81,6 +86,7 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
         nh2 += k2
         bl = AdaptiveLedger()
         quiet = indicator(alloc, leak[i]) <= alloc.per_bond
+        nrec = 0
         Wi = if enrich && !quiet
             ex = _frontier_expand(f, mpo, i, lch, rch, :left, ckw, bl, rng)
             M = to_concrete!(contract(Fm[i + 1], (2, 3), ex.V_ex', (2, 3)))
@@ -88,10 +94,21 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
             H1 = shift_h(one_site_h(mpo, i, lch, push_right_channels(rch, mpo, ex.V_ex, i + 1)),
                          fr.eshift)
             reuse = get(ckw, :krylov_reuse, true)
-            Q, st = _krylov_enrich(Kex, x -> (nh1[] += 1; apply_one_site(H1, x)),
-                                   reuse ? ex.U_ex : U0, :left, tau, alloc; workcap = workcap,
-                                   amp = amp, state_seed = false)
+            applyH = x -> (nh1[] += 1; apply_one_site(H1, x))
+            ent = prev === nothing ? nothing : get(prev.entries, i, nothing)
+            Q, st = if ent === nothing
+                _krylov_enrich(Kex, applyH, reuse ? ex.U_ex : U0, :left, tau, alloc;
+                               workcap = workcap, amp = amp, state_seed = false)
+            else
+                rk.n_offered[1] += length(ent.vecs)
+                rk.n_used[1] += 1
+                _krylov_enrich_recycled(Kex, _rk_transport(ent, :left, Pm, ex.V_ex, Eo, i),
+                                        applyH, reuse ? ex.U_ex : U0, :left, tau, alloc;
+                                        workcap = workcap, amp = amp)
+            end
+            nrec = st.n_recycled
             _record_krylov!(bl, st, alloc)
+            _rk_keep!(rk, :left, i, st, ex.V_ex, alloc.krylov)
             reuse ? Q : _merge_frame(Q, ex.U_ex, :left)
         else
             nskip += 1
@@ -105,7 +122,8 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
         newsec += nsec
         _log_bond!(lg, bl, i, :left, leg_dim(Wn[i], 3))
         _tag_last!(lg, (leak = indicator(alloc, leak[i]), skipped = quiet || !enrich,
-                        added = nadd, new_sectors = nsec, width_before = leg_dim(U0, 3)))
+                        added = nadd, new_sectors = nsec, width_before = leg_dim(U0, 3),
+                        recycled = nrec))
         enrich && (Pm = to_concrete!(contract(Wn[i]', (1, 2), U0, (1, 2))))  # (new_i, old_i)
         pre === nothing && (C = to_concrete!(contract(Wn[i]', (1, 2), K, (1, 2))))
         lchs[i] = lch
@@ -123,6 +141,10 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
                          fold::Bool = false, bonds::Bool = false)
     c, L = fr.c, length(Fm)
     canonical!(Fm, L)
+    rk = enrich ? get(ckw, :recycle, nothing) : nothing
+    prev = real(tau) == 0 ? _rk_round(rk, :right, fr.gen) : nothing
+    Eo = prev === nothing ? nothing : _rk_overlaps(Fm, prev.tail, :right)
+    _rk_begin!(rk, :right)
     chain, wst = _side_cache!(fr, Fm, mpo, :right)
     E = copy(wst)                                # links <= c: shared by every frontier
     env = E[c]
@@ -159,6 +181,7 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
         nh2 += k2
         bl = AdaptiveLedger()
         quiet = indicator(alloc, leak[j]) <= alloc.per_bond
+        nrec = 0
         Zj = if enrich && !quiet
             ex = _frontier_expand(f, mpo, j, lch, rch, :right, ckw, bl, rng)
             M = to_concrete!(contract(ex.U_ex', (1, 2), Fm[j], (1, 2)))
@@ -166,10 +189,21 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
             H1 = shift_h(one_site_h(mpo, j + 1, push_left_channels(lch, mpo, ex.U_ex, j), rch),
                          fr.eshift)
             reuse = get(ckw, :krylov_reuse, true)
-            Q, st = _krylov_enrich(Bex, x -> (nh1[] += 1; apply_one_site(H1, x)),
-                                   reuse ? ex.V_ex : V0, :right, tau, alloc; workcap = workcap,
-                                   amp = amp, state_seed = false)
+            applyH = x -> (nh1[] += 1; apply_one_site(H1, x))
+            ent = prev === nothing ? nothing : get(prev.entries, j, nothing)
+            Q, st = if ent === nothing
+                _krylov_enrich(Bex, applyH, reuse ? ex.V_ex : V0, :right, tau, alloc;
+                               workcap = workcap, amp = amp, state_seed = false)
+            else
+                rk.n_offered[2] += length(ent.vecs)
+                rk.n_used[2] += 1
+                _krylov_enrich_recycled(Bex, _rk_transport(ent, :right, Pm, ex.U_ex, Eo, j),
+                                        applyH, reuse ? ex.V_ex : V0, :right, tau, alloc;
+                                        workcap = workcap, amp = amp)
+            end
+            nrec = st.n_recycled
             _record_krylov!(bl, st, alloc)
+            _rk_keep!(rk, :right, j, st, ex.U_ex, alloc.krylov)
             reuse ? Q : _merge_frame(Q, ex.V_ex, :right)
         else
             nskip += 1
@@ -183,7 +217,8 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
         newsec += nsec
         _log_bond!(lg, bl, j, :right, leg_dim(Zn[j], 1))
         _tag_last!(lg, (leak = indicator(alloc, leak[j]), skipped = quiet || !enrich,
-                        added = nadd, new_sectors = nsec, width_before = leg_dim(V0, 1)))
+                        added = nadd, new_sectors = nsec, width_before = leg_dim(V0, 1),
+                        recycled = nrec))
         enrich && (Pm = to_concrete!(contract(V0, (2, 3), Zn[j]', (2, 3))))  # (old_j, new_j)
         pre === nothing && (D = to_concrete!(contract(B, (2, 3), Zn[j]', (2, 3))))
         rchs[j] = rch
@@ -257,6 +292,10 @@ function _frontier_sweep!(fr::KLFrames, psi::SymMPS, mpo, F::KrylovFrontier, tau
     met = enrich ? lg.tolerance_met :
           all(indicator(alloc, x) <= alloc.per_bond for x in vcat(rl.leak, rr.leak))
     added = rl.added + rr.added
+    # this round's vectors become recyclable exactly when its frames replace `fr`'s
+    rk = enrich ? get(ckw, :recycle, nothing) : nothing
+    _rk_commit!(rk, :left, Fm, gen, added > 0)
+    _rk_commit!(rk, :right, FmR, gen, added > 0)
     wbefore = _frame_width(fr, L)
     if enrich && added > 0
         for i in 1:c

@@ -105,7 +105,9 @@ Grow the frame `Q0` by the Krylov directions of `applyH` from seed `v0` that the
 direction is scored by `weight * ||(I - QQ') v_k||`: `eta_1` is Test C, `eta_{k>=2}` Test D. Scores
 above `alloc.krylov` are appended. A small `eta_1` is not a stop (`H e1 = e2`, `H e2 = e1 + e3` with
 `Q0 = [e1, e2]`). `capped` with `met = false` means the work ceiling or depth bound stopped the
-search with weight left. `amp` is the seed's norm relative to the state.
+search with weight left. `amp` is the seed's norm relative to the state. `stats.basis` and
+`stats.weights` are the Arnoldi vectors and their weights, the last vector the active frontier: what
+a later round recycles ([`_krylov_enrich_recycled`](@ref)).
 """
 function _krylov_enrich(v0, applyH, Q0, side::Symbol, tau::ComplexF64,
                         alloc::BasisAllocation; workcap::Int = 0,
@@ -118,10 +120,12 @@ function _krylov_enrich(v0, applyH, Q0, side::Symbol, tau::ComplexF64,
     eta_c, eta_d, added, added_d, nh = 0.0, 0.0, 0, 0, 0
     capped, closed = false, false
     b0 = norm(v0)
+    vs, ws = Any[], Float64[]
     if b0 > 0
         # `tau = 0` asks the unit-time closure question, as `basis_allocation` does.
         teff = iszero(tau) ? one(tau) : tau
-        vs = Any[to_concrete((1.0 / b0) * v0)]
+        push!(vs, to_concrete((1.0 / b0) * v0))
+        push!(ws, amp)
         Hm = zeros(ComplexF64, maxdepth + 1, maxdepth + 1)
         for k in 1:maxdepth
             w = applyH(vs[end])
@@ -146,6 +150,7 @@ function _krylov_enrich(v0, applyH, Q0, side::Symbol, tau::ComplexF64,
             v = to_concrete((1.0 / b) * w)
             push!(vs, v)
             weight = amp * _kry_weight(Hm, k, teff; state_seed = state_seed)
+            push!(ws, weight)
             R = to_concrete(perp(Q, v))
             eta = weight * norm(R)
             k == 1 ? (eta_c = eta) : (eta_d = max(eta_d, eta))
@@ -167,7 +172,142 @@ function _krylov_enrich(v0, applyH, Q0, side::Symbol, tau::ComplexF64,
     end
     return (Q, (eta_c = eta_c, eta_d = eta_d, added = added, n_h1 = nh,
                 d_after_c = eta_c <= alloc.krylov && added_d > 0,
-                capped = capped, met = closed && !capped))
+                capped = capped, met = closed && !capped, basis = vs, weights = ws,
+                n_recycled = 0))
+end
+
+"A recycled vector whose part outside the block is below this fraction of it adds nothing new."
+const _RECYCLE_FLOOR = 1e-8
+
+"`x` with its components along the orthonormal `B` removed, classical Gram-Schmidt twice."
+function _cgs2(B, x)
+    for _pass in 1:2
+        corr = nothing
+        for u in B
+            ov = tensor_inner(u, x)
+            corr = corr === nothing ? ov * u : corr + ov * u
+        end
+        corr === nothing || (x = to_concrete(x - corr))
+    end
+    return x
+end
+
+"`sum_k c[k] vs[k]`."
+function _lincomb(vs, c)
+    acc = nothing
+    for (k, v) in pairs(vs)
+        iszero(c[k]) && continue
+        acc = acc === nothing ? c[k] * v : acc + c[k] * v
+    end
+    return acc === nothing ? to_concrete(0.0 * vs[1]) : to_concrete(acc)
+end
+
+"`(exp(A) e1, phi_1(A) e1)` from one augmented exponential: `exp([A e1; 0 0])`."
+function _exp_phi1_e1(A::AbstractMatrix)
+    n = size(A, 1)
+    Z = zeros(ComplexF64, n + 1, n + 1)
+    Z[1:n, 1:n] .= A
+    Z[1, n + 1] = 1
+    E = exp(Z)
+    return E[1:n, 1], E[1:n, n + 1]
+end
+
+"""
+    _krylov_enrich_recycled(v0, recycled, applyH, Q0, side, tau, alloc; workcap, maxdepth, amp)
+        -> (Q, stats)
+
+The local Krylov stage of a closure round that holds the previous round's useful directions at
+this bond (plan §1.2: "transport/reorthogonalize old useful directions into the new gauge, and
+extend only from active frontiers"). It is [`_krylov_enrich`](@ref) started from the block
+`B = orth[v0, recycled]` instead of `v0` alone; `recycled` must already be in this round's gauge.
+
+Every block vector gets a fresh image under this round's `H1`. With `A = tau B'HB`, the block's
+approximation of `exp(tau H) v0` has coefficients `exp(A) e1`, and what it cannot represent is the
+defect `d = tau (HB - B B'HB) phi_1(A) e1`. For a one-vector block `||d||` is `_kry_weight`'s Arnoldi
+weight `|tau beta [phi_1]|`, so the stop is the fresh stage's. While `amp ||d||` exceeds the Krylov
+allowance the recurrence continues along `d` alone, the active frontier. Recycled vectors are scored
+by their coefficient, continuation vectors by the defect they resolve, and both join the frame by
+`_extend_frame` exactly as in the fresh stage; a direction the frame already holds scores ~0.
+
+Closure frontiers only (`state_seed = false` in the fresh stage: absolute weights).
+"""
+function _krylov_enrich_recycled(v0, recycled::AbstractVector, applyH, Q0, side::Symbol,
+                                 tau::ComplexF64, alloc::BasisAllocation; workcap::Int = 0,
+                                 maxdepth::Int = _KRY_MAXDEPTH, amp::Float64 = 1.0)
+    side in (:left, :right) || throw(ArgumentError("side must be :left or :right"))
+    perp = side === :left ? perp_component : perp_component_right
+    fl = side === :left ? 3 : 1
+    Q = Q0
+    b0 = norm(v0)
+    b0 > 0 || return (Q, (eta_c = 0.0, eta_d = 0.0, added = 0, n_h1 = 0, d_after_c = false,
+                          capped = false, met = true, basis = Any[], weights = Float64[],
+                          n_recycled = 0))
+    teff = iszero(tau) ? one(tau) : tau
+    B = Any[to_concrete((1.0 / b0) * v0)]
+    for c in recycled
+        x = _cgs2(B, c)
+        nx = norm(x)
+        nx > _RECYCLE_FLOOR * max(norm(c), eps()) && push!(B, to_concrete((1.0 / nx) * x))
+    end
+    nrec = length(B) - 1
+    nmax = length(B) + maxdepth + 1
+    Hm = zeros(ComplexF64, nmax, nmax)
+    HB = Any[]
+    nh = 0
+    function image!(k)                          # H B_k, and row/column k of `Hm = B'HB`
+        push!(HB, to_concrete(applyH(B[k])))
+        nh += 1
+        for j in 1:k
+            Hm[j, k] = tensor_inner(B[j], HB[k])
+            j < k && (Hm[k, j] = tensor_inner(B[k], HB[j]))
+        end
+    end
+    eta_c, eta_d, added = 0.0, 0.0, 0
+    ws = Float64[amp]
+    function score!(k, w)                       # Tests C/D on block vector `k`; false = capped
+        R = to_concrete(perp(Q, B[k]))
+        eta = w * norm(R)
+        k == 2 ? (eta_c = max(eta_c, eta)) : (eta_d = max(eta_d, eta))
+        eta > alloc.krylov || return true
+        room = workcap > 0 ? workcap - leg_dim(Q, fl) : typemax(Int)
+        room <= 0 && return false
+        Q, nadd, fits = _extend_frame(Q, R, B[k], side, w, alloc.krylov; room = room)
+        added += nadd
+        return fits
+    end
+    for k in eachindex(B)
+        image!(k)
+    end
+    capped, closed = false, false
+    g, _ = _exp_phi1_e1(teff .* @view Hm[1:length(B), 1:length(B)])
+    append!(ws, amp .* abs.(g[2:end]))           # every block vector weighed before any cap
+    for k in 2:length(B)
+        score!(k, ws[k]) || (capped = true; break)
+    end
+    depth = 0
+    while !capped
+        n = length(B)
+        Hn = Hm[1:n, 1:n]
+        _, ph = _exp_phi1_e1(teff .* Hn)
+        d = _cgs2(B, to_concrete(teff * (_lincomb(HB, ph) - _lincomb(B, Hn * ph))))
+        nd = norm(d)
+        wd = amp * nd
+        if nd <= _KRY_BREAKDOWN || wd <= alloc.krylov
+            closed = true
+            # kept, never applied: the active frontier a later round continues from
+            nd > _KRY_BREAKDOWN && (push!(B, to_concrete((1.0 / nd) * d)); push!(ws, wd))
+            break
+        end
+        depth >= maxdepth && (capped = true; break)
+        depth += 1
+        push!(B, to_concrete((1.0 / nd) * d))
+        push!(ws, wd)
+        image!(n + 1)
+        score!(n + 1, wd) || (capped = true; break)
+    end
+    return (Q, (eta_c = eta_c, eta_d = eta_d, added = added, n_h1 = nh,
+                d_after_c = eta_c <= alloc.krylov && added > 0, capped = capped,
+                met = closed && !capped, basis = B, weights = ws, n_recycled = nrec))
 end
 
 """
