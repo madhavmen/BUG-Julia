@@ -12,8 +12,9 @@
 #   bug2048b10 / ...b10u   tol_basis 1e-10 instead of 1e-8 (suffix bN = tol_basis 1e-N): is the excess
 #                          the Galerkin error of tol_basis kept by a tighter tol_trunc?
 #   bug512w / bug512wu     cap_order = :weight: the capped frame keeps its heaviest directions
-#   ...rec                 krylov_recycle: the closure rounds continue the previous round's weighted
-#                          local Krylov basis instead of a fresh solve per frontier and bond
+#   ...rec                 krylov_recycle: a closure round extends only the complement of the previous
+#                          round's input at each bond, once its kept block passes the defect test
+#                          (arms without `rec` run krylov_recycle = false); printed: bonds tested/reused
 # Printed per arm: distance to psi_ex, bond dims, per-bond counts of normalised Schmidt values above
 # 1e-2 .. 1e-10, frame widths per bond (BUG) and the step's limits. A spurious tail shows as counts at
 # 1e-6 .. 1e-10 above psi_ex's at the same bonds.
@@ -106,7 +107,11 @@ function arm(psi0, name)
         rec["bond_log"] = [Dict("bond" => e.bond, "side" => string(e.side), "width" => e.width,
                                 "n_selected" => e.n_selected, "n_krylov" => e.n_krylov,
                                 "workcap" => e.workcap, "pass" => get(e, :pass, 0),
-                                "frontier" => get(e, :frontier, 0))
+                                "frontier" => get(e, :frontier, 0),
+                                "recycled" => get(e, :recycled, 0),
+                                "rec_closed" => get(e, :rec_closed, false),
+                                "rec_overlap" => get(e, :rec_overlap, 0.0),
+                                "rec_defect" => get(e, :rec_defect, 0.0))
                            for e in info.ledger.bond_log]
         rec["closure_log"] = [Dict(string(k) => (v isa Number || v isa Bool ? v : string(v))
                                    for (k, v) in pairs(e)) for e in info.ledger.closure_log]
@@ -189,6 +194,12 @@ for t0 in T0S
                 @printf("   half %-5s bond %2d width %5d cbe %5d krylov %5d workcap %s\n", e["side"],
                         e["bond"], e["width"], e["n_selected"], e["n_krylov"], e["workcap"])
             end
+            # `krylov_recycle`: closure bonds that tested the previous solve, how many it held
+            rb = [e for e in rec["bond_log"] if e["recycled"] > 0]
+            isempty(rb) || @printf("   recycled: %d bonds tested, %d reused; defect/overlap median %.2e max %.2e\n",
+                                   length(rb), count(e -> e["rec_closed"], rb),
+                                   sort([e["rec_defect"] / e["rec_overlap"] for e in rb])[cld(length(rb), 2)],
+                                   maximum(e["rec_defect"] / e["rec_overlap"] for e in rb))
             for e in rec["closure_log"]
                 println("   frontier ", get(e, "frontier", -1), " pass ", get(e, "pass", -1),
                         " added ", get(e, "added", 0), " width ", get(e, "width_before", "-"), "->",
