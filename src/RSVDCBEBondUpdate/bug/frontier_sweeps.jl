@@ -86,7 +86,7 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
         nh2 += k2
         bl = AdaptiveLedger()
         quiet = indicator(alloc, leak[i]) <= alloc.per_bond
-        nrec = 0
+        nrec, rclosed = 0, false
         Wi = if enrich && !quiet
             ex = _frontier_expand(f, mpo, i, lch, rch, :left, ckw, bl, rng)
             M = to_concrete!(contract(Fm[i + 1], (2, 3), ex.V_ex', (2, 3)))
@@ -106,7 +106,7 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
                                         applyH, reuse ? ex.U_ex : U0, :left, tau, alloc;
                                         workcap = workcap, amp = amp)
             end
-            nrec = st.n_recycled
+            nrec, rclosed = st.n_recycled, st.rec_closed
             _record_krylov!(bl, st, alloc)
             _rk_keep!(rk, :left, i, st, ex.V_ex, alloc.krylov)
             reuse ? Q : _merge_frame(Q, ex.U_ex, :left)
@@ -123,7 +123,7 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
         _log_bond!(lg, bl, i, :left, leg_dim(Wn[i], 3))
         _tag_last!(lg, (leak = indicator(alloc, leak[i]), skipped = quiet || !enrich,
                         added = nadd, new_sectors = nsec, width_before = leg_dim(U0, 3),
-                        recycled = nrec))
+                        recycled = nrec, rec_closed = rclosed))
         enrich && (Pm = to_concrete!(contract(Wn[i]', (1, 2), U0, (1, 2))))  # (new_i, old_i)
         pre === nothing && (C = to_concrete!(contract(Wn[i]', (1, 2), K, (1, 2))))
         lchs[i] = lch
@@ -181,7 +181,7 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
         nh2 += k2
         bl = AdaptiveLedger()
         quiet = indicator(alloc, leak[j]) <= alloc.per_bond
-        nrec = 0
+        nrec, rclosed = 0, false
         Zj = if enrich && !quiet
             ex = _frontier_expand(f, mpo, j, lch, rch, :right, ckw, bl, rng)
             M = to_concrete!(contract(ex.U_ex', (1, 2), Fm[j], (1, 2)))
@@ -201,7 +201,7 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
                                         applyH, reuse ? ex.V_ex : V0, :right, tau, alloc;
                                         workcap = workcap, amp = amp)
             end
-            nrec = st.n_recycled
+            nrec, rclosed = st.n_recycled, st.rec_closed
             _record_krylov!(bl, st, alloc)
             _rk_keep!(rk, :right, j, st, ex.U_ex, alloc.krylov)
             reuse ? Q : _merge_frame(Q, ex.V_ex, :right)
@@ -218,7 +218,7 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
         _log_bond!(lg, bl, j, :right, leg_dim(Zn[j], 1))
         _tag_last!(lg, (leak = indicator(alloc, leak[j]), skipped = quiet || !enrich,
                         added = nadd, new_sectors = nsec, width_before = leg_dim(V0, 1),
-                        recycled = nrec))
+                        recycled = nrec, rec_closed = rclosed))
         enrich && (Pm = to_concrete!(contract(V0, (2, 3), Zn[j]', (2, 3))))  # (old_j, new_j)
         pre === nothing && (D = to_concrete!(contract(B, (2, 3), Zn[j]', (2, 3))))
         rchs[j] = rch

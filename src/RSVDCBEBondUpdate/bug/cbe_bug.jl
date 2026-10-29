@@ -46,9 +46,9 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        krylov_reuse::Bool = true,
                        # `order > 1` (dissipative plan §1.2: "transport/reorthogonalize old useful
                        # directions into the new gauge, and extend only from active frontiers"):
-                       # each closure round's local Krylov stage starts from the previous round's
-                       # weighted vectors at that bond (`recycled_krylov.jl`) instead of a fresh
-                       # sequence, so closure sweeps append only what the recycled block lacks.
+                       # each closure round's local Krylov chain is augmented by the previous
+                       # round's weighted vectors at that bond (`recycled_krylov.jl`); when the
+                       # joint basis already holds the evolution, the chain stops extending.
                        # Real-time and no-jump steps only. On by default (USER 2026-10-29: no
                        # unnecessary bond growth in the closure sweeps); `false` is the ablation.
                        krylov_recycle::Bool = true,

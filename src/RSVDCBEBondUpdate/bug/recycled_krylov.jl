@@ -10,8 +10,8 @@
 # Here a round keeps, per bond, the Krylov vectors that carried weight above the allowance and its
 # last vector (the active frontier). The next committed round transports them into its own gauge
 # -- the frame leg by the map `Pm` its sweep already carries the frames with, the opposite leg by
-# the overlap of the old and new expanded frame and tail -- and starts its stage from them
-# ([`_krylov_enrich_recycled`](@ref)). Nothing survives the step: every step starts from the state.
+# the overlap of the old and new expanded frame and tail -- and augments its stage's chain with
+# them ([`_krylov_basis`](@ref)). Nothing survives the step: every step starts from the state.
 
 "Recycled vectors kept per bond, heaviest first (plan §1.2 work caps: a bounded recycled set)."
 const _RECYCLE_KEEP = 8

@@ -3,13 +3,15 @@
 # extend only from active frontiers"; `krylov_recycle`, `recycled_krylov.jl`).
 #
 #   R1  no recycled vectors: `_krylov_enrich_recycled` IS the fresh stage (same H1 count, same
-#       directions appended, same span) -- the defect weight equals Saad's Arnoldi weight
-#   R2  the previous solve's own vectors: the evolved seed is captured with at most one
-#       continuation image; unrelated vectors cost at most their own count and never accuracy
+#       directions appended, same span)
+#   R2  the previous solve's own vectors: the joint basis closes before the chain extends;
+#       unrelated vectors cost at most their own count and never accuracy
 #   R3  transport into an unchanged tail is the identity onto the new expanded frame
 #   R4  the store: what a round keeps (heaviest, frontier first, bounded) and when it is usable
 #   R5  end to end: order-3 A1 (doublon loss) agrees with recycling on and off, recycling ran;
 #       imaginary time never recycles
+#   R6  the recurrence on plain matrices (`_krylov_basis`): seed's own, perturbed-generator,
+#       related-seed and unrelated recycled sets against the fresh chain and `exp(tau H) v0`
 
 using Test
 using LinearAlgebra
@@ -63,7 +65,8 @@ end
         Q, st = RC._krylov_enrich_recycled(kl.seed, rec, kl.applyH, kl.Q0, side, tau,
                                            _kalloc(kry))
         @test st.n_recycled == length(rec)
-        @test st.n_h1 - (1 + st.n_recycled) <= 1        # the block already holds the evolution
+        @test st.rec_closed                             # the joint basis holds the evolution
+        @test st.n_h1 == 1 + st.n_recycled              # so the chain never extends
         @test st.met
         @test norm(P(Q, Y)) / norm(kl.seed) <= 10 * kry
         @test norm(P(Q, kl.Q0)) < 1e-12                 # the CBE frame is kept whole
@@ -78,6 +81,8 @@ end
         @test norm(P(Qj, Y)) / norm(kl.seed) <= 10 * kry
         @test _isodef(Qj, side) < 1e-12
         @test sj.n_recycled == length(junk)
+        @test sj.n_h1 <= sf.n_h1 + sj.n_recycled        # one image each, the chain no longer
+        @test !sj.capped
         @info "R2 $side: fresh H1 $(sf.n_h1) added $(sf.added); recycled H1 $(st.n_h1) " *
               "added $(st.added); junk H1 $(sj.n_h1) added $(sj.added)"
     end
@@ -139,18 +144,22 @@ end
           maxdim = 256)
     occ = [:both, :up, :empty, :down, :both, :empty]
     on, off = hub4_product_state(occ), hub4_product_state(occ)
-    nrec, nh1 = [0, 0], [0, 0]
+    nrec, nh1, nkry, raug, nrc = [0, 0], [0, 0], [0, 0], [0, 0], 0
     for _ in 1:nstep
         ion = cbe_bug_step!(on, G, ComplexF64(-im * dt); kw...)       # the default recycles
         ioff = cbe_bug_step!(off, G, ComplexF64(-im * dt); kw..., krylov_recycle = false)
         nrec[1] += sum(get(e, :recycled, 0) for e in ion.ledger.bond_log; init = 0)
         nrec[2] += sum(get(e, :recycled, 0) for e in ioff.ledger.bond_log; init = 0)
+        nrc += count(e -> get(e, :rec_closed, false), ion.ledger.bond_log)
         nh1 .+= (ion.ledger.n_h1_closure, ioff.ledger.n_h1_closure)
+        nkry .+= (ion.ledger.n_krylov, ioff.ledger.n_krylov)
+        raug .= max.(raug, (ion.ledger.r_aug, ioff.ledger.r_aug))
     end
     d = _mps_dist(on, off) / norm(off)
-    @info "R5 A1 L=$L: |on - off|/|off| $(d), recycled vectors $(nrec[1]), closure H1 " *
-          "on $(nh1[1]) off $(nh1[2]), chi on $(maximum(bond_dims(on))) off " *
-          "$(maximum(bond_dims(off)))"
+    @info "R5 A1 L=$L: |on - off|/|off| $(d), recycled vectors $(nrec[1]) (bonds closed by " *
+          "them $(nrc)), closure H1 on $(nh1[1]) off $(nh1[2]), Krylov directions appended " *
+          "on $(nkry[1]) off $(nkry[2]), r_aug on $(raug[1]) off $(raug[2]), chi on " *
+          "$(maximum(bond_dims(on))) off $(maximum(bond_dims(off)))"
     @test nrec[1] > 0                                   # the default's closure rounds recycled
     @test nrec[2] == 0                                  # and the ablation does not
     @test d < 1e-6                                      # same step to the tolerances
@@ -161,6 +170,68 @@ end
     info = cbe_bug_step!(psi, mpo, ComplexF64(-0.05); order = 3, krylov_recycle = true,
                          tol_basis = 1e-8)
     @test all(get(e, :recycled, 0) == 0 for e in info.ledger.bond_log)
+end
+
+@testset "R6: the recurrence on plain matrices" begin
+    # a banded generator `H - (i/2) loss Q` and a localised seed, as a closure frontier is
+    function model(n, loss, rng)
+        H = zeros(ComplexF64, n, n)
+        for k in 1:5
+            b = randn(rng, ComplexF64, n - k)
+            H .+= diagm(k => b) .+ diagm(-k => conj.(b))
+        end
+        H .+= diagm(0 => 3 .* randn(rng, n) .- 0.5im * loss .* abs.(randn(rng, n)))
+        v0 = randn(rng, ComplexF64, n) .* exp.(-((1:n) .- n / 2) .^ 2 ./ (n / 7)^2)
+        return H, v0
+    end
+    function chain(H, v0, m)                     # Arnoldi vectors 2..m+1 of `H` from `v0`
+        P = Vector{ComplexF64}[v0 / norm(v0)]
+        for _ in 1:m
+            w = H * P[end]
+            for _pass in 1:2, u in copy(P)
+                w -= dot(u, w) * u
+            end
+            push!(P, w / norm(w))
+        end
+        return P[2:end]
+    end
+    function run(H, v0, tau, rec, allow)
+        nscored = Ref(0)
+        sc = (v, w, first) -> (w > allow && (nscored[] += 1); true)
+        kb = RC._krylov_basis(v0, x -> H * x, tau, allow, sc; recycled = rec, state_seed = false)
+        Y = exp(tau * H) * (v0 / norm(v0))
+        F = Matrix(qr(reduce(hcat, kb.basis)).Q)
+        return merge(kb, (nscored = nscored[], err = norm(Y - F * (F' * Y))))
+    end
+    allow = 1e-7
+    for (n, loss, tau) in ((120, 0.0, -0.1im), (200, 1.0, -0.2im), (200, 3.0, -0.05im))
+        rng = Random.MersenneTwister(n + round(Int, 10 * loss))
+        H, v0 = model(n, loss, rng)
+        f = run(H, v0, ComplexF64(tau), Any[], allow)
+        @test f.closed && !f.capped && f.err <= 10 * allow && f.n_recycled == 0
+        m = f.n_h1
+        E = randn(rng, ComplexF64, n, n)
+        E ./= opnorm(E)
+        sets = Pair{String, Vector{Any}}[
+            "own" => Any[chain(H, v0, m)...],
+            "related seed" => Any[chain(H, v0 .+ 0.3 * norm(v0) / sqrt(n) .* randn(rng, n), 8)...],
+            "junk x3" => Any[randn(rng, ComplexF64, n) for _ in 1:3],
+            "junk x8" => Any[randn(rng, ComplexF64, n) for _ in 1:8]]
+        for dl in (1e-7, 1e-5, 1e-3, 1e-1)
+            push!(sets, "H moved $dl" => Any[chain(H .+ dl * opnorm(H) .* E, v0, 8)...])
+        end
+        for (name, rec) in sets
+            r = run(H, v0, ComplexF64(tau), rec, allow)
+            @info "R6 n=$n loss=$loss $name: fresh H1 $m scored $(f.nscored); recycled H1 " *
+                  "$(r.n_h1) ($(r.n_recycled) recycled, closed by them $(r.rec_closed)) " *
+                  "scored $(r.nscored) err $(r.err)"
+            @test r.closed && !r.capped                 # never runs to the depth bound
+            @test r.err <= 10 * allow                   # never at the expense of accuracy
+            @test r.n_h1 <= m + r.n_recycled            # one image per recycled vector at most
+            r.rec_closed || @test r.nscored == f.nscored    # chain closed: the fresh directions
+            name == "own" && @test r.rec_closed && r.n_h1 == 1 + r.n_recycled
+        end
+    end
 end
 
 end # recycled local Krylov
