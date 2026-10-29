@@ -13,8 +13,8 @@ Validation of S1-S8: [validation_results.md](validation_results.md).
 | Ablation switches (default off) | `dd_width = l` (one-shot DD sketch of width `l`), `krylov_depth = m` / `_krylov_enrich(fixed_depth = m)`, `krylov_recycle` + `recycle_mode = :images / :frame` |
 | Fig 4 tolerances | `tol_basis = 1e-7`, `tol_trunc = 1e-10`, `tol_expv = 1e-12`, `maxdim = 512` (non-binding, max bond 24), `T = 2`, `dt ∈ {0.2, 0.1, 0.05, 0.025}` |
 | Conventional arm | `dd_width = 16`, `krylov_depth = 16`, fresh Krylov (declared before the run) |
-| Timing | Fig 4 = the dedicated timing job (xf4, Slurm 17583862, 1 thread, `x86-64-v3&intel`, median of 3 warmed repetitions of the whole run). Fig 1-3 times come from xe4 (not a timing job) and are indicative only |
-| Raw data | `runs_xe4/raw_component_costs.csv` (+ fig1/2/3 JSON), `runs_xf4/raw_solver_errors.csv` (+ fig4 JSON); plot with `python benchmarks/xx_efficiency/plot_figs.py RUNDIR OUTDIR` |
+| Timing | 1 thread, `x86-64-v3&intel`, each run as the only timing job of its time. Fig 4 = xf4 (Slurm 17583862): median of 3 warmed repetitions of the whole run. Fig 3 = xr3 (17596414): JIT warm-up of every arm, then one paired run. Fig 1-2 times are medians over seeds and sides from xe4, which was not a timing job; they are relative costs inside one process |
+| Raw data | `raw_component_costs.csv` (Figs 1-3; the Fig 3 rows come from xr3) and `raw_solver_errors.csv` (Fig 4) sit beside this file. Per-job JSON is in `runs_xe4/`, `runs_xr3/` and `runs_xf4/`. Plot with `python benchmarks/xx_efficiency/plot_figs.py RUNDIR OUTDIR` |
 
 Error kinds are kept apart in all figures. ρ_DD is an independently audited range error of the
 discarded-discarded block G_DD = P_L^D X P_R^D, built offline and never by the production path.
@@ -83,27 +83,35 @@ stop's weight estimate is optimistic by less than a factor of 2 there. The CBE-o
 **Hypothesis.** Reusing earlier Krylov directions saves H1 applications in rounds 2-3.
 
 **Comparison.** Three order-3 steps from the J t = 4 rank-8 and rank-16 snapshots
-(h = 0.1, tol_basis = 1e-5).
-- R: the H-image cache (`recycle_mode = :images`; gauge-transported vectors, every image refreshed with the new H1).
+(h = 0.1, tol_basis = 1e-5). The arms:
 - F: fresh Krylov.
+- R: the H-image cache (`recycle_mode = :images`; gauge-transported vectors, every image refreshed with the new H1).
+- Rf: `recycle_mode = :frame`, added at the USER's request. The transported vectors only seed the frame, and a fresh Krylov runs with no image refresh.
 
-The MPS frames are identical in both arms.
+The MPS frames are identical in all three arms. Timing comes from the timing job xr3.
 
-**Achieved error.** Both arms are equal against the exact state: 1.78e-7 / 4.0e-7 / 5.0-5.3e-7 after steps 1-3 (rank 16).
+**Achieved error (accuracy mark in Panel A).** An arm passes when every round met its
+tolerance and its exact state error after step 3 is within 10 % of F's. All three arms pass on both
+snapshots:
+- rank 16: F 5.34e-7, R 4.96e-7, Rf 5.34e-7
+- rank 8: F 5.43e-7, R 5.68e-7, Rf 5.43e-7
 
-**Saved work.** None. Round 1 costs 72 H1 per step in both arms. Rounds 2-3 do work only in step 1:
+**Saved work.** None. Round 1 costs 72 H1 per step in every arm. Rounds 2-3 do work only in step 1:
 - rank 16: R 18 vs F 10
 - rank 8: R 41 vs F 20
 
-Refreshing the transported images costs more than rediscovering the directions. The
-`:frame` variant was added at the USER's request: it seeds the frame with the transported vectors and runs a
-fresh Krylov with no image refresh. Here (S5, 2s = 1, 2, 4) it seeds 0 new directions and
-equals fresh exactly: n_h1 232 / 379 / 478, against 402 / 1652 / 2032 for `:images`. The
-transported directions already lie in the carried frame. Panel B times are from a
-non-timing job and are provisional.
+Over three steps, R costs 4-9 % more H1 and 8-17 % more local-enrichment time (rank 16: 0.89 s vs
+0.82 s, rank 8: 0.96 s vs 0.82 s). Refreshing the transported images costs more than rediscovering
+the directions. Rf seeds 0 new directions and does exactly F's H1 work. Its time differs from F's by
+±10 %, which is single-run noise. The transported directions already lie in the carried frame, and S5
+shows the same at 2s = 1, 2, 4 (n_h1 232 / 379 / 478 for both F and Rf, against 402 / 1652 / 2032 for R).
 
-**Where it fails.** Gauge changes and the changed local operator erase the value of old images. Following the
-plan, the recommendation is **recycling off (current default)**, or conditional at most.
+**Where it fails.** Gauge changes and the changed local operator erase the value of old images. R has a
+further defect, measured in job xr3 (`diag_recycle_unmet.jl`). It refreshes a block of 8-9 transported
+vectors and then extends along one defect direction per step, so the block's residuals shrink by one
+direction at a time. On some round-2 visits the defect never falls below the allowance before the
+64-step depth bound (`n_new = 64`, `capped`); this is the source of the Fig. 4 unmet steps. Following the
+plan, the recommendation is **recycling off (current default)**. Rf is harmless but brings no benefit.
 
 ## Fig. 4 — complete solver (`fig4_total_solver.pdf`)
 
@@ -141,7 +149,7 @@ reference, the global error stays at 1.5-3.8e-11 for every dt.
 **Where it fails.**
 - At dt = 0.025 both adaptive arms sit on the tol_basis = 1e-7 floor (state error 3.5-3.8e-8). The conventional arm's fixed width and depth over-solve to 2.6e-9, so there is no matched-error pair at that dt. The fair comparison is conventional at dt = 0.05 (4.0e-8, 26.9 s) against no-recycling at dt = 0.05 (4.5e-8, 14.2 s).
 - ε_z keeps falling (4.9e-11) while the state error plateaus. ε_z is the less sensitive metric.
-- The full arm reports 3 steps with `tolerance_met = false` at dt = 0.2, while fresh reports none. The final error is identical, but this is a defect of the `:images` path and is open.
+- The full arm reports 3 steps with `tolerance_met = false` at dt = 0.2 (steps 7, 8 and 10), while fresh and `:frame` report none. The cause was diagnosed in xr3. In each of those steps one round-2 visit (bond 7 or 9) ran the `:images` recurrence to its 64-step depth bound, as described under Fig. 3. The solver reports these visits as unmet instead of hiding them, and the final error is unchanged. The extra applications (each capped visit about 74 H1) are most of the 2.5× slowdown at that dt.
 
 ## Recommendation
 

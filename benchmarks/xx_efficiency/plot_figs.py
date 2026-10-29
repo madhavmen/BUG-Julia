@@ -189,42 +189,53 @@ f3 = load("fig3_recycle.json")
 if f3:
     rows = f3["rows"]
     cases = sorted({x["case"] for x in rows})
-    fig, axs = plt.subplots(1, 2, figsize=(10, 3.6))
-    wbar = 0.38
+    ARMS3 = [(arm, lab, col) for arm, lab, col in
+             (("F", "F: fresh Krylov", C1), ("R", "R: recycled, refreshed H images", C2),
+              ("Rf", "Rf: recycled vectors seed the frame only", C4))
+             if any(x["arm"] == arm for x in rows)]
+
+    # accuracy guard (plan Sec. 4): an arm passes when every round met its tolerance and its exact
+    # state error after the last step is within 10 % of F's; no saving is claimed for a failed arm
+    def final_err(case, arm):
+        st_ = [s for s in f3["steps"] if s["case"] == case and s["arm"] == arm]
+        return max(st_, key=lambda s: s["step"])["err"]
+
+    def passes(case, arm):
+        met = all(x["status"] == "met" for x in rows if x["case"] == case and x["arm"] == arm)
+        return met and final_err(case, arm) <= 1.1 * final_err(case, "F")
+
+    fig, axs = plt.subplots(1, 2, figsize=(10, 3.8))
     a, b = axs
-    labels, F, R = [], [], []
-    for case in cases:
-        for rd in (1, 2, 3):
-            labels.append(f"{case.replace('t4.0_', '')}\nround {rd}")
-            for arm, acc in (("F", F), ("R", R)):
-                acc.append(sum(x["work"] for x in rows if x["case"] == case and x["arm"] == arm
-                               and x["param"].endswith(f"round={rd}")))
-    xs = range(len(labels))
-    a.bar([x - wbar / 2 for x in xs], F, wbar, color=C1, label="F: fresh Krylov")
-    a.bar([x + wbar / 2 for x in xs], R, wbar, color=C2, label="R: recycled (refreshed images)")
-    a.set_xticks(list(xs))
+    wbar = 0.8 / len(ARMS3)
+    labels = [f"{case.replace('t4.0_', '')}\nround {rd}" for case in cases for rd in (1, 2, 3)]
+    for j, (arm, lab, col) in enumerate(ARMS3):
+        ys = [sum(x["work"] for x in rows if x["case"] == case and x["arm"] == arm
+                  and x["param"].endswith(f"round={rd}")) for case in cases for rd in (1, 2, 3)]
+        mark = "  ".join(f"{c.replace('t4.0_', '')} {'pass' if passes(c, arm) else 'FAIL'}"
+                         for c in cases)
+        a.bar([i + (j - (len(ARMS3) - 1) / 2) * wbar for i in range(len(labels))], ys, wbar,
+              color=col, label=f"{lab}  [accuracy: {mark}]")
+    a.set_xticks(range(len(labels)))
     a.set_xticklabels(labels, fontsize=7)
     a.set_ylabel("new one-site H applications (3 steps)")
     a.set_title("A  H applications per order-3 round", fontsize=8)
-    a.legend(fontsize=7, loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=2)
+    a.legend(fontsize=6.5, loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=1)
+    warm = f3.get("warmed", False)
     for case, ls in zip(cases, ("-", "--")):
-        for arm, col in (("F", C1), ("R", C2)):
-            ts = []
-            for rd in (1, 2, 3):
-                ts.append(sum(float(x["time_s"]) for x in rows if x["case"] == case
-                              and x["arm"] == arm and x["param"].endswith(f"round={rd}")
-                              and not x["param"].startswith("step=1,")))
-            cum = [sum(ts[:i + 1]) for i in range(3)]
-            b.plot([1, 2, 3], cum, color=col, ls=ls, marker="o",
+        for arm, lab, col in ARMS3:
+            ts = [sum(float(x["time_s"]) for x in rows if x["case"] == case and x["arm"] == arm
+                      and x["param"].endswith(f"round={rd}")
+                      and (warm or not x["param"].startswith("step=1,"))) for rd in (1, 2, 3)]
+            b.plot([1, 2, 3], [sum(ts[:i + 1]) for i in range(3)], color=col, ls=ls, marker="o",
                    label=f"{arm}, {case.replace('t4.0_', '')}")
     b.set_xticks([1, 2, 3])
     b.set_xlabel("round")
-    b.set_ylabel("cumulative local-enrichment s (steps 2-3)")
-    b.set_title("B  cumulative time -- PROVISIONAL (not the timing job; step 1 = JIT, dropped)",
-                fontsize=8)
-    b.legend(fontsize=7)
-    fig.suptitle("Fig. 3  Krylov recycling (R) vs fresh (F), same adaptive DD-CBE and stop rule",
-                 fontsize=9)
+    steps = "steps 1-3" if warm else "steps 2-3"
+    b.set_ylabel(f"cumulative local-enrichment s ({steps})")
+    b.set_title("B  cumulative local-enrichment wall time" +
+                ("" if f3.get("timing_job") else " -- PROVISIONAL (not the timing job)"), fontsize=8)
+    b.legend(fontsize=7, ncol=2)
+    fig.suptitle("Fig. 3  Krylov recycling vs fresh, same adaptive DD-CBE and stop rule", fontsize=9)
     save(fig, "fig3_krylov_recycling")
 
 # ── Fig. 4 ─────────────────────────────────────────────────────────────────────
