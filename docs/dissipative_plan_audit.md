@@ -1453,3 +1453,59 @@ to the solver before `ef6c30d` (test dk7t 17526723 passed).
   Whether to make 1e-6 the default, or to recompute dr6ta's matched-error comparison with it, is
   left to the USER. On the evidence here, BUG's dt 0.1 point on F10 would move from 4.8e-6 to
   9e-8 at slightly lower cost, widening BUG's lead.
+
+# Re-audit 2026-10-29: enrichment and recycling (§1.2, §1.3) on `3a07c7c`
+
+This supersedes two Task 1 rows above: "Krylov recycling: PARTIAL" and the `2·maxdim` peak working-rank cap.
+
+| plan item (line) | status | evidence |
+|---|---|---|
+| three-round K/L scheme (l.69) | IMPLEMENTED | half-sweeps = round 0, then `_single_pass_closure!` → `_frontier_sweep!` for frontiers 1, 2 |
+| CBE ranges eq. (4): implicit `P^D` on thin blocks, streamed `XΩ` (l.71-78) | IMPLEMENTED | `dd_cbe_expand` → `_dd_probe`, `TwoSiteSketchOp`, `_stream_left` / `_stream_right`; the frontier sweeps call the same expansion (`krylov_closure.jl:437`) |
+| QR-only selector, no CBE-selection SVD (l.78) | IMPLEMENTED (default) | `_dd_select` / `_thin_qr`. The only SVD under `expansion/` is `_trim_by_weight` (`dd_cbe_controller.jl:118`), reached only with `cap_order = :weight`; the default is `:sector` |
+| independent holdout (l.78) | IMPLEMENTED | `_dd_controller` |
+| local Krylov on `G_{1,i}` by Arnoldi, no Hermitian Lanczos residual (l.80) | IMPLEMENTED | `_arnoldi_chain` (`krylov_enrich.jl`): `one_site_h`, CGS2 against every vector (full Hessenberg). The weight `_kry_weight` reads `exp` of the Hessenberg and takes the unitary branch only when `tau·H_k` is skew-Hermitian |
+| transport / reorthogonalise old useful directions into the new gauge (l.80) | IMPLEMENTED (`3a07c7c`) | `RecycledKrylov` (`recycled_krylov.jl`). Round 0 is committed as generation 0 (`half_sweeps.jl:175, 243`); a frontier round is committed only when its frames are (`frontier_sweeps.jl:301-302`). `_rk_transport` maps the frame leg by the sweep's `Pm` and the opposite leg by the overlaps (R3: identity to 1e-12). Reorthogonalised by `_cgs2` |
+| extend only from active frontiers (l.80); USER 10-29: the input is the complement of the previous solve's input | IMPLEMENTED (`3a07c7c`) | `_rk_complement` splits `u0 = αp + v_c` and extends only `v_c`. The previous block is never extended: the block-defect continuation (`bc25565`) and the augmentation (`c2b2478`) are removed |
+| one `tol_basis` incl. "recycled local Krylov basis defect" (l.80, l.111) | IMPLEMENTED | the recycled block's defect for `p` under THIS round's `H1` must be within half the Krylov allowance, else the fresh Arnoldi from `u0` runs. `tol_krylov = nothing` (default) is the shared budget; `basis_allocation(...; rule = :linear)` |
+| fixed Krylov depth not a public knob (l.80, U11) | IMPLEMENTED | `_KRY_MAXDEPTH` is internal; reaching it is reported (`capped`, `:krylov` unmet) |
+| work caps: bounded Arnoldi dimension, bounded recycled frontier size (l.128) | IMPLEMENTED | depth 64; `_RECYCLE_KEEP` = 8 vectors plus the input per bond; the store is dropped at the end of every step |
+| measured temporary ranks (l.128) | IMPLEMENTED | `D_stage`, `D_work`, per-bond `width` in the bond log |
+| peak working-rank cap (Task 1) | IMPLEMENTED (USER 10-28) | `work_ceiling(maxdim, r, d) = max(d·maxdim, d·r, 1)` (`adaptive_budget.jl:349`), `d = local_dim(psi)` (`cbe_bug.jl:179`) |
+| step rejection / retry, explicit reason codes (l.128) | PARTIAL | Reason codes: `StepRecord.limits` (`:basis_limited`, `:root_limited`, `:truncation_limited`, `:rank_limited`, `:work_limited`). Rejection happens only through the periodic step doubling (`quantum_jumps.jl:197-202`); a `:work_limited` step is accepted and logged. A smaller-dt retry would not rescue A1: rp7o at dt 0.025 still fills the ceiling |
+| recycled validity after a jump (l.218); charge rules (l.44) | IMPLEMENTED | nothing survives a step; all recycled vectors are symmetric tensors transported by contractions |
+
+**Recycling in practice.** Reuse is accepted only when the kept block certifies `p`'s evolution under this round's generator.
+
+- **Matrix tests (R6).** Any relative change of the generator ≥ 1e-6 between the two solves rejects reuse.
+- **Without the test.** The complement's chain alone errs by 10× the allowance at a 1e-6 change, and by 10⁴× at 1e-3. §1.3's defect test is therefore required.
+- **Real A1, L = 6, order 3 (R5, rk7y 17596378).**
+  - 104 closure bonds were tested and 0 reused.
+  - Closure `H1`: 216 on, 112 off.
+  - Identical Krylov directions (105), frame width (64) and state.
+
+Recycling is implemented as the plan specifies. It does not reduce bond growth here, because the generator moves between rounds.
+
+## Which models' generators cause the blow-up
+
+All rows at the current ceiling `d·maxdim` (`6a8b742` and later), BUG order 3.
+
+| model | generator `G = -iH - Q/2` | `d` | loss | BUG result | verdict |
+|---|---|---|---|---|---|
+| A1, L = 24, U = 4, κ = 2, dbl_rich, maxdim 512 | Hubbard `H = -J Σ (c†c + h.c.) + U Σ n↑n↓`, `L_j = √κ c_j↓ c_j↑` on **every** site | 4 | bulk | dq7h: 19/19 rows (`tol_basis` 1e-4..1e-8 × `tol_krylov`) fail, observables off by 0.24-0.28. D_stage = ceiling 2048, bonds pinned at 512 | **blow-up**; TDVP2 maxdim 512 errs 2.5e-5 |
+| B1, L = 20 | Hubbard junction, `L_0 = √κ c_0↓ c_0↑` only | 4 | one site | dq7g: 19/19 accurate to 7.1e-6 (the reference floor); still work-limited on 11-40 of 60 steps, D_stage 2048 | saturates, accurate |
+| A2, L = 48 | XXZ, collective `L± = √Γ± Σ e^{±ikx_j} S_j^-` | 2 | collective | every step work-limited (D_stage 1024); final D 26; accurate | saturates, accurate (USER 10-27: not failed) |
+| B2, L = 32 | XXZ subradiance, collective | 2 | collective | D_stage 639-664, below the ceiling; D_final 154; accurate | clean (TDVP2 is the wrong one from the alternate product state) |
+
+**A1 mechanism (rank probes, A1 L = 24 from BUG's own clean state at t 0.5).**
+
+- **What one step needs (rp7q 17580899).**
+  - Frontier 1 adds 25 573 directions (frame 2758 → 6702); frontier 2 adds 13 220 (capped at 8192).
+  - The half-sweep frames reach 2000-2800 per bond: Krylov 1100-1800 plus DD-QR CBE about 550.
+  - At ceiling 8192 the step is clean, with D 214-299 against TDVP2's 201-234. It costs 6098 s against TDVP2's 74 s.
+- **Order 1 runs away too (rp7r 17582501).** With no closure rounds, the half-sweeps alone add 1000-1300 Krylov and 520-710 DD-QR directions per bond. The bonds go to 512 and the distance is 6e-5. Recycling, which acts only in the closure rounds, cannot reach this.
+- **No tolerance lifts it.**
+  - `tol_basis`: 1e-5 in dr7a5 / dr7m5, 1e-4..1e-8 in dq7h.
+  - `tol_krylov`: down to 1e-2 in dq7a. `n_krylov` falls from 45k to 4.3k, yet 19-20 of 20 steps stay capped.
+
+The excess is specific to the d = 4 Hubbard generator with bulk loss. The same `d` with loss on one site (B1) saturates but stays accurate, and the `d = 2` spin chains stay accurate.
