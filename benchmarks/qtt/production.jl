@@ -120,7 +120,7 @@ function snapshot!(ts)
     row = Dict{Symbol, Any}(:t => ts, :chi_max => maximum(bond_dims(psi)),
                             :profile => join(bond_dims(psi), ";"), :scalar => scalar(psi))
     if MODEL === :gp_shedding
-        o = gp_observables(model, A, ts)
+        o = gp_observables(model, A, ts; residual = qtt_length(g) <= 20)
         vp, vm, _ = vortex_count(M)
         merge!(row, Dict(:N => o.N, :E_kin => o.E_kin, :E_int => o.E_int, :E_pad => o.E_pad,
                          :F_gc => o.F_gc, :P_ext => o.P_ext, :vortices_plus => vp,

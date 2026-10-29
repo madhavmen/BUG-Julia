@@ -181,8 +181,11 @@ end
     g = _heston_grid(5, 5)
     W = heston_op(g, _HP)
     C = _random_tt([2, 3, 5, 10, 8, 4, 2, 1, 1]; rng = Random.MersenneTwister(21))
+    # 2 chi_{i-1} > chi_i < 2 chi_{i+1} at every tested bond, or P^D vanishes on a side and the
+    # comparison is roundoff against roundoff (qt1b: ranks above saturated bonds 4 and 5)
+    Cs = _random_tt([2, 3, 4, 4, 4, 4, 3, 2, 1]; rng = Random.MersenneTwister(22))
     for i in (3, 4, 5)
-        b = _qtt_bond(g, W, C, i)
+        b = _qtt_bond(g, W, Cs, i)
         f = b.f
         @test _unsaturated(f)
         dd = _dd_dense(f, b.mpo, i, b.lenv, b.renv)

@@ -46,8 +46,8 @@ function gp_parts(m::GPModel)
     end
 end
 
-"`<A| W |A>` for operator cores `W`."
-_expect(W, A) = W === nothing ? 0.0 : real(tt_dot(A, op_apply(W, A)))
+"`<A| W |A>` for operator cores `W`, by environments (`_op_expect`)."
+_expect(W, A) = W === nothing ? 0.0 : real(_op_expect(W, A))
 
 """
     gp_observables(m, A, t) -> NamedTuple
@@ -59,7 +59,7 @@ energy `E = (E_kin + E_trap + E_rot + g/2 int|psi|^4) / N` with chemical potenti
 `R_mu = ||(H[psi] - mu[psi]) psi|| / ||psi||`, and the paddle's external power
 `P_ext = int (d_t V_pad) |psi|^2` (central difference in t).
 """
-function gp_observables(m::GPModel, A::AbstractVector, t::Real)
+function gp_observables(m::GPModel, A::AbstractVector, t::Real; residual::Bool = true)
     g = m.grid
     w = qtt_cell(g)
     P = gp_parts(m)
@@ -71,9 +71,10 @@ function gp_observables(m::GPModel, A::AbstractVector, t::Real)
     ep = w * _expect(Vp, A)
     eint = m.g / 2 * w * i4
     H, _ = gp_hamiltonian_op(m, A, t)
-    HA = first(tt_compress(op_apply(H, A); tol = 1e-12))
-    mu = real(tt_dot(A, HA)) / max(n2, eps())
-    Rm = tt_norm(tt_lincomb([(1.0, HA), (-mu, A)]; tol = 1e-12)) / sqrt(max(n2, eps()))
+    mu = real(_op_expect(H, A)) / max(n2, eps())
+    # R_mu needs ||H psi||: the one compressed product here, skipped at production sizes
+    Rm = residual ? tt_norm(tt_lincomb([(1.0, first(tt_compress(op_apply(H, A); tol = 1e-12))),
+                                        (-mu, A)]; tol = 1e-12)) / sqrt(max(n2, eps())) : NaN
     dtv = 1e-4
     Vf, Vb = gp_paddle_op(m, t + dtv), gp_paddle_op(m, max(t - dtv, 0.0))
     pext = (w * _expect(Vf, A) - w * _expect(Vb, A)) / (t + dtv - max(t - dtv, 0.0))

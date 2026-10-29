@@ -246,7 +246,13 @@ end
                                            tol_trunc = 1e-13), p0, 0.01, 5)
     println("V03 mass drift without the ones-state kept: ",
             abs(qtt_cell(g) * sum(real, pN) - m0) / m0)
-    @test minimum(real, pT) > -1e-3 * maximum(real, pT)
+    # central differences undershoot on this coarse grid (qt1b: -1.2e-3 of the maximum) -- a
+    # property of the spatial scheme, so the integrator must add none beyond the exact discrete flow
+    pex = exp(0.05 .* Matrix(op_dense(heston_op(g, p; adjoint = true)))) * vec(tt_dense(p0))
+    println("V03 forward min/max: BUG ", minimum(real, pT) / maximum(real, pT),
+            " exact discrete ", minimum(real, pex) / maximum(real, pex))
+    @test minimum(real, pT) >= minimum(real, pex) - 1e-6 * maximum(real, pex)
+    @test _relerr(pT, pex) < 1e-4
     # the semi-analytic call: positive, decreasing in K, within no-arbitrage bounds
     cs = [heston_call(p, 1.0, K, 0.09, 0.5) for K in (0.8, 1.0, 1.2)]
     @test issorted(cs; rev = true) && all(>(0), cs)

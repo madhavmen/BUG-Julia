@@ -105,6 +105,15 @@ function _env_stack_right(B, H, C)
     return F
 end
 
+"`<C| W |C>` by one environment sweep, `O(L chi^3 w)` -- never `W C` compressed."
+function _op_expect(W, C)
+    E = _unit_env()
+    for k in eachindex(C)
+        E = _env_left(E, C[k], W[k], C[k])
+    end
+    return E[1, 1, 1]
+end
+
 "Two-site effective action at `(i, i+1)`."
 function _eff2(E, Hi, Hj, F, Th)
     X = _tc(E, (3,), Th, (1,))                     # (a, b, t1, t2, e)
@@ -357,8 +366,10 @@ function qtt_bug_step!(psi::SymMPS, fl::QTTFlow, t::Real, h::Real; order::Int = 
     L = length(psi)
     A0 = qtt_cores(psi)
     Hn, hinfo = flow_op(fl, A0, t)
-    mu_n = fl isa GPFlow && fl.normalized ?
-        real(tt_dot(A0, first(tt_compress(op_apply(Hn, A0))))) / max(tt_norm(A0)^2, eps()) : 0.0
+    # The frames' generator is shifted by the state's mean `<H>` (as imaginary time does): the
+    # Krylov spaces are unchanged, but a stiff step's root no longer underflows to an exactly zero
+    # matrix (V08: h lambda = -1e3 gave e^-1000 = 0 and Telum's root SVD refused it).
+    mu_n = real(_op_expect(Hn, A0)) / max(tt_norm(A0)^2, eps())
     Hmpo = qtt_to_mpo(Hn)
     tau = ComplexF64(fl.pref * h)
     function frames(keep)
@@ -495,7 +506,7 @@ function qtt_tdvp2_step!(psi::SymMPS, fl::QTTFlow, t::Real, h::Real; density::Sy
     L = length(C)
     flow = density === :lagged ? frozen_flow(fl, C, t) : fl
     mu_of(H, X) = fl isa GPFlow && fl.normalized ?
-        real(tt_dot(X, first(tt_compress(op_apply(H, X))))) / max(tt_norm(X)^2, eps()) : 0.0
+        real(_op_expect(H, X)) / max(tt_norm(X)^2, eps()) : 0.0
     back = Float64[]
     nsc = Int[]
     disc2 = 0.0
