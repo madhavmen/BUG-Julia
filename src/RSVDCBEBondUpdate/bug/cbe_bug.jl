@@ -48,8 +48,10 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # directions into the new gauge, and extend only from active frontiers"):
                        # each closure round's local Krylov stage starts from the previous round's
                        # weighted vectors at that bond (`recycled_krylov.jl`) instead of a fresh
-                       # sequence. Real-time and no-jump steps only. Off by default (USER decision).
-                       krylov_recycle::Bool = false,
+                       # sequence, so closure sweeps append only what the recycled block lacks.
+                       # Real-time and no-jump steps only. On by default (USER 2026-10-29: no
+                       # unnecessary bond growth in the closure sweeps); `false` is the ablation.
+                       krylov_recycle::Bool = true,
                        # ── IMAGINARY TIME (plan: cbe_bug_imaginary_open_benchmark, Task 1) ──
                        # The root integrator (`ROOT_METHODS`): `:exp` is the Saad-converged
                        # exponential (the reference); `:trapezoid`/`:radau2`/`:radau3` apply that

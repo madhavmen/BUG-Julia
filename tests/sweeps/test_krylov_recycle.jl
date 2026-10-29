@@ -141,8 +141,8 @@ end
     on, off = hub4_product_state(occ), hub4_product_state(occ)
     nrec, nh1 = [0, 0], [0, 0]
     for _ in 1:nstep
-        ion = cbe_bug_step!(on, G, ComplexF64(-im * dt); kw..., krylov_recycle = true)
-        ioff = cbe_bug_step!(off, G, ComplexF64(-im * dt); kw...)
+        ion = cbe_bug_step!(on, G, ComplexF64(-im * dt); kw...)       # the default recycles
+        ioff = cbe_bug_step!(off, G, ComplexF64(-im * dt); kw..., krylov_recycle = false)
         nrec[1] += sum(get(e, :recycled, 0) for e in ion.ledger.bond_log; init = 0)
         nrec[2] += sum(get(e, :recycled, 0) for e in ioff.ledger.bond_log; init = 0)
         nh1 .+= (ion.ledger.n_h1_closure, ioff.ledger.n_h1_closure)
@@ -151,8 +151,8 @@ end
     @info "R5 A1 L=$L: |on - off|/|off| $(d), recycled vectors $(nrec[1]), closure H1 " *
           "on $(nh1[1]) off $(nh1[2]), chi on $(maximum(bond_dims(on))) off " *
           "$(maximum(bond_dims(off)))"
-    @test nrec[1] > 0                                   # the closure rounds recycled
-    @test nrec[2] == 0                                  # and the default does not
+    @test nrec[1] > 0                                   # the default's closure rounds recycled
+    @test nrec[2] == 0                                  # and the ablation does not
     @test d < 1e-6                                      # same step to the tolerances
     @test isfinite(norm(on))
 
