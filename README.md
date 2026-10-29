@@ -216,6 +216,28 @@ Krylov solves — a run differs from another run only in the operator.
 `pair_mpo` is what makes Haldane-Shastry exact: `1/sin²` has no finite-dimensional MPO, so `O(L)`
 is what exactness costs rather than a wasteful encoding.
 
+## 2D quantics PDEs (QTT): damped Gross-Pitaevskii and Heston
+
+Under `set_symmetry!(:none)` a field on a `2^nx x 2^ny` grid is an MPS of `nx + ny` bits (grouped
+`x | y`, least significant bit first), and every operator is a matrix-free MPO built from the
+binary carry automaton -- nothing of size `2^L` is ever formed
+([qtt_dissipative_cbe_bug_four_task_implementation_plan.md](qtt_dissipative_cbe_bug_four_task_implementation_plan.md),
+map in [docs/qtt_plan_audit.md](docs/qtt_plan_audit.md)).
+
+```julia
+set_symmetry!(:none)
+g   = qtt_grid(8, 8; x = (-8.0, 8.0), y = (-8.0, 8.0))          # 256 x 256, periodic
+m   = gp_model(g; gnl = 1.0, gamma = 0.1, mu = 1.0, omega = 1.0)
+psi = qtt_mps(qtt_separable(g, x -> exp(-x^2 / 2), y -> exp(-y^2 / 2)))
+qtt_bug_step!(psi, GPFlow(m), 0.0, 0.05; order = 3)   # full nonlinear Radau IIA stages, |psi|^2 rebuilt per iterate
+qtt_tdvp2_step!(psi, GPFlow(m), 0.05, 0.05; density = :consistent)   # TDVP2 baseline, A_back recorded
+```
+
+`heston_op(g, p; adjoint)` gives the Heston generator or its mass-conserving forward transpose
+(`LinearFlow`). The GP equation is never linearised: `gp_bug_step!` (one frozen density per step) is
+a separately labelled ablation. Tests: `tests/sweeps/test_qtt_task1.jl`, `test_qtt_task2.jl`;
+studies and production: `benchmarks/qtt/`.
+
 ## Tests
 
 ```bash
