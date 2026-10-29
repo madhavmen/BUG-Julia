@@ -43,7 +43,7 @@ end
 
 What both half-sweeps of one step READ and never write: the operator, `tau`, the generator shift,
 the root bond `c`, the step's allocation and DD-QR expansion settings (`exkw`), the work ceiling,
-the `krylov_reuse` ablation, the states the trial space must contain (`keep_states`) and the
+the `krylov_reuse` and `krylov_depth` ablations, the states the trial space must contain (`keep_states`) and the
 `krylov_recycle` cache (`nothing` when off), which round 1 fills.
 """
 struct _HalfSweepCtx{M, E, A, K, S, R}
@@ -55,6 +55,7 @@ struct _HalfSweepCtx{M, E, A, K, S, R}
     exkw::K
     wcap::Int
     krylov_reuse::Bool
+    krylov_depth::Int
     keep_states::S
     recycle::R
 end
@@ -143,7 +144,7 @@ function _half_left!(psiL, W, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_Ha
         tk0  = time_ns()
         Wkry, kst = _krylov_enrich(Kex, x -> (acc.nmv += 1; apply_one_site(H1, x)),
                                    cx.krylov_reuse ? ex.U_ex : _fr.U0, :left, cx.tau, cx.alloc;
-                                   workcap = cx.wcap)
+                                   workcap = cx.wcap, fixed_depth = cx.krylov_depth)
         cx.krylov_reuse || (Wkry = _merge_frame(Wkry, ex.U_ex, :left))
         _recycle_store!(cx.recycle, :left, i, kst, ex.V_ex, cx.alloc.krylov)
         acc.tkry += (time_ns() - tk0) / 1e9
@@ -215,7 +216,7 @@ function _half_right!(psiR, Z, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_H
         tk0  = time_ns()
         Zkry, kst = _krylov_enrich(Bex, x -> (acc.nmv += 1; apply_one_site(H1, x)),
                                    cx.krylov_reuse ? ex.V_ex : _fr.V0, :right, cx.tau, cx.alloc;
-                                   workcap = cx.wcap)
+                                   workcap = cx.wcap, fixed_depth = cx.krylov_depth)
         cx.krylov_reuse || (Zkry = _merge_frame(Zkry, ex.V_ex, :right))
         _recycle_store!(cx.recycle, :right, j, kst, ex.U_ex, cx.alloc.krylov)
         acc.tkry += (time_ns() - tk0) / 1e9

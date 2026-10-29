@@ -98,7 +98,8 @@ function _frontier_left(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
                                        () -> _recycle_transport(e, :left, Pmi, ex.V_ex, Eov, i),
                                        Kex, x -> (nh1[] += 1; apply_one_site(H1, x)),
                                        reuse ? ex.U_ex : U0, tau, alloc; round = gen + 1,
-                                       workcap = workcap, amp = amp, state_seed = false)
+                                       workcap = workcap, amp = amp, state_seed = false,
+                                       fixed_depth = get(ckw, :krylov_depth, 0))
             _recycle_store!(rec, :left, i, st, ex.V_ex, alloc.krylov)
             _record_krylov!(bl, st, alloc)
             reuse ? Q : _merge_frame(Q, ex.U_ex, :left)
@@ -185,7 +186,8 @@ function _frontier_right(Fm::SymMPS, mpo, fr::KLFrames, tau::ComplexF64,
                                        () -> _recycle_transport(e, :right, Pmj, ex.U_ex, Eov, j),
                                        Bex, x -> (nh1[] += 1; apply_one_site(H1, x)),
                                        reuse ? ex.V_ex : V0, tau, alloc; round = gen + 1,
-                                       workcap = workcap, amp = amp, state_seed = false)
+                                       workcap = workcap, amp = amp, state_seed = false,
+                                       fixed_depth = get(ckw, :krylov_depth, 0))
             _recycle_store!(rec, :right, j, st, ex.U_ex, alloc.krylov)
             _record_krylov!(bl, st, alloc)
             reuse ? Q : _merge_frame(Q, ex.V_ex, :right)

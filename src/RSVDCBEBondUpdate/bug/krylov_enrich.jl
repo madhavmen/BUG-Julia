@@ -98,7 +98,7 @@ end
 
 """
     _krylov_enrich(v0, applyH, Q0, side, tau, alloc; workcap = 0, maxdepth = _KRY_MAXDEPTH,
-                   amp = 1.0, state_seed = true)
+                   amp = 1.0, state_seed = true, fixed_depth = 0)
         -> (Q, stats)
 
 Grow the frame `Q0` by the Krylov directions of `applyH` from seed `v0` that the step needs. Each
@@ -106,14 +106,20 @@ direction is scored by `weight * ||(I - QQ') v_k||`: `eta_1` is Test C, `eta_{k>
 above `alloc.krylov` are appended. A small `eta_1` is not a stop (`H e1 = e2`, `H e2 = e1 + e3` with
 `Q0 = [e1, e2]`). `capped` with `met = false` means the work ceiling or depth bound stopped the
 search with weight left. `amp` is the seed's norm relative to the state.
+
+`fixed_depth = m > 0` is the conventional-control ablation (plan Figs. 2 and 4): exactly `m` steps,
+every new local direction appended (numerical floor only), no weight stop; `met` then reports
+whether the weight had fallen to the allowance by depth `m`.
 """
 function _krylov_enrich(v0, applyH, Q0, side::Symbol, tau::ComplexF64,
                         alloc::BasisAllocation; workcap::Int = 0,
                         maxdepth::Int = _KRY_MAXDEPTH, amp::Float64 = 1.0,
-                        state_seed::Bool = true)
+                        state_seed::Bool = true, fixed_depth::Int = 0)
     side in (:left, :right) || throw(ArgumentError("side must be :left or :right"))
     perp = side === :left ? perp_component : perp_component_right
     fl = side === :left ? 3 : 1
+    fixed = fixed_depth > 0
+    fixed && (maxdepth = fixed_depth)
     Q = Q0
     eta_c, eta_d, added, added_d, nh = 0.0, 0.0, 0, 0, 0
     capped, closed = false, false
@@ -152,19 +158,21 @@ function _krylov_enrich(v0, applyH, Q0, side::Symbol, tau::ComplexF64,
             R = to_concrete(perp(Q, v))
             eta = weight * norm(R)
             k == 1 ? (eta_c = eta) : (eta_d = max(eta_d, eta))
-            if eta > alloc.krylov
+            if eta > (fixed ? 0.0 : alloc.krylov)
                 # The ceiling bounds the frame WIDTH, not the number of extensions: a block
                 # may not carry the frame past it either.
                 room = workcap > 0 ? workcap - leg_dim(Q, fl) : typemax(Int)
                 room <= 0 && (capped = true; break)
-                Q, nadd, fits = _extend_frame(Q, R, v, side, weight, alloc.krylov; room = room)
+                Q, nadd, fits = _extend_frame(Q, R, v, side, weight, fixed ? 0.0 : alloc.krylov;
+                                              room = room)
                 added += nadd
                 k >= 2 && (added_d += nadd)
-                fits || (capped = true; break)
+                # an allowance of 0 never "fits" (the floor's tail): only the adaptive stop caps here
+                fits || fixed || (capped = true; break)
             end
-            weight <= alloc.krylov && (closed = true; break)
+            weight <= alloc.krylov && (closed = true; fixed || break)
         end
-        closed || (capped = true)                             # depth bound with weight left
+        closed || fixed || (capped = true)                    # depth bound with weight left
     else
         closed = true
     end

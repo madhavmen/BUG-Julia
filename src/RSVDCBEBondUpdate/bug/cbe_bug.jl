@@ -50,6 +50,12 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # unitary steps only. A `Ref` in `recycle_report` receives the per-bond log.
                        krylov_recycle::Bool = false,
                        recycle_report::Union{Nothing, Base.RefValue} = nothing,
+                       # ⚠ ABLATION, NOT A METHOD CHOICE (xx-efficiency plan Fig. 4, conventional
+                       # controls). `dd_width = l > 0`: every DD-QR CBE takes ONE probe of width
+                       # `l` (no holdout, no adaptive growth). `krylov_depth = m > 0`: every local
+                       # Krylov stage runs exactly `m` steps with no weight stop.
+                       dd_width::Int = 0,
+                       krylov_depth::Int = 0,
                        # ── IMAGINARY TIME (plan: cbe_bug_imaginary_open_benchmark, Task 1) ──
                        # The root integrator (`ROOT_METHODS`): `:exp` is the Saad-converged
                        # exponential (the reference); `:trapezoid`/`:radau2`/`:radau3` apply that
@@ -177,7 +183,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     wcap_step = work_ceiling(maxdim, maximum(bond_dims(psi); init = 0), local_dim(psi))
     # The expansion settings every DD-QR CBE of the step takes, half-sweeps and frontier sweeps.
     exkw = (growth = ADAPTIVE_GROWTH, exact = exact, alloc = alloc, workcap = wcap_step,
-            cap_order = cap_order)
+            cap_order = cap_order, dd_width = dd_width)
 
     # ⛔ THE LEDGER AND THE RNG ARE PER HALF-SWEEP, because under `parallel = true` the two run
     # concurrently: a shared `AdaptiveLedger` loses `+=` updates, and a shared `MersenneTwister`
@@ -187,8 +193,8 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     ledgerL, ledgerR = AdaptiveLedger(), AdaptiveLedger()
     rngR = parallel ? MersenneTwister(rand(rng, UInt64)) : rng
     rec = krylov_recycle && order > 1 ? KrylovRecycle() : nothing
-    cx = _HalfSweepCtx(mpo, tau, eshift, c, alloc, exkw, wcap_step, krylov_reuse, keep_states,
-                       rec)
+    cx = _HalfSweepCtx(mpo, tau, eshift, c, alloc, exkw, wcap_step, krylov_reuse, krylov_depth,
+                       keep_states, rec)
 
     troot = Ref(0.0); ttrunc = Ref(0.0)
     _t0step = time_ns()
@@ -248,7 +254,7 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     if order > 1
         fr = KLFrames(W, Z, c, lenv_root, renv_root, 0, nothing, nothing, Float64(eshift))
         # Plan T4.1: the frontier sweeps expand by the same DD-QR CBE as the half-sweeps.
-        ckw = merge(exkw, (krylov_reuse = krylov_reuse, recycle = rec))
+        ckw = merge(exkw, (krylov_reuse = krylov_reuse, recycle = rec, krylov_depth = krylov_depth))
         cl = _krylov_closure!(fr, psi, mpo, S0, tau, alloc, ckw; order = order,
                               workcap = wcap_step, nrm = _nrm, parallel = parallel, rng = rng,
                               ledger = ledger, fold = fold_omega, checks = closure_checks)
@@ -321,7 +327,8 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
             while !(resid_of(out, S1) <= budget.basis) && npass < _closure_maxpass(order)
                 fr = KLFrames(W, Z, c, lenv_root, renv_root, 0, nothing, nothing, Float64(eshift))
                 npass += 1
-                r = _frontier_sweep!(fr, psi, mpo, KrylovFrontier(S1, 0, fr.gen), tau, alloc, exkw;
+                r = _frontier_sweep!(fr, psi, mpo, KrylovFrontier(S1, 0, fr.gen), tau, alloc,
+                                     merge(exkw, (krylov_depth = krylov_depth,));
                                      enrich = true, workcap = wcap_step, nrm = _nrm,
                                      parallel = parallel, rng = rng, pass = npass,
                                      fold = fold_omega)

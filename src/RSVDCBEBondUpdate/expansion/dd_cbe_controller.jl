@@ -130,6 +130,9 @@ The other frame is returned unchanged. Rank comes from the QR; the probe width f
 Retained directions are bounded by the local room and the work ceiling; past the ceiling
 `cap_order = :weight` keeps the heaviest ([`_trim_by_weight`](@ref)), `:sector` the first sectors
 in storage order (`_trim_total`).
+
+`dd_width = l > 0` is the fixed-oversampling ablation (xx-efficiency plan Figs. 1A and 4): one
+probe of width `l` through the same DD projection, streamed kernel and QR, no holdout.
 """
 function dd_cbe_expand(f::BondFrame, mpo::MPO, i::Int, lenv::MPOLink, renv::MPOLink,
                        side::Symbol; alloc::Union{Nothing, BasisAllocation} = nothing,
@@ -139,7 +142,7 @@ function dd_cbe_expand(f::BondFrame, mpo::MPO, i::Int, lenv::MPOLink, renv::MPOL
                        rng::AbstractRNG = MersenneTwister(0x5EED),
                        kc::KernelCounters = KernelCounters(), version::Int = 0,
                        holdout_width::Int = _DD_HOLDOUT, audit::Bool = false,
-                       cap_order::Symbol = :sector)
+                       cap_order::Symbol = :sector, dd_width::Int = 0)
     side in (:left, :right) || throw(ArgumentError("side must be :left or :right"))
     cap_order in (:sector, :weight) || throw(ArgumentError(
         "cap_order must be :sector or :weight, got $cap_order"))
@@ -182,7 +185,12 @@ function dd_cbe_expand(f::BondFrame, mpo::MPO, i::Int, lenv::MPOLink, renv::MPOL
     # Plan T3.1: with an allocation the incremental controller decides the width (it is always
     # thin); without one, or for the exact reference, the numerical-rank stop of `_range_find`
     # alone.
-    Q, n = if alloc === nothing || exact
+    Q, n = if dd_width > 0 && !exact
+        blk = draw(min(dd_width, full_opp), nothing)
+        Qf = blk === nothing ? nothing : first(_dd_select(frame, sketch(blk), side, kc))
+        blk === nothing || ledger === nothing || (ledger.n_probes += leg_dim(blk, wleg))
+        (Qf, Qf === nothing ? 0 : leg_dim(Qf, fl))
+    elseif alloc === nothing || exact
         Qr, _, nr = _certified_range(draw, wleg, select, fl, project, sketch, side, w0, wcap,
                                      cap, nothing, ledger)
         (Qr, nr)

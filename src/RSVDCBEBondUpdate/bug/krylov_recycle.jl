@@ -269,7 +269,7 @@ there is one and the step is unitary, `_krylov_enrich` otherwise. Logs the visit
 """
 function _recycled_or_fresh(rec, side::Symbol, i::Int, e, transport, v0, applyH, Q0,
                             tau::ComplexF64, alloc::BasisAllocation; round::Int, kw...)
-    if rec === nothing || e === nothing || real(tau) != 0
+    if rec === nothing || e === nothing || real(tau) != 0 || get(kw, :fixed_depth, 0) > 0
         return _krylov_enrich(v0, applyH, Q0, side, tau, alloc; kw...)
     end
     t0 = time_ns()

@@ -1,5 +1,5 @@
 # tests/sweeps/test_xx_efficiency.jl -- xx_domain_wall_cbe_bug_efficiency_standalone_plan.md
-# ("the plan"), Sec. 5 S1-S4, on the open XX domain wall. Kernel-level coverage already in the
+# ("the plan"), Sec. 5 S1-S5, on the open XX domain wall. Kernel-level coverage already in the
 # suite is not repeated: U01 (streamed DD sketch == explicit, both sides), U02 (no dense projector,
 # no SVD), T2.3 (missing sector found) and T3.x in test_dd_cbe*.jl; UT07-UT10 (Test C zero, Test D
 # finds the H1^2 direction) in test_adaptive_krylov.jl. Here the same kernels meet the plan's model:
@@ -11,6 +11,8 @@
 #   S3  the adaptive DD controller against the offline exact DD residual over seeds: met to the
 #       share or an explicit limit, holdout cost counted, false accepts recorded
 #   S4  local Krylov stopping on the snapshot against the independent eps_K, and fixed depths
+#       (`fixed_depth`); the recycled recurrence's kernel identities
+#   S5  krylov_recycle on order-3 steps against exact sector propagation
 
 using Test
 using LinearAlgebra
@@ -30,7 +32,7 @@ include(joinpath(@__DIR__, "..", "common", "xx_efficiency_fixtures.jl"))
 _wall(L) = [i <= L ÷ 2 ? 1 : -1 for i in 1:L]
 _kalloc(kry) = RC.BasisAllocation(1.0, 1.0, 1.0, kry, 1.0)     # only the Krylov share matters
 
-@testset "XX domain-wall efficiency study: S1-S4" begin
+@testset "XX domain-wall efficiency study: S1-S5" begin
 set_symmetry!(:U1)
 
 @testset "S1: exact XX reference, L = $L" for L in (4, 6, 8, 16)
@@ -70,14 +72,34 @@ mpo = xxz_mpo(12; J = 1.0, delta = 0.0)
     bc = xx_bond_content(copy(snap), mpo, i)
     f, lenv, renv = bc.frame, bc.lenv, bc.renv
     @info "S2 bond $i content" bc.dd bc.dk bc.kd bc.kk bc.rank_dd bc.old_rank bc.disc_l bc.disc_r
-    @test bc.dd > 1e-6                                           # not a trivial bond
+    # The front bond carries real DD content; the off-centre one is nearly one-site reachable
+    # (xe3: ||G_DD|| = 2.6e-8 at ||X|| = 0.37) but still far above roundoff.
+    @test bc.dd > (i == 6 ? 1e-6 : 1e-12 * bc.x)
     for side in (:left, :right)
         c = _dd_closures(f, mpo, lenv, renv, side; i = i, rng = Random.MersenneTwister(5))
         # the audit's G (complete discarded probe) and the materialised P^D X P^D agree
         @test abs(norm(c.G) - bc.dd) < 1e-10 * bc.dd
         Om = c.draw(6, nothing)                                  # P^D Om
         Y = c.project(c.sketch(Om))
-        @test _rel(Y, dd_reference_sketch(f, mpo, i, lenv, renv, Om, side)) < 1e-12
+        Yr = dd_reference_sketch(f, mpo, i, lenv, renv, Om, side)
+        # P^D cancels X's KK/KD/DK part, so the floor is eps * ||X|| * ||Om||, not eps * ||Y||
+        # (xe3 bond 4: relative 1.3e-10 = that floor over ||G_DD|| / ||X|| = 7e-8)
+        @test norm(to_concrete(Y - Yr)) < 1e-12 * norm(Yr) + 16 * eps() * bc.x * norm(Om)
+    end
+end
+
+@testset "S2: fixed-width ablation (dd_width) is one probe through the same DD+QR, bond 6" begin
+    bc = xx_bond_content(copy(snap), mpo, 6)
+    for side in (:left, :right), l in (2, 6)                 # both below the discarded dim 8
+        kc, lg = KernelCounters(), RC.AdaptiveLedger()
+        alloc = basis_allocation(AdaptiveBudget(1e-5, 1e-9, 1e-10), 11; tau = ComplexF64(-0.1im),
+                                 nrm = 1.0, rule = :linear)
+        ex = dd_cbe_expand(bc.frame, mpo, 6, bc.lenv, bc.renv, side; alloc = alloc, ledger = lg,
+                           kc = kc, dd_width = l, rng = Random.MersenneTwister(2))
+        nnew = side === :left ? ex.n_new_l : ex.n_new_r
+        @test kc.n_stream_cols == l == lg.n_probes                # one block, nothing else
+        @test lg.n_holdout == 0
+        @test 1 <= nnew <= l
     end
 end
 
@@ -138,12 +160,19 @@ end
     ek = eps_k(Q, kl.applyH, kl.seed, tau, side)
     @test st.met
     @test ek <= 10 * kry                                         # the stop meets the response
+    # Conventional fixed depth: `_kalloc(0.0)` was NOT one -- an allowance of 0 never "fits", so
+    # every depth stopped after one H1 application (xe3 17580882: n_h1 = 1 at m = 2..16).
     fixed = Any[]
     for m in (2, 4, 8, 16)
-        Qm, stm = RC._krylov_enrich(kl.seed, kl.applyH, kl.Q0, side, tau, _kalloc(0.0);
-                                    maxdepth = m)
-        push!(fixed, (m = m, n_h1 = stm.n_h1, eps = eps_k(Qm, kl.applyH, kl.seed, tau, side)))
+        Qm, stm = RC._krylov_enrich(kl.seed, kl.applyH, kl.Q0, side, tau, alloc; fixed_depth = m)
+        push!(fixed, (m = m, n_h1 = stm.n_h1, met = stm.met, width = leg_dim(Qm, side === :left ? 3 : 1),
+                      eps = eps_k(Qm, kl.applyH, kl.seed, tau, side)))
+        @test stm.n_h1 <= m
+        m <= st.n_h1 && @test stm.n_h1 == m                      # no breakdown before the adaptive stop
+        @test !stm.capped
     end
+    # a deeper fixed space contains the shallower one, so its miss cannot grow
+    @test all(fixed[k + 1].eps <= fixed[k].eps + 1e-14 for k in 1:3)
     @info "S4 $side: allowance $kry, eps_K CBE $e0 -> adaptive $ek with $(st.n_h1) H1 " *
           "applications; fixed depths" fixed
 
@@ -165,14 +194,18 @@ end
     Hs, basis = spin_xx_sector(L, 1)
     tau = ComplexF64(-0.1im)
     akw = (tol_basis = 1e-8, tol_trunc = 1e-10, tol_expv = 1e-12, maxdim = 64, order = 3)
-    arms = Dict{Bool, Any}()
-    for rc in (false, true)
+    # recycle off / on, and the Fig. 4 conventional controls (fixed DD width, fixed Krylov depth)
+    arms = Dict{Any, Any}()
+    for rc in (false, true, :conventional)
+        conv = rc === :conventional
         psi, v = copy(snap), xx_sector_amplitudes(snap, basis)
         logs, nh, errs = Any[], 0, Float64[]
         for _ in 1:3
             rep = Ref{Any}(nothing)
-            info = cbe_bug_step!(psi, mpo, tau; akw..., krylov_recycle = rc, recycle_report = rep,
-                                 rng = Random.MersenneTwister(4))
+            info = cbe_bug_step!(psi, mpo, tau; akw..., krylov_recycle = rc === true,
+                                 recycle_report = rep, dd_width = conv ? 8 : 0,
+                                 krylov_depth = conv ? 8 : 0, rng = Random.MersenneTwister(4))
+            conv && @test info.ledger.n_holdout == 0                # no adaptive check ran
             v = spin_ed_propagate(Hs, v, 0.1)                   # the exact step of the same input
             push!(errs, norm(xx_sector_amplitudes(psi, basis) - v))
             nh += info.ledger.n_h1                              # half-sweep and frontier stages
@@ -180,10 +213,11 @@ end
         end
         arms[rc] = (errs = errs, n_h1 = nh, logs = logs)
     end
-    F, R = arms[false], arms[true]
+    F, R, Cv = arms[false], arms[true], arms[:conventional]
     nrec = sum(r -> r.recycled, vcat((vcat(l[:left], l[:right]) for l in R.logs)...); init = 0)
-    @info "S5 order 3, 3 steps from the rank-8 snapshot" fresh_err = F.errs recycled_err = R.errs fresh_h1 = F.n_h1 recycled_h1 = R.n_h1 recycled_vectors = nrec
-    @test isempty(F.logs)                                        # off means off
+    @info "S5 order 3, 3 steps from the rank-8 snapshot" fresh_err = F.errs recycled_err = R.errs fresh_h1 = F.n_h1 recycled_h1 = R.n_h1 recycled_vectors = nrec conventional_err = Cv.errs conventional_h1 = Cv.n_h1
+    @test isempty(F.logs) && isempty(Cv.logs)                    # off means off
+    @test maximum(Cv.errs) < 1e-2                                # the control integrates too
     @test nrec > 0                                               # the arm really recycled
     @test maximum(F.errs) < 1e-3 && maximum(R.errs) < 1e-3       # both integrate (sanity) ...
     # ... to the same accuracy: the arms differ by less than a tenth of the step's own error
