@@ -128,6 +128,12 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
                        # `:weight` the heaviest across all sectors, `:sector` the first sectors in
                        # storage order (`dd_cbe_expand`). Below the ceiling both are identical.
                        cap_order::Symbol = :sector,
+                       # ⚠ ABLATION, NOT A METHOD CHOICE (QTT plan §1.2A, arm D3). `:hybrid`: every
+                       # DD-QR CBE takes the predictor + one-shot + independent-holdout controller
+                       # (`_dd_hybrid`), its predictor carried across steps in `dd_memory` (a
+                       # `DDMemory`, which also traces every call). `:adaptive` is the existing D1.
+                       dd_policy::Symbol = :adaptive,
+                       dd_memory = nothing,
                        rng::AbstractRNG = MersenneTwister(0x5EED))
     L = length(psi)
     length(mpo) == L || throw(DimensionMismatch(
@@ -191,7 +197,8 @@ function cbe_bug_step!(psi::SymMPS, mpo::MPO, tau::ComplexF64;
     wcap_step = work_ceiling(maxdim, maximum(bond_dims(psi); init = 0), local_dim(psi))
     # The expansion settings every DD-QR CBE of the step takes, half-sweeps and frontier sweeps.
     exkw = (growth = ADAPTIVE_GROWTH, exact = exact, alloc = alloc, workcap = wcap_step,
-            cap_order = cap_order, dd_width = dd_width)
+            cap_order = cap_order, dd_width = dd_width, dd_policy = dd_policy,
+            dd_memory = dd_memory)
 
     # ⛔ THE LEDGER AND THE RNG ARE PER HALF-SWEEP, because under `parallel = true` the two run
     # concurrently: a shared `AdaptiveLedger` loses `+=` updates, and a shared `MersenneTwister`

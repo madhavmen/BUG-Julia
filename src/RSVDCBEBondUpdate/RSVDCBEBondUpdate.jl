@@ -105,6 +105,14 @@ include("bug/parallel_kls.jl")
 include("bug/imaginary_time.jl")
 include("bug/quantum_jumps.jl")
 
+# qtt/ -- 2D quantics fields and operators (qtt_dissipative_cbe_bug_four_task_implementation_plan.md):
+# dense core algebra first, the Telum bridge after it, the GP/Heston models last.
+include("qtt/qtt_grid.jl")
+include("qtt/qtt_cores.jl")
+include("qtt/qtt_ops1d.jl")
+include("qtt/qtt_telum.jl")
+include("qtt/qtt_models.jl")
+
 # Last: a submodule that imports from the parent, so everything it names must exist already.
 include("baselines/ground_state.jl")
 
@@ -135,7 +143,7 @@ export AdaptiveBudget, BasisAllocation, basis_allocation, indicator,
 export sector_graded_sketch, full_local_basis, CBEExpansion, cbe_expand,
        CBEBugOptions, CBEBugRunInfo, SStepSolver, Propagate, LowestEigen,
        sketch_bond_left, sketch_bond_right, cbe_expand_bond, cbe_bond_update,
-       dd_cbe_expand, dd_reference_sketch,
+       dd_cbe_expand, dd_reference_sketch, DDMemory,
        TwoSiteSketchOp, OneSiteOp, RootOp,
        apply_two_site_sketch!, apply_one_site!, apply_root!,
        KernelCounters, StepRecord,
@@ -194,5 +202,21 @@ export CBEBugSweepInfo, cbe_bug_step!, cbe_bug_midpoint_step!, parallel_kls_step
        ite_step!, ite_evolve!, log_panel_steps, uniform_beta_steps, beta_grid,
        mpo_product, site_op_product, factor_product, apply_factor, apply_mpo, global_krylov_states, apply_jump,
        jump_weight, jump_trajectory, jump_ensemble, step_doubling_error, next_step_size
+
+# qtt/
+export QTTGrid, qtt_grid, qtt_length, qtt_coords, qtt_cell, qtt_bits, qtt_point,
+       qtt_site_permutation,
+       tt_dense, tt_from_dense, tt_from_samples, tt_compress, tt_ranks, tt_dot, tt_norm, tt_scale,
+       tt_conj, tt_add, tt_lincomb, tt_hadamard, tt_density, tt_evaluate,
+       op_identity, op_scale, op_add, op_lincomb, op_compress, op_adjoint, op_transpose,
+       op_compose, op_diag, op_apply, op_dense, op_ket_bra,
+       qtt_embed, qtt_function, qtt_separable, qtt_values, qtt_value,
+       QTT_BCS, qtt_shift, qtt_derivative, qtt_diag_1d,
+       qtt_mps, qtt_cores, qtt_to_mpo, qtt_mpo_cores, qtt_apply, qtt_l2norm,
+       qtt_d, qtt_coord_diag, qtt_op,
+       GPPaddle, paddle_state, GPModel, gp_model, gp_paddle_op, gp_linear_op, gp_density,
+       gp_hamiltonian_op, GPHamiltonianCache, qtt_state_tag, gp_hamiltonian, gp_vector_field,
+       gp_jvp, gp_density_audit, gp_bug_step!,
+       HestonParams, feller, heston_op, heston_mpo
 
 end # module

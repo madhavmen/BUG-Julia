@@ -95,6 +95,141 @@ function _dd_controller(frame, side::Symbol, draw, sketch, project, w0::Int, wca
     end
 end
 
+# ── QTT plan §1.2 / §1.2A, arm D3: the hybrid predictor controller ────────────────────────
+
+"Bounded oversampling of D3's first block over its predictor: `clamp(cld(pred, 4), 4, 8)` columns."
+_dd_oversample(pred::Int) = clamp(cld(pred, 4), 4, 8)
+
+"""
+    DDMemory()
+
+Per-bond memory of the D3 hybrid controller (`dd_policy = :hybrid`): the directions accepted last
+time at `(side, bond)` -- the PREDICTOR of the next first block, never a correctness condition --
+and one trace entry per call (`bond`, `side`, `branch`, `ell`, `s`, `retries`, `m`, `n`, `added`,
+`streamed`, `status`) for the first-impressions report (plan §1.2A: reported for every sampled
+bond). Locked, since the two half-sweeps may run concurrently.
+"""
+mutable struct DDMemory
+    accepted::Dict{Tuple{Symbol, Int}, Int}
+    trace::Vector{NamedTuple}
+    lock::ReentrantLock
+end
+DDMemory() = DDMemory(Dict{Tuple{Symbol, Int}, Int}(), NamedTuple[], ReentrantLock())
+
+_dd_predict(mem::DDMemory, side::Symbol, i::Int) =
+    lock(() -> get(mem.accepted, (side, i), nothing), mem.lock)
+
+function _dd_remember!(mem::DDMemory, side::Symbol, i::Int, n::Int, rec::NamedTuple)
+    lock(mem.lock) do
+        mem.accepted[(side, i)] = n
+        push!(mem.trace, rec)
+    end
+    return mem
+end
+
+"""
+    _dd_hybrid(frame, opp, side, draw, sketch, sketch_adj, exhaust_opp, exhaust_self, project,
+               w0, wcap, cap, m, n, alloc, ledger; pred, rng, kc, s) -> (Q, status, record)
+
+Arm D3 of plan §1.2A, on the same `X = mat(F(psi))`, frames and DD-QR kernels as D1:
+
+1. PREFLIGHT. `m`, `n` are the discarded dimensions of this side and of the probe side. When
+   `ell + s + ell_retry >= min(m, n)` sampling cannot undercut the exhaustive DD action (a cost
+   heuristic, not a theorem), so that runs instead: the probe side's whole DD basis (`n` columns),
+   or for `2m < n` the mirrored route (`m` adjoint columns give the row space, then its rank in
+   forward columns). Exhaustive is exact up to the QR floor, so no holdout is drawn.
+2. Otherwise ONE block of `ell = pred + _dd_oversample(pred)` columns (`pred` the rank accepted
+   here last time, else `w0`), QR, and an INDEPENDENT holdout of `s` columns from its own RNG
+   stream, accepted at `alloc.sample` (the time-weighted `eta_DD = h R_DD / ||psi||`).
+3. On failure the holdout's actions are absorbed and a bounded block of `max(ell ÷ 2, s)` new
+   columns appended, with a fresh holdout, until met, `wcap` streamed columns or `cap` directions
+   (`:work_limited`), or a pass adds nothing (`:basis_limited`).
+"""
+function _dd_hybrid(frame, opp, side::Symbol, draw, sketch, sketch_adj, exhaust_opp, exhaust_self,
+                    project, w0::Int, wcap::Int, cap::Int, m::Int, n::Int,
+                    alloc::BasisAllocation, ledger::Union{Nothing, AdaptiveLedger};
+                    pred::Union{Nothing, Int}, rng::AbstractRNG,
+                    kc::KernelCounters = KernelCounters(), s::Int = _DD_HOLDOUT)
+    left = side === :left
+    fl, wleg = left ? (3, 1) : (1, 3)
+    oside = left ? :right : :left
+    tags = frame.inds[fl].itags
+    aug, Q, nq, streamed = frame, nothing, 0, 0
+    function absorb!(Z)
+        Qn, _ = _dd_select(aug, Z, side, kc)
+        Qn === nothing && return 0
+        Qn = to_concrete(setitag(Qn, fl, tags))
+        Q = Q === nothing ? Qn : to_concrete(oplus([Q, Qn], (fl,)))
+        aug = to_concrete(oplus([aug, Qn], (fl,)))
+        return leg_dim(Qn, fl)
+    end
+    function stream(Om, field::Symbol)
+        streamed += leg_dim(Om, wleg)
+        ledger === nothing || setfield!(ledger, field, getfield(ledger, field) + leg_dim(Om, wleg))
+        return sketch(Om)
+    end
+    ell = clamp(pred === nothing ? w0 : pred + _dd_oversample(pred), 1, max(wcap, 1))
+    retry = max(ell ÷ 2, s)
+    rec(branch, st, retries) = (side = side, branch = branch, ell = ell, s = s, retries = retries,
+                                m = m, n = n, added = nq, streamed = streamed, status = st)
+
+    if ell + s + retry >= min(m, n)
+        if n <= 2m
+            B = exhaust_opp()
+            B === nothing && return (nothing, :empty, rec(:exhaustive, :empty, 0))
+            Bq, _ = _dd_select(opp, B, oside, kc)            # orthonormal DD basis, n columns
+            Bq === nothing && return (nothing, :empty, rec(:exhaustive, :empty, 0))
+            nq += absorb!(stream(Bq, :n_probes))
+            return (Q, :met, rec(:exhaustive, :met, 0))
+        end
+        Sx = exhaust_self()
+        Sx === nothing && return (nothing, :empty, rec(:mirrored, :empty, 0))
+        Sq, _ = _dd_select(frame, Sx, side, kc)               # this side's DD basis, m columns
+        Sq === nothing && return (nothing, :empty, rec(:mirrored, :empty, 0))
+        streamed += leg_dim(Sq, fl)
+        ledger === nothing || (ledger.n_probes += leg_dim(Sq, fl))
+        Wq, _ = _dd_select(opp, sketch_adj(Sq), oside, kc)   # the row space of A_DD
+        Wq === nothing && return (nothing, :met, rec(:mirrored, :met, 0))
+        nq += absorb!(stream(Wq, :n_probes))
+        return (Q, :met, rec(:mirrored, :met, 0))
+    end
+
+    hrng = MersenneTwister(rand(rng, UInt64))                 # the holdout's own stream
+    blk = draw(ell, nothing)
+    blk === nothing && return (nothing, :empty, rec(:sampled, :empty, 0))
+    nq += absorb!(stream(blk, :n_probes))
+    retries = 0
+    while true
+        Oh = _dd_probe(opp, oside, s; rng = hrng, kc = kc)
+        Oh === nothing && return (Q, :met, rec(:sampled, :met, retries))
+        Zh = stream(Oh, :n_holdout)
+        est, per, hcols = _sample_residual(Q, project, _ -> Zh, _ -> Oh, 1, wleg, side)
+        ind = indicator(alloc, est)
+        if ind <= alloc.sample || streamed >= wcap || nq >= cap
+            ledger === nothing || _record_sample!(ledger, side, ind, per, hcols, blk, wleg, alloc)
+            ind <= alloc.sample && return (Q, :met, rec(:sampled, :met, retries))
+            if ledger !== nothing
+                _unmet!(ledger, :sample)
+                ledger.workcap_reached = true
+            end
+            return (Q, :work_limited, rec(:sampled, :work_limited, retries))
+        end
+        added = absorb!(Zh)                                   # the failed holdout is kept
+        w = min(retry, max(wcap - streamed, 0))
+        if w > 0
+            b2 = draw(w, nothing)
+            b2 === nothing || (blk = b2; added += absorb!(stream(b2, :n_probes)))
+        end
+        nq += added
+        retries += 1
+        if added == 0
+            ledger === nothing || (_record_sample!(ledger, side, ind, per, hcols, blk, wleg, alloc);
+                                   _unmet!(ledger, :sample))
+            return (Q, :basis_limited, rec(:sampled, :basis_limited, retries))
+        end
+    end
+end
+
 # ── T2.5: one side of the bond expansion ──────────────────────────────────────────────────
 
 const _TAG_W, _TAG_WR = "cbeW,L", "cbeW,R"
@@ -133,6 +268,8 @@ in storage order (`_trim_total`).
 
 `dd_width = l > 0` is the fixed-oversampling ablation (xx-efficiency plan Figs. 1A and 4): one
 probe of width `l` through the same DD projection, streamed kernel and QR, no holdout.
+`dd_policy = :hybrid` is the QTT plan's arm D3 ([`_dd_hybrid`](@ref)), its predictor read from and
+written to `dd_memory` (a [`DDMemory`](@ref); `nothing` = no predictor); `:adaptive` is D1.
 """
 function dd_cbe_expand(f::BondFrame, mpo::MPO, i::Int, lenv::MPOLink, renv::MPOLink,
                        side::Symbol; alloc::Union{Nothing, BasisAllocation} = nothing,
@@ -142,10 +279,13 @@ function dd_cbe_expand(f::BondFrame, mpo::MPO, i::Int, lenv::MPOLink, renv::MPOL
                        rng::AbstractRNG = MersenneTwister(0x5EED),
                        kc::KernelCounters = KernelCounters(), version::Int = 0,
                        holdout_width::Int = _DD_HOLDOUT, audit::Bool = false,
-                       cap_order::Symbol = :sector, dd_width::Int = 0)
+                       cap_order::Symbol = :sector, dd_width::Int = 0,
+                       dd_policy::Symbol = :adaptive, dd_memory = nothing)
     side in (:left, :right) || throw(ArgumentError("side must be :left or :right"))
     cap_order in (:sector, :weight) || throw(ArgumentError(
         "cap_order must be :sector or :weight, got $cap_order"))
+    dd_policy in (:adaptive, :hybrid) || throw(ArgumentError(
+        "dd_policy must be :adaptive or :hybrid, got $dd_policy"))
     left = side === :left
     U0, V0 = f.U0, f.V0
     r = f.old_rank
@@ -194,6 +334,22 @@ function dd_cbe_expand(f::BondFrame, mpo::MPO, i::Int, lenv::MPOLink, renv::MPOL
         Qr, _, nr = _certified_range(draw, wleg, select, fl, project, sketch, side, w0, wcap,
                                      cap, nothing, ledger)
         (Qr, nr)
+    elseif dd_policy === :hybrid
+        opA = TwoSiteSketchOp(f, mpo, i, lenv, renv; adjoint = left, version = version,
+                              counters = kc)
+        outA = Ref{Any}(nothing)
+        # anonymous: a named local function inside a branch is hoisted to the whole method
+        sketch_adj = Om -> (apply_two_site_sketch!(outA, Om, opA); outA[])
+        exhaust_opp = () -> _dd_probe(opp, oside, 0; rng = rng, exact = true, kc = kc)
+        exhaust_self = () -> _dd_probe(frame, side, 0; rng = rng, exact = true, kc = kc)
+        pred = dd_memory === nothing ? nothing : _dd_predict(dd_memory, side, i)
+        Qh, _, rec = _dd_hybrid(frame, opp, side, draw, sketch, sketch_adj, exhaust_opp,
+                                exhaust_self, project, w0, wcap, cap, full_self - r,
+                                full_opp - r, alloc, ledger; pred = pred, rng = rng, kc = kc,
+                                s = holdout_width)
+        nh = Qh === nothing ? 0 : leg_dim(Qh, fl)
+        dd_memory === nothing || _dd_remember!(dd_memory, side, i, nh, merge((bond = i,), rec))
+        (Qh, nh)
     else
         Qc, _ = _dd_controller(frame, side, draw, sketch, project, w0, wcap, cap, alloc,
                                ledger; kc = kc, s = holdout_width, audit = audit)
