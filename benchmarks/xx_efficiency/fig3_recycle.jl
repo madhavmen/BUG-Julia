@@ -2,7 +2,8 @@
 # against fresh local Krylov (F) over the three order-3 augmentation rounds, same adaptive DD-CBE
 # and stop rule; F only has no recycle cache.
 #
-# Per step and round: new one-site H applications and local-enrichment seconds. Round 1 is the
+# Arms: F, R (`recycle_mode = :images`) and Rf (`:frame`, USER 10-29: recycling without the image
+# cache). Per step and round: new one-site H applications and local-enrichment seconds. Round 1 is the
 # half-sweeps (`ledger.n_h1` minus the frontier sweeps', time `t_kry`); rounds 2-3 are the frontier
 # sweeps' `closure_log` entries (frontier j = 1, 2: their `n_h1`, which counts every image refresh,
 # and `t`, which also holds the frontier CBE -- the same in both arms). R's transport seconds come
@@ -19,20 +20,28 @@ const NSTEP = parse(Int, get(ENV, "XXE_NSTEP", "3"))
 const TOL = parse(Float64, get(ENV, "XXE_TOL", "1e-5"))
 
 Hs, basis = spin_xx_sector(L, 1)
+# R = the H-image cache; Rf = transported vectors only seed the frame, fresh Krylov (no refresh)
+const ARMS = (("F", (krylov_recycle = false,)),
+              ("R", (krylov_recycle = true, recycle_mode = :images)),
+              ("Rf", (krylov_recycle = true, recycle_mode = :frame)))
 rows, errs = Any[], Any[]
 for cs in cases("4.0:16:0,4.0:8:0")
     name = "t$(cs.t)_r$(cs.rank)"
     snap = load_snapshot(cs.t, cs.rank)
     v0 = xx_sector_amplitudes(snap, basis)
-    for rc in (false, true)
-        arm = rc ? "R" : "F"
+    # JIT warm-up of every arm, outside every timed region
+    for (_, kw) in ARMS
+        cbe_bug_step!(copy(snap), MPO_XX, ComplexF64(-H * im); tol_basis = TOL, tol_trunc = 1e-10,
+                      tol_expv = 1e-12, maxdim = 256, order = 3, kw...)
+    end
+    for (arm, kw) in ARMS
         psi, v = copy(snap), v0
         for step in 1:NSTEP
             rep = Ref{Any}(nothing)
             t0 = time()
             info = cbe_bug_step!(psi, MPO_XX, ComplexF64(-H * im); tol_basis = TOL,
                                  tol_trunc = 1e-10, tol_expv = 1e-12, maxdim = 256, order = 3,
-                                 krylov_recycle = rc, recycle_report = rep,
+                                 kw..., recycle_report = rep,
                                  rng = MersenneTwister(SEEDS[1]))
             tstep = time() - t0
             v = spin_ed_propagate(Hs, v, H)
@@ -69,7 +78,7 @@ end
 
 write_rows([Dict(String(k) => v for (k, v) in pairs(r)) for r in rows])
 open(joinpath(OUT, "fig3_recycle.json"), "w") do io
-    JSON.json(io, Dict("rows" => rows, "steps" => errs,
+    JSON.json(io, Dict("rows" => rows, "steps" => errs, "warmed" => true,
                        "timing_job" => get(ENV, "XXE_TIMING", "0") == "1"); allownan = true)
 end
 println("XXE-F3-ALLDONE $(length(rows)) rows")

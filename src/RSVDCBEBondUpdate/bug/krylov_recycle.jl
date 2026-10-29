@@ -294,7 +294,7 @@ function _recycled_or_fresh(rec, side::Symbol, i::Int, e, transport, v0, applyH,
         Q, st = _krylov_enrich(v0, applyH, Q, side, tau, alloc; kw...)
         push!(rec.log[side], (round = round, bond = i, cached = length(e.basis), recycled = nseed,
                               n_refresh = 0, n_new = st.n_h1, added = st.added + nseed,
-                              t_transport = tt))
+                              t_transport = tt, met = st.met, capped = st.capped))
         return Q, st
     end
     Q, st = _krylov_enrich_recycled(v0, applyH, Q0, side, tau, alloc, C;
@@ -302,6 +302,7 @@ function _recycled_or_fresh(rec, side::Symbol, i::Int, e, transport, v0, applyH,
                                     amp = get(kw, :amp, 1.0))
     push!(rec.log[side], (round = round, bond = i, cached = length(e.basis),
                           recycled = st.n_recycled, n_refresh = st.n_refresh, n_new = st.n_new,
-                          added = st.added, t_transport = tt))
+                          added = st.added, t_transport = tt, met = st.met, capped = st.capped,
+                          eta_c = st.eta_c, eta_d = st.eta_d))
     return Q, st
 end
