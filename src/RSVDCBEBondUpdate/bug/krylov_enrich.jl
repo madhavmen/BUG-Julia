@@ -98,7 +98,7 @@ end
 
 """
     _krylov_enrich(v0, applyH, Q0, side, tau, alloc; workcap = 0, maxdepth = _KRY_MAXDEPTH,
-                   amp = 1.0, state_seed = true, recycled = ())
+                   amp = 1.0, state_seed = true, fixed_depth = 0, recycled = ())
         -> (Q, stats)
 
 Grow the frame `Q0` by the Krylov directions of `applyH` from seed `v0` that the step needs. Each
@@ -109,32 +109,40 @@ search with weight left. `amp` is the seed's norm relative to the state. `stats.
 `stats.weights` are the Arnoldi vectors and their weights, the last vector the active frontier: what
 a later round recycles. With `recycled` only the complement of the previous solve's input is
 extended ([`_krylov_basis`](@ref)).
+
+`fixed_depth = m > 0` is the conventional-control ablation (plan Figs. 2 and 4): exactly `m` steps,
+every new local direction appended (numerical floor only), no weight stop; `met` then reports
+whether the weight had fallen to the allowance by depth `m`.
 """
 function _krylov_enrich(v0, applyH, Q0, side::Symbol, tau::ComplexF64,
                         alloc::BasisAllocation; workcap::Int = 0,
                         maxdepth::Int = _KRY_MAXDEPTH, amp::Float64 = 1.0,
-                        state_seed::Bool = true, recycled = ())
+                        state_seed::Bool = true, fixed_depth::Int = 0, recycled = ())
     side in (:left, :right) || throw(ArgumentError("side must be :left or :right"))
     perp = side === :left ? perp_component : perp_component_right
     fl = side === :left ? 3 : 1
+    fixed = fixed_depth > 0
+    fixed && (maxdepth = fixed_depth)
+    allow = fixed ? 0.0 : alloc.krylov
     Q = Q0
     eta_c, eta_d, added, added_d = 0.0, 0.0, 0, 0
     function score(v, weight, first::Bool)          # Tests C/D on one direction; false = capped
         R = to_concrete(perp(Q, v))
         eta = weight * norm(R)
         first ? (eta_c = eta) : (eta_d = max(eta_d, eta))
-        eta > alloc.krylov || return true
+        eta > allow || return true
         # The ceiling bounds the frame WIDTH, not the number of extensions: a block may not carry
         # the frame past it either.
         room = workcap > 0 ? workcap - leg_dim(Q, fl) : typemax(Int)
         room <= 0 && return false
-        Q, nadd, fits = _extend_frame(Q, R, v, side, weight, alloc.krylov; room = room)
+        Q, nadd, fits = _extend_frame(Q, R, v, side, weight, allow; room = room)
         added += nadd
         first || (added_d += nadd)
-        return fits
+        # an allowance of 0 never "fits" (the floor's tail): only the adaptive stop caps here
+        return fits || fixed
     end
     kb = _krylov_basis(v0, applyH, tau, alloc.krylov, score; recycled = recycled,
-                       maxdepth = maxdepth, amp = amp, state_seed = state_seed)
+                       maxdepth = maxdepth, amp = amp, state_seed = state_seed, fixed = fixed)
     return (Q, (eta_c = eta_c, eta_d = eta_d, added = added, n_h1 = kb.n_h1,
                 d_after_c = eta_c <= alloc.krylov && added_d > 0,
                 capped = kb.capped, met = kb.closed && !kb.capped, basis = kb.basis,
@@ -152,7 +160,8 @@ _kconc(x::Vector{<:Number}) = x
 const _RECYCLE_FLOOR = 1e-8
 
 """
-    _krylov_basis(v0, applyH, tau, allowance, score; recycled = (), maxdepth, amp, state_seed)
+    _krylov_basis(v0, applyH, tau, allowance, score; recycled = (), maxdepth, amp, state_seed,
+                  fixed = false)
         -> (basis, weights, n_h1, closed, capped, n_recycled, rec_closed, rec_overlap, rec_defect)
 
 The local Krylov recurrence of the frame stages. `score(v, weight, first) -> fits` takes each
@@ -167,7 +176,7 @@ from `v0` after all.
 """
 function _krylov_basis(v0, applyH, tau::ComplexF64, allowance::Float64, score;
                        recycled = (), maxdepth::Int = _KRY_MAXDEPTH, amp::Float64 = 1.0,
-                       state_seed::Bool = true)
+                       state_seed::Bool = true, fixed::Bool = false)
     b0 = norm(v0)
     b0 > 0 || return (basis = Any[], weights = Float64[], n_h1 = 0, closed = true,
                       capped = false, n_recycled = 0, rec_closed = false, rec_overlap = 0.0,
@@ -182,22 +191,23 @@ function _krylov_basis(v0, applyH, tau::ComplexF64, allowance::Float64, score;
         haskey(rc, :basis) && return rc
     end
     ch = _arnoldi_chain(u0, applyH, teff, allowance, score; maxdepth = maxdepth, amp = amp,
-                        state_seed = state_seed)
+                        state_seed = state_seed, fixed = fixed)
     return (basis = ch.basis, weights = ch.weights, n_h1 = rc.n_h1 + ch.n_h1, closed = ch.closed,
             capped = ch.capped, n_recycled = rc.n_recycled, rec_closed = false,
             rec_overlap = rc.rec_overlap, rec_defect = rc.rec_defect)
 end
 
 """
-    _arnoldi_chain(u, applyH, tau, allowance, score; maxdepth, amp, state_seed)
+    _arnoldi_chain(u, applyH, tau, allowance, score; maxdepth, amp, state_seed, fixed)
         -> (basis, weights, n_h1, closed, capped)
 
 Arnoldi from the unit seed `u`: each new vector weighed by `amp` times Saad's estimate
-(`_kry_weight`) and offered to `score`, closed once that weight is within `allowance`.
+(`_kry_weight`) and offered to `score`, closed once that weight is within `allowance`. `fixed`
+runs all `maxdepth` steps (the `fixed_depth` ablation of [`_krylov_enrich`](@ref)).
 """
 function _arnoldi_chain(u, applyH, tau::ComplexF64, allowance::Float64, score;
                         maxdepth::Int = _KRY_MAXDEPTH, amp::Float64 = 1.0,
-                        state_seed::Bool = true)
+                        state_seed::Bool = true, fixed::Bool = false)
     nh, capped, closed = 0, false, false
     vs, ws = Any[u], Float64[amp]
     Hm = zeros(ComplexF64, maxdepth + 1, maxdepth + 1)
@@ -226,9 +236,9 @@ function _arnoldi_chain(u, applyH, tau::ComplexF64, allowance::Float64, score;
         weight = amp * _kry_weight(Hm, k, tau; state_seed = state_seed)
         push!(ws, weight)
         score(v, weight, k == 1) || (capped = true; break)
-        weight <= allowance && (closed = true; break)
+        weight <= allowance && (closed = true; fixed || break)
     end
-    closed || (capped = true)                             # depth bound with weight left
+    closed || fixed || (capped = true)                    # depth bound with weight left
     return (basis = vs, weights = ws, n_h1 = nh, closed = closed, capped = capped)
 end
 
@@ -268,7 +278,7 @@ function _rk_complement(u0, recycled, applyH, tau::ComplexF64, allowance::Float6
     ampr > allowance || return merge(none, (rec_overlap = ampr,))
     B = Any[p]
     for c in Iterators.drop(recycled, 1)
-        x = _cgs2(B, c)
+        x = _orth_against(B, c)
         nx = norm(x)
         nx > _RECYCLE_FLOOR * max(norm(c), eps()) && push!(B, _kconc((1.0 / nx) * x))
     end
@@ -307,19 +317,6 @@ function _rk_complement(u0, recycled, applyH, tau::ComplexF64, allowance::Float6
             n_recycled = length(B), rec_closed = true, rec_overlap = ampr, rec_defect = dr)
 end
 
-"`x` with its components along the orthonormal `B` removed, classical Gram-Schmidt twice."
-function _cgs2(B, x)
-    for _pass in 1:2
-        corr = nothing
-        for u in B
-            ov = _kinner(u, x)
-            corr = corr === nothing ? ov * u : corr + ov * u
-        end
-        corr === nothing || (x = _kconc(x - corr))
-    end
-    return x
-end
-
 "`sum_k c[k] vs[k]`."
 function _lincomb(vs, c)
     acc = nothing
@@ -339,21 +336,6 @@ function _exp_phi1_e1(A::AbstractMatrix)
     E = exp(Z)
     return E[1:n, 1], E[1:n, n + 1]
 end
-
-"""
-    _krylov_enrich_recycled(v0, recycled, applyH, Q0, side, tau, alloc; workcap, maxdepth, amp)
-        -> (Q, stats)
-
-The local Krylov stage of a closure round that holds the previous round's solve at this bond --
-its input first, then its kept Krylov vectors -- already transported into this round's gauge:
-[`_krylov_enrich`](@ref) extending only the complement of that input ([`_rk_complement`](@ref)).
-Closure frontiers only (`state_seed = false`: absolute weights).
-"""
-_krylov_enrich_recycled(v0, recycled::AbstractVector, applyH, Q0, side::Symbol, tau::ComplexF64,
-                        alloc::BasisAllocation; workcap::Int = 0, maxdepth::Int = _KRY_MAXDEPTH,
-                        amp::Float64 = 1.0) =
-    _krylov_enrich(v0, applyH, Q0, side, tau, alloc; workcap = workcap, maxdepth = maxdepth,
-                   amp = amp, state_seed = false, recycled = recycled)
 
 """
     _merge_frame(Q, U, side) -> Q'

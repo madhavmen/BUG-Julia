@@ -19,7 +19,7 @@ Status on 2026-10-29:
 | 4 | Quantum-jump engine (`jump_trajectory`, `jump_ensemble`): log survival, Illinois event location, channel draw ∝ ‖L_μψ‖², seeds stored. B1 junction model and current MPOs. B2 collective channels | t4 54/54, t4_b 452/452, t4_conv 8/8 |
 | 5 | Driver `benchmarks/dissipative_run.jl` (JSON per run). Warm start `DR_WARM`. Step-doubling controller (eq. 7) with a backward-stable MPS distance; the first step of a segment is always checked. Cap marking in the figures (plan §4.4) | t5 24/24; G2 passed (USER 10-25) |
 | 6 | Per-step profiling (phase timers, `D_stage`/`D_work`/`D_final`, sectors, RSS, closure sweeps, holdout, Krylov defect). Checkpoint / restart (refuses changed solver or tolerances; a resumed run equals the uninterrupted one bitwise). Fix: `_dd_select` admitted in-frame roundoff (A2 crash) | t6 R1-R3; restart checks 15/15 |
-| 7 | Fix: the frontier embedding squared the frame defect (`_polar_frame`, `3fa0e78`). Fix: the unbounded `fusion_basis` memo (B1 OOMs; element budget, `3a12dca`). Parallel K/L/S and concurrent half-sweeps (U18). `tol_krylov` knob (`ef6c30d`). Work ceiling `d·maxdim` (`6a8b742`). Rank probe `benchmarks/dissipative_rank_probe.jl`. Recycled local Krylov vectors across the rounds of a step (`recycled_krylov.jl`, final form `3a07c7c`) | U18 35/35; rk7y 1279/1279 |
+| 7 | Fix: the frontier embedding squared the frame defect (`_polar_frame`, `3fa0e78`). Fix: the unbounded `fusion_basis` memo (B1 OOMs; element budget, `3a12dca`). Parallel K/L/S and concurrent half-sweeps (U18). `tol_krylov` knob (`ef6c30d`). Work ceiling `d·maxdim` (`6a8b742`). Rank probe `benchmarks/dissipative_rank_probe.jl`. Recycled local Krylov vectors across the rounds of a step (final form `3a07c7c`; since the merge with `main`, `recycle_mode = :complement` in `krylov_recycle.jl`) | U18 35/35; rk7y 1279/1279 |
 
 Re-audit of §1.2 / §1.3 on `3a07c7c`: every item is IMPLEMENTED except plan l.128, "step rejection / retry". Reason codes exist, but a `:work_limited` step is accepted and logged; only step doubling rejects. A smaller-dt retry would not rescue A1: at dt 0.025 the frame still fills the ceiling.
 
@@ -125,6 +125,7 @@ All rows: no-jump, tol_trunc 1e-7, production dt and maxdim. `tol_krylov` replac
 | dq7g (`6a8b742`, ceiling d·maxdim) | B1 L = 20, maxdim 512 | tol_basis {1e-4 … 1e-8} × tol_krylov {none, 1e-5, 1e-4, 1e-3} | **B1 fixed by the d·maxdim ceiling:** all 19 rows accurate to 7.1e-6 (the reference floor), still work-limited on 11-40/60 steps. Cheapest: tol_krylov 1e-3 (n_krylov 22k vs 277k) |
 | dq7h (`6a8b742`) | A1 L = 24, maxdim 512 (ceiling 2048) | same 19-row grid | **All 19 fail**, observables off by 0.24-0.28. No tolerance lifts it |
 | dq7i (`6a8b742`) | A1 L = 24, maxdim 1024 (ceiling 4096) | defaults | Still fails: obs error 0.21, log P0 1.29 vs TDVP2 maxdim 1024; work-limited 17/20; 35451 s, 16.8 G |
+| dq7j (`6a8b742`) | A1 L = 24, maxdim 512 (ceiling 2048) | tol_basis 1e-8 × tol_krylov {1e-2, 3e-2, 1e-1, 1}: Krylov allowance per test 6.9e-5 … 6.9e-3 (vs 6.9e-11) | **All 4 fail.** Obs error 0.27 / 0.26 / 0.26 / 0.19, log P0 2.2 / 2.4 / 2.1 / 0.85; work-limited 16 / 16 / 16 / 15 of 20; n_krylov 28k → 14k (dq7h at 1e-5: 52k). Details in §7.5 |
 
 ### Why A1 blows up (rank probes)
 
@@ -133,7 +134,7 @@ These probes start from BUG's own clean state at t = 0.5 (A1 L = 24, maxdim 512)
   - At ceiling 8192 the step is clean (D 214-299 against TDVP2's 201-234), but it costs 6098 s against TDVP2's 74 s.
 - **rp7r:** order 1 runs away as well. With no closure rounds, the half-sweeps alone add 1000-1300 Krylov and 520-710 CBE directions per bond.
 
-The blow-up is specific to the d = 4 Hubbard generator with loss on every site. B1 (loss on one site) saturates but stays accurate. The d = 2 spin chains stay accurate.
+Section 7 explains where these directions come from and why the bond runs away. The blow-up is specific to the d = 4 Hubbard generator with loss on every site. B1 (loss on one site) saturates but stays accurate. The d = 2 spin chains stay accurate.
 
 ## 6. Recycled local Krylov vectors (plan §1.2)
 
@@ -147,7 +148,7 @@ The blow-up is specific to the d = 4 Hubbard generator with loss on every site. 
 - If it passes, Arnoldi extends only the complement v_c. Otherwise the fresh solve runs.
 - Nothing survives the step.
 
-The option is `krylov_recycle` (default `true`, set by USER 10-29); `DR_RECYCLE` is the driver knob.
+The option is `krylov_recycle` with `recycle_mode = :complement`, default off. In the merge with `main` it shares one knob with the XX-efficiency study's `:images` / `:frame` modes. `DR_RECYCLE` is the driver knob.
 
 **Measurements across the three versions:**
 
@@ -171,10 +172,100 @@ The option is `krylov_recycle` (default `true`, set by USER 10-29); `DR_RECYCLE`
 - What decides the frame width is the local Krylov enrichment and the work ceiling. Recycling does not change either.
 - Recycling stays implemented as the plan specifies, but it brings no gain on these models.
 
-## 7. Open items
+## 7. Why the bond dimension grows
+
+Two different growths are involved, with different causes:
+- **the working frame** that BUG builds inside a step is far wider than the state it produces;
+- **the final bond** (after truncation) runs away to maxdim. That happens only once the frame is cut short by the ceiling, or when `tol_basis` is much looser than `tol_trunc`.
+
+The numbers below come from the per-bond logs of the rank probes (rp7q, rp7r) and the A1 grid (dq7h). The two causal links marked *inferred* follow from these numbers but have not been measured directly.
+
+### 7.1 Size of the gap
+
+Every row is one step on A1 L = 24, from BUG's own clean state at t0 = 0.5 (rp7q):
+
+| Arm | Frame at the middle bond | Final bonds | Error (dist) |
+|---|---|---|---|
+| TDVP2, maxdim 512 | — | 201-234 | 1.9e-7 |
+| BUG, half-sweeps only | 2299 = ~196 old + 561 DD-QR CBE + 1547 local Krylov | — | — |
+| BUG, ceiling 8192 (both closure rounds) | 8192 (round 1 adds 25 573 directions in total, round 2 adds 13 220) | 214-299 | 7.0e-8 |
+| BUG, ceiling 2048 | 2048, filled by the half-sweeps alone | 241-**512** | **7.4e-5** |
+
+The frame is 10-40× wider than the state it produces.
+
+### 7.2 Why the working frame is so wide
+
+1. **Each Krylov vector brings its whole range, not one direction.**
+   - The local Krylov stage (Tests C/D) hands each Krylov vector to `_extend_frame` (`bug/krylov_enrich.jl`). That function takes the vector's part outside the frame, `R = (I - QQ') v_k`, and appends singular directions of `R` until `weight × (discarded tail) ≤ allowance`.
+   - The allowance per test is `tol_basis / (2(nb+1)·nf)` (`basis_allocation`, rule `:linear`). At L = 24, order 3 and `tol_basis` 1e-8 that is **6.9e-11**.
+   - So the leading Krylov vectors, whose weights are 0.1-1, are admitted almost to their numerical rank.
+   - Each application of the one-site generator spreads the range further, so successive vectors bring new directions.
+   - At the middle bond this adds 950-1550 directions, about 6× the state's own rank.
+2. **The closure rounds compound it.**
+   - Each closure round writes its frontier as an MPS in the current frames (`_frontier_mps`, `bug/krylov_closure.jl`). The frontier's bonds are therefore as wide as the frames (2000+), not as wide as the state (≈ 200).
+   - That round's Krylov vectors have rank ≈ 2000, and admitting their ranges adds tens of thousands of directions.
+   - Wider frames make a wider frontier, which makes the next round's frames wider still. This is why order 3 needs about 4× what the half-sweeps alone need (rp7q: 2299 → 8192).
+3. **It also compounds along the sweep.** Bond i's frame is chosen inside (bond i-1's frame) × d. With d = 4 the frame widens bond by bond (t0 = 0.3: 256 → 810 → 1141 → … → 1366).
+4. **Why A1 and not the spin chains:**
+   - The MPO width is not the difference: the generator `G` has bond dimension 8 for A1/B1 and 11 for A2/B2.
+   - What differs is the local dimension (d = 4 against 2) and the size of the state (D ≈ 200 for A1 against 26 for A2). B2 (d = 2, D_final 154) stays at D_stage 640.
+   - B1 (d = 4) also fills the ceiling, on 11-40 of 60 steps. A1 is where filling it costs accuracy.
+5. **Recycling cannot help here.** Order 1 runs away too (rp7r), and order 1 has no closure rounds to recycle into (section 6).
+
+### 7.3 Why the final bond runs away
+
+1. **The ceiling cuts by order, not by importance.** *(inferred)*
+   - Room in the frame is handed out first come, first served: DD-QR CBE first, then the Krylov vectors in Arnoldi order, then closure round 1, then round 2.
+   - At t0 = 0.5 and ceiling 2048, the half-sweeps alone fill the frame. Round 1 then gets 387 directions and **round 2 gets 0**, although its leak (6.5e-8) is still there.
+   - The step becomes a projection onto an incomplete space: its error is 7.4e-5, against 7.0e-8 with the frame uncapped.
+2. **The truncation cannot remove an error that large.**
+   - The final cut may discard only about `tol_trunc` = 1e-7 of weight. An error 700× larger, spread over many directions, therefore stays in the state as extra rank: the bonds jump to 512.
+   - The next step starts from 512-wide bonds, so its frames fill the ceiling sooner. The loop feeds itself.
+   - dq7h, `tol_basis` 1e-5: D_final is 138, 206, 297, then **466 at the first work-limited step**, then 512 on every later step. TDVP2 at the same times stays near 140-220.
+3. **The same happens without any cap when `tol_basis` ≫ `tol_trunc`.**
+   - dq7h at `tol_basis` 1e-4 has D_final **298 at step 1**, before any step is capped. At `tol_basis` 1e-5 it is 138, and TDVP2 is ≈ 141.
+   - The looser basis leaves a step error above the truncation level, and the truncation keeps it. This is the "Galerkin error of the looser basis kept by the tighter cut" found earlier with rp7h (`docs/dissipative_plan_audit.md`, Task 7 A1).
+
+### 7.4 What would confirm it, and the fixes that follow
+
+**Confirming probe (not run).** One A1 L = 24 step from the t0 = 0.5 state, on one cluster job of about 2 h. For every appended direction it would record:
+- its source: DD-QR CBE, Krylov depth k, or closure round j;
+- its weight in the final state.
+
+That measures directly the two links marked *inferred* above: how few of the appended directions matter, and whether the order-based cut drops the ones that do.
+
+**Fixes this points to** (none implemented):
+- **Cut by weight across all sources** when the ceiling binds, instead of first come, first served. Today `cap_order = :weight` ranks only the DD-QR CBE directions.
+- **Compress each frontier to its own rank** before its closure sweep, instead of sweeping it at frame width. This breaks the round-to-round compounding.
+- **Revisit the per-vector allowance rule.** Admitting each Krylov vector's full residual range at 6.9e-11 spends the whole basis budget on directions that the final cut mostly discards. *Tested in dq7j (§7.5): loosening it alone does not fix A1.*
+
+### 7.5 Loosening the per-test Krylov allowance at the d·maxdim ceiling (dq7j)
+
+dq7j raises the Krylov allowance per test from 6.9e-11 to 6.9e-5 … 6.9e-3 (`tol_krylov` 1e-2 … 1, `tol_basis` 1e-8), at A1 L = 24, maxdim 512, ceiling 2048, same code and snapshot as dq7h. Reference: TDVP2 maxdim 1024 (dr7n).
+
+| tol_krylov | Allowance | Obs err | log P0 err | D_final, steps 1-5 | D_stage, steps 1-5 | First step at 512 / work-limited | Krylov dirs, step 1 / total | DD-QR CBE dirs, step 1 / total | Wall |
+|---|---|---|---|---|---|---|---|---|---|
+| dq7h 1e-5 | 6.9e-8 | 0.26 | 2.45 | 176 250 340 512 512 | 1134 1250 1726 2048 2048 | 4 / 4 | 2502 / 51.7k | 8218 / 382k | 5884 s |
+| dq7h 1e-3 | 6.9e-6 | 0.27 | 2.40 | 322 488 512 512 512 | 1042 1270 1771 2048 2048 | 3 / 4 | 595 / 32.9k | 8974 / 386k | 6224 s |
+| 1e-2 | 6.9e-5 | 0.27 | 2.17 | 292 402 512 512 512 | 1005 1112 1356 1930 2048 | 3 / 5 | 263 / 28.1k | 8918 / 379k | 7701 s |
+| 3e-2 | 2.1e-4 | 0.26 | 2.37 | 273 341 487 512 512 | 988 1052 1187 1663 2048 | 4 / 5 | 157 / 24.3k | 8885 / 376k | 7721 s |
+| 1e-1 | 6.9e-4 | 0.26 | 2.12 | 269 301 428 512 512 | 983 1033 1120 1541 2048 | 4 / 5 | 100 / 21.7k | 8965 / 370k | 4894 s |
+| 1 | 6.9e-3 | 0.19 | 0.85 | 270 270 316 512 512 | 1000 1019 1027 1429 1997 | 4 / 6 | 44 / 14.3k | 8994 / 357k | 4816 s |
+
+The allowance per test is `tol_krylov/(2(nb+1)nf)`; with `tol_krylov` unset it is the `tol_basis` share, 6.9e-11. Walls are from different nodes (rows 3-4 on h05n4, rows 1-2 on h02n2) and are not a timing comparison. TDVP2 maxdim 512 vs 1024 differ by 1.3e-4; D_final of TDVP2 is ≈ 141 at step 1.
+
+**Observations:**
+1. **The local Krylov stage is not what fills the ceiling at this point.** At `tol_krylov` 1 it adds 44 directions at step 1 (against 2502 at 1e-5), yet D_stage at step 1 is still 1000 (against 1134). Over every step the DD-QR CBE appends 7-25× more directions than the Krylov stage (≈ 19k per step in every row). The frame widening of §7.2 item 1 is the Krylov share in rp7q's uncapped half-sweeps; at the 2048 ceiling the DD-QR CBE and the round-to-round compounding (§7.2 items 2-3) fill the frame on their own.
+2. **A looser Krylov allowance inflates D_final from step 1, before any cap.** D_final at step 1 is 269-292 against 176 at 1e-5 and TDVP2's ≈ 141, with discarded weight still ≈ 7e-8. This is §7.3 item 3 again: the looser basis leaves a Galerkin error above `tol_trunc`, and the truncation keeps it as rank. The bonds reach 512 at step 3-4, as before.
+3. **Every row then becomes work-limited (from step 5-6) and stays so.** Loosening delays the first capped step by 1-2 steps; it does not stop the runaway.
+4. **`tol_krylov` 1 is the least bad row** (obs 0.19, log P0 0.85 against 0.26 / 2.2-2.4). Fewer Krylov directions leave room under the ceiling for the closure rounds (§7.3 item 1, *inferred*). It is still 10³× worse than the TDVP2 512-vs-1024 difference, so it is not a fix.
+
+**Conclusion:** the per-test allowance is not the lever for A1. Loosening it cuts Krylov work up to 3.6× but leaves the frame at the ceiling (filled by the DD-QR CBE and the compounding) and raises D_final through the looser Galerkin error. The fixes that remain are the first two of §7.4: cut by weight across all sources when the ceiling binds, and compress each frontier to its own rank.
+
+## 8. Open items
 
 1. **dr6v5 (A2 L = 32):** still running; resume job dr6v6 (17599988) is queued behind it.
-2. **`krylov_recycle` default:** `true`, per USER 10-29. Section 6 argues for `false`; the knob is kept either way.
+2. **`krylov_recycle` default:** set to `false` in the merge with `main` (USER 10-29: one knob, with this plan's variant as `recycle_mode = :complement`); the knob is kept.
 3. **Plan l.128:** step rejection / retry on `:work_limited` is PARTIAL.
 4. **A1 needs a ceiling of about 16·maxdim** to run clean (rp7q, at about 80× TDVP2's cost per step). Until then TDVP2 is the A1 result (plan §4.5: a regime where TDVP2 wins is a result).
 5. **Task 7 BUG reruns at tuned settings were not made.** The candidates are tol_krylov 1e-5 (A2) and 1e-3 (B2, B1), but none changes a verdict.

@@ -43,8 +43,8 @@ end
 
 What both half-sweeps of one step READ and never write: the operator, `tau`, the generator shift,
 the root bond `c`, the step's allocation and DD-QR expansion settings (`exkw`), the work ceiling,
-the `krylov_reuse` ablation, the states the trial space must contain (`keep_states`) and the
-step's recycled local Krylov store (`rk`, `nothing` when off), which these sweeps fill as round 0.
+the `krylov_reuse` and `krylov_depth` ablations, the states the trial space must contain (`keep_states`) and the
+`krylov_recycle` cache (`nothing` when off), which round 1 fills.
 """
 struct _HalfSweepCtx{M, E, A, K, S, R}
     mpo::M
@@ -55,8 +55,9 @@ struct _HalfSweepCtx{M, E, A, K, S, R}
     exkw::K
     wcap::Int
     krylov_reuse::Bool
+    krylov_depth::Int
     keep_states::S
-    rk::R
+    recycle::R
 end
 
 """
@@ -118,11 +119,11 @@ environment pushed through it immediately -- the reference's own ordering
 function _half_left!(psiL, W, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_HalfSweepCtx)
     mpo, c = cx.mpo, cx.c
     canonical!(psiL, 1)
+    _recycle_begin!(cx.recycle, :left, psiL, 0)
     rstack = _env_timed!(acc, right_env_stack, psiL, mpo; downto = 3)
     lch = boundary_channels(mpo)
     lroot = lch
     C = nothing
-    _rk_begin!(cx.rk, :left)
     kcar = Any[nothing for _ in cx.keep_states]   # each kept state's carry, `(b_i, link)`
     held = 0                          # frames this sweep has accumulated, running total
     for i in 1:c
@@ -143,11 +144,11 @@ function _half_left!(psiL, W, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_Ha
         tk0  = time_ns()
         Wkry, kst = _krylov_enrich(Kex, x -> (acc.nmv += 1; apply_one_site(H1, x)),
                                    cx.krylov_reuse ? ex.U_ex : _fr.U0, :left, cx.tau, cx.alloc;
-                                   workcap = cx.wcap)
+                                   workcap = cx.wcap, fixed_depth = cx.krylov_depth)
         cx.krylov_reuse || (Wkry = _merge_frame(Wkry, ex.U_ex, :left))
+        _recycle_store!(cx.recycle, :left, i, kst, ex.V_ex, cx.alloc.krylov)
         acc.tkry += (time_ns() - tk0) / 1e9
         _record_krylov!(bondlg, kst, cx.alloc)
-        _rk_keep!(cx.rk, :left, i, kst, ex.V_ex, cx.alloc.krylov)
         _peak!(acc, held + _state_stored(psiL), Wkry)
         W[i] = to_concrete(setitag(Wkry, 3, _tagW(i)))
         # Union every kept state first: a later union widens `W[i]`, so a carry taken before it
@@ -171,8 +172,7 @@ function _half_left!(psiL, W, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_Ha
         i == c && (lroot = lch)         # captured BEFORE pushing through the root frame
         i < c && (lch = _env_timed!(acc, push_left_channels, lch, mpo, W[i], i))
     end
-    # round 0 of the recycled store: its vectors' tail is `psiL`'s, right-canonical from site 2
-    _rk_commit!(cx.rk, :left, psiL, 0, true)
+    _recycle_commit!(cx.recycle, :left, true)
     return lroot
 end
 
@@ -191,11 +191,12 @@ function _half_right!(psiR, Z, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_H
     mpo, c = cx.mpo, cx.c
     L = length(psiR)
     canonical!(psiR, L)
+    # a shallow copy: the assembly later replaces `psi`'s slots, the cache must keep these
+    _recycle_begin!(cx.recycle, :right, cx.recycle === nothing ? nothing : copy(psiR), 0)
     lstack = _env_timed!(acc, left_env_stack, psiR, mpo; upto = L - 2)
     rch = boundary_channels(mpo)
     rroot = rch
     D = nothing
-    _rk_begin!(cx.rk, :right)
     kcar = Any[nothing for _ in cx.keep_states]   # each kept state's carry, `(link, b_j)`
     held = 0
     for j in (L - 1):-1:c
@@ -215,11 +216,11 @@ function _half_right!(psiR, Z, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_H
         tk0  = time_ns()
         Zkry, kst = _krylov_enrich(Bex, x -> (acc.nmv += 1; apply_one_site(H1, x)),
                                    cx.krylov_reuse ? ex.V_ex : _fr.V0, :right, cx.tau, cx.alloc;
-                                   workcap = cx.wcap)
+                                   workcap = cx.wcap, fixed_depth = cx.krylov_depth)
         cx.krylov_reuse || (Zkry = _merge_frame(Zkry, ex.V_ex, :right))
+        _recycle_store!(cx.recycle, :right, j, kst, ex.U_ex, cx.alloc.krylov)
         acc.tkry += (time_ns() - tk0) / 1e9
         _record_krylov!(bondlg, kst, cx.alloc)
-        _rk_keep!(cx.rk, :right, j, kst, ex.U_ex, cx.alloc.krylov)
         _peak!(acc, held + _state_stored(psiR), Zkry)
         Z[j] = to_concrete(setitag(Zkry, 1, _tagZ(j)))
         BXs = [kcar[t] === nothing ? X[j + 1] : to_concrete!(contract(X[j + 1], (3,), kcar[t], (1,)))
@@ -239,7 +240,6 @@ function _half_right!(psiR, Z, expanded, nn, acc::_HalfAcc, hledger, rng, cx::_H
         j == c && (rroot = rch)
         j > c && (rch = _env_timed!(acc, push_right_channels, rch, mpo, Z[j], j + 1))
     end
-    # `psiR` may alias `psi`, which the step later re-gauges: the store keeps its own copy
-    _rk_commit!(cx.rk, :right, cx.rk === nothing ? nothing : copy(psiR), 0, true)
+    _recycle_commit!(cx.recycle, :right, true)
     return (rroot, D)                   # `D` is (link_{c+1}, b_R)
 end

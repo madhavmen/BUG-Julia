@@ -438,7 +438,8 @@ function _frontier_expand(f::BondFrame, mpo, i::Int, lch, rch, side::Symbol,
                          alloc = get(ckw, :alloc, nothing), workcap = get(ckw, :workcap, 0),
                          growth = get(ckw, :growth, ADAPTIVE_GROWTH),
                          exact = get(ckw, :exact, false), version = i,
-                         cap_order = get(ckw, :cap_order, :sector))
+                         cap_order = get(ckw, :cap_order, :sector),
+                         dd_width = get(ckw, :dd_width, 0))
 end
 
 # Tag every bond entry a frontier sweep logged, after `_log_bond!` wrote it.

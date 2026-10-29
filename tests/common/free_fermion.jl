@@ -84,6 +84,21 @@ The bond currents `j_b = (iJ/2) <S^+_b S^-_{b+1} - h.c.> = -J Im C_{b+1,b}` of t
 xx_open_current(C::AbstractMatrix; J::Real = 1.0) = [-J * imag(C[b + 1, b]) for b in 1:(size(C, 1) - 1)]
 
 """
+    xx_slater_amplitudes(L, t, basis; J=1.0, occupied=1:(L÷2)) -> Vector{ComplexF64}
+
+The exact many-body state of the evolved Slater determinant, amplitude by amplitude, on `basis`
+(`spin_xx_sector`'s: `basis[k][i] = 2 m_i`, up = occupied): `det V[I, :]` with
+`V = u(t)[:, occupied]` and `I` the up sites in ascending order. With the string on the sites left
+of `j`, `c'_{I_1} ... c'_{I_N} |0>` IS `S^+_{I_1} ... S^+_{I_N} |down...>`, so no sign enters
+(checked against sector ED, xx-efficiency plan S1). A state-fidelity oracle for an arbitrary MPS,
+which the correlation matrix alone is not.
+"""
+function xx_slater_amplitudes(L::Int, t::Real, basis; J::Real = 1.0, occupied = 1:(L ÷ 2))
+    V = xx_open_propagator(L, t; J = J)[:, collect(occupied)]
+    return ComplexF64[det(V[findall(>(0), b), :]) for b in basis]
+end
+
+"""
     xx_dephasing_correlation(L, t; J=1.0, gamma=0.0, occupied=1:2:L) -> Matrix{ComplexF64}
 
 `C_ij(t) = <c_i^dag c_j>` for the XX chain under ONSITE DEPHASING, EXACTLY.

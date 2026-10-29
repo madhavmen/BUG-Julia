@@ -1,9 +1,10 @@
 # tests/sweeps/test_krylov_recycle.jl -- the recycled local Krylov stage of `order > 1` steps
 # (dissipative plan §1.2: "transport/reorthogonalize old useful directions into the new gauge, and
-# extend only from active frontiers"; `krylov_recycle`, `recycled_krylov.jl`).
+# extend only from active frontiers"; `krylov_recycle` with `recycle_mode = :complement`,
+# `krylov_recycle.jl` and `_rk_complement` in `krylov_enrich.jl`).
 #
-#   R1  no recycled vectors: `_krylov_enrich_recycled` IS the fresh stage (same H1 count, same
-#       directions appended, same span)
+#   R1  no recycled vectors: `_krylov_enrich(...; recycled)` IS the fresh stage (same H1 count,
+#       same directions appended, same span)
 #   R2  the previous solve's own input and vectors: reused, nothing extended; an unrelated set
 #       is rejected by its defect and costs at most its own count, never accuracy
 #   R3  transport into an unchanged tail is the identity onto the new expanded frame
@@ -43,8 +44,8 @@ tau, kry = ComplexF64(-0.05im), 1e-7
         kl = _xx_kl(side; steps = 2, dex = 1)
         Qf, sf = RC._krylov_enrich(kl.seed, kl.applyH, kl.Q0, side, tau, _kalloc(kry);
                                    state_seed = false)
-        Qr, sr = RC._krylov_enrich_recycled(kl.seed, Any[], kl.applyH, kl.Q0, side, tau,
-                                            _kalloc(kry))
+        Qr, sr = RC._krylov_enrich(kl.seed, kl.applyH, kl.Q0, side, tau, _kalloc(kry);
+                                   state_seed = false, recycled = Any[])
         @test sf.added >= 1                             # non-vacuous: the stage appends
         @test sr.n_recycled == 0
         @test sr.n_h1 == sf.n_h1
@@ -64,8 +65,8 @@ end
         _, sf = RC._krylov_enrich(kl.seed, kl.applyH, kl.Q0, side, tau, _kalloc(kry);
                                   state_seed = false)
         rec = sf.basis                                  # its input first, then its vectors
-        Q, st = RC._krylov_enrich_recycled(kl.seed, rec, kl.applyH, kl.Q0, side, tau,
-                                           _kalloc(kry))
+        Q, st = RC._krylov_enrich(kl.seed, kl.applyH, kl.Q0, side, tau, _kalloc(kry);
+                                  state_seed = false, recycled = rec)
         @test st.n_recycled == length(rec)
         @test st.rec_closed                             # the block holds the input's evolution
         @test st.n_h1 == st.n_recycled                  # and its complement is empty
@@ -77,8 +78,8 @@ end
         # vectors with no relation to this bond's evolution: correct, and bounded in cost
         rng = Random.MersenneTwister(11)
         junk = Any[to_concrete(RC._randomize_like(kl.seed, rng)) for _ in 1:3]
-        Qj, sj = RC._krylov_enrich_recycled(kl.seed, junk, kl.applyH, kl.Q0, side, tau,
-                                            _kalloc(kry))
+        Qj, sj = RC._krylov_enrich(kl.seed, kl.applyH, kl.Q0, side, tau, _kalloc(kry);
+                                   state_seed = false, recycled = junk)
         @test sj.met
         @test norm(P(Qj, Y)) / norm(kl.seed) <= 10 * kry
         @test _isodef(Qj, side) < 1e-12
@@ -103,8 +104,8 @@ end
     v = to_concrete(contract(psi[1], (3,), to_concrete(contract(psi[2], (2, 3), f.V0', (2, 3))),
                              (1,)))
     want = _kl_stage(:left, mpo, 1, psi[1], psi[2], lch, rch, ex).seed
-    E = RC._rk_overlaps(psi, copy(psi), :left)
-    w = RC._rk_transport((vecs = Any[v], frame = f.V0), :left, nothing, ex.V_ex, E, 1)[1]
+    E = RC._tail_overlaps(psi, copy(psi), :left)
+    w = RC._recycle_transport((basis = Any[v], frame = f.V0), :left, nothing, ex.V_ex, E, 1)[1]
     @test norm(to_concrete(w - want)) < 1e-12 * norm(want)
     # right, bond L-1: the mirror against `U_ex`
     canonical!(psi, L)
@@ -115,29 +116,33 @@ end
     v = to_concrete(contract(to_concrete(contract(f.U0', (1, 2), psi[L - 1], (1, 2))), (2,),
                              psi[L], (1,)))
     want = _kl_stage(:right, mpo, L - 1, psi[L - 1], psi[L], lch, rch, ex).seed
-    E = RC._rk_overlaps(psi, copy(psi), :right)
-    w = RC._rk_transport((vecs = Any[v], frame = f.U0), :right, nothing, ex.U_ex, E, L - 1)[1]
+    E = RC._tail_overlaps(psi, copy(psi), :right)
+    w = RC._recycle_transport((basis = Any[v], frame = f.U0), :right, nothing, ex.U_ex, E,
+                              L - 1)[1]
     @test norm(to_concrete(w - want)) < 1e-12 * norm(want)
 end
 
 @testset "R4: what a round keeps, and when it is usable" begin
-    rk = RC.RecycledKrylov()
-    RC._rk_begin!(rk, :left)
-    RC._rk_keep!(rk, :left, 3, (basis = Any[1, 2, 3, 4, 5], weights = [1, 0.5, 1e-9, 0.7, 0.2]),
-                 :frame, 1e-6)
-    @test rk.pend[1][3].vecs == [1, 5, 4, 2]            # input, frontier, then by weight
-    RC._rk_keep!(rk, :left, 4, (basis = Any[1:20...], weights = ones(20)), :frame, 1e-6)
-    v4 = rk.pend[1][4].vecs
+    rk = RC.KrylovRecycle(:complement)
+    RC._recycle_begin!(rk, :left, :tail, 1)
+    RC._recycle_store!(rk, :left, 3,
+                       (basis = Any[1, 2, 3, 4, 5], weights = [1, 0.5, 1e-9, 0.7, 0.2]),
+                       :frame, 1e-6)
+    @test rk.pend[:left].entries[3].basis == [1, 5, 4, 2]   # input, frontier, then by weight
+    @test rk.pend[:left].entries[3].weights == [1, 0.2, 0.7, 0.5]
+    RC._recycle_store!(rk, :left, 4, (basis = Any[1:20...], weights = ones(20)), :frame, 1e-6)
+    v4 = rk.pend[:left].entries[4].basis
     @test length(v4) == RC._RECYCLE_KEEP + 1 && v4[1] == 1 && v4[2] == 20
-    RC._rk_commit!(rk, :left, :tail, 1, false)          # frames not replaced: nothing usable
-    @test RC._rk_round(rk, :left, 1) === nothing && rk.pend[1] === nothing
-    RC._rk_begin!(rk, :left)
-    RC._rk_keep!(rk, :left, 3, (basis = Any[1, 2], weights = [1, 0.5]), :frame, 1e-6)
-    RC._rk_commit!(rk, :left, :tail, 1, true)
-    @test RC._rk_round(rk, :left, 1).entries[3].vecs == [1, 2]
-    @test RC._rk_round(rk, :left, 2) === nothing        # written in another generation
-    @test RC._rk_round(rk, :right, 1) === nothing       # the halves are separate
-    @test RC._rk_keep!(nothing, :left, 1, nothing, nothing, 0.0) === nothing
+    RC._recycle_commit!(rk, :left, false)               # frames not replaced: nothing usable
+    @test RC._recycle_entries(rk, :left, 1) === nothing && rk.pend[:left] === nothing
+    RC._recycle_begin!(rk, :left, :tail, 1)
+    RC._recycle_store!(rk, :left, 3, (basis = Any[1, 2], weights = [1, 0.5]), :frame, 1e-6)
+    RC._recycle_commit!(rk, :left, true)
+    @test RC._recycle_entries(rk, :left, 1).entries[3].basis == [1, 2]
+    @test RC._recycle_entries(rk, :left, 2) === nothing     # written in another generation
+    @test RC._recycle_entries(rk, :right, 1) === nothing    # the halves are separate
+    @test RC._recycle_store!(nothing, :left, 1, nothing, nothing, 0.0) === nothing
+    @test_throws ArgumentError RC.KrylovRecycle(:bogus)
 end
 
 @testset "R5: order-3 steps with and without recycling" begin
@@ -145,13 +150,13 @@ end
     L, dt, nstep = 6, 0.05, 6
     G = no_jump_mpo(hubbard_aa_mpo_d4(L; J = 1.0, U = 4.0), doublon_loss_mpo(L; kappa = 1.0))
     kw = (hermitian = false, order = 3, tol_basis = 1e-8, tol_root = 1e-12, tol_trunc = 1e-10,
-          maxdim = 256)
+          maxdim = 256, recycle_mode = :complement)
     occ = [:both, :up, :empty, :down, :both, :empty]
     on, off = hub4_product_state(occ), hub4_product_state(occ)
     nrec, nh1, nkry, raug, nrc = [0, 0], [0, 0], [0, 0], [0, 0], 0
     for _ in 1:nstep
-        ion = cbe_bug_step!(on, G, ComplexF64(-im * dt); kw...)       # the default recycles
-        ioff = cbe_bug_step!(off, G, ComplexF64(-im * dt); kw..., krylov_recycle = false)
+        ion = cbe_bug_step!(on, G, ComplexF64(-im * dt); kw..., krylov_recycle = true)
+        ioff = cbe_bug_step!(off, G, ComplexF64(-im * dt); kw...)     # the default: off
         nrec[1] += sum(get(e, :recycled, 0) for e in ion.ledger.bond_log; init = 0)
         nrec[2] += sum(get(e, :recycled, 0) for e in ioff.ledger.bond_log; init = 0)
         nrc += count(e -> get(e, :rec_closed, false), ion.ledger.bond_log)
@@ -164,15 +169,15 @@ end
           "them $(nrc)), closure H1 on $(nh1[1]) off $(nh1[2]), Krylov directions appended " *
           "on $(nkry[1]) off $(nkry[2]), r_aug on $(raug[1]) off $(raug[2]), chi on " *
           "$(maximum(bond_dims(on))) off $(maximum(bond_dims(off)))"
-    @test nrec[1] > 0                                   # the default's closure rounds recycled
-    @test nrec[2] == 0                                  # and the ablation does not
+    @test nrec[1] > 0                                   # the closure rounds recycled
+    @test nrec[2] == 0                                  # and the default does not
     @test d < 1e-6                                      # same step to the tolerances
     @test isfinite(norm(on))
 
     # imaginary time: the store is never read
     mpo, psi = _xx_warm(8, 2)
     info = cbe_bug_step!(psi, mpo, ComplexF64(-0.05); order = 3, krylov_recycle = true,
-                         tol_basis = 1e-8)
+                         recycle_mode = :complement, tol_basis = 1e-8)
     @test all(get(e, :recycled, 0) == 0 for e in info.ledger.bond_log)
 end
 

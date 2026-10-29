@@ -96,7 +96,7 @@ function arm(psi0, name)
                              order = something(armorder(name), 3), tol_basis = tb, tol_root = 1e-12,
                              tol_trunc = TOLT, maxdim = md, truncate = !endswith(name, "u"),
                              cap_order = Symbol(rec["cap_order"]),
-                             krylov_recycle = occursin("rec", name))
+                             krylov_recycle = occursin("rec", name), recycle_mode = :complement)
         rec["frames"] = info.expanded
         rec["root_right"] = info.root_right
         rec["limits"] = string.(info.record.limits)
