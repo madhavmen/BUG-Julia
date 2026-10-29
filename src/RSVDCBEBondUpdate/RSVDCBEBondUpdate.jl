@@ -112,6 +112,9 @@ include("qtt/qtt_cores.jl")
 include("qtt/qtt_ops1d.jl")
 include("qtt/qtt_telum.jl")
 include("qtt/qtt_models.jl")
+include("qtt/qtt_flows.jl")
+include("qtt/qtt_observables.jl")
+include("qtt/qtt_imaginary.jl")
 
 # Last: a submodule that imports from the parent, so everything it names must exist already.
 include("baselines/ground_state.jl")
@@ -217,6 +220,12 @@ export QTTGrid, qtt_grid, qtt_length, qtt_coords, qtt_cell, qtt_bits, qtt_point,
        GPPaddle, paddle_state, GPModel, gp_model, gp_paddle_op, gp_linear_op, gp_density,
        gp_hamiltonian_op, GPHamiltonianCache, qtt_state_tag, gp_hamiltonian, gp_vector_field,
        gp_jvp, gp_density_audit, gp_bug_step!,
-       HestonParams, feller, heston_op, heston_mpo
+       HestonParams, feller, heston_op, heston_mpo,
+       QTTFlow, GPFlow, LinearFlow, flow_op, flow_jac_ops, frozen_flow, QTTFrames, frame_state,
+       frame_project, reduced_field, reduced_jacobian, RK_TABLEAUX, qtt_root_for_order,
+       rk_stage_solve, qtt_bug_step!, qtt_tdvp2_step!, tt_expv, qtt_split_tdvp_step!,
+       qtt_normalize!, qtt_sample, gp_parts, gp_observables, vortex_count, heston_riccati,
+       heston_affine_field, heston_call, heston_mass, heston_moment,
+       uniform_schedule, geometric_schedule, gp_ground_state!, gp_gradient_descent!
 
 end # module

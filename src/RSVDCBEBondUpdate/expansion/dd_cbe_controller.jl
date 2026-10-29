@@ -269,7 +269,8 @@ in storage order (`_trim_total`).
 `dd_width = l > 0` is the fixed-oversampling ablation (xx-efficiency plan Figs. 1A and 4): one
 probe of width `l` through the same DD projection, streamed kernel and QR, no holdout.
 `dd_policy = :hybrid` is the QTT plan's arm D3 ([`_dd_hybrid`](@ref)), its predictor read from and
-written to `dd_memory` (a [`DDMemory`](@ref); `nothing` = no predictor); `:adaptive` is D1.
+written to `dd_memory` (a [`DDMemory`](@ref); `nothing` = no predictor); `:adaptive` is D1; `:off`
+adds nothing (the no-CBE control).
 """
 function dd_cbe_expand(f::BondFrame, mpo::MPO, i::Int, lenv::MPOLink, renv::MPOLink,
                        side::Symbol; alloc::Union{Nothing, BasisAllocation} = nothing,
@@ -284,8 +285,10 @@ function dd_cbe_expand(f::BondFrame, mpo::MPO, i::Int, lenv::MPOLink, renv::MPOL
     side in (:left, :right) || throw(ArgumentError("side must be :left or :right"))
     cap_order in (:sector, :weight) || throw(ArgumentError(
         "cap_order must be :sector or :weight, got $cap_order"))
-    dd_policy in (:adaptive, :hybrid) || throw(ArgumentError(
-        "dd_policy must be :adaptive or :hybrid, got $dd_policy"))
+    dd_policy in (:adaptive, :hybrid, :off) || throw(ArgumentError(
+        "dd_policy must be :adaptive, :hybrid or :off, got $dd_policy"))
+    # `:off` -- the no-CBE control of plan §1.2A (the frame then grows by local Krylov alone)
+    dd_policy === :off && return CBEExpansion(f.U0, f.V0, 0, 0, 0.0, 0.0)
     left = side === :left
     U0, V0 = f.U0, f.V0
     r = f.old_rank

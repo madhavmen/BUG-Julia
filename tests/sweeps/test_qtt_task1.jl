@@ -27,7 +27,7 @@ include(joinpath(@__DIR__, "..", "common", "dd_fixtures.jl"))
 include(joinpath(@__DIR__, "..", "common", "qtt_fixtures.jl"))
 
 set_symmetry!(:none)
-RC.clear_fusion_cache!()
+clear_fusion_cache!()
 
 const _ORDERS = ((:grouped, :lsb_first), (:grouped, :msb_first), (:interleaved, :lsb_first))
 

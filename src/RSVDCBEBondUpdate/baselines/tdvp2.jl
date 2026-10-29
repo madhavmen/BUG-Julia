@@ -94,7 +94,8 @@ function _tdvp2_bond!(psi::SymMPS, h::Union{XXZChain, MPO}, i::Int, tau::Complex
                       maxdim, trunc_thresh, maxiter, tol, acc, hermitian = true,
                       conv_tol::Float64 = 0.0, substeps::Int = 1,
                       weight_tol::Union{Nothing, Float64} = nothing, wdiv::Float64 = 1.0,
-                      sweep::Int = 1, eshift::Float64 = 0.0, amp::Bool = false)
+                      sweep::Int = 1, eshift::Float64 = 0.0, amp::Bool = false,
+                      bnorms::Union{Nothing, Vector{Float64}} = nothing)
     Theta = to_concrete(psi[i] * psi[i + 1])        # rank 4 -- the object being compared
     acc[2] = max(acc[2], tensor_elements(Theta))
     acc[4] = max(acc[4], _state_stored(psi) + tensor_elements(Theta))
@@ -126,7 +127,7 @@ function _tdvp2_bond!(psi::SymMPS, h::Union{XXZChain, MPO}, i::Int, tau::Complex
         M = to_concrete(setitag(to_concrete(res.S * res.Vd), 1, tag))
         if i < length(psi) - 1
             M = _tdvp2_backward(shift_h(one_site_h(h, i + 1, lnext, rch), eshift), M, tau, acc,
-                                amp; hermitian, maxiter, tol, conv_tol, substeps)
+                                amp; hermitian, maxiter, tol, conv_tol, substeps, bnorms)
         end
         psi[i + 1] = M
         psi.center = i + 1
@@ -137,7 +138,7 @@ function _tdvp2_bond!(psi::SymMPS, h::Union{XXZChain, MPO}, i::Int, tau::Complex
         M = to_concrete(setitag(to_concrete(res.U * res.S), 3, tag))
         if i > 1
             M = _tdvp2_backward(shift_h(one_site_h(h, i, lch, rnext), eshift), M, tau, acc,
-                                amp; hermitian, maxiter, tol, conv_tol, substeps)
+                                amp; hermitian, maxiter, tol, conv_tol, substeps, bnorms)
         end
         psi[i] = M
         psi.center = i
@@ -152,7 +153,8 @@ drift. By Jensen it is >= 0 and nondecreasing in the step, the same for any ener
 in real time; it costs one extra `H1` action, so it is measured only on request.
 """
 function _tdvp2_backward(H1, M, tau::ComplexF64, acc, amp::Bool; hermitian, maxiter, tol,
-                         conv_tol, substeps)
+                         conv_tol, substeps, bnorms = nothing)
+    nb0 = bnorms === nothing ? 0.0 : norm(M)
     if amp
         n0 = norm(M)
         e1 = real(tensor_inner(M, apply_one_site(H1, M))) / n0^2
@@ -160,6 +162,7 @@ function _tdvp2_backward(H1, M, tau::ComplexF64, acc, amp::Bool; hermitian, maxi
     M = expv(x -> (acc[1] += 1; apply_one_site(H1, x)), -tau, M; hermitian = hermitian,
              maxiter = maxiter, tol = tol, conv_tol = conv_tol, substeps = substeps)
     amp && (acc[8] = max(acc[8], log(norm(M) / n0) - real(-tau) * e1))
+    bnorms === nothing || push!(bnorms, norm(M) / nb0)
     return M
 end
 
@@ -202,7 +205,10 @@ function tdvp2_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::ComplexF64;
                      # norm growth beyond the mean-energy drift (`_tdvp2_backward`): how strongly
                      # the backward stage amplifies components above the mean energy, the
                      # projector-splitting instability in imaginary time. `nothing` skips it.
-                     backward_report::Union{Nothing, Base.RefValue} = nothing)
+                     backward_report::Union{Nothing, Base.RefValue} = nothing,
+                     # QTT plan §2.5: every backward substep's RAW amplification
+                     # `||M_after|| / ||M_before||` is pushed here (`A_back(n, i)`); `nothing` skips.
+                     backward_norms::Union{Nothing, Vector{Float64}} = nothing)
     L = length(psi)
     L >= 2 || throw(ArgumentError("tdvp2_step! needs at least two sites"))
     length(h) == L || throw(DimensionMismatch(
@@ -213,7 +219,8 @@ function tdvp2_step!(psi::SymMPS, h::Union{XXZChain, MPO}, tau::ComplexF64;
     #  ||psi||^2, worst backward log growth]
     acc = Any[0, 0, 0.0, 0, 0.0, 0.0, 0.0, -Inf]
     wkw = (weight_tol = weight_tol, wdiv = _cut_divisor(L, _bug_root_link(L) + 1),
-           eshift = Float64(eshift), amp = backward_report !== nothing)
+           eshift = Float64(eshift), amp = backward_report !== nothing,
+           bnorms = backward_norms)
     half = tau / 2
 
     # O(L) environments, as in `cbe_lubich_sweep`: each half-sweep carries its own side
