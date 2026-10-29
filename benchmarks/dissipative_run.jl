@@ -32,6 +32,8 @@
 #   DR_KEEP_KRYLOV (DR_ORDER for A2/B2, else 0: G psi..G^m psi kept on steps from a product state,
 #   dt5m), DR_KEEP_EVERY (0; 1 = on every step, the ablation),
 #   DR_EXACT (0; 1 = the complete DD probe, the lossless arm of the Task 5 order ablation),
+#   DR_RECYCLE (0; 1 = cbe_bug_step!'s `krylov_recycle`: each closure round's local Krylov stage
+#   continues from the previous round's weighted basis instead of a fresh solve per frontier),
 #   DR_WARM (0; t_w > 0 = start from the state evolved to t_w by tight BUG steps, see below),
 #   DR_TARGET (none), DR_CHECK (4), DR_NTRAJ (100), DR_SEED (1), DR_REF (auto: ed when small),
 #   DR_JIT_WARMUP (0; n = n unlogged steps on a copy first, for timing runs),
@@ -74,6 +76,7 @@ const CLOSURE = env("DR_CLOSURE", NONLOCAL ? 1 : 0) == "1"
 const KEEPK = parse(Int, env("DR_KEEP_KRYLOV", NONLOCAL ? ORDER : 0))
 const KEEP_EVERY = env("DR_KEEP_EVERY", 0) == "1"
 const EXACT = env("DR_EXACT", 0) == "1"
+const RECYCLE = env("DR_RECYCLE", 0) == "1"
 const PARALLEL = Symbol(env("DR_PARALLEL", "serial"))
 const WARM = parse(Float64, env("DR_WARM", 0))
 const TARGET = (x = env("DR_TARGET", "none"); x == "none" ? nothing : parse(Float64, x))
@@ -171,7 +174,8 @@ const G = no_jump_mpo(M.H, M.Q)
 const TAG = @sprintf("%s_L%d_%s_%s_dt%g_b%g_r%g_t%g_%s%s%s%s%s%s%s_seed%d", MODEL, L, MODE, INT, DT, TOLB,
                      TOLR, TOLT, START, TOLK === nothing ? "" : "_k$(TOLK)",
                      WARM > 0 ? "_warm$(WARM)" : "", TARGET === nothing ? "" : "_tau$(TARGET)",
-                     KEEPK > 0 ? "_keep$(KEEPK)$(KEEP_EVERY ? "e" : "")" : "", EXACT ? "_exact" : "",
+                     KEEPK > 0 ? "_keep$(KEEPK)$(KEEP_EVERY ? "e" : "")" : "",
+                     (EXACT ? "_exact" : "") * (RECYCLE ? "_rec" : ""),
                      PARALLEL === :serial ? "" : "_par$(PARALLEL)", SEED)
 const OUT = env("DR_OUT", "dissipative_$(TAG).json")
 const CKPT = env("DR_CKPT", OUT * ".ckpt")
@@ -203,7 +207,7 @@ function step!(psi, h)
         info = cbe_bug_step!(psi, G, ComplexF64(-im * h); hermitian = false, order = ORDER,
                              tol_basis = TOLB, tol_root = TOLR, tol_trunc = TOLT, maxdim = MAXDIM,
                              tol_krylov = TOLK, closure_checks = CLOSURE, exact = EXACT, keep_states = keep,
-                             parallel = PARALLEL)
+                             parallel = PARALLEL, krylov_recycle = RECYCLE)
         lg, rc = info.ledger, info.record
         # Task 7 parallel subset: the K/L/S step's omitted new-new block and its fallback
         if lg.kls !== nothing
@@ -335,6 +339,8 @@ const CONFIG = Dict("model" => string(MODEL), "L" => L, "mode" => string(MODE), 
                     "operator_hash" => string(hash((string(MODEL), L, string(START),
                                                     JSON.json(filter(kv -> kv[1] != "prep", M.par))));
                                               base = 16))
+# recorded only when on, so the headers of runs from before the knob still match their checkpoints
+RECYCLE && (CONFIG["krylov_recycle"] = true)
 # T may grow on a resume; B1's preparation diagnostics are recomputed, possibly to the last bit
 const HEADER = merge(filter(kv -> kv[1] != "T", CONFIG),
                      Dict("params" => filter(kv -> kv[1] != "prep", M.par)))
