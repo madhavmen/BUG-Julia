@@ -49,6 +49,18 @@ without switching HEAD). Status words: **present** (used as is), **adapted** (ch
 ### Task 4
 - `benchmarks/qtt/production.jl` (manifest, ledger, step-doubling acceptance, checkpoint/resume, snapshots by `qtt_sample`), `benchmarks/qtt/restart_check.jl`.
 
+## Defects found in existing code (reported, not patched in the core)
+- **Order-p frontier closure under `:none` near saturation** (job qt1c 17603921, GP oscillator,
+  L = 12, order 4): `_frontier_right` builds `V0 = Z[j] Pm` with the OLD frame's width (36) on a site
+  whose new right link leaves a 16-dimensional local space, and the frame guard throws in
+  `_krylov_enrich -> _extend_frame -> _cap_to_local_room`. Not reproduced in the U(1) campaigns.
+  `qtt_bug_step!` catches exactly this guard and builds the equivalent order-p basis from order-1
+  frames that keep the global Krylov vectors `(tau H)^j psi`, `j < p` (`global_krylov_states`,
+  dissipative plan U10); every use is counted in the step's `basis_fallback`.
+- `qtt_bug_step!`'s frame-building step underflowed its linear root to an exactly zero matrix at
+  `h lambda = -1e3` (V08) -> Telum's root SVD refused it; fixed by shifting the frames' generator by
+  `<H>` (Krylov spaces unchanged).
+
 ## Known limitations (stated, not hidden)
 - Second-order FD Laplacian, not the paper's QFT Laplacian.
 - The paddle shape is an engineering fixture (Appendix B gives no parameters).

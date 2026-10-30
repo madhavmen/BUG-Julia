@@ -180,6 +180,27 @@ function frame_project(fr::QTTFrames, H, C::AbstractVector)
     return _tc(E, (2, 3), F, (2, 3))
 end
 
+"""
+    frame_operator_matrix(fr, H) -> Matrix
+
+The root-space matrix of `W' H Z` (`vec(Y)` order, `Y[a, a2]` with `a` fastest), from the frames'
+own environments: `M[(a,a2),(c,c2)] = sum_b E[a,b,c] F[a2,b,c2]`. For the stage preconditioner.
+"""
+function frame_operator_matrix(fr::QTTFrames, H)
+    c = length(fr.W)
+    E = _unit_env()
+    for k in 1:c
+        E = _env_left(E, fr.W[k], H[k], fr.W[k])
+    end
+    F = _unit_env()
+    for k in length(H):-1:(c + 1)
+        F = _env_right(F, fr.Z[k - c], H[k], fr.Z[k - c])
+    end
+    M = _tc(E, (2,), F, (2,))                        # (a, c, a2, c2)
+    rl, rr = size(E, 1), size(F, 1)
+    return reshape(permutedims(M, (1, 3, 2, 4)), rl * rr, rl * rr)
+end
+
 "The reduced vector field `G(Y) = W' F(t, W Y Z) Z'` and `mu`."
 function reduced_field(fl::QTTFlow, fr::QTTFrames, Y, t)
     A = frame_state(fr, Y)
@@ -284,16 +305,27 @@ function _unpack(x::Vector{Float64}, dims)
 end
 
 """
-    rk_stage_solve(fl, fr, S, t, h, method; tol, maxnewton, gmres_tol, Y0) -> (Y, stats)
+Largest stacked stage dimension `s r_L r_R` for which the dense preconditioner is factorised; above
+it the stage GMRES runs unpreconditioned (and says so in `stats.precond`).
+"""
+const _STAGE_PRECOND_MAX = 3072
+
+"""
+    rk_stage_solve(fl, fr, S, t, h, method; tol, maxnewton, gmres_tol, Y0, precond) -> (Y, stats)
 
 The nonlinear stage equations `Y_j = S + h sum_l A_jl G(t + c_l h, Y_l)` in the root space, by
 Newton-GMRES on the doubled-real unknowns with the reduced real-linear Jacobian. The RESIDUAL is
-the full nonlinear one, driven to `tol` (relative to `||S||`); `stats` records Newton and GMRES
-iterations, the final residual, the field evaluations and the density-build seconds.
+the full nonlinear one, driven to `tol` (relative to `||S||`). `precond = :auto` right-
+preconditions GMRES with `I - h A (x) pref (M - mu)`, `M = W' J1 Z` the frozen LINEAR part of the
+Jacobian at the step input (the kinetic/trap/density terms; `conj(d)` is left to GMRES), factorised
+once when `s r_L r_R <= _STAGE_PRECOND_MAX` (plan §2.4). `stats` records Newton and GMRES
+iterations, the final residual, the field evaluations, the density-build seconds and the
+preconditioner used.
 """
 function rk_stage_solve(fl::QTTFlow, fr::QTTFrames, S::AbstractMatrix, t::Real, h::Real,
                         method::Symbol; tol::Real = 1e-10, maxnewton::Int = 20,
-                        gmres_tol::Real = 1e-3 * tol, gmres_maxiter::Int = 600, Y0 = nothing)
+                        gmres_tol::Real = 1e-3 * tol, gmres_maxiter::Int = 600, Y0 = nothing,
+                        precond::Symbol = :auto)
     tab = RK_TABLEAUX[method]
     s = length(tab.c)
     A = tab.A
@@ -301,6 +333,21 @@ function rk_stage_solve(fl::QTTFlow, fr::QTTFrames, S::AbstractMatrix, t::Real, 
     dims = [size(S) for _ in 1:s]
     nS = max(norm(S), eps())
     nfield, ngm, trho, res = 0, 0, 0.0, Inf
+    n = length(S)
+    Pf = nothing
+    if precond === :auto && s * n <= _STAGE_PRECOND_MAX
+        A0c = frame_state(fr, S)
+        J1, _ = flow_jac_ops(fl, A0c, t + h / 2)
+        M = frame_operator_matrix(fr, J1)
+        mu0 = fl isa GPFlow && fl.normalized ? real(dot(vec(S), M * vec(S))) / max(norm(S)^2, eps()) : 0.0
+        Jl = fl.pref .* (M - mu0 * I)
+        Pf = lu(Matrix{ComplexF64}(I, s * n, s * n) .- h .* kron(A, Jl))
+    end
+    applyP(x) = Pf === nothing ? x : begin
+        z = vcat((vec(D) for D in _unpack(x, dims))...)
+        w = Pf \ z
+        _pack([reshape(w[((j - 1) * n + 1):(j * n)], dims[j]) for j in 1:s])
+    end
     for it in 0:maxnewton
         Gs, mus = Matrix{ComplexF64}[], Float64[]
         for l in 1:s
@@ -313,7 +360,8 @@ function rk_stage_solve(fl::QTTFlow, fr::QTTFrames, S::AbstractMatrix, t::Real, 
         res = sqrt(sum(norm(r)^2 for r in R)) / nS
         if res <= tol || it == maxnewton
             return Y, (newton = it, gmres = ngm, residual = res, converged = res <= tol,
-                       nfield = nfield, t_rho = trho, mu = mus[end])
+                       nfield = nfield, t_rho = trho, mu = mus[end],
+                       precond = Pf === nothing ? :none : :linear_part)
         end
         Js = [reduced_jacobian(fl, fr, Y[l], t + tab.c[l] * h, mus[l]) for l in 1:s]
         op = function (x)
@@ -321,13 +369,19 @@ function rk_stage_solve(fl::QTTFlow, fr::QTTFrames, S::AbstractMatrix, t::Real, 
             JD = [any(!iszero, A[:, l]) ? Js[l](D[l]) : zero(D[l]) for l in 1:s]
             return _pack([D[j] .- h .* sum(A[j, l] .* JD[l] for l in 1:s) for j in 1:s])
         end
-        dx, gi, _ = _gmres_real(op, -_pack(R); tol = Float64(gmres_tol), maxiter = gmres_maxiter)
+        # right preconditioning: solve (op o P^-1) y = -R, then dx = P^-1 y
+        dy, gi, _ = _gmres_real(x -> op(applyP(x)), -_pack(R); tol = Float64(gmres_tol),
+                                maxiter = gmres_maxiter)
+        dx = applyP(dy)
         ngm += gi
         Y = [Y[j] .+ D for (j, D) in enumerate(_unpack(dx, dims))]
     end
 end
 
 # ── the nonlinear BUG step ──
+
+"Safety factor on the local-Krylov share of `tol_basis` in `qtt_bug_step!` (plan §1.3)."
+const _QTT_KRYLOV_MARGIN = 0.5
 
 "Overwrite `psi` with `src` (same length)."
 function _replace_state!(psi::SymMPS, src::SymMPS)
@@ -372,12 +426,36 @@ function qtt_bug_step!(psi::SymMPS, fl::QTTFlow, t::Real, h::Real; order::Int = 
     mu_n = real(_op_expect(Hn, A0)) / max(tt_norm(A0)^2, eps())
     Hmpo = qtt_to_mpo(Hn)
     tau = ComplexF64(fl.pref * h)
+    # plan §1.3: the adaptive local-Krylov stop overshot its target in 3/54 XX cases, so its share
+    # is held to `_QTT_KRYLOV_MARGIN * tol_basis` unless `tol_krylov` is passed (no depth knob)
+    tk = Float64(get(kwargs, :tol_krylov, _QTT_KRYLOV_MARGIN * tol_basis))
+    kw = Base.structdiff(values(kwargs), NamedTuple{(:tol_krylov,)})
+    nfallback = 0
+    gkry = nothing
     function frames(keep)
         fref = Ref{Any}(nothing)
-        cbe_bug_step!(copy(psi), Hmpo, tau; order = order, tol_basis = Float64(tol_basis),
-                      tol_trunc = Float64(tol_trunc), maxdim = maxdim, hermitian = false,
-                      frames_report = fref, keep_states = keep, truncate = false,
-                      eshift = mu_n, kwargs...)
+        run(ord, ks) = cbe_bug_step!(copy(psi), Hmpo, tau; order = ord,
+                                     tol_basis = Float64(tol_basis), tol_trunc = Float64(tol_trunc),
+                                     maxdim = maxdim, hermitian = false, frames_report = fref,
+                                     keep_states = ks, truncate = false, eshift = mu_n,
+                                     tol_krylov = tk, kw...)
+        try
+            run(order, keep)
+        catch err
+            # The order-p frontier closure can carry an old frame wider than a near-saturated
+            # site's new local space (qt1c: GP L = 12 order 4, "frame holds 36 directions ... local
+            # 16", in `_frontier_right`). The equivalent order-p basis -- order-1 frames that keep
+            # the global Krylov vectors (tau H)^j psi, j < p, exactly (dissipative plan U10) -- is
+            # used instead and counted (`basis_fallback`).
+            order > 1 && occursin("cannot exceed its local space", sprint(showerror, err)) ||
+                rethrow()
+            nfallback += 1
+            if gkry === nothing
+                gkry = global_krylov_states(Hmpo, psi, order - 1; tol_trunc = Float64(keep_tol),
+                                            maxdim = 4 * maxdim)
+            end
+            run(1, vcat(Any[keep...], Any[gkry...]))
+        end
         return QTTFrames(fref[])
     end
     tb0 = time_ns()
@@ -418,6 +496,7 @@ function qtt_bug_step!(psi::SymMPS, fl::QTTFlow, t::Real, h::Real; order::Int = 
     return (stats = stats, converged = all(s.converged for s in stats),
             frame_width = (size(fr.W[end], 3), size(fr.Z[1], 1)), discarded = cum,
             rank_capped = capped, t_basis = t_basis, t_root = t_root, t_rho0 = hinfo.t_rho,
+            basis_fallback = nfallback,
             t_step = (time_ns() - t0) / 1e9, chi = maximum(bond_dims(psi); init = 1),
             root = root, order = order)
 end

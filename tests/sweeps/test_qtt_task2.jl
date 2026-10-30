@@ -128,7 +128,13 @@ end
         Rd = F.vectors * Diagonal(Rz[meth].(F.values)) / F.vectors
         Ys, st = rk_stage_solve(GPFlow(m), frc, S0, 0.0, h, meth; tol = 1e-13)
         @test st.converged && st.newton <= 2                  # linear: Newton exact in one pass
+        @test st.precond === :linear_part
         @test _relerr(vec(tt_dense(frame_state(frc, Ys[end]))), Rd * v0) < 1e-10
+        Yn, sn = rk_stage_solve(GPFlow(m), frc, S0, 0.0, h, meth; tol = 1e-13, precond = :none)
+        @test sn.precond === :none && sn.converged
+        @test _relerr(Yn[end], Ys[end]) < 1e-10
+        println("V01 $meth stage GMRES iterations: preconditioned $(st.gmres), plain $(sn.gmres)")
+        @test st.gmres <= sn.gmres
     end
     # BUG p = 2/3/4 against the exact discrete flow, two step sizes: the error falls
     T = 0.4

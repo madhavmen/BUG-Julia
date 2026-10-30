@@ -140,7 +140,7 @@ function bond_rows!(rows, name, L, chi, g, C, m, tau, i, tag)
                 nmet += met
                 nfalse += (met && alloc.scale * miss > alloc.sample) ? 1 : 0
                 push!(st_cols, kc.n_stream_cols); push!(st_dirs, ex.n_new_l); push!(st_qr, kc.n_qr)
-                mem === nothing || (branch = String(mem.trace[end].branch))
+                mem === nothing || isempty(mem.trace) || (branch = String(mem.trace[end].branch))
             end
             # warm timing: 3 repeats after one JIT call, same seed
             run_arm(arm, b, alloc, 1; mem = arm in (:D3, :D3warm) ? DDMemory() : nothing)

@@ -154,7 +154,7 @@ while t < TEND - 1e-12
         if ehat > TARGET || (hasproperty(r, :converged) && !r.converged)
             accepted, reason = false, ehat > TARGET ? :step_error : :stage
         else
-            _replace_state!(psi, halfs)
+            RC._replace_state!(psi, halfs)
         end
     else
         r = one_step!(psi, t, hh)
