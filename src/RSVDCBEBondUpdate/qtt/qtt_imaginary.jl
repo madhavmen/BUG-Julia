@@ -1,5 +1,6 @@
 # ── GP ground states: imaginary-time BUG, QTT-TDVP and QTT gradient descent (QTT plan §3.1) ──
-# The normalised gradient flow d_tau psi = -(H0 + g|psi|^2 - mu[psi]) psi with the SAME implicit BUG
+# Imaginary time d_tau psi = -(H0 + g|psi|^2) psi, the density rebuilt at every stage as in real
+# time (or the normalised gradient flow with mu[psi], `normalized_flow`), with the SAME implicit BUG
 # p2/3/4 under two schedules -- uniform and geometric -- and two baselines, compared on the energy
 # and stationarity residual reached per WALL second, never per step count. Every method renormalises
 # in the physical quadrature after each accepted step and rejects (halves) a step whose stage solve
@@ -19,19 +20,22 @@ geometric_schedule(h0::Real, q::Real, hmax::Real, n::Int) =
 
 """
     gp_ground_state!(psi, m, schedule; method = :bug, order = 2, maxdim = 128, tol_trunc = 1e-10,
-                     tol_basis = 1e-8, max_reject = 6, kwargs...) -> Vector{NamedTuple}
+                     tol_basis = 1e-8, max_reject = 6, normalized_flow = false, kwargs...)
+        -> Vector{NamedTuple}
 
-Imaginary-time relaxation along `schedule` (`:bug` = `qtt_bug_step!` of the normalised GP flow,
-`:tdvp` = `qtt_tdvp2_step!` lagged). A step is REJECTED and retried at half the step when its stage
-solve does not converge or the normalised energy increases beyond roundoff; the ledger records
-every accepted and rejected attempt with energy, mu, R_mu, chi and wall time.
+Imaginary-time relaxation along `schedule` (`:bug` = `qtt_bug_step!`, `:tdvp` = `qtt_tdvp2_step!`
+lagged). The flow is the real-time one in imaginary time, `-H[psi] psi` with the nonlinear density
+rebuilt at every stage (USER 10-30), renormalised after each step; `normalized_flow = true` steps
+the normalised gradient flow with `mu[psi]` inside instead. A step is REJECTED and retried at half
+the step when its stage solve does not converge or the normalised energy increases beyond roundoff;
+the ledger records every accepted and rejected attempt with energy, mu, R_mu, chi and wall time.
 """
 function gp_ground_state!(psi::SymMPS, m::GPModel, schedule::AbstractVector;
                           method::Symbol = :bug, order::Int = 2, maxdim::Int = 128,
                           tol_trunc::Real = 1e-10, tol_basis::Real = 1e-8, max_reject::Int = 6,
-                          kwargs...)
+                          normalized_flow::Bool = false, kwargs...)
     method in (:bug, :tdvp) || throw(ArgumentError("method must be :bug or :tdvp, got :$method"))
-    fl = GPFlow(m; imaginary = true)
+    fl = GPFlow(m; imaginary = true, normalized = normalized_flow)
     g = m.grid
     qtt_normalize!(psi, g)
     obs = gp_observables(m, qtt_cores(psi), 0.0)

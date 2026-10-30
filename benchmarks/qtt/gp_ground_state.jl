@@ -10,7 +10,7 @@
 #
 # ENV: T3G_OUT, T3G_N (7), T3G_BOX (10), T3G_CASES ("harmonic,trapped,rotating"), T3G_STEPS (60),
 #      T3G_H (0.1), T3G_H0 (0.01), T3G_Q (1.3), T3G_HMAX (1.0), T3G_MAXDIM (128), T3G_ORDERS ("2,3,4"),
-#      T3G_BASELINES ("": none; "tdvp,gd" adds them)
+#      T3G_BASELINES ("": none; "tdvp,gd" adds them), T3G_NORMALIZED (0: -H[psi] psi + renormalise)
 
 include(joinpath(@__DIR__, "common.jl"))
 
@@ -22,6 +22,9 @@ const NST = envi("T3G_STEPS", 60)
 const MAXD = envi("T3G_MAXDIM", 128)
 const ORDERS = round.(Int, envlist("T3G_ORDERS", "2,3,4"))
 const BASELINES = Symbol.(filter(!isempty, split(envs("T3G_BASELINES", ""), ",")))
+# USER 10-30: the real-time flow in imaginary time (density MPO rebuilt per stage) + renormalise;
+# 1 steps the normalised gradient flow with mu[psi] inside instead
+const NORMALIZED = envi("T3G_NORMALIZED", 0) == 1
 mkpath(OUT)
 
 g = qtt_grid(N, N; x = (-BOX, BOX), y = (-BOX, BOX))
@@ -60,7 +63,8 @@ for case in CASES
         lg = meth === :gd ?
              [merge(e, (accepted = true, rejected = 0)) for e in
               gp_gradient_descent!(psi, m; maxiter = 20 * NST, maxdim = MAXD)] :
-             gp_ground_state!(psi, m, sched; method = meth, order = p, maxdim = MAXD)
+             gp_ground_state!(psi, m, sched; method = meth, order = p, maxdim = MAXD,
+                              normalized_flow = NORMALIZED)
         for e in lg
             push!(hist, merge((case = case, method = name, p = p), e,
                               (E_err = e.E - Ex, mu_err = e.mu - mux)))

@@ -136,6 +136,25 @@ end
         println("V01 $meth stage GMRES iterations: preconditioned $(st.gmres), plain $(sn.gmres)")
         @test st.gmres <= sn.gmres
     end
+    # imaginary time on the real-time flow's field -H0 psi (no mu, USER 10-30): the same RK maps
+    fli = GPFlow(m; imaginary = true, normalized = false)
+    @test fli.pref == -1 && !fli.normalized && GPFlow(m; imaginary = true).normalized
+    Hd = op_dense(m.H0)
+    Fi = eigen(-h .* Hd)
+    for meth in (:trapezoid, :radau2, :radau3)
+        Rd = Fi.vectors * Diagonal(Rz[meth].(Fi.values)) / Fi.vectors
+        Ys, st = rk_stage_solve(fli, frc, S0, 0.0, h, meth; tol = 1e-13)
+        @test st.converged
+        @test _relerr(vec(tt_dense(frame_state(frc, Ys[end]))), Rd * v0) < 1e-10
+    end
+    # ... and the BUG ground state on it, renormalised per step, reaches the discrete ground state
+    lmin = minimum(eigvals(Hermitian((Hd + Hd') / 2)))
+    lg = gp_ground_state!(qtt_mps(A0), m, uniform_schedule(0.5, 40); order = 3, maxdim = 64)
+    acc = filter(e -> e.accepted, lg)
+    println("V01 ground state E $(acc[end].E) vs discrete lambda_min $lmin, rejected ",
+            count(e -> !e.accepted, lg))
+    @test all(k -> acc[k + 1].E <= acc[k].E + 1e-10 * abs(acc[k].E), 1:(length(acc) - 1))
+    @test abs(acc[end].E - lmin) < 1e-6 * abs(lmin)
     # BUG p = 2/3/4 against the exact discrete flow, two step sizes: the error falls
     T = 0.4
     vT = exp(T .* Gd) * v0

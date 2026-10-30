@@ -1,7 +1,8 @@
 # ── full nonlinear stages: BUG roots and the TDVP2 baselines (QTT plan, Tasks 2.3A and 2.4) ──
 # A FLOW is the vector field d_t psi = F(t, psi) = pref * (H[psi, t] psi - mu[psi] psi):
 #   GPFlow, real time:      pref = -i - gamma, mu = 0 (the model's own mu sits in H0)
-#   GPFlow, imaginary time: pref = -1, mu[psi] = <psi, H psi> / <psi, psi> (normalised gradient flow)
+#   GPFlow, imaginary time: pref = -1, mu = 0 (the ground state renormalises after each step) or
+#                           mu[psi] = <psi, H psi> / <psi, psi> (`normalized`: the gradient flow)
 #   LinearFlow:             a state-independent H (linear GP, Heston), mu = 0
 # H[psi, t] is rebuilt from the state it acts on at EVERY evaluation -- every Radau stage iterate,
 # every TDVP substep in the consistent mode. The real-linear Jacobian is
@@ -12,18 +13,19 @@
 abstract type QTTFlow end
 
 """
-    GPFlow(m; imaginary = false)
+    GPFlow(m; imaginary = false, normalized = imaginary)
 
-The damped GP flow of `m` in real time, or the normalised imaginary-time gradient flow
-`d_tau psi = -(H[psi] - mu[psi]) psi`.
+The damped GP flow of `m` in real time, or in imaginary time `d_tau psi = -(H[psi] - mu[psi]) psi`
+(the normalised gradient flow); `normalized = false` drops `mu[psi]`, leaving the real-time flow's
+field `-H[psi] psi` with its density rebuilt at every stage, the norm restored by the caller.
 """
 struct GPFlow <: QTTFlow
     m::GPModel
     pref::ComplexF64
     normalized::Bool
 end
-GPFlow(m::GPModel; imaginary::Bool = false) =
-    imaginary ? GPFlow(m, ComplexF64(-1), true) : GPFlow(m, ComplexF64(-1im - m.gamma), false)
+GPFlow(m::GPModel; imaginary::Bool = false, normalized::Bool = imaginary) =
+    GPFlow(m, imaginary ? ComplexF64(-1) : ComplexF64(-1im - m.gamma), normalized)
 
 "`F = pref H psi` for a fixed operator (cores)."
 struct LinearFlow <: QTTFlow
