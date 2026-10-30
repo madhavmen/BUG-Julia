@@ -330,6 +330,9 @@ end
     # H[psi, t] and F(psi) against dense
     H1, _ = gp_hamiltonian_op(m, A1, t)
     @test _relerr(op_dense(H1), Hl + m.g * Diagonal(abs2.(v1))) < 1e-11
+    # H psi by the zip-up apply (never the exact w chi cores) == dense
+    HA, _ = op_zipup(H1, A1; tol = 1e-13)
+    @test _relerr(vec(tt_dense(HA)), op_dense(H1) * v1) < 1e-11
     @test _relerr(vec(tt_dense(gp_vector_field(m, A1, t))), Fd(v1)) < 1e-10
     # g = 0 is the linear path exactly
     m0 = gp_model(g; gnl = 0.0, gamma = 0.1, mu = 0.4, omega = 1.0, paddle = pad)

@@ -190,4 +190,29 @@ end
     end
 end
 
+@testset "keep-state union: a state inside a near-isometric frame adds nothing" begin
+    # qt1f: a kept state inside the span of a frame with a small isometry defect was appended as
+    # a full column still inside the span -- frames outgrew their local space (48 on a 32-dim
+    # bond) and the Galerkin step lost the Heston mass.
+    f, skl, _ = _xx_bond()
+    U0, V0 = f.U0, f.V0
+    for d in (1e-11, 1e-8)
+        Ud = to_concrete((1 + d) * U0)                  # spans U0; ||Q'Q - I|| ~ 2d
+        @test leg_dim(RC._union_left(Ud, to_concrete(setitag(Ud, 3, "kx"))), 3) == leg_dim(U0, 3)
+        Vd = to_concrete((1 + d) * V0)
+        @test leg_dim(RC._union_right(Vd, to_concrete(setitag(Vd, 1, "kx"))), 1) == leg_dim(V0, 1)
+    end
+    # a genuinely new direction is still appended, exactly as the preselection admits it
+    Y = to_concrete(skl(full_local_basis(V0, :right)))
+    Q, _ = RC._preselect_left(U0, Y, 1e-14)
+    @test Q !== nothing
+    Uu = RC._union_left(U0, Y)
+    @test leg_dim(Uu, 3) == leg_dim(U0, 3) + leg_dim(Q, 3)
+    # still isometric: tr(Uu'Uu) = ||Uu||^2 = k and ||Uu'Uu||^2 = k force every eigenvalue to 1
+    k = leg_dim(Uu, 3)
+    G = to_concrete(contract(Uu', (1, 2), Uu, (1, 2)))
+    @test abs(norm(Uu)^2 - k) < 1e-10
+    @test abs(norm(G)^2 - k) < 1e-10
+end
+
 end # adaptive API (Stage 1)

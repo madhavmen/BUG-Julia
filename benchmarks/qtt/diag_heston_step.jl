@@ -5,13 +5,13 @@
 # state (copied as production.jl does) and grades every step against the dense exact exp(h H):
 # frame misses of the input and of the kept ones state, frame isometry, mass, and whether the state
 # or the kept state is mutated or a repeated step differs (hidden history).
-# ENV: DH_N (5), DH_OUT, DH_ORDERS (1,2,3), DH_HS (0.05,...,0.0015625)
+# ENV: DH_N (5), DH_OUT, DH_ORDERS (2,3,4: the nonlinear-BUG orders), DH_HS (0.05,...,0.0015625)
 
 include(joinpath(@__DIR__, "common.jl"))
 
 const N = envi("DH_N", 5)
 const OUT = envs("DH_OUT", "diag_heston")
-const ORDERS = Int.(envlist("DH_ORDERS", "1,2,3"))
+const ORDERS = Int.(envlist("DH_ORDERS", "2,3,4"))
 const HS = envlist("DH_HS", "0.05,0.025,0.0125,0.00625,0.003125,0.0015625")
 mkpath(OUT)
 

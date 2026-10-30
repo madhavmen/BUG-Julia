@@ -782,7 +782,7 @@ function qtt_split_tdvp_step!(psi::SymMPS, m::GPModel, t::Real, h::Real; maxdim:
     t0 = time_ns()
     diss(A, ts) = begin
         H, _ = gp_hamiltonian_op(m, A, ts)
-        first(tt_expv(X -> op_apply(H, X), A, -m.gamma * h / 2; maxdim = maxdim,
+        first(tt_expv(X -> first(op_zipup(H, X; tol = tol_krylov)), A, -m.gamma * h / 2; maxdim = maxdim,
                       tol = tol_krylov, tol_trunc = tol_trunc))
     end
     A = diss(qtt_cores(psi), t)

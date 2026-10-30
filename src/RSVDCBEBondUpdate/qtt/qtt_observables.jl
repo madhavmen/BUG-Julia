@@ -73,7 +73,7 @@ function gp_observables(m::GPModel, A::AbstractVector, t::Real; residual::Bool =
     H, _ = gp_hamiltonian_op(m, A, t)
     mu = real(_op_expect(H, A)) / max(n2, eps())
     # R_mu needs ||H psi||: the one compressed product here, skipped at production sizes
-    Rm = residual ? tt_norm(tt_lincomb([(1.0, first(tt_compress(op_apply(H, A); tol = 1e-12))),
+    Rm = residual ? tt_norm(tt_lincomb([(1.0, first(op_zipup(H, A; tol = 1e-12))),
                                         (-mu, A)]; tol = 1e-12)) / sqrt(max(n2, eps())) : NaN
     dtv = 1e-4
     Vf, Vb = gp_paddle_op(m, t + dtv), gp_paddle_op(m, max(t - dtv, 0.0))

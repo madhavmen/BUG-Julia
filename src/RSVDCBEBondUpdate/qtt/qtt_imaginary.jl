@@ -97,7 +97,7 @@ function gp_gradient_descent!(psi::SymMPS, m::GPModel; eta::Real = 0.05, maxiter
         o.R_mu < tol && break
         t1 = time_ns()
         H, _ = gp_hamiltonian_op(m, A, 0.0)
-        HA = op_apply(H, A)
+        HA, _ = op_zipup(H, A; tol = 0.1 * tol_trunc)
         mu = o.mu - m.mu
         local B, ob
         while true

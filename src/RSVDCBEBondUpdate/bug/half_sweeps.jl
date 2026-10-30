@@ -85,6 +85,24 @@ function _peak!(acc::_HalfAcc, held::Int, ts...)
     return nothing
 end
 
+# A state inside the span of a frame with isometry defect d leaves a residual of size d ||X||,
+# above `_preselect_*`'s 100 eps floor; normalised, it is a full column that still lies in the
+# span, and each later union widens the frame again (qt1f, QTT Heston order-1 fallback: a right
+# frame 48 wide on a 32-dim bond, ||Q'Q - I|| = 4, mass 1 -> 5.5). A direction is appended only
+# when one more projection keeps at least this share of it (twice is enough).
+const _UNION_KEEP = 0.5
+
+"The part of the orthonormal `Q` that one more projection off the frame `F` keeps, or `nothing`."
+function _union_fresh(F, Q, side::Symbol)
+    R = side === :left ? perp_component(F, Q) : perp_component_right(F, Q)
+    legs, t1, t2 = side === :left ? ((1, 2), _TAG_L, _TAG_LR) : ((2, 3), _TAG_R, _TAG_RR)
+    res = svd(R, legs, t1, t2; cutoff = 1e-13, get_lists = true)
+    smax = maximum(first, res.kept_list; init = 0.0)
+    smax < _UNION_KEEP && return nothing
+    U = to_concrete(svd(R, legs, t1, t2; cutoff = _UNION_KEEP / smax).U)
+    return side === :left ? U : to_concrete(permutedims(U, (3, 1, 2)))
+end
+
 """
 Union `Wk` (the basis update's output) with `U0` (the CBE frame), on the LEFT.
 
@@ -95,11 +113,15 @@ ordinary case once the two already span the same space.
 function _union_left(U0, Wk)
     Q, _ = _preselect_left(U0, Wk, 1e-14)
     Q === nothing && return U0
+    Q = _union_fresh(U0, Q, :left)
+    Q === nothing && return U0
     return to_concrete(oplus([U0, to_concrete(setitag(Q, 3, U0.inds[3].itags))], (3,)))
 end
 "Row mirror of [`_union_left`](@ref): the bond leg is 1 and the direct sum is over it."
 function _union_right(V0, Zk)
     Q, _ = _preselect_right(V0, Zk, 1e-14)
+    Q === nothing && return V0
+    Q = _union_fresh(V0, Q, :right)
     Q === nothing && return V0
     return to_concrete(oplus([V0, to_concrete(setitag(Q, 1, V0.inds[1].itags))], (1,)))
 end

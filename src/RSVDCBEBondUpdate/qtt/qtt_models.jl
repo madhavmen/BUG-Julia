@@ -208,7 +208,7 @@ end
 """
 function gp_vector_field(m::GPModel, A::AbstractVector, t::Real; tol::Real = 1e-12)
     H, _ = gp_hamiltonian_op(m, A, t)
-    return first(tt_compress(tt_scale(op_apply(H, A), -1im - m.gamma); tol = tol))
+    return tt_scale(first(op_zipup(H, A; tol = tol)), -1im - m.gamma)
 end
 
 """
@@ -221,12 +221,13 @@ dA, t)` whenever `g != 0`. For Newton-Krylov stage solves only; the CBE always s
 """
 function gp_jvp(m::GPModel, A::AbstractVector, dA::AbstractVector, t::Real; tol::Real = 1e-12)
     Hl = gp_linear_op(m, t)
-    lin = op_apply(Hl, dA)
-    m.g == 0 && return first(tt_compress(tt_scale(lin, -1im - m.gamma); tol = tol))
+    lin, _ = op_zipup(Hl, dA; tol = tol)
+    m.g == 0 && return tt_scale(lin, -1im - m.gamma)
     rho, _ = gp_density(m, A)
     psi2, _ = tt_product(A, A; tol = m.rho_tol)
-    t1 = op_apply(op_diag(rho), dA)
-    t2 = op_apply(op_diag(psi2), tt_conj(dA))
+    # diag(f) dA = f .* dA: zip-up products, never the exact chi_rho chi_dA cores
+    t1, _ = tt_product(rho, dA; tol = tol)
+    t2, _ = tt_product(psi2, tt_conj(dA); tol = tol)
     acc = tt_lincomb([(1.0, lin), (2 * m.g, t1), (m.g, t2)]; tol = tol)
     return first(tt_compress(tt_scale(acc, -1im - m.gamma); tol = tol))
 end

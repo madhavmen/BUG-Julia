@@ -206,7 +206,8 @@ density build as a dominant `O(D^4)` cost, so its time is returned for the step 
 function tt_density(A0::AbstractVector; tol::Real = 1e-12, maxdim::Int = typemax(Int))
     t0 = time_ns()
     A, _ = tt_compress(A0; tol = 0.0)
-    return _product_rc(A, tt_conj(A), tol, maxdim, t0)
+    B = tt_conj(A)
+    return _zip_rc(t -> _product_zipup(A, B, t, maxdim), tol, maxdim, t0)
 end
 
 """
@@ -221,15 +222,15 @@ function tt_product(A0::AbstractVector, B0::AbstractVector; tol::Real = 1e-12,
     t0 = time_ns()
     A, _ = tt_compress(A0; tol = 0.0)
     B = B0 === A0 ? A : first(tt_compress(B0; tol = 0.0))
-    return _product_rc(A, B, tol, maxdim, t0)
+    return _zip_rc(t -> _product_zipup(A, B, t, maxdim), tol, maxdim, t0)
 end
 
-"The zip-up product of right-canonical `A`, `B`, retried once at a tighter cut, recompressed."
-function _product_rc(A, B, tol::Real, maxdim::Int, t0)
-    C, bound = _product_zipup(A, B, tol, maxdim)
+"A zip-up `zip(tol) -> (C, bound)`, retried once at a tighter cut, recompressed."
+function _zip_rc(zip, tol::Real, maxdim::Int, t0)
+    C, bound = zip(tol)
     retried = false
     if bound > tol && tol > 0
-        C, bound = _product_zipup(A, B, 0.25 * tol * tol / bound, maxdim)
+        C, bound = zip(0.25 * tol * tol / bound)
         retried = true
     end
     C, d2 = tt_compress(C; tol = 0.1 * tol, maxdim = maxdim)
@@ -368,6 +369,56 @@ function op_apply(W::AbstractVector, A::AbstractVector)
         C[k] = c
     end
     return C
+end
+
+"""
+    op_zipup(W, A; tol = 1e-12, maxdim) -> (C, info)
+
+`W * A` compressed by a left zip-up over a right-canonical copy of `A`, with the retry and `info`
+of [`tt_product`](@ref): never the exact `w chi` cores of [`op_apply`](@ref), which with the GP's
+density term (`w ~ chi_rho`) reach GBs per core (qt1f T3G gradient descent OOM at 16 G, chi 93).
+The per-bond tails bound the error only when `W`'s right parts are contractions, so the bound
+is an estimate for a general operator (tested against `op_apply` + `tt_compress`).
+"""
+function op_zipup(W::AbstractVector, A0::AbstractVector; tol::Real = 1e-12,
+                  maxdim::Int = typemax(Int))
+    t0 = time_ns()
+    A, _ = tt_compress(A0; tol = 0.0)
+    return _zip_rc(t -> _apply_zipup(W, A, t, maxdim), tol, maxdim, t0)
+end
+
+function _apply_zipup(W::AbstractVector, A::AbstractVector, tol::Real, maxdim::Int)
+    L = length(A)
+    T = promote_type(eltype(W[1]), eltype(A[1]))
+    R = ones(T, 1, 1, 1)                                 # (r, a, w) -- a for A, w for W
+    C = Vector{Array{T, 3}}(undef, L)
+    disc = 0.0
+    for k in 1:L
+        w, a = W[k], A[k]
+        cal, d, car = size(a)
+        cwl, dout, _, cwr = size(w)
+        r = size(R, 1)
+        # Y[r, w, i, a'] = sum_a R[r, a, w] A[a, i, a']
+        Y = reshape(reshape(permutedims(R, (1, 3, 2)), r * cwl, cal) * reshape(a, cal, d * car),
+                    r, cwl, d, car)
+        # Tk[r, o, a', w'] = sum_{w, i} Y[r, w, i, a'] W[w, o, i, w']
+        Yp = reshape(permutedims(Y, (1, 4, 2, 3)), r * car, cwl * d)
+        Wp = reshape(permutedims(w, (1, 3, 2, 4)), cwl * d, dout * cwr)
+        Tk = permutedims(reshape(Yp * Wp, r, car, dout, cwr), (1, 3, 2, 4))
+        if k == L
+            C[k] = reshape(Tk, r, dout, 1)
+            break
+        end
+        M = reshape(Tk, r * dout, car * cwr)
+        F = svd(M)
+        delta = tol * norm(F.S) / sqrt(max(L - 1, 1))
+        rr = _qtt_rank(F.S, delta, maxdim)
+        disc += sqrt(sum(abs2, @view(F.S[(rr + 1):end]); init = 0.0))
+        C[k] = reshape(F.U[:, 1:rr], r, dout, rr)
+        R = reshape(Diagonal(F.S[1:rr]) * F.Vt[1:rr, :], rr, car, cwr)
+    end
+    nr = norm(C[L])
+    return C, (nr > disc ? disc / (nr - disc) : (disc > 0 ? Inf : 0.0))
 end
 
 """
