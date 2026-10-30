@@ -71,7 +71,8 @@ for ord in ORDERS, h in HS
     write_csv(joinpath(OUT, "diag_heston_step.csv"), rows)
 end
 # hidden history: the first full step of each order, repeated after all the others
-for (ord, (h, C)) in sort(collect(first_full))
+# by key: Pair's isless evaluates the value comparison too (qt1h: isless on core arrays)
+for (ord, (h, C)) in sort(collect(first_full); by = first)
     full = copy(psi)
     step!(full, 0.0, h, ord)
     println("HISTORY order $ord h $h: repeat bitwise = $(qtt_cores(full) == C)  " *

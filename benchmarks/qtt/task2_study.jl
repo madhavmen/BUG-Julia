@@ -66,7 +66,10 @@ if PART in ("orders", "all")
             el = err_vs(p1, pr, ref1)
             push!(rows, (part = :orders, problem = pr.name, arm = Symbol("bug$p"), p = p, h = h,
                          err_global = eg, err_local = el, wall = time() - t0,
-                         chi = maximum(bond_dims(psi)), newton = sum(i.stats[end].newton for i in info),
+                         chi = maximum(bond_dims(psi)), chi_max = maximum(i.chi for i in info),
+                         frame_defect = maximum(i.frame_defect for i in info),
+                         fallback = sum(i.basis_fallback for i in info),
+                         newton = sum(i.stats[end].newton for i in info),
                          gmres = sum(i.stats[end].gmres for i in info),
                          converged = all(i.converged for i in info)))
             println(rows[end]); flush(stdout)
@@ -178,7 +181,10 @@ if PART in ("tdvp", "all")
                               err = err_vs(psi, pr, refT),
                               A_max = hasproperty(rs[1], :A_max) ? maximum(r.A_max for r in rs) : NaN,
                               norm_ratio = norm(psi) / tt_norm(A0), wall = time() - t0,
-                              chi = maximum(bond_dims(psi))))
+                              chi = maximum(bond_dims(psi)),
+                              chi_max = maximum(r -> hasproperty(r, :chi) ? r.chi : 0, rs),
+                              frame_defect = hasproperty(rs[1], :frame_defect) ?
+                                             maximum(r.frame_defect for r in rs) : NaN))
                 println(drows[end]); flush(stdout)
             end
         end

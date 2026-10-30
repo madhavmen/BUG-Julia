@@ -161,6 +161,38 @@ end
             _relerr(qtt_values(tt_from_dense(reshape(vT, ntuple(_ -> 2, 6))), g), an))
 end
 
+@testset "V05: an order-2 stage inside the frames keeps them isometric (t2s1)" begin
+    # The trapezoid's first stage is the projected input, inside the frames; the basis correction
+    # keeps it, and the keep-state union appended its rounding as new columns. t2s1 (this start,
+    # N = 6, h = 0.05): BUG p = 2 grew the damped linear flow's norm 3.5x, err 3.3, chi 16 -> 31,
+    # while p = 3/4 stayed at 1e-4/2e-7 and chi 16. Graded without a reference: the flow contracts.
+    g = qtt_grid(6, 6; x = (-8.0, 8.0), y = (-8.0, 8.0))
+    m = gp_model(g; gnl = 0.0, gamma = 0.1, mu = 0.0, omega = 1.0)
+    osc(n, x) = n == 0 ? pi^(-0.25) * exp(-x^2 / 2) : n == 1 ? sqrt(2) * x * osc(0, x) :
+                sqrt(2 / n) * x * osc(n - 1, x) - sqrt((n - 1) / n) * osc(n - 2, x)
+    rng = Random.MersenneTwister(1)                    # the study's rank_rich_state(g), seed 1
+    terms = Any[]
+    for mx in 0:4, my in 0:4
+        c = (randn(rng) + 1im * randn(rng)) / (1 + mx + my)^2
+        push!(terms, (c, qtt_separable(g, x -> osc(mx, x), y -> osc(my, y))))
+    end
+    A0 = tt_lincomb(terms; tol = 1e-13)
+    runs = map((2, 4)) do p
+        psi, infos = qtt_mps(A0), Any[]
+        for k in 0:7
+            push!(infos, qtt_bug_step!(psi, GPFlow(m), k * 0.05, 0.05; order = p, maxdim = 128,
+                                       tol_basis = 1e-9, tol_trunc = 1e-11, tol_stage = 1e-11))
+        end
+        (psi = psi, infos = infos)
+    end
+    (p2, i2), (p4, _) = runs
+    println("V05 p=2 frame defects $([i.frame_defect for i in i2]) chi $([i.chi for i in i2])")
+    @test all(i -> i.frame_defect < 1e-10, i2)
+    @test tt_norm(qtt_cores(p2)) <= tt_norm(A0)
+    @test _relerr(vec(tt_dense(qtt_cores(p2))), vec(tt_dense(qtt_cores(p4)))) < 1e-2
+    @test maximum(bond_dims(p2)) <= maximum(bond_dims(p4)) + 4
+end
+
 @testset "V02: nonlinear dissipative plane wave and a modulated state" begin
     n = 3
     g = qtt_grid(n, n; x = (0.0, 2pi), y = (0.0, 2pi))

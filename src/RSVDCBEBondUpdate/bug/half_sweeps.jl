@@ -89,21 +89,28 @@ end
 # above `_preselect_*`'s 100 eps floor; normalised, it is a full column that still lies in the
 # span, and each later union widens the frame again (qt1f, QTT Heston order-1 fallback: a right
 # frame 48 wide on a 32-dim bond, ||Q'Q - I|| = 4, mass 1 -> 5.5). A direction is appended only
-# when one more projection keeps at least this share of it (twice is enough). The preselection
-# runs at the numerical floor (`stol = 0`, measured against the whole state): a fixed relative cut
-# is measured against that tiny residual, so rounding noise outside the frame passed it as new
-# directions (qt1g: a 13-wide frame grew to 16 from a state inside it).
+# when one more projection keeps at least this share of it (twice is enough), tested on the first
+# projection's basis itself: `_preselect_*`'s RepairOrtho re-SVDs the second projection relative
+# to its own largest value, which turns the ~eps ||X|| rounding of an in-span residual into full
+# columns genuinely outside the frame (qt1g/qt1h: a 13-wide frame grew to 16 from a state inside
+# it). The first cut is the preselection's numerical floor, measured against the whole state.
 const _UNION_KEEP = 0.5
 
-"The part of the orthonormal `Q` that one more projection off the frame `F` keeps, or `nothing`."
-function _union_fresh(F, Q, side::Symbol)
-    R = side === :left ? perp_component(F, Q) : perp_component_right(F, Q)
-    legs, t1, t2 = side === :left ? ((1, 2), _TAG_L, _TAG_LR) : ((2, 3), _TAG_R, _TAG_RR)
+"Orthonormal directions of `Y` outside the frame `F` that survive a second projection, or `nothing`."
+function _union_fresh(F, Y, side::Symbol)
+    left = side === :left
+    perp = left ? perp_component : perp_component_right
+    legs, t1, t2 = left ? ((1, 2), _TAG_L, _TAG_LR) : ((2, 3), _TAG_R, _TAG_RR)
+    orient = U -> to_concrete(left ? U : permutedims(U, (3, 1, 2)))
+    R = perp(F, Y)
+    n = norm(R)
+    n <= _CBE_EPS * max(norm(Y), 1.0) && return nothing
+    Q = orient(svd(to_concrete((1.0 / n) * R), legs, t1, t2; cutoff = _rank_cut(0.0, Y, n)).U)
+    R = perp(F, Q)
     res = svd(R, legs, t1, t2; cutoff = 1e-13, get_lists = true)
     smax = maximum(first, res.kept_list; init = 0.0)
     smax < _UNION_KEEP && return nothing
-    U = to_concrete(svd(R, legs, t1, t2; cutoff = _UNION_KEEP / smax).U)
-    return side === :left ? U : to_concrete(permutedims(U, (3, 1, 2)))
+    return orient(svd(R, legs, t1, t2; cutoff = _UNION_KEEP / smax).U)
 end
 
 """
@@ -114,17 +121,13 @@ appended -- `_preselect_left` returns `nothing` when there is nothing to append,
 ordinary case once the two already span the same space.
 """
 function _union_left(U0, Wk)
-    Q, _ = _preselect_left(U0, Wk, 0.0)
-    Q === nothing && return U0
-    Q = _union_fresh(U0, Q, :left)
+    Q = _union_fresh(U0, Wk, :left)
     Q === nothing && return U0
     return to_concrete(oplus([U0, to_concrete(setitag(Q, 3, U0.inds[3].itags))], (3,)))
 end
 "Row mirror of [`_union_left`](@ref): the bond leg is 1 and the direct sum is over it."
 function _union_right(V0, Zk)
-    Q, _ = _preselect_right(V0, Zk, 0.0)
-    Q === nothing && return V0
-    Q = _union_fresh(V0, Q, :right)
+    Q = _union_fresh(V0, Zk, :right)
     Q === nothing && return V0
     return to_concrete(oplus([V0, to_concrete(setitag(Q, 1, V0.inds[1].itags))], (1,)))
 end
