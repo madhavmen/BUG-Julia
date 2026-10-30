@@ -181,6 +181,27 @@ function frame_project(fr::QTTFrames, H, C::AbstractVector)
 end
 
 """
+    frame_miss(fr, X) -> Float64
+
+`||X - W W' X Z' Z|| / ||X||`: what the root space cannot hold of the TT `X` (zero when `X` is in
+the frames' span). The difference's norm is read after a QR sweep (`tt_compress`), because the
+Gram `<D, D>` of a direct sum is a cancellation floored near 1e-8.
+"""
+function frame_miss(fr::QTTFrames, X::AbstractVector)
+    nX = tt_norm(X)
+    nX > 0 || return 0.0
+    D = tt_add(X, tt_scale(frame_state(fr, frame_project(fr, nothing, X)), -1.0))
+    return norm(first(first(tt_compress(D)))) / nX
+end
+
+"Largest isometry defect `||Q'Q - I||` over the frame cores (`W` left, `Z` right)."
+function frame_defect(fr::QTTFrames)
+    dl(Q) = (M = reshape(Q, :, size(Q, 3)); opnorm(M' * M - I))
+    dr(Q) = (M = reshape(Q, size(Q, 1), :); opnorm(M * M' - I))
+    return max(maximum(dl, fr.W; init = 0.0), maximum(dr, fr.Z; init = 0.0))
+end
+
+"""
     frame_operator_matrix(fr, H) -> Matrix
 
 The root-space matrix of `W' H Z` (`vec(Y)` order, `Y[a, a2]` with `a` fastest), from the frames'
@@ -432,6 +453,16 @@ function qtt_bug_step!(psi::SymMPS, fl::QTTFlow, t::Real, h::Real; order::Int = 
     kw = Base.structdiff(values(kwargs), NamedTuple{(:tol_krylov,)})
     nfallback = 0
     gkry = nothing
+    # every frame set is audited: the step input and each `keep` state must lie in the span
+    # (Galerkin invariants, e.g. Heston mass, hold only then) and the cores must be isometric
+    keepC = [qtt_cores(X) for X in keep]
+    miss_in, miss_keep, defect = 0.0, 0.0, 0.0
+    function audit!(fr)
+        miss_in = max(miss_in, frame_miss(fr, A0))
+        miss_keep = max(miss_keep, maximum(X -> frame_miss(fr, X), keepC; init = 0.0))
+        defect = max(defect, frame_defect(fr))
+        return fr
+    end
     function frames(keep)
         fref = Ref{Any}(nothing)
         run(ord, ks) = cbe_bug_step!(copy(psi), Hmpo, tau; order = ord,
@@ -456,7 +487,7 @@ function qtt_bug_step!(psi::SymMPS, fl::QTTFlow, t::Real, h::Real; order::Int = 
             end
             run(1, vcat(Any[keep...], Any[gkry...]))
         end
-        return QTTFrames(fref[])
+        return audit!(QTTFrames(fref[]))
     end
     tb0 = time_ns()
     fr = frames(Any[keep...])
@@ -496,8 +527,8 @@ function qtt_bug_step!(psi::SymMPS, fl::QTTFlow, t::Real, h::Real; order::Int = 
     return (stats = stats, converged = all(s.converged for s in stats),
             frame_width = (size(fr.W[end], 3), size(fr.Z[1], 1)), discarded = cum,
             rank_capped = capped, t_basis = t_basis, t_root = t_root, t_rho0 = hinfo.t_rho,
-            basis_fallback = nfallback,
-            t_step = (time_ns() - t0) / 1e9, chi = maximum(bond_dims(psi); init = 1),
+            basis_fallback = nfallback, miss_input = miss_in, miss_keep = miss_keep,
+            frame_defect = defect, t_step = (time_ns() - t0) / 1e9, chi = maximum(bond_dims(psi); init = 1),
             root = root, order = order)
 end
 

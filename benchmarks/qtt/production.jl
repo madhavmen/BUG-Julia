@@ -89,13 +89,15 @@ else
      done_snaps = Float64[], ledger = NamedTuple[], snaps = NamedTuple[], wall = 0.0)
 end
 t, h, k = state.t, state.h, state.k
-psi = qtt_mps(state.cores)
+# the state itself, not `qtt_mps(cores)`: re-gauging is exact only to roundoff, and the
+# tolerance-driven rank decisions of the next step then differ (qt1d: 2.8e-6 after resume)
+psi = hasproperty(state, :psi) ? state.psi : qtt_mps(state.cores)
 ledger, snaprows, done = copy(state.ledger), copy(state.snaps), copy(state.done_snaps)
 wall0 = state.wall
 tstart = time()
 lastck = time()
 checkpoint() = serialize(ck, (config_hash = config_hash, t = t, h = h, k = k, cores = qtt_cores(psi),
-                              done_snaps = done, ledger = ledger, snaps = snaprows,
+                              psi = psi, done_snaps = done, ledger = ledger, snaps = snaprows,
                               wall = wall0 + time() - tstart))
 
 function one_step!(ps, t, hh)
@@ -171,6 +173,10 @@ while t < TEND - 1e-12
                    stage_res = hasproperty(r, :stats) ? r.stats[end].residual : NaN,
                    discarded = hasproperty(r, :discarded) ? r.discarded : NaN,
                    A_max = hasproperty(r, :A_max) ? r.A_max : NaN,
+                   miss_input = hasproperty(r, :miss_input) ? r.miss_input : NaN,
+                   miss_keep = hasproperty(r, :miss_keep) ? r.miss_keep : NaN,
+                   frame_defect = hasproperty(r, :frame_defect) ? r.frame_defect : NaN,
+                   basis_fallback = hasproperty(r, :basis_fallback) ? r.basis_fallback : 0,
                    t_basis = hasproperty(r, :t_basis) ? r.t_basis : NaN,
                    t_root = hasproperty(r, :t_root) ? r.t_root : NaN,
                    t_rho = hasproperty(r, :t_rho0) ? r.t_rho0 : NaN, wall = w,
