@@ -224,7 +224,7 @@ function gp_jvp(m::GPModel, A::AbstractVector, dA::AbstractVector, t::Real; tol:
     lin = op_apply(Hl, dA)
     m.g == 0 && return first(tt_compress(tt_scale(lin, -1im - m.gamma); tol = tol))
     rho, _ = gp_density(m, A)
-    psi2 = first(tt_compress(tt_hadamard(A, A); tol = m.rho_tol))
+    psi2, _ = tt_product(A, A; tol = m.rho_tol)
     t1 = op_apply(op_diag(rho), dA)
     t2 = op_apply(op_diag(psi2), tt_conj(dA))
     acc = tt_lincomb([(1.0, lin), (2 * m.g, t1), (m.g, t2)]; tol = tol)

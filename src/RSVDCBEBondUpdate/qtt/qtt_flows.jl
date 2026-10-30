@@ -44,7 +44,7 @@ function flow_jac_ops(fl::GPFlow, A, t)
     Hl = gp_linear_op(m, t)
     m.g == 0 && return Hl, nothing
     rho, _ = gp_density(m, A)
-    psi2 = first(tt_compress(tt_hadamard(A, A); tol = m.rho_tol))
+    psi2, _ = tt_product(A, A; tol = m.rho_tol)
     return op_lincomb([(1.0, Hl), (2 * m.g, op_diag(rho))]), op_scale(op_diag(psi2), m.g)
 end
 flow_jac_ops(fl::LinearFlow, A, t) = (fl.H, nothing)

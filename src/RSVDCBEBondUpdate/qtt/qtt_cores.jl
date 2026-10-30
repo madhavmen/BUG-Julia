@@ -206,48 +206,70 @@ density build as a dominant `O(D^4)` cost, so its time is returned for the step 
 function tt_density(A0::AbstractVector; tol::Real = 1e-12, maxdim::Int = typemax(Int))
     t0 = time_ns()
     A, _ = tt_compress(A0; tol = 0.0)
-    rho, bound = _density_zipup(A, tol, maxdim)
-    retried = false
-    if bound > tol && tol > 0
-        rho, bound = _density_zipup(A, 0.25 * tol * tol / bound, maxdim)
-        retried = true
-    end
-    rho, d2 = tt_compress(rho; tol = 0.1 * tol, maxdim = maxdim)
-    return rho, (chi = maximum(tt_ranks(rho); init = 1), err_bound = bound + d2,
-                 seconds = (time_ns() - t0) / 1e9, retried = retried)
+    return _product_rc(A, tt_conj(A), tol, maxdim, t0)
 end
 
-function _density_zipup(A::AbstractVector, tol::Real, maxdim::Int)
+"""
+    tt_product(A, B; tol = 1e-12, maxdim) -> (C, info)
+
+`A .* B` compressed, by the zip-up of [`tt_density`](@ref) (same error bound, retry and `info`):
+never the exact `chi_A chi_B` cores of [`tt_hadamard`](@ref), which at the GP's `psi^2` Jacobian
+term reach GBs per core (t3g1/t3v1 OOM at 12 G).
+"""
+function tt_product(A0::AbstractVector, B0::AbstractVector; tol::Real = 1e-12,
+                    maxdim::Int = typemax(Int))
+    t0 = time_ns()
+    A, _ = tt_compress(A0; tol = 0.0)
+    B = B0 === A0 ? A : first(tt_compress(B0; tol = 0.0))
+    return _product_rc(A, B, tol, maxdim, t0)
+end
+
+"The zip-up product of right-canonical `A`, `B`, retried once at a tighter cut, recompressed."
+function _product_rc(A, B, tol::Real, maxdim::Int, t0)
+    C, bound = _product_zipup(A, B, tol, maxdim)
+    retried = false
+    if bound > tol && tol > 0
+        C, bound = _product_zipup(A, B, 0.25 * tol * tol / bound, maxdim)
+        retried = true
+    end
+    C, d2 = tt_compress(C; tol = 0.1 * tol, maxdim = maxdim)
+    return C, (chi = maximum(tt_ranks(C); init = 1), err_bound = bound + d2,
+               seconds = (time_ns() - t0) / 1e9, retried = retried)
+end
+
+function _product_zipup(A::AbstractVector, B::AbstractVector, tol::Real, maxdim::Int)
     L = length(A)
-    R = ones(eltype(A[1]), 1, 1, 1)                      # (r, a, a') -- a for A, a' for conj(A)
-    rho = Vector{Array{eltype(A[1]), 3}}(undef, L)
+    T = promote_type(eltype(A[1]), eltype(B[1]))
+    R = ones(T, 1, 1, 1)                                 # (r, a, b) -- a for A, b for B
+    C = Vector{Array{T, 3}}(undef, L)
     disc = 0.0
     for k in 1:L
-        a = A[k]
-        chl, d, chr = size(a)
+        a, b = A[k], B[k]
+        cal, d, car = size(a)
+        cbl, _, cbr = size(b)
         r = size(R, 1)
-        # Y[r, a, s, b'] = sum_a' R[r, a, a'] conj(A)[a', s, b']
-        Y = reshape(reshape(R, r * chl, chl) * reshape(conj(a), chl, d * chr), r, chl, d, chr)
-        Tk = zeros(eltype(a), r, d, chr, chr)              # (r, s, b, b')
+        # Y[r, a, s, b'] = sum_b R[r, a, b] B[b, s, b']
+        Y = reshape(reshape(R, r * cal, cbl) * reshape(b, cbl, d * cbr), r, cal, d, cbr)
+        Tk = zeros(T, r, d, car, cbr)                     # (r, s, a', b')
         for s in 1:d
-            Ys = reshape(permutedims(Y[:, :, s, :], (1, 3, 2)), r * chr, chl)   # (r b', a)
-            Ts = reshape(Ys * a[:, s, :], r, chr, chr)                          # (r, b', b)
+            Ys = reshape(permutedims(Y[:, :, s, :], (1, 3, 2)), r * cbr, cal)   # (r b', a)
+            Ts = reshape(Ys * a[:, s, :], r, cbr, car)                          # (r, b', a')
             Tk[:, s, :, :] .= permutedims(Ts, (1, 3, 2))
         end
         if k == L
-            rho[k] = reshape(Tk, r, d, 1)
+            C[k] = reshape(Tk, r, d, 1)
             break
         end
-        M = reshape(Tk, r * d, chr * chr)
+        M = reshape(Tk, r * d, car * cbr)
         F = svd(M)
         delta = tol * norm(F.S) / sqrt(max(L - 1, 1))
         rr = _qtt_rank(F.S, delta, maxdim)
         disc += sqrt(sum(abs2, @view(F.S[(rr + 1):end]); init = 0.0))
-        rho[k] = reshape(F.U[:, 1:rr], r, d, rr)
-        R = reshape(Diagonal(F.S[1:rr]) * F.Vt[1:rr, :], rr, chr, chr)
+        C[k] = reshape(F.U[:, 1:rr], r, d, rr)
+        R = reshape(Diagonal(F.S[1:rr]) * F.Vt[1:rr, :], rr, car, cbr)
     end
-    nr = norm(rho[L])
-    return rho, (nr > disc ? disc / (nr - disc) : (disc > 0 ? Inf : 0.0))
+    nr = norm(C[L])
+    return C, (nr > disc ? disc / (nr - disc) : (disc > 0 ? Inf : 0.0))
 end
 
 """

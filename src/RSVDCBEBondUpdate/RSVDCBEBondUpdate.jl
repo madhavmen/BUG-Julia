@@ -210,7 +210,7 @@ export CBEBugSweepInfo, cbe_bug_step!, cbe_bug_midpoint_step!, parallel_kls_step
 export QTTGrid, qtt_grid, qtt_length, qtt_coords, qtt_cell, qtt_bits, qtt_point,
        qtt_site_permutation,
        tt_dense, tt_from_dense, tt_from_samples, tt_compress, tt_ranks, tt_dot, tt_norm, tt_scale,
-       tt_conj, tt_add, tt_lincomb, tt_hadamard, tt_density, tt_evaluate,
+       tt_conj, tt_add, tt_lincomb, tt_hadamard, tt_density, tt_product, tt_evaluate,
        op_identity, op_scale, op_add, op_lincomb, op_compress, op_adjoint, op_transpose,
        op_compose, op_diag, op_apply, op_dense, op_ket_bra,
        qtt_embed, qtt_function, qtt_separable, qtt_values, qtt_value,

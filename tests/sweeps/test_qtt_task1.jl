@@ -321,6 +321,12 @@ end
     ex, _ = tt_compress(tt_hadamard(A1, tt_conj(A1)); tol = 1e-13)
     @test _relerr(vec(tt_dense(rho)), vec(tt_dense(ex))) < 1e-11
     @test gp_density_audit(m, A1) < 1e-10
+    # the same zip-up for any product: psi^2 (the Jacobian's conj term) and A1 .* A2
+    p2, pinfo = tt_product(A1, A1; tol = 1e-13)
+    @test _relerr(vec(tt_dense(p2)), v1 .^ 2) < 1e-11
+    @test pinfo.err_bound < 1e-11
+    p12, _ = tt_product(A1, A2; tol = 1e-13)
+    @test _relerr(vec(tt_dense(p12)), v1 .* v2) < 1e-11
     # H[psi, t] and F(psi) against dense
     H1, _ = gp_hamiltonian_op(m, A1, t)
     @test _relerr(op_dense(H1), Hl + m.g * Diagonal(abs2.(v1))) < 1e-11
