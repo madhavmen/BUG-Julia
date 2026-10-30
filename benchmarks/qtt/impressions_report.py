@@ -90,7 +90,7 @@ def main(indir, out):
                      f"{sum(f(s['f_cbe']) for s in ss)/len(ss):.3f} | {sum(f(s['f_rho']) for s in ss)/len(ss):.3f} | "
                      f"{f(ss[-1].get('err_vs_ref', 'nan')):.2e} | {max(int(float(s['chi_max'])) for s in ss)} |")
     lines += ["", "Amdahl bound: a 2x CBE speedup gives at most 1/(1 - f_CBE/2) on the whole step.", ""]
-    open(out, "w").write("\n".join(lines))
+    open(out, "w", encoding="utf-8").write("\n".join(lines))
     print("wrote", out)
 
 
