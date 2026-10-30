@@ -89,7 +89,10 @@ end
 # above `_preselect_*`'s 100 eps floor; normalised, it is a full column that still lies in the
 # span, and each later union widens the frame again (qt1f, QTT Heston order-1 fallback: a right
 # frame 48 wide on a 32-dim bond, ||Q'Q - I|| = 4, mass 1 -> 5.5). A direction is appended only
-# when one more projection keeps at least this share of it (twice is enough).
+# when one more projection keeps at least this share of it (twice is enough). The preselection
+# runs at the numerical floor (`stol = 0`, measured against the whole state): a fixed relative cut
+# is measured against that tiny residual, so rounding noise outside the frame passed it as new
+# directions (qt1g: a 13-wide frame grew to 16 from a state inside it).
 const _UNION_KEEP = 0.5
 
 "The part of the orthonormal `Q` that one more projection off the frame `F` keeps, or `nothing`."
@@ -111,7 +114,7 @@ appended -- `_preselect_left` returns `nothing` when there is nothing to append,
 ordinary case once the two already span the same space.
 """
 function _union_left(U0, Wk)
-    Q, _ = _preselect_left(U0, Wk, 1e-14)
+    Q, _ = _preselect_left(U0, Wk, 0.0)
     Q === nothing && return U0
     Q = _union_fresh(U0, Q, :left)
     Q === nothing && return U0
@@ -119,7 +122,7 @@ function _union_left(U0, Wk)
 end
 "Row mirror of [`_union_left`](@ref): the bond leg is 1 and the direct sum is over it."
 function _union_right(V0, Zk)
-    Q, _ = _preselect_right(V0, Zk, 1e-14)
+    Q, _ = _preselect_right(V0, Zk, 0.0)
     Q === nothing && return V0
     Q = _union_fresh(V0, Q, :right)
     Q === nothing && return V0

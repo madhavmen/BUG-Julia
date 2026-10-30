@@ -204,7 +204,7 @@ end
     end
     # a genuinely new direction is still appended, exactly as the preselection admits it
     Y = to_concrete(skl(full_local_basis(V0, :right)))
-    Q, _ = RC._preselect_left(U0, Y, 1e-14)
+    Q, _ = RC._preselect_left(U0, Y, 0.0)                  # the union's numerical floor
     @test Q !== nothing
     Uu = RC._union_left(U0, Y)
     @test leg_dim(Uu, 3) == leg_dim(U0, 3) + leg_dim(Q, 3)
