@@ -2,11 +2,15 @@
 # Cases: harmonic g = 0 (exact 2D Gaussian, E = 1 for omega = 1), trapped g = 100, rotating
 # Omega = 0.8 g = 100 (Chen et al.; vortex lattice, no analytic state -- graded against the best
 # converged run and its stationarity residual). Methods: BUG p = 2/3/4 on a uniform and a geometric
-# schedule, QTT-TDVP2 imaginary time (uniform), QTT gradient descent. Compared on energy and R_mu
-# reached per WALL second, with accepted/rejected steps; vortex charges for the rotating case.
+# schedule; the baselines QTT-TDVP2 imaginary time (uniform) and QTT gradient descent only when
+# named in T3G_BASELINES (USER 10-30: BUG against the analytic result first, no gradient descent).
+# Analytic grading: harmonic -> E - 1 on every step and the final state's infidelity against the
+# exact Gaussian exp(-(x^2+y^2)/2) (continuum values; the grid adds O(dx^2)); trapped -> the
+# Thomas-Fermi mu_TF = sqrt(g/pi), E_TF = 2 mu_TF / 3 (asymptotic in g, a reference not a gate).
 #
 # ENV: T3G_OUT, T3G_N (7), T3G_BOX (10), T3G_CASES ("harmonic,trapped,rotating"), T3G_STEPS (60),
-#      T3G_H (0.1), T3G_H0 (0.01), T3G_Q (1.3), T3G_HMAX (1.0), T3G_MAXDIM (128), T3G_ORDERS ("2,3,4")
+#      T3G_H (0.1), T3G_H0 (0.01), T3G_Q (1.3), T3G_HMAX (1.0), T3G_MAXDIM (128), T3G_ORDERS ("2,3,4"),
+#      T3G_BASELINES ("": none; "tdvp,gd" adds them)
 
 include(joinpath(@__DIR__, "common.jl"))
 
@@ -17,11 +21,19 @@ const CASES = Symbol.(split(envs("T3G_CASES", "harmonic,trapped,rotating"), ",")
 const NST = envi("T3G_STEPS", 60)
 const MAXD = envi("T3G_MAXDIM", 128)
 const ORDERS = round.(Int, envlist("T3G_ORDERS", "2,3,4"))
+const BASELINES = Symbol.(filter(!isempty, split(envs("T3G_BASELINES", ""), ",")))
 mkpath(OUT)
 
 g = qtt_grid(N, N; x = (-BOX, BOX), y = (-BOX, BOX))
 params = Dict(:harmonic => (gnl = 0.0, Omega = 0.0), :trapped => (gnl = 100.0, Omega = 0.0),
               :rotating => (gnl = 100.0, Omega = 0.8))
+# the analytic references (omega = 1): exact for g = 0, Thomas-Fermi for the trapped case
+exactE(case) = case === :harmonic ? 1.0 :
+               case === :trapped ? 2 / 3 * sqrt(params[case].gnl / pi) : NaN
+exactmu(case) = case === :harmonic ? 1.0 :
+                case === :trapped ? sqrt(params[case].gnl / pi) : NaN
+const GAUSS = qtt_separable(g, x -> exp(-x^2 / 2), y -> exp(-y^2 / 2))
+infidelity(A) = 1 - abs2(tt_dot(GAUSS, A)) / (tt_norm(GAUSS)^2 * tt_norm(A)^2)
 hist = NamedTuple[]
 summary = NamedTuple[]
 for case in CASES
@@ -38,41 +50,36 @@ for case in CASES
                      geometric_schedule(envf("T3G_H0", 0.01), envf("T3G_Q", 1.3),
                                         envf("T3G_HMAX", 1.0), NST)))
     end
-    push!(runs, (:tdvp_uniform, 2, :tdvp, uniform_schedule(envf("T3G_H", 0.1), NST)))
+    :tdvp in BASELINES &&
+        push!(runs, (:tdvp_uniform, 2, :tdvp, uniform_schedule(envf("T3G_H", 0.1), NST)))
+    :gd in BASELINES && push!(runs, (:gd, 0, :gd, nothing))
+    Ex, mux = exactE(case), exactmu(case)
     for (name, p, meth, sched) in runs
         psi = qtt_mps(A0)
         t0 = time()
-        lg = gp_ground_state!(psi, m, sched; method = meth, order = p, maxdim = MAXD)
+        lg = meth === :gd ?
+             [merge(e, (accepted = true, rejected = 0)) for e in
+              gp_gradient_descent!(psi, m; maxiter = 20 * NST, maxdim = MAXD)] :
+             gp_ground_state!(psi, m, sched; method = meth, order = p, maxdim = MAXD)
         for e in lg
-            push!(hist, merge((case = case, method = name, p = p), e))
+            push!(hist, merge((case = case, method = name, p = p), e,
+                              (E_err = e.E - Ex, mu_err = e.mu - mux)))
         end
         acc = filter(e -> e.accepted, lg)
         vc = case === :rotating ? vortex_count(last(qtt_sample(qtt_cores(psi), g;
                                                                stride = max(1, 2^N ÷ 128)))) :
              (0, 0, Any[])
-        push!(summary, (case = case, method = name, E = acc[end].E, mu = acc[end].mu,
-                        R_mu = acc[end].R_mu, chi = acc[end].chi, wall = time() - t0,
+        push!(summary, (case = case, method = name, E = acc[end].E, E_exact = Ex,
+                        E_err = acc[end].E - Ex, mu = acc[end].mu, mu_exact = mux,
+                        mu_err = acc[end].mu - mux,
+                        infidelity = case === :harmonic ? infidelity(qtt_cores(psi)) : NaN,
+                        R_mu = acc[end].R_mu, chi = acc[end].chi,
+                        chi_max = maximum(e.chi for e in lg), wall = time() - t0,
                         accepted = length(acc) - 1, rejected = count(e -> !e.accepted, lg),
                         vortices_plus = vc[1], vortices_minus = vc[2]))
         println(summary[end]); flush(stdout)
         write_csv(joinpath(OUT, "history.csv"), hist)
         write_csv(joinpath(OUT, "summary.csv"), summary)
     end
-    psi = qtt_mps(A0)
-    t0 = time()
-    lg = gp_gradient_descent!(psi, m; maxiter = 20 * NST, maxdim = MAXD)
-    for e in lg
-        push!(hist, merge((case = case, method = :gd, p = 0, accepted = true), e))
-    end
-    vc = case === :rotating ? vortex_count(last(qtt_sample(qtt_cores(psi), g;
-                                                           stride = max(1, 2^N ÷ 128)))) : (0, 0, Any[])
-    push!(summary, (case = case, method = :gd, E = lg[end].E, mu = lg[end].mu, R_mu = lg[end].R_mu,
-                    chi = lg[end].chi, wall = time() - t0, accepted = length(lg) - 1, rejected = 0,
-                    vortices_plus = vc[1], vortices_minus = vc[2]))
-    println(summary[end])
-    case === :harmonic && println("harmonic exact E = 1 (continuum); best = ",
-                                  minimum(s.E for s in summary if s.case === case))
-    write_csv(joinpath(OUT, "history.csv"), hist)
-    write_csv(joinpath(OUT, "summary.csv"), summary)
 end
 println("T3G-DONE")
